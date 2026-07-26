@@ -30,7 +30,7 @@ export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
   if (!ready) return null;
   return {
     harness: ready.id,
-    model: ready.models[0]?.id ?? null,
+    model: null,
     permissionMode: ready.options?.defaultPermissionMode ?? null,
     reasoningLevel: ready.options?.defaultReasoningLevel ?? null,
   };
@@ -164,6 +164,18 @@ export function ModelPicker({
                   <div className="model-more">{harness.agentNote ?? "Not available"}</div>
                 ) : (
                   <>
+                    <button
+                      className="model-item"
+                      onClick={() => pick(harness, null)}
+                    >
+                      <span>
+                        Default model
+                        <span className="model-id">CLI configuration</span>
+                      </span>
+                      {value?.harness === harness.id && value?.model === null && (
+                        <Check size={13} />
+                      )}
+                    </button>
                     {models.map((m) => (
                       <button
                         key={m.id}
