@@ -49,9 +49,7 @@ use crate::local::chat::{
 use crate::local::codex::{CodexClient, ServerReqKind, TurnEvent};
 use crate::local::opencode::ensure_playbook;
 
-// The 5.6 variants (Sol = frontier, Terra = balanced, Luna = fast) plus 5.5;
-// ChatGPT-account codex rejects bare `gpt-5.6`. Verified against codex-cli
-// 0.144 via `codex exec -m` (5.6 needs >= 0.143; older CLIs get a 400).
+// Fallback when the installed CLI cannot report its model catalog.
 const CODEX_MODELS: [&str; 4] = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"];
 
 /// Codex usage occupying the context window: `input_tokens + output_tokens`
@@ -160,6 +158,49 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
     })
 }
 
+fn parse_codex_models(stdout: &[u8], api_only: bool) -> Vec<String> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|catalog| {
+            Some(
+                catalog
+                    .get("models")?
+                    .as_array()?
+                    .iter()
+                    .filter(|model| {
+                        model.get("visibility").and_then(Value::as_str) == Some("list")
+                            && (!api_only
+                                || model.get("supported_in_api").and_then(Value::as_bool)
+                                    == Some(true))
+                    })
+                    .filter_map(|model| nonempty_str(model, "slug"))
+                    .collect(),
+            )
+        })
+        .unwrap_or_default()
+}
+
+async fn detect_codex_models(api_only: bool) -> Vec<String> {
+    let Some(bin) = find_codex() else {
+        return Vec::new();
+    };
+    let mut cmd = Command::new(bin);
+    cmd.args(["debug", "models"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    prepare_env(&mut cmd);
+    let Ok(Ok(output)) = tokio::time::timeout(Duration::from_secs(10), cmd.output()).await else {
+        return Vec::new();
+    };
+    if output.status.success() {
+        parse_codex_models(&output.stdout, api_only)
+    } else {
+        Vec::new()
+    }
+}
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -219,13 +260,30 @@ impl Harness for Codex {
 
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            if let Some(model) = custom_provider
+            let configured_model = custom_provider
                 .as_ref()
-                .and_then(|provider| provider.model.as_deref())
+                .and_then(|provider| provider.model.as_deref());
+            let mut models = detect_codex_models(
+                custom_provider.is_some() || info.auth_method == Some("apiKey"),
+            )
+            .await;
+            // A bundled first-party catalog is not useful for an unrelated
+            // custom model; keep the configured model as the safe fallback.
+            if custom_provider.is_some()
+                && configured_model.is_some_and(|model| !models.iter().any(|id| id == model))
             {
-                info = info.with_models(&[model]);
-            } else if custom_provider.is_none() {
+                models.clear();
+            }
+            if let Some(model) = configured_model {
+                if !models.iter().any(|id| id == model) {
+                    models.insert(0, model.to_string());
+                }
+            }
+            if models.is_empty() && custom_provider.is_none() {
                 info = info.with_models(&CODEX_MODELS);
+            } else {
+                let ids: Vec<&str> = models.iter().map(String::as_str).collect();
+                info = info.with_models(&ids);
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
@@ -2065,6 +2123,16 @@ requires_openai_auth = true
 "#
         )
         .is_none());
+    }
+
+    #[test]
+    fn model_catalog_ignores_wrapper_noise_and_picker_hidden_models() {
+        let stdout = br#"Upgrade Codex faster with codex-switch
+{"models":[{"slug":"gpt-api","visibility":"list","supported_in_api":true},{"slug":"gpt-chat","visibility":"list","supported_in_api":false},{"slug":"gpt-hidden","visibility":"hide","supported_in_api":true},{"slug":"","visibility":"list","supported_in_api":true}]}
+"#;
+
+        assert_eq!(parse_codex_models(stdout, false), ["gpt-api", "gpt-chat"]);
+        assert_eq!(parse_codex_models(stdout, true), ["gpt-api"]);
     }
 
     #[test]
