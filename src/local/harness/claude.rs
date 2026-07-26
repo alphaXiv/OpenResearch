@@ -14,14 +14,16 @@
 //! continues the same turn.
 //!
 //! Detection: `~/.claude.json` carries the signed-in OAuth account (no secrets
-//! read); `ANTHROPIC_API_KEY` is the api-key fallback.
+//! read); `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are credential fallbacks.
 
 use std::path::PathBuf;
 
 use async_trait::async_trait;
 use serde_json::Value;
 
-use super::detect::{bin_version, find_on_path, nonempty_str, read_json, HarnessInfo};
+use super::detect::{
+    bin_version, effective_env_var, find_on_path, nonempty_str, read_json, HarnessInfo,
+};
 use super::options::{HarnessOptions, PermissionMode};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
@@ -32,14 +34,10 @@ use crate::local::chat::{
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::opencode::ensure_playbook;
 
-/// Each harness runs directly (its own CLI, the user's own login), so its
-/// model list is its own: static ids for the Claude Code CLI.
-const CLAUDE_MODELS: [&str; 4] = [
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-haiku-4-5",
-];
+/// Stable Claude Code aliases. The CLI resolves these through the active
+/// provider and `ANTHROPIC_DEFAULT_*_MODEL` mappings, so gateways are not sent
+/// stale first-party version ids.
+const CLAUDE_MODELS: [&str; 4] = ["fable", "sonnet", "opus", "haiku"];
 
 /// Claude Code's `--effort` tiers (id == the CLI value). `xhigh`/`max` are
 /// Claude-specific — the reasoning vocabulary is per-harness, not global.
@@ -52,6 +50,12 @@ const CLAUDE_EFFORT_LEVELS: [(&str, &str); 5] = [
 ];
 
 pub struct ClaudeCode;
+
+fn has_api_credential(get_env: impl Fn(&str) -> Option<String>) -> bool {
+    ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+        .iter()
+        .any(|key| get_env(key).is_some())
+}
 
 /// `claude` on PATH, else the common install drop locations.
 pub(crate) fn find_claude() -> Option<PathBuf> {
@@ -85,8 +89,12 @@ impl Harness for ClaudeCode {
             info.version = bin_version(&bin).await;
             info.bin_path = Some(bin.to_string_lossy().into_owned());
         }
-        // ~/.claude.json carries the signed-in OAuth account (no secrets read).
-        if let Some(cfg) = dirs::home_dir().and_then(|h| read_json(h.join(".claude.json"))) {
+        // Environment credentials win in headless Claude Code, even when stale
+        // subscription metadata remains in ~/.claude.json.
+        if has_api_credential(effective_env_var) {
+            info.authenticated = true;
+            info.auth_method = Some("apiKey");
+        } else if let Some(cfg) = dirs::home_dir().and_then(|h| read_json(h.join(".claude.json"))) {
             if let Some(acct) = cfg.get("oauthAccount") {
                 info.authenticated = true;
                 info.auth_method = Some("oauth");
@@ -98,10 +106,6 @@ impl Harness for ClaudeCode {
                     None => None,
                 };
             }
-        }
-        if !info.authenticated && std::env::var("ANTHROPIC_API_KEY").is_ok_and(|v| !v.is_empty()) {
-            info.authenticated = true;
-            info.auth_method = Some("apiKey");
         }
 
         info.agent_ready = info.installed && info.authenticated;
@@ -1031,6 +1035,17 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_key_or_bearer_token_is_a_usable_credential() {
+        assert!(has_api_credential(
+            |key| (key == "ANTHROPIC_API_KEY").then(|| "key".into())
+        ));
+        assert!(has_api_credential(|key| {
+            (key == "ANTHROPIC_AUTH_TOKEN").then(|| "token".into())
+        }));
+        assert!(!has_api_credential(|_| None));
+    }
 
     #[test]
     fn plan_card_synthesized_only_for_cardless_texty_plan_turns() {

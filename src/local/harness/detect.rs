@@ -130,6 +130,18 @@ pub(super) fn nonempty_str(v: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The value a spawned harness sees: the current process wins, otherwise use
+/// the dashboard-synced env that `prepare_env` injects into child processes.
+pub(super) fn effective_env_var(key: &str) -> Option<String> {
+    match std::env::var_os(key) {
+        Some(value) => value
+            .into_string()
+            .ok()
+            .filter(|value| !value.trim().is_empty()),
+        None => crate::config::synced_env_var(key).filter(|value| !value.trim().is_empty()),
+    }
+}
+
 /// Decode a JWT's payload without verifying — we only surface the account
 /// email and plan the user is already signed in as, locally.
 pub(super) fn jwt_payload(token: &str) -> Option<Value> {
