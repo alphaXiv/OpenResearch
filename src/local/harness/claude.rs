@@ -17,6 +17,7 @@
 //! read); `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` are credential
 //! fallbacks, and are what a custom `ANTHROPIC_BASE_URL` gateway uses.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -626,15 +627,13 @@ struct TurnState {
     /// same `{mid}-{index}` part ids the final complete `assistant` event
     /// upserts.
     stream_mid: Option<String>,
-    /// Content blocks already consumed from prior `assistant` events, per
-    /// message id. The CLI emits one `assistant` event *per content block*
-    /// (each with a single-element `content` array), so a block's position in
-    /// the message — the `index` its stream deltas carried — is this running
-    /// offset plus its position within the event. Without it, every block
-    /// would key to `{mid}-0` and a text block following a thinking block
-    /// would clobber the reasoning part while its own delta-built part
-    /// survived as a duplicate.
-    assistant_blocks_seen: std::collections::HashMap<String, usize>,
+    /// Content blocks already consumed from prior `assistant` events, keyed
+    /// per message (and per subagent — see the `assistant` arm). The CLI
+    /// emits one `assistant` event *per content block* (a single-element
+    /// `content` array), so a block's index in the message — the `index` its
+    /// stream deltas carried — is this running offset plus its position
+    /// within the event.
+    assistant_blocks_seen: HashMap<String, usize>,
 }
 
 /// Fold one stream-json output object into the turn's transcript + `TurnState`.
@@ -653,9 +652,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         // one. That overwrite (and part ordering) leans on two stream-protocol
         // invariants: the stream's message id equals the assistant events',
         // and a block's `index` is its position in the message's content,
-        // with blocks streamed (and their assistant events emitted) in
-        // ascending order — see `assistant_blocks_seen` for how the per-block
-        // assistant events recover that index.
+        // with blocks streamed in ascending order.
         Some("stream_event") => {
             // A subagent's nested stream (parent_tool_use_id set) would
             // interleave its text into the transcript — main loop only.
@@ -715,14 +712,25 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            // The CLI streams one `assistant` event per completed content
-            // block, so this event's blocks continue the message where the
-            // previous event left off — offset by the blocks already seen to
-            // recover each block's true index in the message (a full-content
-            // array in a single event starts at offset 0 and works the same).
-            let offset = state.assistant_blocks_seen.get(&mid).copied().unwrap_or(0);
-            for (i, block) in blocks.iter().enumerate() {
-                let i = offset + i;
+            // Per-block `assistant` events continue the message where the
+            // last left off; a message's first event starts at offset 0, so a
+            // single full-content array behaves as before. The counter trusts
+            // the CLI to emit each block exactly once, in order — it has no
+            // wire index to cross-check (the events don't carry one). A
+            // subagent's events (parent_tool_use_id set) get their own
+            // namespace so they can never advance the main message's offset,
+            // even on a colliding or missing message id.
+            let offset_key = match event.get("parent_tool_use_id").and_then(Value::as_str) {
+                Some(parent) => format!("{parent}:{mid}"),
+                None => mid.clone(),
+            };
+            let offset = state
+                .assistant_blocks_seen
+                .get(&offset_key)
+                .copied()
+                .unwrap_or(0);
+            for (n, block) in blocks.iter().enumerate() {
+                let i = offset + n;
                 match block.get("type").and_then(Value::as_str) {
                     Some("text") => {
                         let text = block.get("text").and_then(Value::as_str).unwrap_or("");
@@ -739,8 +747,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         let id = block
                             .get("id")
                             .and_then(Value::as_str)
-                            .unwrap_or(&format!("{mid}-{i}"))
-                            .to_string();
+                            .map_or_else(|| format!("{mid}-{i}"), str::to_string);
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
                         let input = block.get("input");
                         // ExitPlanMode / AskUserQuestion surface as interactive
@@ -780,9 +787,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     _ => {}
                 }
             }
+            // Advance by the content-array length, not a render count: a
+            // bridge-suppressed ExitPlanMode/AskUserQuestion or an unknown
+            // block type still occupies its position in the message.
             state
                 .assistant_blocks_seen
-                .insert(mid, offset + blocks.len());
+                .insert(offset_key, offset + blocks.len());
             // Per-message usage gives live updates during multi-step turns; the
             // window arrives later on `result`, so report the token count only.
             // A subagent's message is a top-level `assistant` event with
@@ -1295,10 +1305,11 @@ mod tests {
     }
 
     #[test]
-    fn stream_deltas_paint_parts_and_the_final_event_overwrites_them() {
-        // Deltas accumulate under {mid}-{index}; the complete assistant event
-        // then upserts the authoritative text over the very same part — one
-        // part, no duplicate, final text wins.
+    fn stream_deltas_paint_parts_and_a_whole_message_event_overwrites_them() {
+        // Deltas accumulate under {mid}-{index}; an assistant event carrying
+        // the whole content array (the offset-0 degenerate case — the live
+        // CLI splits per block, see the next test) upserts the authoritative
+        // text over the very same parts — no duplicate, final text wins.
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sd1"}"#,
             r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m9"}},"parent_tool_use_id":null}"#,
@@ -1341,18 +1352,21 @@ mod tests {
         let state = fold(&mut ctx, false, &transcript);
         let parts = &ctx.assistant.parts;
         assert_eq!(parts.len(), 2, "{parts:?}");
+        assert_eq!(parts[0].id, "m9-0");
         assert_eq!(parts[0].kind, "reasoning");
         assert_eq!(parts[0].text.as_deref(), Some("hmm"));
+        assert_eq!(parts[1].id, "m9-1");
         assert_eq!(parts[1].kind, "text");
         assert_eq!(parts[1].text.as_deref(), Some("Rivers flow."));
         assert_eq!(state.last_text, "Rivers flow.");
     }
 
     #[test]
-    fn block_offsets_reset_across_messages_in_one_turn() {
-        // A multi-iteration turn has several assistant messages, each with its
-        // own id — the block offset is per message id, so the second message's
-        // first block keys to {mid2}-0, not a continuation of message one.
+    fn block_offsets_are_keyed_per_message_id() {
+        // A multi-iteration turn has several assistant messages, each with
+        // its own id — each id gets its own offset, so the second message's
+        // first block keys to {mid2}-0, not a continuation of message one
+        // (a single running counter would break here).
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sd3"}"#,
             r#"{"type":"assistant","message":{"id":"mA","content":[{"type":"thinking","thinking":"t1"}]}}"#,
@@ -1369,6 +1383,51 @@ mod tests {
         assert_eq!(parts[1].text.as_deref(), Some("first"));
         assert_eq!(parts[2].id, "mB-0");
         assert_eq!(parts[2].text.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn bridge_suppressed_blocks_still_advance_the_offset() {
+        // A bridge-suppressed ExitPlanMode renders nothing but still occupies
+        // its position in the message — the text block after it must land at
+        // {mid}-1, overwriting its delta-built part, not at {mid}-0.
+        let transcript = [
+            r#"{"type":"system","subtype":"init","session_id":"sd4"}"#,
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"mC"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"mC","content":[{"type":"tool_use","id":"toolu_p","name":"ExitPlanMode","input":{}}]}}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"after"}},"parent_tool_use_id":null}"#,
+            r#"{"type":"assistant","message":{"id":"mC","content":[{"type":"text","text":"after"}]}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"sd4","is_error":false}"#,
+        ];
+        let mut ctx = TurnCtx::test_stub();
+        fold(&mut ctx, true, &transcript);
+        let parts = &ctx.assistant.parts;
+        assert_eq!(parts.len(), 1, "{parts:?}");
+        assert_eq!(parts[0].id, "mC-1");
+        assert_eq!(parts[0].text.as_deref(), Some("after"));
+    }
+
+    #[test]
+    fn subagent_assistant_events_do_not_share_the_main_offset() {
+        // A Task subagent's top-level assistant events (parent_tool_use_id
+        // set) still fold into parts — pre-existing behavior — but their
+        // offsets live in their own namespace, so an interleaved subagent
+        // event can't push the main message's next block off the part id its
+        // stream deltas built.
+        let transcript = [
+            r#"{"type":"system","subtype":"init","session_id":"sd5"}"#,
+            r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"thinking","thinking":"t"}]}}"#,
+            r#"{"type":"assistant","message":{"id":"mSub","content":[{"type":"text","text":"sub"}]},"parent_tool_use_id":"toolu_1"}"#,
+            r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"text","text":"main"}]}}"#,
+            r#"{"type":"result","subtype":"success","session_id":"sd5","is_error":false}"#,
+        ];
+        let mut ctx = TurnCtx::test_stub();
+        fold(&mut ctx, false, &transcript);
+        let parts = &ctx.assistant.parts;
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert_eq!(parts[0].id, "mD-0");
+        assert_eq!(parts[1].id, "mSub-0");
+        assert_eq!(parts[2].id, "mD-1");
+        assert_eq!(parts[2].text.as_deref(), Some("main"));
     }
 
     #[test]
