@@ -328,6 +328,83 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
     })
 }
 
+/// One-shot session title from the first user message: a throwaway
+/// `codex exec` child in a read-only sandbox, at `low` reasoning effort so the
+/// one-sentence answer stays cheap. Deliberately *not* the session's own thread
+/// — a title request there would pollute the real conversation history.
+///
+/// No `-m`: the user's default model at `low` effort is the cheap pin, and the
+/// session's own (possibly expensive) model selection is irrelevant to naming a
+/// chat. Like Codex desktop's own hidden titling thread, this leaves a throwaway
+/// rollout behind in `~/.codex/sessions`.
+///
+/// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
+/// and the caller keeps the placeholder title.
+async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String> {
+    let fut = async {
+        let mut cmd = Command::new(bin);
+        cmd.args(["exec", "--json", "--skip-git-repo-check"])
+            .args(["-c", "sandbox_mode=\"read-only\""])
+            .args(["-c", "approval_policy=\"never\""])
+            .args(["-c", "model_reasoning_effort=\"low\""])
+            // Naming a chat needs no MCP: booting the user's servers for a
+            // one-line request would cost far more than the request itself.
+            .args(["-c", "mcp_servers={}"])
+            .arg(super::title::title_prompt(first_message))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            // Hermetic: run outside any repo so the child doesn't ingest the
+            // server cwd's AGENTS.md into a request that only needs a title.
+            .current_dir(std::env::temp_dir());
+        prepare_env(&mut cmd);
+        // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
+        // would otherwise write escape codes straight into the title column.
+        cmd.env("NO_COLOR", "1");
+        let mut child = cmd.spawn().ok()?;
+        let mut lines = BufReader::new(child.stdout.take()?).lines();
+        // Keep the last agent message: a chatty run may narrate before it
+        // answers, and the title is what it settled on.
+        let mut last = None;
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(text) = exec_line_agent_message(&line) {
+                last = Some(text);
+            }
+        }
+        if !child.wait().await.ok()?.success() {
+            return None;
+        }
+        super::title::sanitize_title(&last?)
+    };
+    tokio::time::timeout(super::title::TITLE_TIMEOUT, fut)
+        .await
+        .ok()?
+}
+
+/// One `codex exec --json` stdout line → its agent message text, if it carries
+/// one. Handles both JSONL shapes the turn parser already covers: the legacy
+/// `msg.type == "agent_message"` event and the item-style `item.completed`
+/// wrapper. Split from the transport so it can be tested without a CLI.
+fn exec_line_agent_message(line: &str) -> Option<String> {
+    let event = serde_json::from_str::<Value>(line).ok()?;
+    let msg = event.get("msg").unwrap_or(&event);
+    match msg.get("type").and_then(Value::as_str)? {
+        "agent_message" => msg
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        "item.completed" => {
+            let item = msg.get("item")?;
+            if item.get("type").and_then(Value::as_str) != Some("agent_message") {
+                return None;
+            }
+            item.get("text").and_then(Value::as_str).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -459,6 +536,10 @@ impl Harness for Codex {
             return run_turn_exec(ctx).await;
         }
         run_turn_app_server(ctx).await
+    }
+
+    async fn generate_title(&self, first_message: &str) -> Option<String> {
+        codex_generate_title(&find_codex()?, first_message).await
     }
 
     fn options(&self) -> HarnessOptions {
@@ -2755,6 +2836,36 @@ requires_openai_auth = false
         assert_eq!(codex_sandbox(Some(PermissionMode::Bypass)), None);
         // No mode set → the balanced default, never an accidental full-access.
         assert_eq!(codex_sandbox(None), Some("workspace-write"));
+    }
+
+    #[test]
+    fn exec_line_agent_message_reads_both_jsonl_shapes() {
+        // Legacy shape: the message nests under "msg".
+        assert_eq!(
+            exec_line_agent_message(
+                r#"{"msg":{"type":"agent_message","message":"Fix the login redirect"}}"#
+            )
+            .as_deref(),
+            Some("Fix the login redirect")
+        );
+        // Item shape: the message rides an `item.completed` wrapper.
+        assert_eq!(
+            exec_line_agent_message(
+                r#"{"type":"item.completed","item":{"type":"agent_message","id":"m1","text":"Fix the login redirect"}}"#
+            )
+            .as_deref(),
+            Some("Fix the login redirect")
+        );
+        // Everything else is not the answer.
+        for line in [
+            "",
+            "not json",
+            r#"{"msg":{"type":"agent_reasoning","text":"thinking"}}"#,
+            r#"{"type":"item.completed","item":{"type":"reasoning","text":"thinking"}}"#,
+            r#"{"type":"token_count","info":{}}"#,
+        ] {
+            assert!(exec_line_agent_message(line).is_none(), "line: {line}");
+        }
     }
 
     #[test]

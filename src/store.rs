@@ -219,6 +219,7 @@ impl Store {
                 harness           TEXT NOT NULL,
                 native_session_id TEXT,
                 title             TEXT,
+                title_source      TEXT,
                 model             TEXT,
                 permission_mode   TEXT,
                 reasoning_level   TEXT,
@@ -255,6 +256,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
@@ -643,15 +645,16 @@ impl Store {
 
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, model,
+            "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         permission_mode, reasoning_level, archived, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 s.id,
                 s.project_id,
                 s.harness,
                 s.native_session_id,
                 s.title,
+                s.title_source,
                 s.model,
                 s.permission_mode,
                 s.reasoning_level,
@@ -747,21 +750,26 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_chat_session_title(&self, id: &str, title: &str) -> Result<()> {
+    /// Unconditional title write. `source` records who wrote it — see
+    /// [`StoredChatSession::title_source`] for the vocabulary — which is what
+    /// later lets auto-titling tell a placeholder from a title worth keeping.
+    pub fn set_chat_session_title(&self, id: &str, title: &str, source: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE chat_sessions SET title = ?2, updated_at = ?3 WHERE id = ?1",
-            params![id, title, now_ms()],
+            "UPDATE chat_sessions SET title = ?2, title_source = ?3, updated_at = ?4 WHERE id = ?1",
+            params![id, title, source, now_ms()],
         )?;
         Ok(())
     }
 
-    /// Set the title only if the session currently has none (NULL or blank).
-    /// Atomic check-and-set for harness auto-titling, so it can't clobber a
-    /// title the user set via Rename. Returns true if a row was written.
-    pub fn set_chat_session_title_if_empty(&self, id: &str, title: &str) -> Result<bool> {
+    /// Adopt a generated title only while the title is still unset or the
+    /// first-line placeholder. Atomic check-and-set: a user Rename (`'user'`)
+    /// and a legacy row (NULL source with a non-blank title) are never
+    /// overwritten, and a session that already has a `'generated'` title is
+    /// never re-titled. Returns true if a row was written.
+    pub fn set_chat_session_title_if_placeholder(&self, id: &str, title: &str) -> Result<bool> {
         let n = self.conn.execute(
-            "UPDATE chat_sessions SET title = ?2, updated_at = ?3 \
-             WHERE id = ?1 AND (title IS NULL OR trim(title) = '')",
+            "UPDATE chat_sessions SET title = ?2, title_source = 'generated', updated_at = ?3 \
+             WHERE id = ?1 AND (title IS NULL OR trim(title) = '' OR title_source = 'fallback')",
             params![id, title, now_ms()],
         )?;
         Ok(n > 0)
@@ -882,6 +890,10 @@ pub struct StoredChatSession {
     pub harness: String,
     pub native_session_id: Option<String>,
     pub title: Option<String>,
+    /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
+    /// (harness auto-title), `"user"` (Rename). NULL on legacy rows, which the
+    /// conditional setter treats as "unknown, don't overwrite".
+    pub title_source: Option<String>,
     pub model: Option<String>,
     /// Permission-mode wire id (`"auto"` / `"plan"` / …); None = harness default.
     pub permission_mode: Option<String>,
@@ -908,7 +920,8 @@ pub struct StoredChatMessage {
 }
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
-     permission_mode, reasoning_level, archived, context_usage_json, created_at, updated_at";
+     permission_mode, reasoning_level, archived, context_usage_json, created_at, updated_at, \
+     title_source";
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -926,6 +939,7 @@ fn row_to_chat_session(
         context_usage_json: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        title_source: row.get(12)?,
     })
 }
 
@@ -981,21 +995,9 @@ mod tests {
     fn chat_session_context_usage_roundtrips() {
         let dir = std::env::temp_dir().join(format!("orx-store-ctxusage-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
-        let session = StoredChatSession {
-            id: "chat_1".into(),
-            project_id: "proj_1".into(),
-            harness: "claude-code".into(),
-            native_session_id: None,
-            title: None,
-            model: Some("claude-haiku-4-5".into()),
-            permission_mode: None,
-            reasoning_level: None,
-            archived: false,
-            context_usage_json: None,
-            created_at: 1,
-            updated_at: 1,
-        };
-        store.create_chat_session(&session).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
         // Fresh session: no usage yet.
         assert!(store
             .get_chat_session("chat_1")
@@ -1017,6 +1019,149 @@ mod tests {
                 .as_deref(),
             Some(json)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn chat_session_fixture(id: &str) -> StoredChatSession {
+        StoredChatSession {
+            id: id.into(),
+            project_id: "proj_1".into(),
+            harness: "claude-code".into(),
+            native_session_id: None,
+            title: None,
+            title_source: None,
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            created_at: 1,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn title_source_roundtrips_and_defaults_to_none() {
+        let dir = std::env::temp_dir().join(format!("orx-store-titlesrc-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let fresh = store.get_chat_session("chat_1").unwrap().unwrap();
+        assert!(fresh.title.is_none());
+        assert!(fresh.title_source.is_none());
+
+        store
+            .set_chat_session_title("chat_1", "First line…", "fallback")
+            .unwrap();
+        let after = store.get_chat_session("chat_1").unwrap().unwrap();
+        assert_eq!(after.title.as_deref(), Some("First line…"));
+        assert_eq!(after.title_source.as_deref(), Some("fallback"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn title_if_placeholder_respects_provenance() {
+        let dir = std::env::temp_dir().join(format!("orx-store-titleph-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["untitled", "fallback", "renamed", "legacy"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+        }
+
+        // No title at all (a harness-native title arriving before any user
+        // message) → filled.
+        assert!(store
+            .set_chat_session_title_if_placeholder("untitled", "Generated one")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("untitled")
+                .unwrap()
+                .unwrap()
+                .title_source
+                .as_deref(),
+            Some("generated")
+        );
+        // Already generated → never re-titled.
+        assert!(!store
+            .set_chat_session_title_if_placeholder("untitled", "Generated two")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("untitled")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Generated one")
+        );
+        // ...but an explicit Rename still overrides it.
+        store
+            .set_chat_session_title("untitled", "My name", "user")
+            .unwrap();
+        let renamed = store.get_chat_session("untitled").unwrap().unwrap();
+        assert_eq!(renamed.title.as_deref(), Some("My name"));
+        assert_eq!(renamed.title_source.as_deref(), Some("user"));
+
+        // The first-line placeholder → replaced.
+        store
+            .set_chat_session_title("fallback", "Hey can you look at…", "fallback")
+            .unwrap();
+        assert!(store
+            .set_chat_session_title_if_placeholder("fallback", "Review the parser")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("fallback")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Review the parser")
+        );
+
+        // A user Rename → never clobbered, whichever order the race resolves in.
+        store
+            .set_chat_session_title("renamed", "Mine", "user")
+            .unwrap();
+        assert!(!store
+            .set_chat_session_title_if_placeholder("renamed", "Generated")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("renamed")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Mine")
+        );
+
+        // Legacy row: a title with no recorded source is "unknown, don't touch".
+        store
+            .conn
+            .execute(
+                "UPDATE chat_sessions SET title = 'Old title' WHERE id = 'legacy'",
+                [],
+            )
+            .unwrap();
+        assert!(!store
+            .set_chat_session_title_if_placeholder("legacy", "Generated")
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_session("legacy")
+                .unwrap()
+                .unwrap()
+                .title
+                .as_deref(),
+            Some("Old title")
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -2631,6 +2631,7 @@ async fn create_chat_session(
         harness: req.harness,
         native_session_id: None,
         title: None,
+        title_source: None,
         model: nonempty(req.model),
         permission_mode: nonempty(req.permission_mode),
         reasoning_level: nonempty(req.reasoning_level),

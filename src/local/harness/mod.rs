@@ -24,6 +24,7 @@ mod detect;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
+pub(crate) mod title;
 
 use std::path::PathBuf;
 
@@ -103,6 +104,18 @@ pub trait Harness: Send + Sync {
     /// for the composer toggles. Default is neither control (the UI hides both).
     fn options(&self) -> HarnessOptions {
         HarnessOptions::none()
+    }
+
+    /// Generate a short (≤6 words) session title from the session's first user
+    /// message by spawning a short-lived headless child pinned to a cheap
+    /// configuration. `None` = can't or failed — the caller keeps the
+    /// first-line placeholder.
+    ///
+    /// Default: no generation. OpenCode adopts its own native titles (minus its
+    /// creation seed) through `TurnCtx::set_title`, and Cursor has no chat
+    /// capability at all.
+    async fn generate_title(&self, _first_message: &str) -> Option<String> {
+        None
     }
 
     /// Decide how an answered prompt flows back, and (for inline harnesses)

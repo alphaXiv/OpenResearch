@@ -912,8 +912,22 @@ impl ChatHost {
         }
         let saved_images = save_images(&images)?;
         let display_text = transcript_text.as_deref().unwrap_or(&text);
+        // The input auto-titling runs on — set only on the first message.
+        // Owned because `skills::expand` moves `text` below, ending the borrow
+        // `display_text` may hold on it; and it carries what the user typed,
+        // not the expanded harness prompt.
+        let mut title_seed = None;
         if session.title.is_none() {
-            let first_line = display_text.lines().next().unwrap_or("").trim();
+            // First *non-empty* line: a message that opens with a blank line
+            // would otherwise write no placeholder at all, leaving `title` NULL
+            // so every later message re-ran the whole first-message path.
+            let first_line = display_text
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .trim();
+            // Text only: an image-only message has nothing to name from.
+            title_seed = (!first_line.is_empty()).then(|| display_text.to_string());
             let mut title: String = first_line.chars().take(64).collect();
             if first_line.chars().count() > 64 {
                 title = title.trim_end().to_string();
@@ -923,7 +937,7 @@ impl ChatHost {
                 title = "Image".into();
             }
             if !title.is_empty() {
-                store.set_chat_session_title(&session.id, &title)?;
+                store.set_chat_session_title(&session.id, &title, "fallback")?;
                 session.title = Some(title);
             }
         }
@@ -1040,6 +1054,13 @@ impl ChatHost {
             let mut turns = self.turns.lock().await;
             if matches!(turns.get(&sid), Some(None)) {
                 turns.insert(sid, Some(task.abort_handle()));
+                // Inside the success arm so an interrupt that killed the turn
+                // mid-prologue doesn't still launch a title child. Runs parallel
+                // with the turn: naming the session must never delay the first
+                // answer.
+                if let Some(seed) = title_seed {
+                    self.spawn_title_generation(session.id.clone(), session.harness.clone(), seed);
+                }
             } else {
                 // Reservation gone (interrupted) or already replaced — honor the
                 // interrupt: abort the task (its finish_turn won't run) and leave
@@ -1259,6 +1280,34 @@ impl ChatHost {
         }
     }
 
+    /// Broadcast a freshly re-read session row, resolving `busy` live from the
+    /// turn map.
+    ///
+    /// For the mutations that *don't* know `busy` — rename, archive, auto-title
+    /// — which is why they have to ask. The turn-transition sites
+    /// (`send_message`'s prologue, `finish_turn`, `respond`,
+    /// `TurnCtx::set_title`) hard-code the busy value they are establishing and
+    /// emit inline instead.
+    ///
+    /// Callers pass the row they re-read *after* their write: re-reading keeps
+    /// the broadcast from clobbering a concurrent title/archive/`updated_at`
+    /// change with a stale snapshot. `None` in means the row is genuinely gone
+    /// (deleted mid-flight) and nothing is emitted; `None` comes back out, for
+    /// the HTTP handlers that answer 404 on it.
+    ///
+    /// Takes the row rather than a `&Store`: `Store` is `!Sync`, so a `&Store`
+    /// held across the await would make the spawned auto-title future
+    /// non-`Send`. Callers do the read (propagating store errors).
+    async fn emit_session(&self, session: Option<StoredChatSession>) -> Option<StoredChatSession> {
+        let session = session?;
+        let busy = self.is_busy(&session.id).await;
+        self.emit(
+            "chat.session",
+            json!({ "session": session_json(&session, busy) }),
+        );
+        Some(session)
+    }
+
     /// Archive/unarchive a session and broadcast the updated row so every open
     /// dashboard's Recents list re-filters. Returns None for an unknown id.
     pub async fn set_archived(
@@ -1268,18 +1317,40 @@ impl ChatHost {
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
         store.set_chat_session_archived(session_id, archived)?;
-        // Re-read after the write (finish_turn's pattern): the broadcast must
-        // not clobber a concurrent title/updated_at change with a stale
-        // snapshot, and a session deleted mid-flight must not be resurrected.
-        let Some(session) = store.get_chat_session(session_id)? else {
-            return Ok(None);
-        };
-        let busy = self.is_busy(session_id).await;
-        self.emit(
-            "chat.session",
-            json!({ "session": session_json(&session, busy) }),
-        );
-        Ok(Some(session))
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
+    }
+
+    /// Fire-and-forget auto-title: run the harness's one-shot title child in
+    /// parallel with the first turn, then adopt the result only while the title
+    /// is still unset or the first-line placeholder (a user Rename always
+    /// wins). Failures are silent — the placeholder is a perfectly good title.
+    fn spawn_title_generation(
+        self: &Arc<Self>,
+        session_id: String,
+        harness_id: String,
+        first_message: String,
+    ) {
+        let host = self.clone();
+        tokio::spawn(async move {
+            let Some(harness) = crate::local::harness::chat_harness(&harness_id) else {
+                return;
+            };
+            let Some(title) = harness.generate_title(&first_message).await else {
+                return;
+            };
+            let Ok(store) = Store::open() else { return };
+            if !matches!(
+                store.set_chat_session_title_if_placeholder(&session_id, &title),
+                Ok(true)
+            ) {
+                return;
+            }
+            // `emit_session` resolves busy live rather than assuming the turn is
+            // still running: generation can outlive a fast turn, and a stale
+            // `busy: true` would strand the UI.
+            let session = store.get_chat_session(&session_id).ok().flatten();
+            host.emit_session(session).await;
+        });
     }
 
     /// Rename a session and broadcast the updated row. Returns `None` for an
@@ -1290,19 +1361,8 @@ impl ChatHost {
         title: &str,
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
-        store.set_chat_session_title(session_id, title)?;
-        // Re-read after the write (finish_turn's pattern): broadcast the fresh
-        // snapshot so a concurrent archive/updated_at change isn't clobbered,
-        // and a session deleted mid-flight isn't resurrected.
-        let Some(session) = store.get_chat_session(session_id)? else {
-            return Ok(None);
-        };
-        let busy = self.is_busy(session_id).await;
-        self.emit(
-            "chat.session",
-            json!({ "session": session_json(&session, busy) }),
-        );
-        Ok(Some(session))
+        store.set_chat_session_title(session_id, title, "user")?;
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
@@ -1662,13 +1722,13 @@ impl TurnCtx {
             return;
         }
         if let Ok(store) = Store::open() {
-            // Only adopt a harness-generated title when the session has none
-            // yet — mirrors the first-message auto-title guard. Otherwise a
-            // later `session.updated` (e.g. opencode re-titling) would silently
-            // overwrite a title the user set via Rename. The check-and-set is a
-            // single conditional UPDATE so a concurrent Rename can't slip in
-            // between a read and the write.
-            match store.set_chat_session_title_if_empty(&self.session_id, title) {
+            // A harness-native title replaces the first-line placeholder but
+            // never a title the user set via Rename, and never a title already
+            // generated (so a later `session.updated` from opencode can't
+            // re-title mid-conversation). The check-and-set is a single
+            // conditional UPDATE so a concurrent Rename can't slip in between a
+            // read and the write.
+            match store.set_chat_session_title_if_placeholder(&self.session_id, title) {
                 Ok(true) => {}
                 _ => return,
             }
@@ -2163,6 +2223,7 @@ mod bridge_tests {
             harness: "claude-code".into(),
             native_session_id: None,
             title: None,
+            title_source: None,
             model: Some("claude-haiku-4-5".into()),
             permission_mode: None,
             reasoning_level: None,
@@ -2215,6 +2276,7 @@ mod notify_target_tests {
                 harness: "codex".into(),
                 native_session_id: None,
                 title: None,
+                title_source: None,
                 model: None,
                 permission_mode: None,
                 reasoning_level: None,

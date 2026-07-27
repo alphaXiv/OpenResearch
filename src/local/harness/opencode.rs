@@ -723,6 +723,14 @@ fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
     (total > 0).then_some(total)
 }
 
+/// Whether a `session.updated` title is opencode's placeholder rather than a
+/// real summary. The server seeds every session with `New session - <ISO
+/// timestamp>` at creation and overwrites it once its own summarizer answers,
+/// so the seed is a title to skip, not adopt.
+fn is_opencode_seed_title(title: &str) -> bool {
+    title.trim_start().starts_with("New session - ")
+}
+
 fn handle_event(
     ctx: &mut TurnCtx,
     native_id: &str,
@@ -784,10 +792,17 @@ fn handle_event(
             }
         }
         Some("session.updated") => {
-            // Adopt opencode's auto-generated titles.
+            // Adopt opencode's auto-generated titles. The creation seed arrives
+            // in the first `session.updated` and the real title in a later one;
+            // adopting the seed would latch it as 'generated' and permanently
+            // reject the real one.
             let info = props.get("info").unwrap_or(&Value::Null);
             if info.get("id").and_then(Value::as_str) == Some(native_id) {
-                if let Some(title) = info.get("title").and_then(Value::as_str) {
+                if let Some(title) = info
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|t| !is_opencode_seed_title(t))
+                {
                     ctx.set_title(title);
                 }
             }
@@ -1182,5 +1197,20 @@ opencode/glm-5
         });
         handle_event(&mut ctx, "ses_x", &zero_tokens, &mut msgs);
         assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn seed_title_is_recognized_but_real_titles_pass() {
+        // The exact shape opencode stamps at session creation.
+        assert!(is_opencode_seed_title(
+            "New session - 2026-07-09T23:50:40.501Z"
+        ));
+        assert!(is_opencode_seed_title(
+            "  New session - 2026-07-09T23:50:40.501Z"
+        ));
+        // What the summarizer actually produces — must reach `set_title`.
+        assert!(!is_opencode_seed_title("Fix the login redirect"));
+        assert!(!is_opencode_seed_title("New session handling in the store"));
+        assert!(!is_opencode_seed_title(""));
     }
 }
