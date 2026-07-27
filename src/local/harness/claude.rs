@@ -628,11 +628,8 @@ struct TurnState {
     /// upserts.
     stream_mid: Option<String>,
     /// Content blocks already consumed from prior `assistant` events, keyed
-    /// per message (and per subagent — see the `assistant` arm). The CLI
-    /// emits one `assistant` event *per content block* (a single-element
-    /// `content` array), so a block's index in the message — the `index` its
-    /// stream deltas carried — is this running offset plus its position
-    /// within the event.
+    /// per message id (subagent events namespaced by `parent_tool_use_id`) —
+    /// see the `assistant` arm for why this offset exists.
     assistant_blocks_seen: HashMap<String, usize>,
 }
 
@@ -649,7 +646,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         // when the complete `assistant` event arrives. Deltas build a part
         // under the same `{mid}-{index}` id that the assistant event upserts,
         // so the authoritative full text simply overwrites the accumulated
-        // one. That overwrite (and part ordering) leans on two stream-protocol
+        // one (the `assistant` arm reconstructs the block index from a
+        // running offset). That overwrite (and part ordering) leans on two stream-protocol
         // invariants: the stream's message id equals the assistant events',
         // and a block's `index` is its position in the message's content,
         // with blocks streamed in ascending order.
@@ -712,15 +710,16 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            // Per-block `assistant` events continue the message where the
-            // last left off; a message's first event starts at offset 0, so a
-            // single full-content array behaves as before. The counter trusts
-            // the CLI to emit each block exactly once, in order — it has no
-            // wire index to cross-check (the events don't carry one). A
+            // The CLI emits one `assistant` event per content block (a
+            // single-element `content` array), so each event continues the
+            // message where the last left off; a message's first event starts
+            // at offset 0, so a single full-content array behaves the same.
+            // The counter trusts the CLI to emit each block exactly once, in
+            // order — the events carry no wire index to cross-check. A
             // subagent's events (parent_tool_use_id set) get their own
-            // namespace so they can never advance the main message's offset,
-            // even on a colliding or missing message id.
-            let offset_key = match event.get("parent_tool_use_id").and_then(Value::as_str) {
+            // namespace so they can never advance the main message's offset.
+            let parent = event.get("parent_tool_use_id").and_then(Value::as_str);
+            let offset_key = match parent {
                 Some(parent) => format!("{parent}:{mid}"),
                 None => mid.clone(),
             };
@@ -795,11 +794,9 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .insert(offset_key, offset + blocks.len());
             // Per-message usage gives live updates during multi-step turns; the
             // window arrives later on `result`, so report the token count only.
-            // A subagent's message is a top-level `assistant` event with
-            // `parent_tool_use_id` set — its smaller count must not overwrite
-            // (latest-wins) the main session's occupancy, so skip its usage.
-            let is_subagent = !event.get("parent_tool_use_id").is_none_or(Value::is_null);
-            if !is_subagent {
+            // A subagent's smaller count must not overwrite (latest-wins) the
+            // main session's occupancy, so skip its usage.
+            if parent.is_none() {
                 if let Some(used) = claude_used_tokens(event.pointer("/message/usage")) {
                     ctx.report_usage(ContextUsage {
                         used_tokens: used,
@@ -1308,8 +1305,10 @@ mod tests {
     fn stream_deltas_paint_parts_and_a_whole_message_event_overwrites_them() {
         // Deltas accumulate under {mid}-{index}; an assistant event carrying
         // the whole content array (the offset-0 degenerate case — the live
-        // CLI splits per block, see the next test) upserts the authoritative
-        // text over the very same parts — no duplicate, final text wins.
+        // CLI splits per block, see
+        // `per_block_assistant_events_land_on_the_delta_parts`) upserts the
+        // authoritative text over the very same parts — no duplicate, final
+        // text wins.
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sd1"}"#,
             r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m9"}},"parent_tool_use_id":null}"#,
@@ -1334,8 +1333,8 @@ mod tests {
     #[test]
     fn per_block_assistant_events_land_on_the_delta_parts() {
         // The CLI emits one `assistant` event per completed content block,
-        // each with a single-element content array (captured live from
-        // claude 2.1.212). Without the running block offset, the text block's
+        // each with a single-element content array (captured live from the
+        // claude CLI). Without the running block offset, the text block's
         // event would key to {mid}-0, clobbering the reasoning part while the
         // delta-built text at {mid}-1 survived as a duplicate.
         let transcript = [
@@ -1375,7 +1374,7 @@ mod tests {
             r#"{"type":"result","subtype":"success","session_id":"sd3","is_error":false}"#,
         ];
         let mut ctx = TurnCtx::test_stub();
-        fold(&mut ctx, false, &transcript);
+        let state = fold(&mut ctx, false, &transcript);
         let parts = &ctx.assistant.parts;
         assert_eq!(parts.len(), 3, "{parts:?}");
         assert_eq!(parts[0].id, "mA-0");
@@ -1383,6 +1382,7 @@ mod tests {
         assert_eq!(parts[1].text.as_deref(), Some("first"));
         assert_eq!(parts[2].id, "mB-0");
         assert_eq!(parts[2].text.as_deref(), Some("second"));
+        assert_eq!(state.last_text, "second");
     }
 
     #[test]
@@ -1410,24 +1410,28 @@ mod tests {
     fn subagent_assistant_events_do_not_share_the_main_offset() {
         // A Task subagent's top-level assistant events (parent_tool_use_id
         // set) still fold into parts — pre-existing behavior — but their
-        // offsets live in their own namespace, so an interleaved subagent
-        // event can't push the main message's next block off the part id its
-        // stream deltas built.
+        // offsets live in their own namespace, so even a subagent message
+        // reusing the main message's id (synthetic here; real API ids are
+        // globally unique) can't push the main message's next block off the
+        // part id its stream deltas built. Without the namespace the main
+        // text would land at mD-2.
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sd5"}"#,
             r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"thinking","thinking":"t"}]}}"#,
-            r#"{"type":"assistant","message":{"id":"mSub","content":[{"type":"text","text":"sub"}]},"parent_tool_use_id":"toolu_1"}"#,
+            r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"text","text":"sub"}]},"parent_tool_use_id":"toolu_1"}"#,
             r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"text","text":"main"}]}}"#,
             r#"{"type":"result","subtype":"success","session_id":"sd5","is_error":false}"#,
         ];
         let mut ctx = TurnCtx::test_stub();
         fold(&mut ctx, false, &transcript);
         let parts = &ctx.assistant.parts;
-        assert_eq!(parts.len(), 3, "{parts:?}");
+        // The subagent's un-namespaced part id collides with the synthetic
+        // shared mid and upserts over mD-0 — an artifact of the collision,
+        // not the invariant under test.
+        assert_eq!(parts.len(), 2, "{parts:?}");
         assert_eq!(parts[0].id, "mD-0");
-        assert_eq!(parts[1].id, "mSub-0");
-        assert_eq!(parts[2].id, "mD-1");
-        assert_eq!(parts[2].text.as_deref(), Some("main"));
+        assert_eq!(parts[1].id, "mD-1");
+        assert_eq!(parts[1].text.as_deref(), Some("main"));
     }
 
     #[test]
