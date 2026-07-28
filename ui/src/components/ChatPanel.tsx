@@ -361,9 +361,10 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
     );
   }
 
-  const summary = running
-    ? toolLine(parts.find((p) => p.state?.status === "running") ?? parts[parts.length - 1])
-    : `Used ${parts.length} tools`;
+  // A running group is always expanded (`expanded = open || running`), so a
+  // summary echoing the running tool's line would sit directly above the
+  // identical row — the count never duplicates.
+  const summary = `Used ${parts.length} tools`;
 
   return (
     <div className={`tool-group ${errored ? "has-error" : ""}`}>
