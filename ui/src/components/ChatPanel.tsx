@@ -350,12 +350,20 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
   // While a tool is in flight, show it live; collapse once the run settles.
   const expanded = open || running;
 
-  const summary =
-    parts.length === 1
-      ? toolLine(parts[0])
-      : running
-        ? toolLine(parts.find((p) => p.state?.status === "running") ?? parts[parts.length - 1])
-        : `Used ${parts.length} tools`;
+  // A single tool needs no group wrapper: its ToolRow already shows the same
+  // line (dot + toolLine) and expands to the input/output directly. The
+  // summary-plus-rows shape would paint the identical line twice.
+  if (parts.length === 1) {
+    return (
+      <div className={`tool-group ${errored ? "has-error" : ""}`}>
+        <ToolRow part={parts[0]} onOpenFile={onOpenFile} />
+      </div>
+    );
+  }
+
+  const summary = running
+    ? toolLine(parts.find((p) => p.state?.status === "running") ?? parts[parts.length - 1])
+    : `Used ${parts.length} tools`;
 
   return (
     <div className={`tool-group ${errored ? "has-error" : ""}`}>
@@ -690,6 +698,12 @@ function renderParts(
     toolRun = [];
   };
   for (const part of parts) {
+    // A part that renders nothing must not break a tool run either — e.g. the
+    // empty reasoning parts encrypted-thinking models produced (stored
+    // transcripts predating the ingest-side skip still carry them). Without
+    // this, each invisible part splits consecutive tools into single-row
+    // groups.
+    if ((part.type === "text" || part.type === "reasoning") && !part.text) continue;
     // A sub-agent spawn part streams its own transcript in `children` — render
     // it as a standalone nested block, not folded into a tool run. The signal is
     // harness-agnostic: Codex tags the row `subagent`, while Claude's `Task` /

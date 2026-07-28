@@ -1158,6 +1158,11 @@ textarea::placeholder {
 .tool-group.has-error .tool-group-summary {
   color: var(--accent-red);
 }
+/* A single-tool group renders its ToolRow directly (no summary line); keep the
+   errored-line color parity with grouped summaries. */
+.tool-group.has-error > .tool-row .tool-line {
+  color: var(--accent-red);
+}
 .tool-chevron {
   flex-shrink: 0;
   color: var(--muted);
