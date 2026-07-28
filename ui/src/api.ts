@@ -919,6 +919,9 @@ export interface ChatSession {
   projectId: string;
   harness: HarnessId;
   title: string | null;
+  /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
+   * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
+  titleSource?: string | null;
   model: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;

@@ -891,6 +891,29 @@ textarea::placeholder {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* An auto-generated title materializes character by character when it replaces
+   the first-line placeholder. Quiet on purpose: no color, no scale, no layout
+   shift — the parent keeps its single-line box and its ellipsis. Each character
+   is an inline-block (transform doesn't apply to plain inline boxes) so the
+   glyph can lift without disturbing the line box; the per-character delay is
+   inline-styled. Spaces stay bare inline text and just fade. */
+.title-reveal-char {
+  display: inline-block;
+  animation: title-char-in 240ms ease-out both;
+}
+@keyframes title-char-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateY(0.15em);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .title-reveal-char {
+    animation: none;
+  }
+}
+
 .session-row .session-time {
   font-size: var(--fs-2xs);
   color: var(--muted);

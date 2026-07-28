@@ -751,6 +751,50 @@ function SessionFilterMenu({
   );
 }
 
+/** Per-character stagger, and the ceiling on the whole run — a long title
+ * shouldn't take a second and a half to finish arriving. */
+const TITLE_CHAR_STAGGER_MS = 14;
+const TITLE_STAGGER_CAP_MS = 500;
+/** How long the reveal flag stays set: the capped stagger plus one character's
+ * 240ms animation, plus slack. After this the title renders as plain text. */
+const TITLE_REVEAL_CLEAR_MS = 1200;
+
+/** A session title that materializes character by character when a
+ * harness-generated one replaces the first-line placeholder. `animate` is false
+ * everywhere else (initial load, renames, re-renders), and then this renders the
+ * bare string — the animated form is deliberately the exception.
+ *
+ * The characters are `aria-hidden` and the whole title rides an `aria-label`:
+ * a screen reader must hear one title, not forty single-letter spans. */
+function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
+  if (!animate) return <>{title}</>;
+  return (
+    <span className="title-reveal" aria-label={title}>
+      {Array.from(title).map((ch, i) =>
+        // Spaces stay plain inline boxes: the animated characters must be
+        // inline-block (transform doesn't apply to inline boxes), but an
+        // inline-block space collapses to zero width and eats the word gap.
+        ch === " " ? (
+          <span key={i} aria-hidden>
+            {ch}
+          </span>
+        ) : (
+          <span
+            key={i}
+            aria-hidden
+            className="title-reveal-char"
+            style={{
+              animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
+            }}
+          >
+            {ch}
+          </span>
+        ),
+      )}
+    </span>
+  );
+}
+
 /** One Recents row. Hover swaps the timestamp for a three-dot menu with
  * Rename, Archive/Unarchive, and Delete (Claude-desktop style). Rename turns
  * the title into an inline input. */
@@ -759,6 +803,7 @@ function SessionRow({
   active,
   busy,
   waiting,
+  revealTitle,
   onOpen,
   onRename,
   onSetArchived,
@@ -769,6 +814,10 @@ function SessionRow({
   busy: boolean;
   /** Turn held on an unanswered card: steady dot, not the working pulse. */
   waiting: boolean;
+  /** Nonce set while this row's freshly auto-generated title should play its
+   * reveal; it doubles as the remount key so a second retitle replays it.
+   * Undefined the rest of the time (static title). */
+  revealTitle: number | undefined;
   onOpen: () => void;
   onRename: (title: string) => void;
   onSetArchived: (archived: boolean) => void;
@@ -856,7 +905,13 @@ function SessionRow({
           }}
         />
       ) : (
-        <span className="session-title">{title}</span>
+        <span className="session-title">
+          <TitleReveal
+            key={revealTitle ?? "static"}
+            title={title}
+            animate={revealTitle !== undefined}
+          />
+        </span>
       )}
       <span className="session-time">{relTime(session.updatedAt)}</span>
       <button
@@ -972,6 +1027,14 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
+  // Sessions whose title was just replaced by a harness-generated one, mapped
+  // to a nonce that bumps per reveal so a second retitle remounts the spans and
+  // replays the animation instead of sitting on a finished one.
+  const [titleReveals, setTitleReveals] = useState<Map<string, number>>(new Map());
+  // Last title seen per session id. The SSE subscription is keyed on projectId
+  // alone, so its closure can't read `sessions`; this ref is what tells an
+  // incoming title from the one already on screen.
+  const seenTitles = useRef(new Map<string, string | null>());
   const loadedSessions = useRef(new Set<string>());
   // Tombstones: a turn finishing in the same instant as a delete can emit its
   // final chat.session upsert *after* chat.session.deleted; ignoring upserts
@@ -1131,9 +1194,15 @@ export function ChatPanel({
     setAttachments([]);
     dispatch({ type: "reset" });
     loadedSessions.current = new Set();
+    setTitleReveals(new Map());
+    seenTitles.current = new Map();
     listChatSessions(projectId)
       .then((list) => {
         setSessions(list);
+        // Seed the titles baseline from the load itself, so the first live
+        // event compares against what's on screen rather than reading as a
+        // change and animating a title the user already had.
+        seenTitles.current = new Map(list.map((s) => [s.id, s.title]));
         // Prefer the newest non-archived session; archived ones stay hidden.
         setActiveId((cur) => cur ?? list.find((s) => !s.archived)?.id ?? null);
         dispatch({
@@ -1165,9 +1234,33 @@ export function ChatPanel({
   useEffect(() => {
     return onChatEvent((ev) => {
       switch (ev.type) {
-        case "session":
+        case "session": {
           if (ev.session.projectId !== projectId) return;
           if (deletedIds.current.has(ev.session.id)) return;
+          // A generated title landing on a session already on screen is the
+          // auto-title arriving — reveal it. A session we've never seen is
+          // skipped on purpose: a list load or a newly created row must not
+          // animate a title that was simply always there.
+          const known = seenTitles.current.has(ev.session.id);
+          const changed = seenTitles.current.get(ev.session.id) !== ev.session.title;
+          seenTitles.current.set(ev.session.id, ev.session.title);
+          if (known && changed && ev.session.titleSource === "generated") {
+            setTitleReveals((cur) => {
+              const next = new Map(cur);
+              next.set(ev.session.id, (cur.get(ev.session.id) ?? 0) + 1);
+              return next;
+            });
+            // Drop the flag once the run is over (longest stagger + one char
+            // duration, plus slack) so later re-renders show a static title.
+            window.setTimeout(() => {
+              setTitleReveals((cur) => {
+                if (!cur.has(ev.session.id)) return cur;
+                const next = new Map(cur);
+                next.delete(ev.session.id);
+                return next;
+              });
+            }, TITLE_REVEAL_CLEAR_MS);
+          }
           setSessions((cur) => {
             const i = cur.findIndex((s) => s.id === ev.session.id);
             if (i < 0) return [ev.session, ...cur];
@@ -1180,6 +1273,7 @@ export function ChatPanel({
             return next;
           });
           break;
+        }
         case "sessionDeleted":
           forgetSession(ev.sessionId);
           break;
@@ -1231,6 +1325,8 @@ export function ChatPanel({
   }, [state.busySessions, state.messagesBySession]);
   const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
   const activeSession = openSession;
+  // Nonce while the open session's title is mid-reveal; undefined = static.
+  const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
 
   // The newest unresolved plan prompt, if any — it drives the docked strip
   // above the composer. Resolution re-emits the message over SSE, so this
@@ -1456,6 +1552,7 @@ export function ChatPanel({
     setSessions((cur) => cur.filter((s) => s.id !== sessionId));
     setActiveId((cur) => (cur === sessionId ? null : cur));
     loadedSessions.current.delete(sessionId);
+    seenTitles.current.delete(sessionId);
     dispatch({ type: "forget", sessionId });
   }
 
@@ -1592,6 +1689,7 @@ export function ChatPanel({
             active={s.id === activeId && mainView === "chat"}
             busy={state.busySessions.has(s.id)}
             waiting={waitingSessions.has(s.id)}
+            revealTitle={titleReveals.get(s.id)}
             onOpen={() => {
               setActiveId(s.id);
               onSelectMainView("chat");
@@ -1658,7 +1756,15 @@ export function ChatPanel({
           className="title"
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
         >
-          {activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
+          {activeSession ? (
+            <TitleReveal
+              key={activeTitleReveal ?? "static"}
+              title={activeSession.title?.trim() || "Untitled"}
+              animate={activeTitleReveal !== undefined}
+            />
+          ) : (
+            "New session"
+          )}
         </div>
         {onStartTour && (
           <button

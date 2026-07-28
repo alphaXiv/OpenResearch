@@ -317,6 +317,9 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "projectId": s.project_id,
         "harness": s.harness,
         "title": s.title,
+        // The UI animates the reveal of a harness-generated title, so it needs
+        // to tell one from a placeholder or a user rename.
+        "titleSource": s.title_source,
         "model": s.model,
         "permissionMode": s.permission_mode,
         "reasoningLevel": s.reasoning_level,
@@ -2247,6 +2250,17 @@ mod bridge_tests {
         let value = session_json(&with_usage, false);
         assert_eq!(value["contextUsage"]["usedTokens"], 27564);
         assert_eq!(value["contextUsage"]["contextWindow"], 200000);
+    }
+
+    #[test]
+    fn session_json_carries_title_source() {
+        // The UI keys its title-reveal animation off this field, so it has to
+        // survive to the wire — null on a legacy row, verbatim otherwise.
+        assert!(session_json(&bare_session(), false)["titleSource"].is_null());
+
+        let mut generated = bare_session();
+        generated.title_source = Some("generated".into());
+        assert_eq!(session_json(&generated, false)["titleSource"], "generated");
     }
 
     #[test]
