@@ -32,8 +32,8 @@ use super::options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
 use super::{Harness, ResumeAction};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    prepare_env, ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
-    WireQuestionOption, WireToolState,
+    find_part_mut, prepare_env, ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart,
+    WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
 use crate::local::opencode::ensure_playbook;
@@ -891,10 +891,79 @@ struct TurnState {
     /// same `{mid}-{index}` part ids the final complete `assistant` event
     /// upserts.
     stream_mid: Option<String>,
+    /// Per sub-agent (keyed by `parent_tool_use_id`), the in-flight message id of
+    /// that sub-agent's stream — the child equivalent of `stream_mid`, so two
+    /// concurrent sub-agents' deltas key to distinct child part ids.
+    sub_stream_mid: std::collections::HashMap<String, String>,
     /// Content blocks already consumed from prior `assistant` events, keyed
     /// per message id (subagent events namespaced by `parent_tool_use_id`) —
     /// see the `assistant` arm for why this offset exists.
     assistant_blocks_seen: HashMap<String, usize>,
+}
+
+/// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
+/// or `None` for a main-loop event. Claude Code tags every sub-agent
+/// `stream_event`/`assistant`/`user` with this — and its value *is* the Task
+/// part's WirePart id, so it directly names the spawn part the sub-agent's
+/// transcript hangs under (no thread→part map needed, unlike Codex).
+fn subagent_parent(event: &Value) -> Option<&str> {
+    event.get("parent_tool_use_id").and_then(Value::as_str)
+}
+
+/// Route a sub-agent `assistant` message's content blocks into the spawning Task
+/// part's `children` (ids namespaced by `parent` so concurrent sub-agents can't
+/// collide). Mirrors the main-loop block handling minus the interactive-prompt /
+/// bridge special-casing, which only applies to the main session. `start` is the
+/// index of the first not-yet-seen block (the thinking-model dedup offset), so a
+/// re-sent `assistant` event doesn't duplicate the sub-agent's earlier blocks.
+fn apply_subagent_blocks(
+    ctx: &mut TurnCtx,
+    parent: &str,
+    mid: &str,
+    start: usize,
+    blocks: &[Value],
+) {
+    for (i, block) in blocks.iter().enumerate().skip(start) {
+        let ns = |id: &str| format!("{parent}:{id}");
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+                ctx.upsert_child(parent, WirePart::text(ns(&format!("{mid}-{i}")), text));
+            }
+            Some("thinking") => {
+                let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                ctx.upsert_child(parent, WirePart::reasoning(ns(&format!("{mid}-{i}")), text));
+            }
+            Some("tool_use") => {
+                let raw_id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{mid}-{i}"));
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                let input = block.get("input");
+                ctx.upsert_child(
+                    parent,
+                    WirePart {
+                        id: ns(&raw_id),
+                        kind: "tool".into(),
+                        text: None,
+                        tool: Some(name.to_string()),
+                        state: Some(WireToolState {
+                            status: "running".into(),
+                            input: input.map(normalize_input),
+                            output: None,
+                            error: None,
+                            title: None,
+                        }),
+                        prompt: None,
+                        children: Vec::new(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Fold one stream-json output object into the turn's transcript + `TurnState`.
@@ -916,41 +985,69 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         // and a block's `index` is its position in the message's content,
         // with blocks streamed in ascending order.
         Some("stream_event") => {
-            // A subagent's nested stream (parent_tool_use_id set) would
-            // interleave its text into the transcript — main loop only.
-            if !event.get("parent_tool_use_id").is_none_or(|v| v.is_null()) {
-                return false;
-            }
+            // A subagent's nested stream carries `parent_tool_use_id` (the id of
+            // the spawning Task tool_use — which is the Task part's own id). Its
+            // deltas stream into that part's `children`; a main-loop delta (no
+            // parent) streams into the top-level transcript as before.
+            let parent = subagent_parent(event);
             let inner = event.get("event").unwrap_or(&Value::Null);
             match inner.get("type").and_then(Value::as_str) {
                 Some("message_start") => {
+                    // Sub-agent streams have their own message ids; namespace the
+                    // stream mid per parent so a concurrent sub-agent's deltas
+                    // don't collide with the main stream's.
                     if let Some(mid) = inner.pointer("/message/id").and_then(Value::as_str) {
-                        state.stream_mid = Some(mid.to_string());
+                        match parent {
+                            Some(p) => {
+                                state.sub_stream_mid.insert(p.to_string(), mid.to_string());
+                            }
+                            None => state.stream_mid = Some(mid.to_string()),
+                        }
                     }
                 }
                 Some("content_block_delta") => {
-                    let (Some(mid), Some(index)) = (
-                        state.stream_mid.as_deref(),
-                        inner.get("index").and_then(Value::as_u64),
-                    ) else {
+                    let mid = match parent {
+                        Some(p) => state.sub_stream_mid.get(p).map(String::as_str),
+                        None => state.stream_mid.as_deref(),
+                    };
+                    let (Some(mid), Some(index)) =
+                        (mid, inner.get("index").and_then(Value::as_u64))
+                    else {
                         return false;
                     };
-                    let id = format!("{mid}-{index}");
                     let delta = inner.get("delta").unwrap_or(&Value::Null);
-                    let (field, reasoning) = match delta.get("type").and_then(Value::as_str) {
-                        Some("text_delta") => ("text", false),
-                        Some("thinking_delta") => ("thinking", true),
+                    let (reasoning, field) = match delta.get("type").and_then(Value::as_str) {
+                        Some("text_delta") => (false, "text"),
+                        Some("thinking_delta") => (true, "thinking"),
                         _ => return false,
                     };
-                    if let Some(text) = delta.get(field).and_then(Value::as_str) {
-                        if !ctx.assistant.parts.iter().any(|p| p.id == id) {
-                            ctx.upsert_part(if reasoning {
-                                WirePart::reasoning(id.clone(), "")
-                            } else {
-                                WirePart::text(id.clone(), "")
+                    let Some(text) = delta.get(field).and_then(Value::as_str) else {
+                        return false;
+                    };
+                    match parent {
+                        Some(p) => {
+                            // Namespace the child id by parent so two sub-agents'
+                            // block indices can't collide.
+                            let id = format!("{p}:{mid}-{index}");
+                            ctx.append_child_text(p, &id, text, || {
+                                if reasoning {
+                                    WirePart::reasoning(id.clone(), "")
+                                } else {
+                                    WirePart::text(id.clone(), "")
+                                }
                             });
                         }
-                        ctx.append_part_text(&id, text);
+                        None => {
+                            let id = format!("{mid}-{index}");
+                            if !ctx.assistant.parts.iter().any(|p| p.id == id) {
+                                ctx.upsert_part(if reasoning {
+                                    WirePart::reasoning(id.clone(), "")
+                                } else {
+                                    WirePart::text(id.clone(), "")
+                                });
+                            }
+                            ctx.append_part_text(&id, text);
+                        }
                     }
                 }
                 _ => {}
@@ -982,8 +1079,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             // order — the events carry no wire index to cross-check. A
             // subagent's events (parent_tool_use_id set) get their own
             // namespace so they can never advance the main message's offset.
-            let parent = event.get("parent_tool_use_id").and_then(Value::as_str);
-            let offset_key = match parent {
+            let parent = subagent_parent(event).map(str::to_string);
+            let offset_key = match parent.as_deref() {
                 Some(parent) => format!("{parent}:{mid}"),
                 None => mid.clone(),
             };
@@ -992,6 +1089,17 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .get(&offset_key)
                 .copied()
                 .unwrap_or(0);
+            // A sub-agent's message: route its blocks into the spawning Task
+            // part's `children` (namespaced ids, same offset), never into the
+            // top-level transcript, and skip prompt-card / usage handling (a
+            // sub-agent drives neither the main interactive flow nor its meter).
+            if let Some(parent) = parent.as_deref() {
+                apply_subagent_blocks(ctx, parent, &mid, offset, &blocks);
+                state
+                    .assistant_blocks_seen
+                    .insert(offset_key, offset + blocks.len());
+                return false;
+            }
             for (n, block) in blocks.iter().enumerate() {
                 let i = offset + n;
                 match block.get("type").and_then(Value::as_str) {
@@ -1031,7 +1139,11 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                             state.saw_prompt = true;
                             ctx.upsert_part(WirePart::prompt(id, prompt));
                         } else {
-                            ctx.upsert_part(WirePart {
+                            // Preserve children: a Task tool_use re-sent after its
+                            // sub-agent already streamed must not drop the nested
+                            // transcript. (Plain tools have no children, so this is
+                            // an ordinary upsert for them.)
+                            ctx.upsert_part_preserving_children(WirePart {
                                 id,
                                 kind: "tool".into(),
                                 text: None,
@@ -1044,6 +1156,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                     title: None,
                                 }),
                                 prompt: None,
+                                children: Vec::new(),
                             });
                         }
                     }
@@ -1058,19 +1171,20 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .insert(offset_key, offset + blocks.len());
             // Per-message usage gives live updates during multi-step turns; the
             // window arrives later on `result`, so report the token count only.
-            // A subagent's smaller count must not overwrite (latest-wins) the
-            // main session's occupancy, so skip its usage.
-            if parent.is_none() {
-                if let Some(used) = claude_used_tokens(event.pointer("/message/usage")) {
-                    ctx.report_usage(ContextUsage {
-                        used_tokens: used,
-                        context_window: None,
-                    });
-                }
+            // (Sub-agent messages returned early above, so their smaller counts
+            // never reach — and never clobber — the main session's meter.)
+            if let Some(used) = claude_used_tokens(event.pointer("/message/usage")) {
+                ctx.report_usage(ContextUsage {
+                    used_tokens: used,
+                    context_window: None,
+                });
             }
         }
         Some("user") => {
-            // Synthetic tool-result turns: complete the matching tool part.
+            // Synthetic tool-result turns: complete the matching tool part. A
+            // sub-agent's tool_result carries the bare `tool_use_id`; its part
+            // lives in the spawning Task part's children under the namespaced id.
+            let parent = subagent_parent(event);
             let blocks = event
                 .pointer("/message/content")
                 .and_then(Value::as_array)
@@ -1088,7 +1202,11 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let text = block.get("content").map(result_text).unwrap_or_default();
-                if let Some(part) = ctx.assistant.parts.iter_mut().find(|p| p.id == tool_id) {
+                let part_id = match parent {
+                    Some(p) => format!("{p}:{tool_id}"),
+                    None => tool_id.to_string(),
+                };
+                if let Some(part) = find_part_mut(&mut ctx.assistant.parts, &part_id) {
                     if let Some(state) = part.state.as_mut() {
                         state.status = if is_error { "error" } else { "completed" }.into();
                         if is_error {
@@ -1790,13 +1908,15 @@ mod tests {
 
     #[test]
     fn subagent_assistant_events_do_not_share_the_main_offset() {
-        // A Task subagent's top-level assistant events (parent_tool_use_id
-        // set) still fold into parts — pre-existing behavior — but their
-        // offsets live in their own namespace, so even a subagent message
+        // A Task subagent's assistant events (parent_tool_use_id set) route
+        // into the spawning Task part's children, NOT the top-level parts, and
+        // advance a per-parent offset namespace — so even a subagent message
         // reusing the main message's id (synthetic here; real API ids are
         // globally unique) can't push the main message's next block off the
-        // part id its stream deltas built. Without the namespace the main
-        // text would land at mD-2.
+        // part id its stream deltas built. Without the namespace the main text
+        // would land at mD-2. Here there's no `toolu_1` Task part, so the
+        // subagent block simply no-ops (nowhere to nest) — either way it never
+        // touches the main transcript.
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sd5"}"#,
             r#"{"type":"assistant","message":{"id":"mD","content":[{"type":"thinking","thinking":"t"}]}}"#,
@@ -1807,9 +1927,8 @@ mod tests {
         let mut ctx = TurnCtx::test_stub();
         fold(&mut ctx, false, &transcript);
         let parts = &ctx.assistant.parts;
-        // The subagent's un-namespaced part id collides with the synthetic
-        // shared mid and upserts over mD-0 — an artifact of the collision,
-        // not the invariant under test.
+        // Only the two MAIN blocks land top-level, at their own offsets; the
+        // subagent "sub" block never appears here.
         assert_eq!(parts.len(), 2, "{parts:?}");
         assert_eq!(parts[0].id, "mD-0");
         assert_eq!(parts[1].id, "mD-1");
@@ -1817,17 +1936,51 @@ mod tests {
     }
 
     #[test]
-    fn subagent_stream_deltas_are_ignored() {
-        // A Task subagent's nested stream carries parent_tool_use_id — its
-        // deltas must not paint the main transcript.
+    fn subagent_activity_streams_into_the_task_part_children() {
+        // The main agent calls Task (a top-level tool_use), then the sub-agent's
+        // nested stream (parent_tool_use_id = the Task id) and its assistant
+        // message must nest under the Task part's `children`, not the transcript.
         let transcript = [
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_1","name":"Task","input":{"description":"analyze runs"}}]}}"#,
+            // sub-agent streams thinking + text, then a completed assistant block + a bash tool call
             r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"sub"}},"parent_tool_use_id":"toolu_1"}"#,
-            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"nested"}},"parent_tool_use_id":"toolu_1"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Look"}},"parent_tool_use_id":"toolu_1"}"#,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ing…"}},"parent_tool_use_id":"toolu_1"}"#,
+            r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"sub","content":[{"type":"tool_use","id":"call_a","name":"Bash","input":{"command":"ls"}}]}}"#,
+            r#"{"type":"user","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"tool_result","tool_use_id":"call_a","content":"a.rs"}]}}"#,
+            // The Task's own result is a MAIN-session user event (no parent) —
+            // it completes the top-level Task row, and must not wipe children.
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"done: 3 runs"}]}}"#,
             r#"{"type":"result","subtype":"success","session_id":"s","is_error":false}"#,
         ];
         let mut ctx = TurnCtx::test_stub();
         fold(&mut ctx, false, &transcript);
-        assert!(ctx.assistant.parts.is_empty(), "{:?}", ctx.assistant.parts);
+        // Exactly one top-level part: the Task spawn row. Nothing leaked flat.
+        assert_eq!(ctx.assistant.parts.len(), 1, "{:?}", ctx.assistant.parts);
+        let task = &ctx.assistant.parts[0];
+        assert_eq!(task.id, "toolu_1");
+        assert_eq!(task.tool.as_deref(), Some("Task"));
+        // The Task row itself completed (its main-session tool_result), and its
+        // children survived that completion.
+        assert_eq!(task.state.as_ref().unwrap().status, "completed");
+        assert_eq!(task.children.len(), 2, "children survive completion");
+        // The sub-agent's streamed text + bash call nested under it (namespaced).
+        let child_text = task
+            .children
+            .iter()
+            .find(|p| p.text.as_deref() == Some("Looking…"));
+        assert!(
+            child_text.is_some(),
+            "streamed text nested: {:?}",
+            task.children
+        );
+        let bash = task
+            .children
+            .iter()
+            .find(|p| p.id == "toolu_1:call_a")
+            .expect("sub bash nested with namespaced id");
+        assert_eq!(bash.state.as_ref().unwrap().status, "completed");
+        assert_eq!(bash.state.as_ref().unwrap().output.as_deref(), Some("a.rs"));
     }
 
     #[test]

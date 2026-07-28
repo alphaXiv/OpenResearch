@@ -210,6 +210,7 @@ impl Store {
                 agent_status         TEXT NOT NULL DEFAULT 'idle',
                 created_at           INTEGER NOT NULL,
                 updated_at           INTEGER NOT NULL,
+                chat_session_id      TEXT,
                 UNIQUE(project_id, slug)
             );
             DROP TABLE IF EXISTS local_reports;
@@ -258,6 +259,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN context_usage_json TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -598,10 +600,11 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
+                e.chat_session_id,
             ],
         )?;
         Ok(())
@@ -628,6 +631,9 @@ impl Store {
     }
 
     /// Full-row update by id (title / description / run_command / agent_status).
+    ///
+    /// `chat_session_id` is deliberately omitted: session ownership is stamped
+    /// once at creation and is immutable thereafter.
     pub fn update_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
             "UPDATE local_experiments SET parent_experiment_id = ?2, slug = ?3, branch_name = ?4,
@@ -952,7 +958,8 @@ const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, baseline_
                             repo_path, run_command, paper_id, created_at, updated_at";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
-                               title, description, run_command, agent_status, created_at, updated_at";
+                               title, description, run_command, agent_status, created_at, \
+                               updated_at, chat_session_id";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -1235,6 +1242,78 @@ mod tests {
             run.chat_session_id,
             Some("chat_A".to_string()),
             "the launching session is never overwritten by a later upsert"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn experiment_fixture(id: &str, chat_session_id: Option<&str>) -> LocalExperiment {
+        LocalExperiment {
+            id: id.into(),
+            project_id: "proj_1".into(),
+            parent_experiment_id: None,
+            slug: format!("exp-{id}"),
+            branch_name: format!("orx/exp-{id}"),
+            title: None,
+            description: None,
+            run_command: "echo hi".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            chat_session_id: chat_session_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn experiment_chat_session_id_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orx-store-expsess-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
+            .unwrap();
+        store
+            .create_local_experiment(&experiment_fixture("exp_orphan", None))
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_local_experiment("exp_owned")
+                .unwrap()
+                .unwrap()
+                .chat_session_id,
+            Some("chat_x".to_string())
+        );
+        assert_eq!(
+            store
+                .get_local_experiment("exp_orphan")
+                .unwrap()
+                .unwrap()
+                .chat_session_id,
+            None
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn experiment_ownership_is_immutable_across_updates() {
+        let dir = std::env::temp_dir().join(format!("orx-store-expimm-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_local_experiment(&experiment_fixture("exp_owned", Some("chat_x")))
+            .unwrap();
+
+        // A later full-row update must not rewrite the owning session.
+        let mut updated = experiment_fixture("exp_owned", None);
+        updated.title = Some("renamed".into());
+        store.update_local_experiment(&updated).unwrap();
+
+        let stored = store.get_local_experiment("exp_owned").unwrap().unwrap();
+        assert_eq!(stored.title.as_deref(), Some("renamed"), "title updates");
+        assert_eq!(
+            stored.chat_session_id,
+            Some("chat_x".to_string()),
+            "the creating session is never overwritten by a later update"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

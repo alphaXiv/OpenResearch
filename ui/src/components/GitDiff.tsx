@@ -30,7 +30,7 @@ function getUnifiedLineNumber(change: ChangeData): number {
   return change.lineNumber;
 }
 
-function countChanges(file: FileData) {
+export function countChanges(file: FileData) {
   let additions = 0;
   let deletions = 0;
   for (const hunk of file.hunks) {

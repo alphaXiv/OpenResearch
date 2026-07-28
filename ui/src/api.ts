@@ -31,6 +31,8 @@ export interface Experiment {
   agentStatus: string;
   createdAt: number;
   updatedAt: number;
+  /** Chat session that created this experiment; null for dashboard/legacy rows. */
+  chatSessionId?: string | null;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
@@ -897,6 +899,9 @@ export interface ChatPart {
   tool?: string;
   state?: ChatToolState;
   prompt?: ChatPrompt;
+  /** Nested transcript of a sub-agent this part spawned (Codex `subagent`
+   * tool). Streams live and recurses for sub-agents that spawn their own. */
+  children?: ChatPart[];
 }
 
 export interface ChatMessage {

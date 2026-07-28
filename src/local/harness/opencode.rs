@@ -22,7 +22,7 @@
 //! list plus each model's reasoning `variants` (plain `opencode models` is the
 //! fallback for a CLI too old for `--verbose`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -395,6 +395,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
             tool: None,
             state: None,
             prompt: None,
+            children: Vec::new(),
         }),
         "tool" => {
             let state = part.get("state");
@@ -424,10 +425,30 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
                         .map(str::to_string),
                 }),
                 prompt: None,
+                children: Vec::new(),
             })
         }
         _ => None,
     }
+}
+
+/// The id of the most-recent top-level `task` tool part not yet linked to a
+/// child session — the row a freshly-spawned sub-agent session belongs to.
+/// opencode's `session.created` carries the child's `parentID` (our session) but
+/// not the spawning tool call, so we attribute to the latest unclaimed `task`
+/// row; in the common single-task case this is exact.
+///
+/// Only top-level `task` rows are candidates, so nesting is one level deep: a
+/// sub-agent that spawns its *own* sub-agent emits a `session.created` whose
+/// `parentID` is the child session (not ours), so the grandchild isn't
+/// registered and its events fall through to the foreign-session drop.
+fn newest_task_part_id(parts: &[WirePart], claimed: &HashMap<String, String>) -> Option<String> {
+    let taken: HashSet<&str> = claimed.values().map(String::as_str).collect();
+    parts
+        .iter()
+        .rev()
+        .find(|p| p.tool.as_deref() == Some("task") && !taken.contains(p.id.as_str()))
+        .map(|p| p.id.clone())
 }
 
 /// opencode `permission.asked` payload → a `permission` card. The permission
@@ -666,6 +687,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // before its message would be misfiled, and assistant messages are always
     // announced before their parts stream.
     let mut assistant_msgs: HashSet<String> = HashSet::new();
+    // Sub-agent child sessions spawned by a `task` tool this turn: child
+    // sessionID → the task spawn part's id. Their events (a foreign sessionID)
+    // route into that part's `children` instead of being dropped.
+    let mut sub_sessions: HashMap<String, String> = HashMap::new();
     let mut buf = String::new();
 
     loop {
@@ -684,7 +709,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     // are handled async (emit a card, or auto-reply per mode); all
                     // other events are message/part updates handled synchronously.
                     if !handle_prompt_event(ctx, &native_id, &base, &event).await? {
-                        handle_event(ctx, &native_id, &event, &mut assistant_msgs);
+                        handle_event(ctx, &native_id, &event, &mut assistant_msgs, &mut sub_sessions);
                     }
                 }
             }
@@ -696,7 +721,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
                             if let Some(wire) = to_wire_part(part) {
-                                ctx.upsert_part(wire);
+                                // Preserve children: the final `task` part carries
+                                // none, but its row already streamed the sub-agent
+                                // transcript into `children`.
+                                ctx.upsert_part_preserving_children(wire);
                             }
                         }
                     }
@@ -736,17 +764,41 @@ fn handle_event(
     native_id: &str,
     event: &Value,
     assistant_msgs: &mut HashSet<String>,
+    sub_sessions: &mut HashMap<String, String>,
 ) {
     let props = event.get("properties").unwrap_or(&Value::Null);
     match event.get("type").and_then(Value::as_str) {
+        // A `task` tool spawns a sub-agent in a child session; opencode announces
+        // it with `session.created` carrying the child's `parentID` = our
+        // session. Link that child session to the spawning `task` tool row so its
+        // events stream into that row's `children`.
+        Some("session.created") => {
+            let info = props.get("info").unwrap_or(&Value::Null);
+            if info.get("parentID").and_then(Value::as_str) == Some(native_id) {
+                if let Some(child_id) = info.get("id").and_then(Value::as_str) {
+                    if let Some(spawn) = newest_task_part_id(&ctx.assistant.parts, sub_sessions) {
+                        sub_sessions.insert(child_id.to_string(), spawn);
+                    }
+                }
+            }
+        }
         Some("message.updated") => {
             let info = props.get("info").unwrap_or(&Value::Null);
-            if info.get("sessionID").and_then(Value::as_str) == Some(native_id)
-                && info.get("role").and_then(Value::as_str) == Some("assistant")
-            {
+            let session = info.get("sessionID").and_then(Value::as_str);
+            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            // Record assistant message ids for the main session AND registered
+            // sub-sessions, so a session's user parts (e.g. the task prompt echo)
+            // can be filtered out — for both the transcript and sub-agent nesting.
+            let ours =
+                session == Some(native_id) || session.is_some_and(|s| sub_sessions.contains_key(s));
+            if ours && is_assistant {
                 if let Some(id) = info.get("id").and_then(Value::as_str) {
                     assistant_msgs.insert(id.to_string());
                 }
+            }
+            // Only the MAIN session's tokens drive the context meter; a
+            // sub-agent's smaller counts must not overwrite it.
+            if session == Some(native_id) && is_assistant {
                 // Several `message.updated` fire per message; the early ones have
                 // no tokens yet, so skip a report until real numbers land. The
                 // context window isn't in this event (provider config only), so
@@ -761,14 +813,25 @@ fn handle_event(
         }
         Some("message.part.updated") => {
             let part = props.get("part").unwrap_or(&Value::Null);
-            if part.get("sessionID").and_then(Value::as_str) != Some(native_id) {
-                return;
-            }
+            let session = part.get("sessionID").and_then(Value::as_str);
             let owned_by_assistant = part
                 .get("messageID")
                 .and_then(Value::as_str)
                 .is_some_and(|mid| assistant_msgs.contains(mid));
-            if !owned_by_assistant {
+            // A sub-agent's part (foreign sessionID we've registered) streams
+            // into its owning `task` row's children, with a namespaced id — but
+            // only assistant-owned parts (skip the child's user prompt echo).
+            if let Some(spawn) = session.and_then(|s| sub_sessions.get(s)).cloned() {
+                if owned_by_assistant {
+                    if let Some(mut wire) = to_wire_part(part) {
+                        wire.id = format!("{spawn}:{}", wire.id);
+                        ctx.upsert_child(&spawn, wire);
+                        ctx.maybe_flush();
+                    }
+                }
+                return;
+            }
+            if session != Some(native_id) || !owned_by_assistant {
                 return;
             }
             if let Some(wire) = to_wire_part(part) {
@@ -777,19 +840,30 @@ fn handle_event(
             }
         }
         Some("message.part.delta") => {
-            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
-                return;
-            }
             if props.get("field").and_then(Value::as_str) != Some("text") {
                 return;
             }
-            if let (Some(part_id), Some(delta)) = (
+            let session = props.get("sessionID").and_then(Value::as_str);
+            let (Some(part_id), Some(delta)) = (
                 props.get("partID").and_then(Value::as_str),
                 props.get("delta").and_then(Value::as_str),
-            ) {
-                ctx.append_part_text(part_id, delta);
+            ) else {
+                return;
+            };
+            // Route a sub-agent's text delta into the owning task row's child.
+            if let Some(spawn) = session.and_then(|s| sub_sessions.get(s)).cloned() {
+                let child_id = format!("{spawn}:{part_id}");
+                ctx.append_child_text(&spawn, &child_id, delta, || {
+                    WirePart::text(child_id.clone(), "")
+                });
                 ctx.maybe_flush();
+                return;
             }
+            if session != Some(native_id) {
+                return;
+            }
+            ctx.append_part_text(part_id, delta);
+            ctx.maybe_flush();
         }
         Some("session.updated") => {
             // Adopt opencode's auto-generated titles. The creation seed arrives
@@ -1172,7 +1246,7 @@ opencode/glm-5
                 "tokens": { "input": 1200, "output": 340, "reasoning": 50, "cache": { "read": 8000, "write": 200 } }
             }}
         });
-        handle_event(&mut ctx, "ses_x", &event, &mut msgs);
+        handle_event(&mut ctx, "ses_x", &event, &mut msgs, &mut HashMap::new());
         let usage = ctx.context_usage.expect("usage reported");
         assert_eq!(usage.used_tokens, 1200 + 340 + 50 + 8000 + 200);
         assert_eq!(usage.context_window, None);
@@ -1187,7 +1261,13 @@ opencode/glm-5
             "type": "message.updated",
             "properties": { "info": { "id": "msg_1", "sessionID": "ses_x", "role": "assistant" }}
         });
-        handle_event(&mut ctx, "ses_x", &no_tokens, &mut msgs);
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &no_tokens,
+            &mut msgs,
+            &mut HashMap::new(),
+        );
         assert!(ctx.context_usage.is_none());
         // All-zero placeholder tokens must also be ignored.
         let zero_tokens = json!({
@@ -1195,7 +1275,13 @@ opencode/glm-5
             "properties": { "info": { "id": "msg_1", "sessionID": "ses_x", "role": "assistant",
                 "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } }}}
         });
-        handle_event(&mut ctx, "ses_x", &zero_tokens, &mut msgs);
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &zero_tokens,
+            &mut msgs,
+            &mut HashMap::new(),
+        );
         assert!(ctx.context_usage.is_none());
     }
 
@@ -1212,5 +1298,86 @@ opencode/glm-5
         assert!(!is_opencode_seed_title("Fix the login redirect"));
         assert!(!is_opencode_seed_title("New session handling in the store"));
         assert!(!is_opencode_seed_title(""));
+    }
+
+    /// A `task` tool spawns a child session (announced via `session.created` with
+    /// `parentID` = our session); the sub-agent's parts stream into the task
+    /// row's `children`, not the top-level transcript.
+    #[test]
+    fn subagent_parts_stream_into_the_task_row_children() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut msgs: HashSet<String> = HashSet::new();
+        let mut subs: HashMap<String, String> = HashMap::new();
+        // The main assistant message + its `task` tool call (top-level).
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_main","role":"assistant"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.part.updated","properties":{"part":{
+                "id":"prt_task","type":"tool","tool":"task","sessionID":"ses_main","messageID":"msg_1",
+                "state":{"status":"running","input":{"description":"analyze"}}}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        // opencode announces the spawned child session (parentID = our session).
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"session.created","properties":{"info":{"id":"ses_child","parentID":"ses_main"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        assert_eq!(subs.get("ses_child").map(String::as_str), Some("prt_task"));
+        // The child session's assistant message + a tool part → nests under task.
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_c","sessionID":"ses_child","role":"assistant"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.part.updated","properties":{"part":{
+                "id":"prt_bash","type":"tool","tool":"bash","sessionID":"ses_child","messageID":"msg_c",
+                "state":{"status":"completed","input":{"command":"ls"},"output":"a.rs"}}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        // Only the task row is top-level; the sub bash nested under it (namespaced).
+        assert_eq!(ctx.assistant.parts.len(), 1, "{:?}", ctx.assistant.parts);
+        let task = &ctx.assistant.parts[0];
+        assert_eq!(task.id, "prt_task");
+        assert_eq!(task.tool.as_deref(), Some("task"));
+        let bash = task
+            .children
+            .iter()
+            .find(|p| p.id == "prt_task:prt_bash")
+            .expect("sub bash nested under the task row");
+        assert_eq!(bash.state.as_ref().unwrap().output.as_deref(), Some("a.rs"));
+
+        // The turn-end merge re-upserts the main message's parts (incl. the task
+        // row, rebuilt with empty children) authoritatively. It MUST preserve the
+        // accrued children — a plain upsert would wipe the sub-agent transcript.
+        let final_task = to_wire_part(&json!({
+            "id":"prt_task","type":"tool","tool":"task","sessionID":"ses_main","messageID":"msg_1",
+            "state":{"status":"completed","input":{"description":"analyze"},"output":"done"}
+        }))
+        .unwrap();
+        assert!(
+            final_task.children.is_empty(),
+            "rebuilt part has no children"
+        );
+        ctx.upsert_part_preserving_children(final_task);
+        let task = &ctx.assistant.parts[0];
+        assert_eq!(task.state.as_ref().unwrap().status, "completed");
+        assert_eq!(task.children.len(), 1, "children survive the final merge");
     }
 }

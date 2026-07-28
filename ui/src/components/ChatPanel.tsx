@@ -10,6 +10,7 @@ import {
   PanelLeft,
   Plus,
   SlidersHorizontal,
+  Users,
   X,
 } from "lucide-react";
 import {
@@ -259,6 +260,8 @@ function toolLine(part: ChatPart): string {
       return desc ?? "Fetched a page";
     case "Task":
       return desc ?? "Ran a subagent";
+    case "subagent":
+      return subagentLine(input);
     case "error":
       return "Error";
     default: {
@@ -266,6 +269,35 @@ function toolLine(part: ChatPart): string {
       return detail ? `${tool}: ${detail}` : tool;
     }
   }
+}
+
+/** Readable one-liner for a Codex sub-agent spawn/activity row, from the
+ * collab item fields the backend put in `state.input`. */
+function subagentLine(input: Record<string, unknown>): string {
+  const trim = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
+  const prompt = typeof input.prompt === "string" && input.prompt ? ` — “${trim(input.prompt)}”` : "";
+  // collabAgentToolCall carries `tool`; subAgentActivity carries `kind`.
+  switch (typeof input.tool === "string" ? input.tool : "") {
+    case "spawnAgent":
+      return `Spawned agent${prompt}`;
+    case "sendInput":
+      return `Sent input to agent${prompt}`;
+    case "resumeAgent":
+      return "Resumed agent";
+    case "wait":
+      return "Waiting on agent";
+    case "closeAgent":
+      return "Closed agent";
+  }
+  switch (typeof input.kind === "string" ? input.kind : "") {
+    case "started":
+      return "Sub-agent started";
+    case "interacted":
+      return "Sub-agent activity";
+    case "interrupted":
+      return "Sub-agent interrupted";
+  }
+  return "Sub-agent";
 }
 
 /** One expandable tool row inside a group: gray summary line, click to reveal
@@ -578,6 +610,7 @@ const Message = memo(function Message({
   onOpenFile,
   onRespond,
   onOpenPlan,
+  onOpenSubagent,
   skills,
 }: {
   message: ChatMessage;
@@ -585,6 +618,8 @@ const Message = memo(function Message({
   onRespond?: (answer: PromptAnswer) => void;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
   onOpenPlan?: (plan: string, promptId: string) => void;
+  /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
+  onOpenSubagent?: (spawnPartId: string) => void;
   /** Known slash-skills, for rendering a leading `/name` as a command chip. */
   skills?: SkillInfo[];
 }) {
@@ -623,8 +658,28 @@ const Message = memo(function Message({
       </div>
     );
   }
-  // Coalesce consecutive tool parts into one collapsed group (Claude-desktop
-  // style); text / reasoning / prompt parts break a run and render inline.
+  return (
+    <div className="msg-assistant">
+      {renderParts(message.parts, { onOpenFile, onRespond, onOpenPlan, onOpenSubagent })}
+    </div>
+  );
+});
+
+/** Shared assistant-parts renderer, reused for a message body and (recursively)
+ * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
+ * collapsed group (Claude-desktop style); text / reasoning / prompt parts break
+ * a run and render inline. A sub-agent spawn part (tool `subagent`) also breaks
+ * the run and renders as its own nested block. */
+function renderParts(
+  parts: ChatPart[],
+  opts: {
+    onOpenFile?: (path: string) => void;
+    onRespond?: (answer: PromptAnswer) => void;
+    onOpenPlan?: (plan: string, promptId: string) => void;
+    onOpenSubagent?: (spawnPartId: string) => void;
+  },
+): React.ReactNode[] {
+  const { onOpenFile, onRespond, onOpenPlan, onOpenSubagent } = opts;
   const rendered: React.ReactNode[] = [];
   let toolRun: ChatPart[] = [];
   const flushTools = () => {
@@ -634,7 +689,18 @@ const Message = memo(function Message({
     );
     toolRun = [];
   };
-  for (const part of message.parts) {
+  for (const part of parts) {
+    // A sub-agent spawn part streams its own transcript in `children` — render
+    // it as a standalone nested block, not folded into a tool run. The signal is
+    // harness-agnostic: Codex tags the row `subagent`, while Claude's `Task` /
+    // OpenCode's `task` rows are spawns whenever they carry children.
+    if (part.type === "tool" && (part.tool === "subagent" || (part.children?.length ?? 0) > 0)) {
+      flushTools();
+      rendered.push(
+        <SubagentBlock key={part.id} part={part} onOpenSubagent={onOpenSubagent} />,
+      );
+      continue;
+    }
     if (part.type === "tool") {
       toolRun.push(part);
       continue;
@@ -661,9 +727,77 @@ const Message = memo(function Message({
       );
   }
   flushTools();
+  return rendered;
+}
 
-  return <div className="msg-assistant">{rendered}</div>;
-});
+/** Find a part by id anywhere in a parts tree (depth-first). Used by the
+ * right-pane sub-agent tab to locate a spawn part across a session's messages. */
+export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
+  for (const part of parts) {
+    if (part.id === id) return part;
+    const nested = part.children && findPartById(part.children, id);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** The sub-agent's transcript, rendered standalone in the right-pane tab (the
+ * only place the transcript is shown — the inline row just opens this). Reuses
+ * `renderParts`, so nested sub-agents are themselves click-to-open rows. */
+export function SubagentTranscript({
+  spawn,
+  onOpenFile,
+  onOpenSubagent,
+}: {
+  spawn: ChatPart;
+  onOpenFile?: (path: string) => void;
+  onOpenSubagent?: (spawnPartId: string) => void;
+}) {
+  const parts = spawn.children ?? [];
+  const running = spawn.state?.status === "running";
+  return (
+    <div className="msg-assistant">
+      <div className="subagent-tab-header">
+        <span className={toolStatusClass(spawn.state?.status)} />
+        <span className="tool-line">{toolLine(spawn)}</span>
+        {running && <span className="subagent-live">live</span>}
+      </div>
+      {parts.length === 0 ? (
+        <div className="subagent-empty">{running ? "Working…" : "No activity"}</div>
+      ) : (
+        renderParts(parts, { onOpenFile, onOpenSubagent })
+      )}
+    </div>
+  );
+}
+
+/** A Codex/Claude/OpenCode sub-agent spawn row. A single clickable line — a
+ * status dot + label — that opens the sub-agent's full transcript in the
+ * right-side panel (like the Claude/Codex desktop apps). The transcript is
+ * never expanded inline; the row stays a one-liner whether the sub-agent is
+ * running (pulsing dot) or done. */
+function SubagentBlock({
+  part,
+  onOpenSubagent,
+}: {
+  part: ChatPart;
+  onOpenSubagent?: (spawnPartId: string) => void;
+}) {
+  const errored = part.state?.status === "error";
+  return (
+    <button
+      className={`subagent-row ${errored ? "has-error" : ""}`}
+      title="Open sub-agent transcript"
+      onClick={() => onOpenSubagent?.(part.id)}
+      disabled={!onOpenSubagent}
+    >
+      <Users size={12} className="subagent-icon" />
+      <span className={toolStatusClass(part.state?.status)} />
+      <span className="tool-line">{toolLine(part)}</span>
+      <ChevronRight size={12} className="subagent-row-chevron" />
+    </button>
+  );
+}
 
 /** Memoized transcript: composer keystrokes re-render ChatPanel (draft state
  * lives there), and this boundary keeps them from re-allocating N Message
@@ -676,12 +810,14 @@ const Transcript = memo(function Transcript({
   onOpenFile,
   onRespond,
   onOpenPlan,
+  onOpenSubagent,
   skills,
 }: {
   messages: ChatMessage[];
   onOpenFile?: (path: string) => void;
   onRespond?: (answer: PromptAnswer) => void;
   onOpenPlan?: (plan: string, promptId: string) => void;
+  onOpenSubagent?: (spawnPartId: string) => void;
   skills?: SkillInfo[];
 }) {
   return (
@@ -693,6 +829,7 @@ const Transcript = memo(function Transcript({
           onOpenFile={onOpenFile}
           onRespond={onRespond}
           onOpenPlan={onOpenPlan}
+          onOpenSubagent={onOpenSubagent}
           skills={skills}
         />
       ))}
@@ -703,6 +840,10 @@ const Transcript = memo(function Transcript({
 // --- session rail ------------------------------------------------------------
 
 type SessionFilter = "active" | "archived" | "all";
+
+/** Whether the rail's current filter shows a session in this archived state. */
+const matchesFilter = (filter: SessionFilter, archived: boolean) =>
+  filter === "all" ? true : filter === "archived" ? archived : !archived;
 
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
 const SESSION_FILTERS: { id: SessionFilter; label: string; railLabel: string }[] = [
@@ -977,8 +1118,10 @@ export function ChatPanel({
   onTogglePanel,
   onOpenFile,
   onOpenPlan,
+  onOpenSubagent,
   onOpenWorktree,
   onStartTour,
+  onActiveSessionChange,
   children,
 }: {
   projectId: string;
@@ -1002,10 +1145,15 @@ export function ChatPanel({
   onOpenFile?: (path: string, sessionId?: string) => void;
   /** Open a plan's markdown as a right-pane tab (plan strip / plan cards). */
   onOpenPlan?: (plan: string, sessionId: string, promptId: string) => void;
+  /** Open a sub-agent's transcript as a right-pane tab (spawn-row "view").
+   * `sessionId` is the chat session; `spawnPartId` locates the spawn part. */
+  onOpenSubagent?: (sessionId: string, spawnPartId: string) => void;
   /** Open the live worktree tab for a session (chat header worktree button). */
   onOpenWorktree?: (sessionId: string) => void;
   /** Replay the onboarding tour (chat header help button). */
   onStartTour?: () => void;
+  /** The open chat session, surfaced so the shell can scope panes to it. */
+  onActiveSessionChange?: (sessionId: string | null) => void;
   /** Middle-pane content when a settings section is active (the SettingsView). */
   children?: React.ReactNode;
 }) {
@@ -1398,6 +1546,14 @@ export function ChatPanel({
     [onOpenPlan, activeId],
   );
 
+  const openSubagent = useMemo(
+    () =>
+      onOpenSubagent && activeId
+        ? (spawnPartId: string) => onOpenSubagent(activeId, spawnPartId)
+        : undefined,
+    [onOpenSubagent, activeId],
+  );
+
   // File opens resolve against the active session's worktree — the agent runs
   // there, so that's where its paths point.
   const openFileInSession = useMemo(
@@ -1408,6 +1564,11 @@ export function ChatPanel({
   // Drop any unsent composer tweak when switching sessions, so it never bleeds
   // from one session's pickers onto another's.
   useEffect(() => setSessionOverride({}), [activeId]);
+
+  // Surface the open session to the shell (Agent-scoped panes key off it).
+  useEffect(() => {
+    onActiveSessionChange?.(activeId);
+  }, [activeId, onActiveSessionChange]);
 
   // Opening a session — or remounting the thread (leaving a settings view,
   // history seeding in) — always starts pinned at the latest messages.
@@ -1562,6 +1723,11 @@ export function ChatPanel({
     // which could undo a concurrent authoritative update).
     const prev = session.archived;
     setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, archived } : s)));
+    // Deselect only when the row leaves the rail's current filter — keeping it
+    // selected would leave the thread (and Agent-scoped panes) keyed to an
+    // invisible session. Kept even if the request fails; it's a no-op then.
+    if (!matchesFilter(sessionFilter, archived))
+      setActiveId((cur) => (cur === session.id ? null : cur));
     void setChatSessionArchived(session.id, archived).catch(() => {
       setSessions((cur) =>
         cur.map((s) => (s.id === session.id ? { ...s, archived: prev } : s)),
@@ -1635,9 +1801,7 @@ export function ChatPanel({
     [activeId, projectId],
   );
 
-  const visibleSessions = sessions.filter((s) =>
-    sessionFilter === "all" ? true : sessionFilter === "archived" ? s.archived : !s.archived,
-  );
+  const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
 
   const rail = (
     <aside className="session-rail floating-panel">
@@ -1850,6 +2014,7 @@ export function ChatPanel({
               onOpenFile={openFileInSession}
               onRespond={respond}
               onOpenPlan={openPlan}
+              onOpenSubagent={openSubagent}
               skills={skills}
             />
             {busy &&

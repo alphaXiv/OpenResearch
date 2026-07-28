@@ -19,12 +19,15 @@ function backendLabel(run: Run): string {
 export function RunsTable({
   runs,
   experiments,
+  emptyHint,
   onOpen,
   onOpenChanges,
   onCancel,
 }: {
   runs: Run[];
   experiments: Experiment[];
+  /** Overrides the empty-state text when the caller pre-filtered `runs`. */
+  emptyHint?: string;
   /** Row click — opens the run's experiment terminal tab. */
   onOpen: (run: Run) => void;
   /** GitBranch shortcut — opens the experiment's changes tab. */
@@ -37,7 +40,7 @@ export function RunsTable({
   if (sorted.length === 0) {
     return (
       <div className="empty-state">
-        <p>No runs yet.</p>
+        <p>{emptyHint ?? "No runs yet."}</p>
       </div>
     );
   }

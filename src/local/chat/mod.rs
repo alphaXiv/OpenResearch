@@ -53,10 +53,42 @@ fn cap_tool_text(text: &mut String) {
     text.push_str(TOOL_TEXT_TRUNCATION_MARKER);
 }
 
+/// Find a part by id anywhere in the tree (depth-first), returning `&mut` to it.
+/// Shared by the harnesses that route sub-agent events into a spawn part's
+/// `children`.
+pub fn find_part_mut<'a>(parts: &'a mut [WirePart], id: &str) -> Option<&'a mut WirePart> {
+    for part in parts.iter_mut() {
+        if part.id == id {
+            return Some(part);
+        }
+        if let Some(found) = find_part_mut(&mut part.children, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Upsert by id, carrying forward the existing part's `children`. Used for spawn
+/// parts: a fresh build has empty children, but the sub-agent transcript already
+/// streamed into the on-transcript part — replacing the whole part would drop it.
+/// Non-spawn parts have no children, so this is equivalent to a plain upsert.
+pub fn upsert_preserving_children(parts: &mut Vec<WirePart>, mut part: WirePart) {
+    match parts.iter_mut().find(|p| p.id == part.id) {
+        Some(existing) => {
+            if part.children.is_empty() {
+                part.children = std::mem::take(&mut existing.children);
+            }
+            *existing = part;
+        }
+        None => parts.push(part),
+    }
+}
+
 /// Cap every tool part's `output`/`error` in place. Applied on each flush —
 /// this covers every adapter (they all land parts on the turn's
 /// `assistant.parts`, some by direct mutation); an adapter that re-upserts a
-/// part with the full output just gets re-capped on the next flush.
+/// part with the full output just gets re-capped on the next flush. Recurses
+/// into `children` so a nested sub-agent transcript's output is bounded too.
 fn cap_tool_parts(parts: &mut [WirePart]) {
     for part in parts.iter_mut() {
         if let Some(state) = part.state.as_mut() {
@@ -67,6 +99,7 @@ fn cap_tool_parts(parts: &mut [WirePart]) {
                 cap_tool_text(error);
             }
         }
+        cap_tool_parts(&mut part.children);
     }
 }
 
@@ -183,6 +216,13 @@ pub struct WirePart {
     /// Present only on `prompt` parts — the interactive request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt: Option<WirePrompt>,
+    /// Nested parts belonging to a sub-agent this part spawned (Codex
+    /// collaboration). A spawn part streams the sub-agent's own transcript here;
+    /// arbitrary depth for sub-agents that spawn their own. `default` +
+    /// `skip_serializing_if` keeps old `parts_json` rows and childless parts
+    /// byte-identical on the wire — no migration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<WirePart>,
 }
 
 impl WirePart {
@@ -194,6 +234,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: None,
+            children: Vec::new(),
         }
     }
 
@@ -221,6 +262,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: Some(prompt),
+            children: Vec::new(),
         }
     }
 }
@@ -1769,10 +1811,49 @@ impl TurnCtx {
         }
     }
 
+    /// Like `upsert_part`, but carries forward an existing part's `children` when
+    /// the incoming part has none — so re-upserting a spawn row (e.g. an
+    /// authoritative final-message merge) doesn't drop the sub-agent transcript
+    /// that streamed into it.
+    pub fn upsert_part_preserving_children(&mut self, part: WirePart) {
+        upsert_preserving_children(&mut self.assistant.parts, part);
+    }
+
     pub fn append_part_text(&mut self, part_id: &str, delta: &str) {
         if let Some(part) = self.assistant.parts.iter_mut().find(|p| p.id == part_id) {
             let text = part.text.get_or_insert_with(String::new);
             text.push_str(delta);
+        }
+    }
+
+    /// Upsert a part into the `children` of the part with `parent_id` (anywhere
+    /// in the tree), carrying forward existing children — for a sub-agent's
+    /// transcript hung under its spawn row. No-op if the parent isn't found yet.
+    /// Shared by every harness that streams sub-agent activity (Codex threadId,
+    /// Claude parent_tool_use_id, OpenCode child sessionID).
+    pub fn upsert_child(&mut self, parent_id: &str, part: WirePart) {
+        if let Some(parent) = find_part_mut(&mut self.assistant.parts, parent_id) {
+            upsert_preserving_children(&mut parent.children, part);
+        }
+    }
+
+    /// Append streamed text to a child part (creating it via `make` on the first
+    /// delta) inside `parent_id`'s children. No-op if the parent isn't found.
+    pub fn append_child_text(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+        delta: &str,
+        make: impl FnOnce() -> WirePart,
+    ) {
+        let Some(parent) = find_part_mut(&mut self.assistant.parts, parent_id) else {
+            return;
+        };
+        if !parent.children.iter().any(|p| p.id == child_id) {
+            parent.children.push(make());
+        }
+        if let Some(child) = parent.children.iter_mut().find(|p| p.id == child_id) {
+            child.text.get_or_insert_with(String::new).push_str(delta);
         }
     }
 
@@ -1791,6 +1872,7 @@ impl TurnCtx {
                 title: None,
             }),
             prompt: None,
+            children: Vec::new(),
         });
     }
 
@@ -2058,25 +2140,32 @@ mod cap_tests {
     }
 
     /// The per-flush pass caps `output` and `error` on tool parts and leaves
-    /// text parts alone.
+    /// text parts alone. Nested sub-agent parts (`children`) are capped too.
     #[test]
     fn cap_tool_parts_caps_output_and_error() {
+        let bloated_tool = |id: &str| WirePart {
+            id: id.into(),
+            kind: "tool".into(),
+            text: None,
+            tool: Some("Bash".into()),
+            state: Some(WireToolState {
+                status: "completed".into(),
+                input: None,
+                output: Some("y".repeat(1_000_000)),
+                error: Some("e".repeat(1_000_000)),
+                title: None,
+            }),
+            prompt: None,
+            children: Vec::new(),
+        };
+        // A spawn part whose sub-agent transcript (a child) has huge output.
+        let mut spawn = bloated_tool("spawn");
+        spawn.tool = Some("subagent".into());
+        spawn.children = vec![bloated_tool("sub-t1")];
         let mut parts = vec![
             WirePart::text("t0", "z".repeat(TOOL_TEXT_CAP * 2)),
-            WirePart {
-                id: "t1".into(),
-                kind: "tool".into(),
-                text: None,
-                tool: Some("Bash".into()),
-                state: Some(WireToolState {
-                    status: "completed".into(),
-                    input: None,
-                    output: Some("y".repeat(1_000_000)),
-                    error: Some("e".repeat(1_000_000)),
-                    title: None,
-                }),
-                prompt: None,
-            },
+            bloated_tool("t1"),
+            spawn,
         ];
         cap_tool_parts(&mut parts);
         // Assistant prose is never capped — only tool payloads.
@@ -2087,6 +2176,12 @@ mod cap_tests {
             TOOL_TEXT_CAP
         );
         assert_eq!(state.error.as_ref().unwrap().chars().count(), TOOL_TEXT_CAP);
+        // The nested sub-agent part's output is bounded by the recursion.
+        let child_state = parts[2].children[0].state.as_ref().unwrap();
+        assert_eq!(
+            child_state.output.as_ref().unwrap().chars().count(),
+            TOOL_TEXT_CAP
+        );
     }
 }
 

@@ -127,6 +127,7 @@ pub fn create_experiment(
         agent_status: "idle".to_string(),
         created_at: now,
         updated_at: now,
+        chat_session_id: crate::local::chat::launching_chat_session(),
     };
     store.create_local_experiment(&experiment)?;
     Ok(experiment)
@@ -165,6 +166,7 @@ mod tests {
             agent_status: "idle".into(),
             created_at: 0,
             updated_at: 0,
+            chat_session_id: None,
         }
     }
 

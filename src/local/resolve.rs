@@ -130,6 +130,7 @@ mod tests {
             agent_status: "idle".to_string(),
             created_at: now,
             updated_at: now,
+            chat_session_id: None,
         }
     }
 
