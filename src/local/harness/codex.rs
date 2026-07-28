@@ -350,6 +350,9 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             // Naming a chat needs no MCP: booting the user's servers for a
             // one-line request would cost far more than the request itself.
             .args(["-c", "mcp_servers={}"])
+            // Nor skills: the plugin catalog alone injected ~6k prompt tokens
+            // (24.3k → 18k input measured) into a request that ignores it.
+            .args(["-c", "features.plugins=false"])
             .arg(super::title::title_prompt(first_message))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
