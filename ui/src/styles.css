@@ -1159,7 +1159,9 @@ textarea::placeholder {
   color: var(--accent-red);
 }
 /* A single-tool group renders its ToolRow directly (no summary line); keep the
-   errored-line color parity with grouped summaries. */
+   errored-line color parity with grouped summaries. The child combinator is
+   load-bearing: grouped rows live under .tool-group-rows and must keep their
+   normal color. */
 .tool-group.has-error > .tool-row .tool-line {
   color: var(--accent-red);
 }

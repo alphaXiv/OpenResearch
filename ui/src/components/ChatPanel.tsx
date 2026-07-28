@@ -340,19 +340,19 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
   );
 }
 
-/** A run of consecutive tool calls, collapsed into one gray line like the
- * Claude desktop app ("Read hello.py" for one, "Used N tools" for several).
- * Clicking expands every row; a still-running tool auto-expands. */
+/** A run of consecutive tool calls. A single call renders as its own row
+ * (click reveals input/output); several collapse behind one "Used N tools"
+ * line that expands to every row, auto-expanded while one is still running. */
 function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (path: string) => void }) {
   const running = parts.some((p) => p.state?.status === "running");
   const errored = parts.some((p) => p.state?.status === "error");
   const [open, setOpen] = useState(false);
-  // While a tool is in flight, show it live; collapse once the run settles.
-  const expanded = open || running;
 
   // A single tool needs no group wrapper: its ToolRow already shows the same
   // line (dot + toolLine) and expands to the input/output directly. The
-  // summary-plus-rows shape would paint the identical line twice.
+  // summary-plus-rows shape would paint the identical line twice. A running
+  // lone row stays collapsed by design — the old auto-expand only revealed a
+  // duplicate line whose detail was collapsed anyway.
   if (parts.length === 1) {
     return (
       <div className={`tool-group ${errored ? "has-error" : ""}`}>
@@ -361,9 +361,11 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
     );
   }
 
-  // A running group is always expanded (`expanded = open || running`), so a
-  // summary echoing the running tool's line would sit directly above the
-  // identical row — the count never duplicates.
+  // While a tool is in flight, show the rows live; collapse once the run
+  // settles. Because a running group is always expanded, a summary echoing
+  // the running tool's line would sit directly above the identical row — the
+  // count never duplicates.
+  const expanded = open || running;
   const summary = `Used ${parts.length} tools`;
 
   return (
@@ -593,17 +595,24 @@ function PromptCard({
   );
 }
 
+/** Whether a part paints anything in the transcript. The single source of
+ * truth for "invisible": empty text/reasoning (encrypted-thinking models
+ * stored these before the harness-side skip existed) and resolved permission
+ * cards (which leave no trace). Shared by `messageHasVisibleContent` and
+ * `renderParts` so the two can't drift. */
+function partIsVisible(part: ChatPart): boolean {
+  if (part.type === "prompt")
+    return !!part.prompt && !(part.prompt.resolved && part.prompt.kind === "permission");
+  if (part.type === "text" || part.type === "reasoning") return !!part.text;
+  return true; // tool, image, …
+}
+
 /** Whether a message renders anything once resolved-permission cards vanish —
  * a bridge permission card rides its own message, so resolving it leaves the
  * message empty and it must drop out of the transcript entirely. */
 function messageHasVisibleContent(m: ChatMessage): boolean {
   if (m.role === "user") return true;
-  return m.parts.some((part) => {
-    if (part.type === "prompt")
-      return !!part.prompt && !(part.prompt.resolved && part.prompt.kind === "permission");
-    if (part.type === "text" || part.type === "reasoning") return !!part.text;
-    return true; // tool, image, …
-  });
+  return m.parts.some(partIsVisible);
 }
 
 /** Memoized: streaming re-broadcasts the whole updated message ~7x/sec, and
@@ -701,10 +710,10 @@ function renderParts(
   for (const part of parts) {
     // A part that renders nothing must not break a tool run either — e.g. the
     // empty reasoning parts encrypted-thinking models produced (stored
-    // transcripts predating the ingest-side skip still carry them). Without
-    // this, each invisible part splits consecutive tools into single-row
-    // groups.
-    if ((part.type === "text" || part.type === "reasoning") && !part.text) continue;
+    // transcripts predating the ingest-side skip still carry them), or a
+    // resolved permission card. Without this, each invisible part splits
+    // consecutive tools into single-row groups.
+    if (!partIsVisible(part)) continue;
     // A sub-agent spawn part streams its own transcript in `children` — render
     // it as a standalone nested block, not folded into a tool run. The signal is
     // harness-agnostic: Codex tags the row `subagent`, while Claude's `Task` /
@@ -721,9 +730,11 @@ function renderParts(
       continue;
     }
     flushTools();
-    if (part.type === "text" && part.text)
-      rendered.push(<Md key={part.id} text={part.text} onOpenFile={onOpenFile} />);
-    else if (part.type === "reasoning" && part.text)
+    // The visibility skip above guarantees text/reasoning parts here are
+    // non-empty.
+    if (part.type === "text")
+      rendered.push(<Md key={part.id} text={part.text!} onOpenFile={onOpenFile} />);
+    else if (part.type === "reasoning")
       rendered.push(
         <details key={part.id} className="reasoning">
           <summary>thinking…</summary>
@@ -770,6 +781,9 @@ export function SubagentTranscript({
 }) {
   const parts = spawn.children ?? [];
   const running = spawn.state?.status === "running";
+  // Gate the empty state on what actually renders, not the raw part count — a
+  // stored transcript of nothing but invisible parts must still read as empty.
+  const rendered = renderParts(parts, { onOpenFile, onOpenSubagent });
   return (
     <div className="msg-assistant">
       <div className="subagent-tab-header">
@@ -777,10 +791,10 @@ export function SubagentTranscript({
         <span className="tool-line">{toolLine(spawn)}</span>
         {running && <span className="subagent-live">live</span>}
       </div>
-      {parts.length === 0 ? (
+      {rendered.length === 0 ? (
         <div className="subagent-empty">{running ? "Working…" : "No activity"}</div>
       ) : (
-        renderParts(parts, { onOpenFile, onOpenSubagent })
+        rendered
       )}
     </div>
   );
