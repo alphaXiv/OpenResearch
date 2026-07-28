@@ -277,6 +277,12 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
         "--strict-mcp-config",
         "--tools",
         "",
+        // Replace the agent system prompt: the default hauls ~8.5k tokens of
+        // Claude Code scaffolding into a request that ignores it (measured
+        // 8.5k → 1.9k input). Latency is unchanged — the ~3s is node boot plus
+        // one API round trip — but every title gets ~78% cheaper.
+        "--system-prompt",
+        "You generate short chat titles.",
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
