@@ -516,6 +516,34 @@ export interface SlurmPreflight {
 export const slurmPreflight = (host: string) =>
   post<SlurmPreflight>("/api/settings/slurm/preflight", { host });
 
+// --- settings: ray ------------------------------------------------------------
+
+export interface RaySettings {
+  /** Saved Jobs / Dashboard URL; null = fall back to env / localhost. */
+  address: string | null;
+  /** Effective address after settings → env → default resolution. */
+  resolvedAddress: string;
+  /** settings | ASTROAI_RAY_JOBS_ADDRESS | RAY_DASHBOARD_URL | default */
+  source: string;
+}
+
+export const getRaySettings = () => get<RaySettings>("/api/settings/ray");
+
+/** Empty string clears the saved address (fall back to env / default). */
+export const saveRaySettings = (body: { address?: string }) =>
+  post<RaySettings>("/api/settings/ray", body);
+
+export interface RayPreflight {
+  reachable: boolean;
+  address: string;
+  rayVersion: string | null;
+  error: string | null;
+}
+
+/** Live-test a Ray Jobs / Dashboard endpoint. */
+export const rayPreflight = (address?: string) =>
+  post<RayPreflight>("/api/settings/ray/preflight", { address: address ?? null });
+
 // --- settings: compute targets (unified list + default) ------------------------
 
 export type ComputeTargetId =
@@ -525,6 +553,7 @@ export type ComputeTargetId =
   | "k8s"
   | "ssh"
   | "slurm"
+  | "ray"
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives

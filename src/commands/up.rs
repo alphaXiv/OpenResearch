@@ -221,6 +221,11 @@ fn router(state: AppState) -> Router {
             get(slurm_settings).post(set_slurm_settings),
         )
         .route("/api/settings/slurm/preflight", post(slurm_preflight))
+        .route(
+            "/api/settings/ray",
+            get(ray_settings).post(set_ray_settings),
+        )
+        .route("/api/settings/ray/preflight", post(ray_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -790,10 +795,11 @@ async fn run_experiment(
         "k8s" => local::k8s::submit_local_k8s(&args).await,
         "ssh" => local::ssh::submit_local_ssh(&args).await,
         "slurm" => local::slurm::submit_local_slurm(&args).await,
+        "ray" => local::ray::submit_local_ray(&args).await,
         "openresearch" => local::openresearch::submit_local_openresearch(&args).await,
         "local" => local::localrun::submit_local_run(&args).await,
         other => Err(anyhow!(
-            "Unknown backend '{other}'. Supported: local, hf, modal, k8s, ssh, slurm, openresearch."
+            "Unknown backend '{other}'. Supported: local, hf, modal, k8s, ssh, slurm, ray, openresearch."
         )),
     }
     .map_err(bad_request)?;
@@ -2281,6 +2287,76 @@ async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiResult {
     })))
 }
 
+// --- ray --------------------------------------------------------------------
+
+use crate::jobs::ray;
+
+fn ray_settings_json() -> Value {
+    let settings = ray::load_settings().ok().flatten().unwrap_or_default();
+    let (resolved, source) = ray::resolve_address_with_source(None);
+    let source_label = match source {
+        ray::AddressSource::Settings => "settings",
+        ray::AddressSource::AstroaiEnv => "ASTROAI_RAY_JOBS_ADDRESS",
+        ray::AddressSource::RayEnv => "RAY_DASHBOARD_URL",
+        ray::AddressSource::Default => "default",
+    };
+    json!({
+        "address": settings.address,
+        "resolvedAddress": resolved,
+        "source": source_label,
+    })
+}
+
+async fn ray_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(ray_settings_json())))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("ray task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetRaySettingsReq {
+    /// `None` leaves alone; `Some("")` clears (fall back to env / default).
+    address: Option<String>,
+}
+
+async fn set_ray_settings(Json(req): Json<SetRaySettingsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let mut settings = ray::load_settings()?.unwrap_or_default();
+        if let Some(a) = req.address {
+            settings.address = Some(a.trim().to_string()).filter(|s| !s.is_empty());
+        }
+        ray::save_settings(&settings)?;
+        Ok(Json(ray_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("ray task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct RayPreflightReq {
+    address: Option<String>,
+}
+
+/// Live check for a Ray Jobs / Dashboard endpoint.
+async fn ray_preflight(Json(req): Json<RayPreflightReq>) -> ApiResult {
+    let address = ray::resolve_address(req.address.as_deref());
+    match ray::preflight(&address).await {
+        Ok(p) => Ok(Json(json!({
+            "reachable": p.reachable,
+            "address": p.address,
+            "rayVersion": p.ray_version,
+            "error": null,
+        }))),
+        Err(e) => Ok(Json(json!({
+            "reachable": false,
+            "address": address,
+            "rayVersion": null,
+            "error": e.to_string(),
+        }))),
+    }
+}
+
 // --- compute targets (unified settings list + default) --------------------------
 
 /// The whole payload for the Compute tab's collapsed list, in one round trip.
@@ -2359,6 +2435,21 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
     let slurm_host = slurm_settings.as_ref().and_then(|s| s.host.clone());
+    let (ray_resolved, ray_source) = crate::jobs::ray::resolve_address_with_source(None);
+    let ray_configured = !matches!(
+        ray_source,
+        crate::jobs::ray::AddressSource::Default
+    ) || crate::jobs::ray::load_settings()
+        .ok()
+        .flatten()
+        .and_then(|s| s.address)
+        .is_some();
+    let ray_source_label = match ray_source {
+        crate::jobs::ray::AddressSource::Settings => "Saved address",
+        crate::jobs::ray::AddressSource::AstroaiEnv => "ASTROAI_RAY_JOBS_ADDRESS",
+        crate::jobs::ray::AddressSource::RayEnv => "RAY_DASHBOARD_URL",
+        crate::jobs::ray::AddressSource::Default => "Default localhost:8265",
+    };
     // Presence of the credentials file only — whether the token still works is
     // the expanded row's (network) question.
     let or_logged_in = crate::config::credentials_present();
@@ -2423,6 +2514,17 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
                 || "No login node configured".to_string(),
                 |h| format!("Login node {h}"),
             ),
+        },
+        {
+            "id": "ray",
+            // Always "worth trying" — default localhost is a valid cluster
+            // address when a local head is running; the expanded row probes.
+            "configured": true,
+            "summary": if ray_configured {
+                format!("{ray_source_label} ({ray_resolved})")
+            } else {
+                format!("{ray_source_label}")
+            },
         },
         {
             "id": "openresearch",

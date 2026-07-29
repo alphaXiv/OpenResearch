@@ -11,6 +11,7 @@ pub mod kubernetes;
 pub mod localbox;
 pub mod modal;
 pub mod openresearch;
+pub mod ray;
 pub mod slurm;
 pub mod ssh;
 
@@ -148,6 +149,20 @@ impl BackendDescriptor {
         self.job_id.as_deref().ok_or_else(|| {
             anyhow!("Backend descriptor is missing the run dir — was the job submitted?")
         })
+    }
+
+    /// The Ray Jobs (address, submission id) handle; address rides on
+    /// `namespace`, dashboard link on `url`.
+    pub fn ray_ref(&self) -> Result<(&str, &str)> {
+        if self.kind != "ray_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (self.namespace.as_deref(), self.job_id.as_deref()) {
+            (Some(addr), Some(id)) => Ok((addr, id)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the Ray address/submission id — was the job submitted?"
+            )),
+        }
     }
 
     /// The SSH (host, remote run dir) handle; host rides on `namespace`.

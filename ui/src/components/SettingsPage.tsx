@@ -27,6 +27,7 @@ import {
   getLocalMachine,
   getModalSettings,
   getOpenResearchSettings,
+  getRaySettings,
   getSlurmSettings,
   getSshHosts,
   listInstances,
@@ -36,6 +37,7 @@ import {
   saveGitSettings,
   saveHfToken,
   saveK8sSettings,
+  saveRaySettings,
   saveSlurmSettings,
   setEnvVar,
   getDataDir,
@@ -44,6 +46,7 @@ import {
   type DataDirSettings,
   type DataDirValidation,
   shortId,
+  rayPreflight,
   slurmPreflight,
   sshPreflight,
   timeAgo,
@@ -62,6 +65,8 @@ import {
   type ModalSettings,
   type ModalTokenSource,
   type OpenResearchSettings,
+  type RayPreflight,
+  type RaySettings,
   type SlurmPreflight,
   type SlurmSettings,
   type SshHost,
@@ -727,6 +732,128 @@ function SlurmSection() {
   );
 }
 
+function RaySection() {
+  const [settings, setSettings] = useState<RaySettings | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [address, setAddress] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [test, setTest] = useState<"testing" | RayPreflight | null>(null);
+  const preflight = test !== null && test !== "testing" ? test : null;
+
+  const apply = (s: RaySettings) => {
+    setSettings(s);
+    setAddress(s.address ?? "");
+  };
+
+  useEffect(() => {
+    getRaySettings()
+      .then(apply)
+      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const unchanged = settings !== null && address === (settings.address ?? "");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      apply(await saveRaySettings({ address }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runPreflight() {
+    setTest("testing");
+    try {
+      setTest(await rayPreflight(address.trim() || undefined));
+    } catch (err) {
+      setTest({
+        reachable: false,
+        address: address.trim() || "(unknown)",
+        rayVersion: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return (
+    <>
+      <p className="settings-sub">
+        Run on a Ray cluster with <code>--backend ray [--flavor gpu:1]</code>. orx
+        submits via the Ray Jobs API (Dashboard URL). Address resolution: this
+        setting, then <code>ASTROAI_RAY_JOBS_ADDRESS</code> /{" "}
+        <code>RAY_DASHBOARD_URL</code>, then <code>http://127.0.0.1:8265</code>.
+        Optional flavor maps to entrypoint CPUs/GPUs/memory (e.g.{" "}
+        <code>cpu:2</code>, <code>gpu:1,mem:8GiB</code>).
+      </p>
+      {loadError ? (
+        <div className="error">{loadError}</div>
+      ) : !settings ? (
+        <div className="settings-loading">
+          <span className="spinner" /> Loading Ray settings…
+        </div>
+      ) : (
+        <>
+          <p className="settings-note">
+            Effective: <code>{settings.resolvedAddress}</code> ({settings.source})
+          </p>
+          {preflight?.error && <p className="settings-note">{preflight.error}</p>}
+          {preflight?.reachable && preflight.rayVersion && (
+            <p className="settings-note">
+              Ray version: <code>{preflight.rayVersion}</code>
+            </p>
+          )}
+          <form className="form settings-form" onSubmit={submit}>
+            <label>
+              Jobs / Dashboard URL
+              <input
+                className="mono"
+                type="text"
+                value={address}
+                onChange={(e) => {
+                  setAddress(e.target.value);
+                  setTest(null);
+                }}
+                placeholder="http://127.0.0.1:8265"
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            {error && <div className="error">{error}</div>}
+            <div className="actions">
+              <button type="submit" className="btn primary" disabled={saving || unchanged}>
+                {saving ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void runPreflight()}
+                disabled={test === "testing"}
+              >
+                Test connection
+              </button>
+              <RayTestBadge test={test} />
+            </div>
+          </form>
+        </>
+      )}
+    </>
+  );
+}
+
+function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
+  if (test === null) return null;
+  if (test === "testing") return <span className="badge">Testing…</span>;
+  if (test.reachable) return <span className="badge ok">Reachable</span>;
+  return <span className="badge warn">Unreachable</span>;
+}
+
 // --- compute (local) --------------------------------------------------------------
 
 function LocalSection() {
@@ -877,6 +1004,7 @@ const TARGET_LABELS: Record<ComputeTargetId, string> = {
   k8s: "Kubernetes",
   ssh: "SSH",
   slurm: "Slurm",
+  ray: "Ray",
   openresearch: "OpenResearch",
 };
 
@@ -888,11 +1016,12 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   k8s: "k8s_job",
   ssh: "ssh_job",
   slurm: "slurm_job",
+  ray: "ray_job",
   openresearch: "openresearch_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -900,6 +1029,7 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
+  ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
@@ -1089,6 +1219,7 @@ function TargetRow({
           {target.id === "k8s" && <K8sSection />}
           {target.id === "ssh" && <SshSection />}
           {target.id === "slurm" && <SlurmSection />}
+          {target.id === "ray" && <RaySection />}
           {target.id === "openresearch" && <OpenResearchSection />}
         </div>
       )}

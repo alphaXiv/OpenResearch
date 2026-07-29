@@ -6,7 +6,7 @@
 // slurm (whose official mark is a complex raster), local (this machine), and
 // openresearch (our own hosted boxes) get the same treatment.
 
-import { Boxes, Cloud, Laptop, Server } from "lucide-react";
+import { Boxes, Cloud, Cpu, Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
@@ -22,6 +22,8 @@ function backendName(kind: string): string {
       return "SSH";
     case "slurm_job":
       return "Slurm";
+    case "ray_job":
+      return "Ray";
     case "openresearch_job":
       return "OpenResearch";
     case "local_job":
@@ -127,6 +129,8 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <Server size={size} />;
     case "slurm_job":
       return <Boxes size={size} />;
+    case "ray_job":
+      return <Cpu size={size} />;
     case "openresearch_job":
       return <Cloud size={size} />;
     case "local_job":

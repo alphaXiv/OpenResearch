@@ -1,10 +1,10 @@
 ---
 name: orx-compute
-description: "Launch experiment runs with `orx exp run`: backends (hf, modal, k8s, ssh, slurm, openresearch, local), flavors, timeouts, images, sizing, and `orx exp wait`. Use before launching or re-launching any run, when choosing or switching a backend or GPU flavor, when a job OOMs, stalls, or times out, or when deciding GPU vs CPU."
+description: "Launch experiment runs with `orx exp run`: backends (hf, modal, k8s, ssh, slurm, ray, openresearch, local), flavors, timeouts, images, sizing, and `orx exp wait`. Use before launching or re-launching any run, when choosing or switching a backend or GPU flavor, when a job OOMs, stalls, or times out, or when deciding GPU vs CPU."
 ---
 
 In local mode (`orx up`) every run launches with `orx exp run <expId>` onto a
-**backend**: `hf`, `modal`, `k8s`, `ssh`, `slurm`, `openresearch`, or `local`.
+**backend**: `hf`, `modal`, `k8s`, `ssh`, `slurm`, `ray`, `openresearch`, or `local`.
 There is no managed-SKU compute here (`--gpu`/`--cpu`/`--sandbox` are
 server-project flags) — the backend comes from an explicit `--backend`, or from
 the default target the user saved in Settings → Compute.
@@ -125,6 +125,26 @@ orx exp run <expId> --backend slurm                    # CPU-only, settings defa
   default from Settings → Compute → Slurm. **`--flavor` is a GRES GPU request**
   (`h100:2` = two H100s); omit it for a CPU-only job. There is no `--image`;
   `--timeout` (default `4h`) applies — size it to cover the whole run.
+
+## A Ray Jobs cluster — `--backend ray`
+
+Submits via the Ray Jobs / Dashboard API (same contract as Hugging Face Jobs:
+clone the experiment branch tip from GitHub and run the fixed command). Needs a
+reachable Ray head (Dashboard, usually port 8265).
+
+```sh
+orx exp run <expId> --backend ray
+orx exp run <expId> --backend ray --flavor gpu:1
+orx exp run <expId> --backend ray --flavor cpu:2,mem:8GiB
+```
+
+- **Address** comes from Settings → Compute → Ray, else
+  `ASTROAI_RAY_JOBS_ADDRESS` / `RAY_DASHBOARD_URL`, else
+  `http://127.0.0.1:8265`.
+- **`--flavor` is optional** resource hints for the job entrypoint:
+  `cpu[:N]`, `gpu[:N]`, `mem:<size>` (comma-separated). Omit it to reserve
+  nothing (avoids Pending on small heads). There is no per-job `--image`
+  unless the cluster's runtime env already provides one.
 
 ## An OpenResearch box — `--backend openresearch`
 

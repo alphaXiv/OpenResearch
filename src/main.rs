@@ -613,10 +613,12 @@ pub struct ExpRunArgs {
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
-    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend openresearch`:
-    /// a GPU id from `orx compute` (h100_sxm, or h100_sxm:2 for two) or a CPU
-    /// flavor (cpu5c/cpu5g/cpu5m, or cpu5c:32 for the vCPU tier). Not used by
-    /// k8s (see --manifest) or ssh (see --host).
+    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
+    /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
+    /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
+    /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
+    /// cpu5c:32 for the vCPU tier). Not used by k8s (see --manifest) or ssh
+    /// (see --host).
     #[arg(long)]
     pub flavor: Option<String>,
     /// The org to bill the box to (with `--backend openresearch`). Omit when

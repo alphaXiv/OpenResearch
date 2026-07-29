@@ -312,6 +312,7 @@ impl ControlPlane for LocalPlane {
             Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
             Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
             Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
+            Some("ray") => crate::local::ray::launch_local_ray(&args).await,
             Some("openresearch") => {
                 crate::local::openresearch::launch_local_openresearch(&args).await
             }
@@ -319,8 +320,8 @@ impl ControlPlane for LocalPlane {
             Some(other) => Err(anyhow!(
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
-                 slurm (your Slurm cluster), openresearch (an ephemeral OpenResearch box), \
-                 local (this machine).",
+                 slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                 openresearch (an ephemeral OpenResearch box), local (this machine).",
                 other
             )),
             None => Err(anyhow!(
@@ -333,6 +334,7 @@ impl ControlPlane for LocalPlane {
                  default .orx/k8s.yaml, or --manifest <path>), \
                  `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
                  `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
+                 `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
                  `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
                  e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
                  or `--backend local` (a detached process on this machine)."

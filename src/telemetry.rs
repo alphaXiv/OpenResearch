@@ -691,7 +691,7 @@ impl TelemetrySession {
 ///   an ephemeral OpenResearch box provisioned for a local-mode run, and
 ///   `local=true, target="hf"` drives the user's own HF account from local mode.
 /// - `target`: for a run, a COARSE compute label — the backend/provider name
-///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"openresearch"`,
+///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"ray"`, `"openresearch"`,
 ///   `"local"`) for local-mode runs, or the managed compute shape (`"gpu"`,
 ///   `"cpu"`, `"existing"`) for server runs. `None` for `create` (no compute).
 ///   Always a fixed enum label, never an id, name, or path.

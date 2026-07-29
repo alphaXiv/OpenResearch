@@ -150,7 +150,7 @@ fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
                  Use another backend only when the user names one (see \"Compute backends\")"
             )
         }
-        None => "- Compute: backends — `hf`, `modal`, `k8s`, `ssh`, `slurm`, or `local` —\n  \
+        None => "- Compute: backends — `hf`, `modal`, `k8s`, `ssh`, `slurm`, `ray`, or `local` —\n  \
                  chosen by the user per run; **there is no default backend** (see \"Compute\n  \
                  backends\")"
             .to_string(),
@@ -194,11 +194,11 @@ fn playbook_md_with_memory(project: &LocalProject, memory: &str) -> String {
     let launch_step = if compute_default.is_some() {
         "3. **Launch**: `orx exp run <expId>` — omitting `--backend` uses the default\n   \
          target (flags the default still needs are listed under \"Compute backends\") —\n   \
-         or name one explicitly (`--flavor` for hf/modal, `--host` for ssh/slurm; k8s\n   \
+         or name one explicitly (`--flavor` for hf/modal/ray, `--host` for ssh/slurm; k8s\n   \
          reads the committed manifest; local takes no flags)."
     } else {
         "3. **Launch**: `orx exp run <expId> --backend <backend>` (`--flavor` for\n   \
-         hf/modal, `--host` for ssh/slurm; k8s reads the committed manifest; local\n   \
+         hf/modal/ray, `--host` for ssh/slurm; k8s reads the committed manifest; local\n   \
          takes no flags)."
     };
     // The modular skills installed into this session's worktree (see
