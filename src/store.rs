@@ -819,6 +819,14 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn has_chat_messages(&self, session_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE session_id = ?1)",
+            params![session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     /// A single chat message by id (used to reconcile a message's persisted
     /// state against an in-memory copy mid-turn). `None` if it doesn't exist.
     pub fn get_chat_message(&self, id: &str) -> Result<Option<StoredChatMessage>> {
@@ -1026,6 +1034,29 @@ mod tests {
                 .as_deref(),
             Some(json)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chat_message_existence_tracks_persisted_messages() {
+        let dir = std::env::temp_dir().join(format!("orx-store-messages-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        assert!(!store.has_chat_messages("chat_1").unwrap());
+
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: "msg_1".into(),
+                session_id: "chat_1".into(),
+                role: "user".into(),
+                parts_json: "[]".into(),
+                created_at: 1,
+            })
+            .unwrap();
+        assert!(store.has_chat_messages("chat_1").unwrap());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

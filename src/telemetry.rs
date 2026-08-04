@@ -100,8 +100,7 @@ pub(crate) struct Settings {
     #[serde(default)]
     pub data_dir: Option<String>,
     /// Default compute target for local-mode launches (Settings → Compute).
-    /// Absent = no default: the CLI requires an explicit `--backend` and the
-    /// HTTP run endpoint keeps its historical `hf` fallback.
+    /// Absent = no default: local launches require an explicit `--backend`.
     #[serde(default)]
     pub default_backend: Option<String>,
     /// Default `--flavor`, only meaningful alongside `default_backend` and only
@@ -628,6 +627,18 @@ pub(crate) async fn record_consent(agreed: bool) {
     let _ = tokio::time::timeout(Duration::from_secs(3), send).await;
 }
 
+pub(crate) fn capture_onboarding_completed() {
+    capture("onboarding_completed", json!({}));
+}
+
+pub(crate) fn capture_project_created(local: bool) {
+    capture("project_created", json!({ "local": local }));
+}
+
+pub(crate) fn capture_chat_session_started(harness: &str) {
+    capture("chat_session_started", json!({ "harness": harness }));
+}
+
 /// Flush every pending event send (the session's `cli_command` plus any key
 /// events fired during the command) within ONE shared window — the sends run
 /// concurrently, so total tail latency is bounded by a single `FLUSH_GRACE`, not
@@ -1070,10 +1081,13 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         // This PostHog project is shared with the website; CLI events must be
         // separable by name alone. `build_payload` prefixes unconditionally, so
-        // the two base names map to their prefixed wire names and nothing can
+        // the base names map to their prefixed wire names and nothing can
         // emit an unprefixed event.
         for (bare, wire) in [
             ("command", "cli_command"),
+            ("onboarding_completed", "cli_onboarding_completed"),
+            ("project_created", "cli_project_created"),
+            ("chat_session_started", "cli_chat_session_started"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
         ] {
@@ -1094,6 +1108,57 @@ mod tests {
             assert_eq!(p["properties"]["agreed"], agreed);
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn product_event_payloads_have_expected_properties() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-product-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        let onboarding = build_payload("onboarding_completed", "did", json!({}));
+        assert_eq!(onboarding["event"], "cli_onboarding_completed");
+        assert_eq!(
+            property_keys(&onboarding),
+            vec![
+                "$process_person_profile",
+                "arch",
+                "ci",
+                "cli_version",
+                "install_kind",
+                "os",
+                "source",
+            ]
+        );
+
+        let project = build_payload("project_created", "did", json!({ "local": true }));
+        assert_eq!(project["event"], "cli_project_created");
+        assert_eq!(project["properties"]["local"], true);
+        let mut project_keys = property_keys(&onboarding);
+        project_keys.push("local");
+        project_keys.sort_unstable();
+        assert_eq!(property_keys(&project), project_keys);
+
+        let chat = build_payload("chat_session_started", "did", json!({ "harness": "codex" }));
+        assert_eq!(chat["event"], "cli_chat_session_started");
+        assert_eq!(chat["properties"]["harness"], "codex");
+        let mut chat_keys = property_keys(&onboarding);
+        chat_keys.push("harness");
+        chat_keys.sort_unstable();
+        assert_eq!(property_keys(&chat), chat_keys);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn property_keys(payload: &serde_json::Value) -> Vec<&str> {
+        let mut keys: Vec<_> = payload["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     #[tokio::test]

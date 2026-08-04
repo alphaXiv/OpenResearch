@@ -174,39 +174,6 @@ export interface Instance extends Run {
 export const listInstances = () =>
   get<{ instances: Instance[] }>("/api/instances").then((r) => r.instances);
 
-export interface NewExperiment {
-  /** Omit on an empty project to create the baseline root; once a root
-   *  exists, an omitted parent attaches the node under the oldest root. */
-  parentExperimentId?: string;
-  /** Force a new baseline root even when the project already has one. */
-  baseline?: boolean;
-  slug?: string;
-  title?: string;
-  description?: string;
-  runCommand?: string;
-}
-
-export const createExperiment = (projectId: string, body: NewExperiment) =>
-  post<{ experiment: Experiment }>(`/api/projects/${projectId}/experiments`, body).then(
-    (r) => r.experiment,
-  );
-
-export const startRun = (
-  experimentId: string,
-  body: {
-    /** Omit to launch on the default compute target (Settings → Compute);
-     * with no default set the server falls back to `hf`. */
-    backend?: "local" | "hf" | "modal" | "k8s" | "ssh" | "slurm" | "ray" | "openresearch";
-    flavor?: string;
-    manifest?: string;
-    timeout?: string;
-    /** ssh host alias, or the Slurm login node; defaults to the slurm settings' host. */
-    host?: string;
-    /** Org to bill the box to (openresearch only; omit = the sole org). */
-    org?: string;
-  } = {},
-) => post<{ run: Run }>(`/api/experiments/${experimentId}/run`, body).then((r) => r.run);
-
 export const cancelRun = (runId: string) => post<{ ok: boolean }>(`/api/runs/${runId}/cancel`);
 
 export interface LogChunk {

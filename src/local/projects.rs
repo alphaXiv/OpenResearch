@@ -2,8 +2,8 @@
 //! the `orx up` HTTP API (`POST /api/projects`).
 //!
 //! The project starts with an empty experiment tree. The first experiment
-//! created without a parent (via `orx create-experiment` or the HTTP API)
-//! becomes the baseline root — the control every variant is measured against.
+//! created without a parent via `orx create-experiment` becomes the baseline
+//! root — the control every variant is measured against.
 
 use std::collections::HashSet;
 

@@ -412,6 +412,22 @@ fn stored_to_wire(m: &StoredChatMessage) -> WireMessage {
     }
 }
 
+fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) -> bool {
+    transcript_text.is_none() && !has_messages
+}
+
+#[cfg(test)]
+mod initial_message_tests {
+    use super::is_initial_chat_message;
+
+    #[test]
+    fn only_the_first_ordinary_message_starts_a_chat_session() {
+        assert!(is_initial_chat_message(None, false));
+        assert!(!is_initial_chat_message(None, true));
+        assert!(!is_initial_chat_message(Some("resume"), false));
+    }
+}
+
 // --- permission bridge ---------------------------------------------------------
 
 /// The decision returned to the `orx mcp-gate` permission bridge for one
@@ -981,6 +997,10 @@ impl ChatHost {
         let mut session = store
             .get_chat_session(session_id)?
             .ok_or_else(|| anyhow!("chat session not found"))?;
+        let starts_session = is_initial_chat_message(
+            transcript_text.as_deref(),
+            store.has_chat_messages(session_id)?,
+        );
         let project = store
             .get_local_project(&session.project_id)?
             .ok_or_else(|| anyhow!("project not found"))?;
@@ -1078,6 +1098,9 @@ impl ChatHost {
                 parts_json: serde_json::to_string(&user_msg.parts)?,
                 created_at: user_msg.created_at,
             })?;
+            if starts_session {
+                crate::telemetry::capture_chat_session_started(&session.harness);
+            }
             self.emit("chat.message", message_json(&user_msg, &session.id));
         }
         store.touch_chat_session(&session.id)?;

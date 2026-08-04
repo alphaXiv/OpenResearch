@@ -142,10 +142,12 @@ Run the tests with `cargo test`.
 opt-out, and the `orx up` onboarding surfaces the choice on first run.
 
 - **Collected:** command name, a random per-install UUID, CLI version, OS/arch,
-  a CI flag, and coarse event labels (e.g. "a run launched on `modal`").
+  a CI flag, coarse install type, and coarse event labels (e.g. onboarding
+  completed, project created, chat session started, or a run launched on
+  `modal`).
 - **Never collected:** code, prompts, file contents or paths, project or
-  experiment ids/names, repo names, tokens, emails — nothing identifying. The
-  install UUID is not tied to your account.
+  experiment ids/names, repo names, tokens, emails, or account/identity data.
+  The random install UUID is not tied to your account.
 
 ```sh
 orx telemetry off        # persistent, per-machine

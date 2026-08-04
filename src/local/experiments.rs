@@ -1,5 +1,5 @@
-//! Local experiment creation — slug, branch, row. Shared by the CLI
-//! (`orx create-experiment`) and the `orx up` HTTP API.
+//! Local experiment creation — slug, branch, row. Used by
+//! `orx create-experiment` through the local execution plane.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -33,8 +33,8 @@ fn unique_slug(store: &Store, project_id: &str, base: &str) -> Result<String> {
 
 /// The project's root experiment (parent NULL) — oldest first when several
 /// exist. `None` on a fresh project: the tree starts empty and the first
-/// no-parent create becomes the baseline. CLI/API creates without a parent
-/// attach here once a root exists (pass `--baseline` to add another root).
+/// no-parent create becomes the baseline. CLI creates without a parent attach
+/// here once a root exists (pass `--baseline` to add another root).
 pub fn project_root(store: &Store, project_id: &str) -> Result<Option<LocalExperiment>> {
     // list is ordered created_at ASC, so `find` picks the oldest root.
     Ok(store

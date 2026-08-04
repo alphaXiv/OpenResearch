@@ -30,6 +30,7 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
   const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
   const [git, setGit] = useState<GitSettings | null>(null);
   const [telemetry, setTelemetryState] = useState<TelemetrySettings | null>(null);
+  const [telemetrySaving, setTelemetrySaving] = useState(false);
   const [checking, setChecking] = useState(false);
   // Per-probe, not one shared flag: a telemetry failure must not put a
   // connectivity error on a gate it has nothing to do with — or worse, hide
@@ -204,11 +205,18 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
             <h2 className="onb-title">Usage analytics</h2>
             <p className="onb-sub">
               orx can send anonymous usage analytics to help improve the tool. No code, prompts,
-              file contents, or identifiers are ever sent — just a random per-install id, the
-              command run, and your OS.
+              file contents, repo names, or project/session identifiers are ever sent — just a
+              random per-install id, CLI version, OS and architecture, CI flag, coarse install
+              type, and coarse events such as commands, onboarding completion, project creation,
+              and chat-session starts.
             </p>
             <div className="onb-cards">
-              <TelemetryCard telemetry={telemetry} onUpdate={setTelemetryState} />
+              <TelemetryCard
+                telemetry={telemetry}
+                saving={telemetrySaving}
+                onSavingChange={setTelemetrySaving}
+                onUpdate={setTelemetryState}
+              />
             </div>
             {/* The data dir moved to Settings → Storage; still disclose where
                 things land so the location isn't a surprise. */}
@@ -221,7 +229,11 @@ export function Onboarding({ onDone }: { onDone: () => void }) {
                 <ArrowLeft size={12} /> Back
               </button>
               <div style={{ flex: 1 }} />
-              <button className="btn primary" onClick={finishOnboarding}>
+              <button
+                className="btn primary"
+                onClick={finishOnboarding}
+                disabled={telemetrySaving}
+              >
                 Create your first project <ArrowRight size={13} />
               </button>
             </div>
@@ -388,12 +400,15 @@ function GitCard({
 
 function TelemetryCard({
   telemetry,
+  saving,
+  onSavingChange,
   onUpdate,
 }: {
   telemetry: TelemetrySettings | null;
+  saving: boolean;
+  onSavingChange: (saving: boolean) => void;
   onUpdate: (t: TelemetrySettings) => void;
 }) {
-  const [saving, setSaving] = useState(false);
   if (telemetry === null) {
     return (
       <div className="onb-loading">
@@ -407,10 +422,11 @@ function TelemetryCard({
   const overridden = !on && telemetry.reason !== null && telemetry.reason !== "disabled via `orx telemetry off`";
   const choose = (enabled: boolean) => {
     if (saving || enabled === on) return;
-    setSaving(true);
+    onSavingChange(true);
     void setTelemetry(enabled)
       .then(onUpdate)
-      .finally(() => setSaving(false));
+      .catch(() => {})
+      .finally(() => onSavingChange(false));
   };
   return (
     <div className="onb-card">
@@ -445,8 +461,9 @@ function TelemetryCard({
         </div>
       </div>
       <div className="onb-card-meta" style={{ marginTop: 12 }}>
-        Sent: a random per-install id, the command run, CLI version, and OS. Never sent: code,
-        prompts, file contents, paths, or repo names. Change anytime in Settings or with{" "}
+        Sent: a random per-install id, CLI version, OS/architecture, CI flag, coarse install type,
+        and coarse usage events. Never sent: code, prompts, file contents, paths, repo names, or
+        project/session identifiers. Change anytime in Settings or with{" "}
         <code>orx telemetry off</code>.
       </div>
       {overridden && (

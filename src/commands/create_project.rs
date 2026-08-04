@@ -46,6 +46,7 @@ pub async fn run(args: crate::CreateProjectArgs) -> Result<()> {
     )
     .await?;
     let project = result.project;
+    crate::telemetry::capture_project_created(false);
 
     let kind = if from_repo {
         "from repo"

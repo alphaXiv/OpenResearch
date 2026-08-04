@@ -16,7 +16,6 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -228,15 +227,11 @@ fn router(state: AppState) -> Router {
                 .delete(delete_project),
         )
         .route("/api/projects/{id}/open", post(open_project))
-        .route(
-            "/api/projects/{id}/experiments",
-            get(list_experiments).post(create_experiment),
-        )
+        .route("/api/projects/{id}/experiments", get(list_experiments))
         .route("/api/projects/{id}/runs", get(list_project_runs))
         .route("/api/papers/search", get(search_papers_api))
         .route("/api/papers/resolve", get(resolve_paper_api))
         .route("/api/instances", get(list_instances))
-        .route("/api/experiments/{id}/run", post(run_experiment))
         .route("/api/runs/{id}/cancel", post(cancel_run))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/diff", get(run_diff))
@@ -603,9 +598,9 @@ async fn create_project(
             .await
             .map_err(|e| anyhow!("clone task failed: {e}"))?;
     }
-    Ok(Json(
-        json!({ "project": project_json(&result.map_err(bad_request)?) }),
-    ))
+    let project = result.map_err(bad_request)?;
+    crate::telemetry::capture_project_created(true);
+    Ok(Json(json!({ "project": project_json(&project) })))
 }
 
 async fn get_project(Path(id): Path<String>) -> ApiResult {
@@ -777,154 +772,6 @@ async fn list_instances() -> ApiResult {
         instances.push(value);
     }
     Ok(Json(json!({ "instances": instances })))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CreateExperimentReq {
-    parent_experiment_id: Option<String>,
-    /// Force a new baseline root even when the project already has one.
-    #[serde(default)]
-    baseline: bool,
-    slug: Option<String>,
-    title: Option<String>,
-    description: Option<String>,
-    run_command: Option<String>,
-}
-
-async fn create_experiment(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<CreateExperimentReq>,
-) -> ApiResult {
-    reject_if_moving(&state)?;
-    let admission = state
-        .project_lifecycle
-        .admit(&id)
-        .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    // Branch create + push shells out to git (network); off the async workers.
-    let experiment = tokio::task::spawn_blocking(move || {
-        let _admission = admission;
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let parent = match &req.parent_experiment_id {
-            Some(pid) => Some(
-                store
-                    .get_local_experiment(pid)?
-                    .ok_or_else(|| not_found("parent experiment"))?,
-            ),
-            // `baseline` forces a new root; otherwise no parent -> the oldest
-            // project root when one exists (empty project: a new baseline).
-            None if req.baseline => None,
-            None => local::experiments::project_root(&store, &project.id)?,
-        };
-        local::experiments::create_experiment(
-            &store,
-            &project,
-            parent.as_ref(),
-            req.slug.as_deref(),
-            req.title,
-            req.description,
-            req.run_command,
-        )
-        .map_err(bad_request)
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("branch task failed: {e}")))??;
-    Ok(Json(json!({ "experiment": experiment })))
-}
-
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct RunReq {
-    backend: Option<String>,
-    flavor: Option<String>,
-    /// Repo-relative manifest path (k8s only; default .orx/k8s.yaml).
-    manifest: Option<String>,
-    timeout: Option<String>,
-    /// ssh config host alias of the Slurm login node (slurm only; defaults to
-    /// the slurm settings' host).
-    host: Option<String>,
-    /// Org to bill the box to (openresearch only; omit = the sole org).
-    org: Option<String>,
-}
-
-async fn run_experiment(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> ApiResult {
-    reject_if_moving(&state)?;
-    let store = Store::open()?;
-    let project_id = store
-        .get_local_experiment(&id)?
-        .ok_or_else(|| not_found("experiment"))?
-        .project_id;
-    let _admission = state
-        .project_lifecycle
-        .admit(&project_id)
-        .ok_or_else(|| bad_request("project deletion is in progress"))?;
-    store
-        .get_local_experiment(&id)?
-        .ok_or_else(|| not_found("experiment"))?;
-    store
-        .get_local_project(&project_id)?
-        .ok_or_else(|| not_found("project"))?;
-    // Tolerate an empty body — every field is optional in the schema.
-    let req: RunReq = if body.is_empty() {
-        RunReq::default()
-    } else {
-        serde_json::from_slice(&body).map_err(bad_request)?
-    };
-    // Resolve the persisted default target (Settings → Compute) when the
-    // request doesn't name a backend; `hf` stays the last-resort fallback so
-    // existing clients keep their historical behavior when no default is set.
-    // Empty strings mean "unset", matching the /compute/default endpoint.
-    let mut backend_opt = req.backend.filter(|b| !b.trim().is_empty());
-    let mut flavor = req.flavor.filter(|f| !f.trim().is_empty());
-    local::apply_compute_default(&mut backend_opt, &mut flavor);
-    let backend = backend_opt.unwrap_or_else(|| "hf".to_string());
-    let args = crate::ExpRunArgs {
-        exp_id: id,
-        gpu: None,
-        count: None,
-        disk: None,
-        provider: None,
-        cpu: None,
-        vcpus: None,
-        sandbox: None,
-        backend: Some(backend.clone()),
-        flavor,
-        org: req.org,
-        host: req.host,
-        manifest: req.manifest,
-        image: None,
-        timeout: req.timeout,
-        force: false,
-    };
-    // Same code paths as CLI `orx exp run --backend <b>` on a local experiment.
-    let run = tokio::spawn(async move {
-        let _admission = _admission;
-        match backend.as_str() {
-            "hf" => local::hf::submit_local_hf(&args).await,
-            "modal" => local::modal::submit_local_modal(&args).await,
-            "k8s" => local::k8s::submit_local_k8s(&args).await,
-            "ssh" => local::ssh::submit_local_ssh(&args).await,
-            "slurm" => local::slurm::submit_local_slurm(&args).await,
-            "ray" => local::ray::submit_local_ray(&args).await,
-            "openresearch" => local::openresearch::submit_local_openresearch(&args).await,
-            "local" => local::localrun::submit_local_run(&args).await,
-            other => Err(anyhow!(
-                "Unknown backend '{other}'. Supported: local, hf, modal, k8s, ssh, slurm, ray, openresearch."
-            )),
-        }
-    })
-    .await
-    .map_err(|error| bad_request(format!("run launch task failed: {error}")))?
-    .map_err(bad_request)?;
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
 
 async fn cancel_run(Path(id): Path<String>) -> ApiResult {
@@ -2269,6 +2116,7 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
 /// telemetry::record_consent): it lands even when the choice is "off".
 async fn record_telemetry_consent(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     crate::telemetry::record_consent(req.enabled).await;
+    crate::telemetry::capture_onboarding_completed();
     Ok(Json(json!({ "ok": true })))
 }
 
