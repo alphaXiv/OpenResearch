@@ -1,4 +1,5 @@
 import {
+  ChartSpline,
   FileCode,
   FlaskConical,
   FolderGit2,
@@ -126,6 +127,8 @@ type RightTab =
 
 interface RightPaneSessionState {
   rightTab: RightTab;
+  experimentsTabOpen: boolean;
+  filesTabOpen: boolean;
   expTabs: ExpViewDef[];
   fileTabs: FileViewDef[];
   planTabs: PlanViewDef[];
@@ -143,6 +146,8 @@ interface RightPaneSessionState {
 function initialRightPaneSessionState(sessionId?: string): RightPaneSessionState {
   const initial: RightPaneSessionState = {
     rightTab: "experiments",
+    experimentsTabOpen: true,
+    filesTabOpen: false,
     expTabs: [],
     fileTabs: [],
     planTabs: [],
@@ -163,13 +168,13 @@ function initialRightPaneSessionState(sessionId?: string): RightPaneSessionState
       { path: "nanochat-training-throughput.svg", source: "artifacts" },
       { path: "nanochat-core-evaluation.svg", source: "artifacts" },
     ];
-    return { ...initial, rightTab: fileTabs[0], fileTabs };
+    return { ...initial, rightTab: fileTabs[0], experimentsTabOpen: false, fileTabs };
   }
   if (sessionId === DEMO_LITERATURE_SESSION_ID) {
     const fileTabs: FileViewDef[] = [
       { path: "nanochat-bottleneck-diagnosis.md", source: "artifacts" },
     ];
-    return { ...initial, rightTab: fileTabs[0], fileTabs };
+    return { ...initial, rightTab: fileTabs[0], experimentsTabOpen: false, fileTabs };
   }
   return initial;
 }
@@ -299,10 +304,11 @@ export default function App() {
     return runs.filter((r) => mine.has(r.experimentId));
   }, [runs, experiments, effectiveScope, activeSessionId]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  // Right-panel tab strip: pinned Experiments/Files homes plus a closable tab per
-  // opened experiment view / project file. The same experiment can keep both
-  // its overview and terminal open.
+  // Right-panel tab strip: closable home and working tabs. The same experiment
+  // can keep both its overview and terminal open.
   const [rightTab, setRightTab] = useState<RightTab>("experiments");
+  const [experimentsTabOpen, setExperimentsTabOpen] = useState(true);
+  const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
@@ -330,6 +336,8 @@ export default function App() {
   const activeSessionIdRef = useRef<string | null>(null);
   currentRightPaneStateRef.current = {
     rightTab,
+    experimentsTabOpen,
+    filesTabOpen,
     expTabs,
     fileTabs,
     planTabs,
@@ -354,6 +362,8 @@ export default function App() {
         initialRightPaneSessionState(nextSessionId))
       : initialRightPaneSessionState();
     setRightTab(nextState.rightTab);
+    setExperimentsTabOpen(nextState.experimentsTabOpen);
+    setFilesTabOpen(nextState.filesTabOpen);
     setExpTabs(nextState.expTabs);
     setFileTabs(nextState.fileTabs);
     setPlanTabs(nextState.planTabs);
@@ -383,6 +393,8 @@ export default function App() {
   const startTour = useCallback(() => {
     setMainView("chat");
     setRailOpen(true);
+    setExperimentsTabOpen(true);
+    setRightTab("experiments");
     setPanelOpen(true);
     setPanelMax(false);
     setTourOpen(true);
@@ -484,6 +496,8 @@ export default function App() {
     setFilesView("files");
     setFilesToggled(new Set());
     setRightTab("experiments");
+    setExperimentsTabOpen(true);
+    setFilesTabOpen(false);
     // Scoping is an explicit per-project choice — don't let Agent scope
     // re-bind to whichever session ChatPanel auto-selects in the next project.
     setScope("project");
@@ -534,11 +548,32 @@ export default function App() {
       if (idx === -1) return;
       const next = expTabs.filter((_, i) => i !== idx);
       setExpTabs(next);
-      // Closing the focused tab falls back to a neighbor, else Experiments.
-      if (typeof rightTab === "object" && "id" in rightTab && sameExpTab(rightTab, tab))
-        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+      if (typeof rightTab === "object" && "id" in rightTab && sameExpTab(rightTab, tab)) {
+        const fallback =
+          next[Math.min(idx, next.length - 1)] ??
+          (experimentsTabOpen ? "experiments" : undefined) ??
+          (filesTabOpen ? "files" : undefined) ??
+          fileTabs[0] ??
+          planTabs[0] ??
+          subagentTabs[0] ??
+          codeTabs[0];
+        if (fallback) setRightTab(fallback);
+        else {
+          setPanelOpen(false);
+          setPanelMax(false);
+        }
+      }
     },
-    [expTabs, rightTab],
+    [
+      expTabs,
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      fileTabs,
+      planTabs,
+      subagentTabs,
+      codeTabs,
+    ],
   );
 
   // Open a project file as a right-panel tab. `contextSessionId` is the chat
@@ -570,10 +605,32 @@ export default function App() {
       if (idx === -1) return;
       const next = fileTabs.filter((_, i) => i !== idx);
       setFileTabs(next);
-      if (typeof rightTab === "object" && "path" in rightTab && sameFileTab(rightTab, tab))
-        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+      if (typeof rightTab === "object" && "path" in rightTab && sameFileTab(rightTab, tab)) {
+        const fallback =
+          next[Math.min(idx, next.length - 1)] ??
+          (experimentsTabOpen ? "experiments" : undefined) ??
+          (filesTabOpen ? "files" : undefined) ??
+          expTabs[0] ??
+          planTabs[0] ??
+          subagentTabs[0] ??
+          codeTabs[0];
+        if (fallback) setRightTab(fallback);
+        else {
+          setPanelOpen(false);
+          setPanelMax(false);
+        }
+      }
     },
-    [fileTabs, rightTab],
+    [
+      fileTabs,
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      expTabs,
+      planTabs,
+      subagentTabs,
+      codeTabs,
+    ],
   );
 
   // Open a proposed plan as a right-panel tab (the chat plan strip's "View
@@ -604,9 +661,32 @@ export default function App() {
         rightTab.kind === "plan" &&
         rightTab.promptId === tab.promptId
       )
-        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+        {
+          const fallback =
+            next[Math.min(idx, next.length - 1)] ??
+            (experimentsTabOpen ? "experiments" : undefined) ??
+            (filesTabOpen ? "files" : undefined) ??
+            expTabs[0] ??
+            fileTabs[0] ??
+            subagentTabs[0] ??
+            codeTabs[0];
+          if (fallback) setRightTab(fallback);
+          else {
+            setPanelOpen(false);
+            setPanelMax(false);
+          }
+        }
     },
-    [planTabs, rightTab],
+    [
+      planTabs,
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      expTabs,
+      fileTabs,
+      subagentTabs,
+      codeTabs,
+    ],
   );
 
   // Open a sub-agent's transcript as a right-panel tab (a chat spawn row's
@@ -633,9 +713,32 @@ export default function App() {
         rightTab.kind === "subagent" &&
         rightTab.spawnPartId === tab.spawnPartId
       )
-        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+        {
+          const fallback =
+            next[Math.min(idx, next.length - 1)] ??
+            (experimentsTabOpen ? "experiments" : undefined) ??
+            (filesTabOpen ? "files" : undefined) ??
+            expTabs[0] ??
+            fileTabs[0] ??
+            planTabs[0] ??
+            codeTabs[0];
+          if (fallback) setRightTab(fallback);
+          else {
+            setPanelOpen(false);
+            setPanelMax(false);
+          }
+        }
     },
-    [subagentTabs, rightTab],
+    [
+      subagentTabs,
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      expTabs,
+      fileTabs,
+      planTabs,
+      codeTabs,
+    ],
   );
 
   // One Git-backed code tab per branch. Reopening the same branch focuses it
@@ -682,15 +785,70 @@ export default function App() {
         "code" in rightTab &&
         sameCodeTab(rightTab, tab)
       )
-        setRightTab(next[Math.min(idx, next.length - 1)] ?? "experiments");
+        {
+          const fallback =
+            next[Math.min(idx, next.length - 1)] ??
+            (experimentsTabOpen ? "experiments" : undefined) ??
+            (filesTabOpen ? "files" : undefined) ??
+            expTabs[0] ??
+            fileTabs[0] ??
+            planTabs[0] ??
+            subagentTabs[0];
+          if (fallback) setRightTab(fallback);
+          else {
+            setPanelOpen(false);
+            setPanelMax(false);
+          }
+        }
     },
-    [codeTabs, rightTab],
+    [
+      codeTabs,
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      expTabs,
+      fileTabs,
+      planTabs,
+      subagentTabs,
+    ],
   );
 
   const openWorktreeTab = useCallback(() => {
+    setFilesTabOpen(true);
     setRightTab("files");
     setPanelOpen(true);
   }, []);
+
+  const closeHomeTab = useCallback(
+    (tab: "experiments" | "files") => {
+      if (tab === "experiments") setExperimentsTabOpen(false);
+      else setFilesTabOpen(false);
+      if (rightTab !== tab) return;
+      const fallback =
+        (tab !== "experiments" && experimentsTabOpen ? "experiments" : undefined) ??
+        (tab !== "files" && filesTabOpen ? "files" : undefined) ??
+        expTabs[0] ??
+        fileTabs[0] ??
+        planTabs[0] ??
+        subagentTabs[0] ??
+        codeTabs[0];
+      if (fallback) setRightTab(fallback);
+      else {
+        setPanelOpen(false);
+        setPanelMax(false);
+      }
+    },
+    [
+      rightTab,
+      experimentsTabOpen,
+      filesTabOpen,
+      expTabs,
+      fileTabs,
+      planTabs,
+      subagentTabs,
+      codeTabs,
+    ],
+  );
 
   // Drag the panel's left edge to resize; width persists across reloads.
   const resizePanel = (e: React.PointerEvent) => {
@@ -843,7 +1001,12 @@ export default function App() {
             onSelectMainView={setMainView}
             panelOpen={panelOpen}
             onTogglePanel={() => {
-              if (panelOpen) setPanelMax(false);
+              if (panelOpen) {
+                setPanelMax(false);
+              } else {
+                setExperimentsTabOpen(true);
+                setRightTab("experiments");
+              }
               setPanelOpen(!panelOpen);
             }}
             onOpenFile={openFileTab}
@@ -894,21 +1057,25 @@ export default function App() {
         >
           {!panelMax && <div className="panel-resizer" onPointerDown={resizePanel} />}
           <div className="tabs">
-            <div className="pinned-tabs">
-              <button
-                className={`tab ${rightTab === "experiments" ? "active" : ""}`}
-                onClick={() => setRightTab("experiments")}
-              >
-                Experiments
-              </button>
-              <button
-                className={`tab ${rightTab === "files" ? "active" : ""}`}
-                onClick={() => setRightTab("files")}
-              >
-                Files
-              </button>
-            </div>
             <div className="tab-strip">
+              {experimentsTabOpen && (
+                <ClosableTab
+                  active={rightTab === "experiments"}
+                  label="Experiments"
+                  icon={<FlaskConical size={12} style={{ flexShrink: 0 }} />}
+                  onSelect={() => setRightTab("experiments")}
+                  onClose={() => closeHomeTab("experiments")}
+                />
+              )}
+              {filesTabOpen && (
+                <ClosableTab
+                  active={rightTab === "files"}
+                  label="Files"
+                  icon={<FolderGit2 size={12} style={{ flexShrink: 0 }} />}
+                  onSelect={() => setRightTab("files")}
+                  onClose={() => closeHomeTab("files")}
+                />
+              )}
               {expTabs.map((t) => {
                 const exp = experiments.find((e) => e.id === t.id);
                 return (
@@ -918,7 +1085,7 @@ export default function App() {
                     label={exp ? exp.title || exp.slug : "…"}
                     icon={
                       t.view === "overview" ? (
-                        <FlaskConical size={12} style={{ flexShrink: 0 }} />
+                        <ChartSpline size={12} style={{ flexShrink: 0 }} />
                       ) : (
                         <Terminal size={12} style={{ flexShrink: 0 }} />
                       )

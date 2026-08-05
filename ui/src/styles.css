@@ -679,7 +679,7 @@ textarea::placeholder {
   flex-shrink: 0;
 }
 
-/* Panel tab bar: pinned homes + closable working tabs. */
+/* Panel tab bar: closable home and working tabs. */
 .tabs {
   display: flex;
   align-items: flex-end;
@@ -691,15 +691,7 @@ textarea::placeholder {
   flex-shrink: 0;
 }
 
-/* Home tabs never scroll away when many working tabs are open. */
-.pinned-tabs {
-  display: flex;
-  align-items: flex-end;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-/* Only working tabs participate in horizontal scrolling. */
+/* Tabs scroll horizontally when the strip fills up. */
 .tab-strip {
   display: flex;
   align-items: flex-end;
@@ -739,7 +731,7 @@ textarea::placeholder {
   color: var(--text);
 }
 
-/* One tab style for the whole strip — pinned tabs simply have no close "x". */
+/* One tab style for every closable tab in the strip. */
 .tab {
   position: relative;
   display: inline-flex;
