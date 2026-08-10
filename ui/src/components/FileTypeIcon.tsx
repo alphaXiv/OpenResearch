@@ -76,7 +76,7 @@ export function FileTypeIcon({ name }: { name: string }) {
   }
 
   return (
-    <svg className={`file-tree-icon ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+    <svg className={`file-tree-icon [width:15px] [height:15px] [flex-shrink:0] [color:var(--muted)] [overflow:visible] [&.markdown]:[color:var(--accent-blue)] [&.image]:[color:var(--accent-purple)] [&.spreadsheet]:[color:var(--accent-green)] [&.code]:[color:var(--accent-orange)] [&.archive]:[color:var(--accent-amber)] [&.pdf]:[color:var(--accent-red)] [&.document]:[color:var(--subtext)] ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
       {glyph}
     </svg>
   );

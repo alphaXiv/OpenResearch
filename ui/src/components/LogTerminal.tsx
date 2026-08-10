@@ -34,7 +34,7 @@ export function LogTerminal({ runId }: { runId: string }) {
         "ui-monospace, Menlo, Consolas, monospace",
       scrollback: 20000,
       theme: {
-        // Matches --term-bg in styles.css (terminal stays dark in both themes).
+        // Matches --term-bg in tailwind.css (terminal stays dark in both themes).
         background: "#1a1a1a",
         foreground: "#e6e1e0",
         cursor: "#1a1a1a",

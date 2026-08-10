@@ -24,12 +24,21 @@ import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { StatusBadge } from "./StatusBadge";
 
+const EMPTY_STATE_CLASS_NAME = [
+  "empty-state [position:absolute] [inset:0] [display:flex] [flex-direction:column] [align-items:center]",
+  "[justify-content:center] [padding:24px] [text-align:center] [color:var(--subtext)] [&_p]:[max-width:46ch]",
+  "[&_p]:[margin:0] [&_p]:[font-size:var(--fs-md)] [&_p]:[line-height:1.5] [&_p]:[text-wrap:balance]",
+  "[&_p.empty-state-title]:[font-size:var(--fs-2xl)] [&_p.empty-state-title]:[font-weight:var(--fw-regular)]",
+  "[&_p.empty-state-title]:[color:var(--text)] [&_p.empty-state-hint]:[font-size:var(--fs-lg)]",
+  "[&_p.empty-state-hint]:[color:var(--subtext)] empty-state-cta [gap:6px]",
+].join(" ");
+
 const NODE_W = 264;
 const NODE_H = 132;
 const GAP_X = 44;
 const GAP_Y = 72;
 const MAX_SQUARES = 8;
-// Keep in sync with `.elided-node` in styles.css.
+// Keep in sync with the inline `.elided-node` classes below.
 const ELIDED_W = 148;
 const ELIDED_H = 44;
 
@@ -179,7 +188,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node ${live ? "live" : ""}`}
+      className={`exp-node [width:264px] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [background:var(--base)] [padding:10px_12px] [box-shadow:0_1px_2px_rgba(0,_0,_0,_0.04)] [font-size:var(--fs-md)] [transition:box-shadow_120ms_ease] [&:hover]:[box-shadow:0_2px_8px_rgba(0,_0,_0,_0.08)] [&.live]:[border-color:var(--accent-teal)] [&.live]:[box-shadow:0_2px_12px_rgba(32,_154,_132,_0.2)] [&_.node-overview-link]:[display:block] [&_.node-overview-link]:[width:100%] [&_.node-overview-link]:[padding:0] [&_.node-overview-link]:[border:0] [&_.node-overview-link]:[background:transparent] [&_.node-overview-link]:[color:inherit] [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:[text-align:left] [&_.node-overview-link]:[cursor:pointer] [&_.node-overview-link:hover_.node-slug]:[text-decoration:underline] [&_.node-overview-link:hover_.node-slug]:[text-underline-offset:3px] [&_.node-overview-link:focus-visible]:[outline:2px_solid_var(--accent)] [&_.node-overview-link:focus-visible]:[outline-offset:4px] [&_.node-overview-link:focus-visible]:[border-radius:var(--radius-xs)] [&_.node-eyebrow]:[display:flex] [&_.node-eyebrow]:[align-items:center] [&_.node-eyebrow]:[justify-content:space-between] [&_.node-eyebrow]:[gap:8px] [&_.node-eyebrow]:[margin-bottom:6px] [&_.node-eyebrow]:[font-size:var(--fs-2xs)] [&_.node-eyebrow]:[font-weight:var(--fw-medium)] [&_.node-eyebrow]:[color:var(--muted)] [&_.node-head]:[display:flex] [&_.node-head]:[align-items:center] [&_.node-head]:[gap:7px] [&_.node-head]:[min-width:0] [&_.node-status]:[width:8px] [&_.node-status]:[height:8px] [&_.node-status]:[border-radius:50%] [&_.node-status]:[flex-shrink:0] [&_.node-slug]:[font-family:var(--mono)] [&_.node-slug]:[font-size:var(--fs-sm)] [&_.node-slug]:[font-weight:var(--fw-semibold)] [&_.node-slug]:[color:var(--text)] [&_.node-slug]:[flex:1] [&_.node-slug]:[min-width:0] [&_.node-slug]:[overflow:hidden] [&_.node-slug]:[text-overflow:ellipsis] [&_.node-slug]:[white-space:nowrap] [&_.node-title]:[margin-top:4px] [&_.node-title]:[color:var(--text)] [&_.node-title]:[font-size:var(--fs-sm)] [&_.node-title]:[display:-webkit-box] [&_.node-title]:[-webkit-line-clamp:2] [&_.node-title]:[-webkit-box-orient:vertical] [&_.node-title]:[overflow:hidden] [&_.node-meta]:[margin-top:8px] [&_.node-meta]:[display:flex] [&_.node-meta]:[align-items:center] [&_.node-meta]:[gap:8px] [&_.node-meta]:[font-size:var(--fs-2xs)] [&_.node-meta]:[color:var(--muted)] [&_.node-actions]:[margin-top:8px] [&_.node-actions]:[padding-top:6px] [&_.node-actions]:[border-top:1px_solid_var(--border-variant)] [&_.node-actions]:[display:flex] [&_.node-actions]:[align-items:center] [&_.node-actions]:[gap:3px] [&_.node-action]:[display:inline-flex] [&_.node-action]:[align-items:center] [&_.node-action]:[gap:5px] [&_.node-action]:[padding:3px_6px] [&_.node-action]:[font-size:var(--fs-xs)] [&_.node-action]:[font-weight:var(--fw-medium)] [&_.node-action]:[color:var(--text)] [&_.node-action]:[border-radius:var(--radius-sm)] [&_.node-action]:[text-decoration:none] [&_.node-action:hover]:[color:var(--text)] [&_.node-action:hover]:[background:var(--surface)] [&_.node-action-ext]:[margin-left:auto] [&_.node-action-ext]:[padding:3px_5px] ${live ? "live" : ""}`}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
     >
@@ -208,11 +217,11 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         <div className="node-meta">
           <span>Runs</span>
           {squares.length > 0 ? (
-            <span className="run-squares">
+            <span className="run-squares [display:flex] [align-items:center] [gap:3px]">
               {squares.map((run) => (
                 <span
                   key={run.id}
-                  className={`run-sq ${runSquareClass(runDisplayStatus(run))}`}
+                  className={`run-sq [width:9px] [height:9px] [flex-shrink:0] [&.pass]:[background:var(--accent-green)] [&.fail]:[border:1.5px_solid_color-mix(in_oklab,_var(--accent-red)_55%,_transparent)] [&.live]:[background:var(--accent-teal)] [&.live]:[animation:or-pulse_1.2s_ease-in-out_infinite] [&.other]:[border:1.5px_solid_var(--border)] ${runSquareClass(runDisplayStatus(run))}`}
                   title={runDisplayStatus(run)}
                 />
               ))}
@@ -285,7 +294,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   // body is a single action.
   return (
     <div
-      className="elided-node"
+      className="elided-node [width:148px] [height:44px] [display:flex] [align-items:center] [gap:8px] [padding:6px_10px] [border:1px_dashed_var(--border)] [border-radius:var(--radius-md)] [background:color-mix(in_oklab,_var(--text)_3%,_transparent)] [color:var(--muted)] [font-size:var(--fs-2xs)] [font-weight:var(--fw-medium)] [text-align:left] [transition:border-color_120ms_ease,_color_120ms_ease] [&:hover]:[border-color:var(--text)] [&:hover]:[color:var(--text)] [&_.elided-node-label]:[display:flex] [&_.elided-node-label]:[flex-direction:column] [&_.elided-node-label]:[line-height:1.3] [&_.elided-node-sub]:[color:var(--muted)]"
       role="button"
       tabIndex={0}
       title="Switch to Entire project to see all experiments"
@@ -430,7 +439,7 @@ export function TreeView({
 
   if (experiments.length === 0) {
     return (
-      <div className="empty-state empty-state-cta">
+      <div className={EMPTY_STATE_CLASS_NAME}>
         <p className="empty-state-title">No experiments yet</p>
         <p className="empty-state-hint">Ask the agent in chat to create and run your first experiment.</p>
       </div>
@@ -440,7 +449,7 @@ export function TreeView({
   // Only Current task scope can filter a non-empty forest down to nothing.
   if (nodes.length === 0 && agentSessionId) {
     return (
-      <div className="empty-state empty-state-cta">
+      <div className={EMPTY_STATE_CLASS_NAME}>
         <p className="empty-state-title">No experiments from the current task yet</p>
         <p className="empty-state-hint">
           Ask in this task to create one, or switch to Entire project to see all experiments.
@@ -451,6 +460,7 @@ export function TreeView({
 
   return (
     <ReactFlow
+      className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:[cursor:default] [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:[cursor:pointer] [&_.react-flow\_\_handle]:[opacity:0] [&_.react-flow\_\_handle]:[pointer-events:none] [&_.react-flow\_\_attribution]:[display:none]!"
       // fitView only runs on mount, so remount when the scope changes to re-fit.
       key={agentSessionId ?? "project"}
       nodes={nodes}

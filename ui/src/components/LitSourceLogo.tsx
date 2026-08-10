@@ -36,7 +36,7 @@ export function LitSourceLogo({
 }) {
   return (
     <span
-      className="lit-logo"
+      className="lit-logo [flex:0_0_auto] [display:inline-flex] [align-items:center] [justify-content:center] [padding:1.5px] [box-sizing:border-box] [background:#fff] [border-radius:3px] [box-shadow:0_0_0_1px_rgba(0,_0,_0,_0.08)] [&_svg]:[width:100%] [&_svg]:[height:100%] [&_svg]:[display:block]"
       style={{ width: size, height: size }}
       {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": LIT_SOURCE_NAME[source] })}
       // Static, build-inlined brand SVGs — not user input.

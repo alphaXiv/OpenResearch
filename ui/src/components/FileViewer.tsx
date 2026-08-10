@@ -10,6 +10,7 @@ import { artifactUrl, getArtifactFileText, getProjectFile, type ProjectFile } fr
 import { CodeView } from "./CodeView";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import { Md } from "./Md";
+import { ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
 
 export function FileViewer({
   projectId,
@@ -117,21 +118,21 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view">
-      <div className="file-view-header">
+    <div className="file-view [display:flex] [flex-direction:column] [height:100%] [min-height:0]">
+      <div className="file-view-header [display:flex] [align-items:center] [gap:8px] [padding:6px_12px] [border-bottom:1px_solid_var(--border-variant)] [color:var(--text)] [flex-shrink:0]">
         <FileText size={13} style={{ flexShrink: 0 }} />
-        <code className="file-view-path" title={path}>
+        <code className="file-view-path [font-family:var(--mono)] [font-size:var(--fs-sm)] [color:var(--text)] [flex:1] [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]" title={path}>
           {path}
         </code>
         {branchLabel && (
-          <span className="file-view-branch" title={`Branch: ${branchLabel}`}>
+          <span className="file-view-branch [display:inline-flex] [align-items:center] [gap:4px] [min-width:0] [font-family:var(--mono)] [font-size:var(--fs-xs)] [color:var(--muted)] [border:1px_solid_var(--border-variant)] [border-radius:var(--radius-sm)] [padding:1px_6px] [max-width:260px] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap] [flex-shrink:0] [&_svg]:[flex:none]" title={`Branch: ${branchLabel}`}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
         )}
         {isMarkdown && (
           <button
-            className={`icon-btn ${showSource ? "active" : ""}`}
+            className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
             data-tip={showSource ? "Rendered view" : "View source"}
             data-tip-align="end"
             aria-label={showSource ? "Rendered view" : "View source"}
@@ -141,25 +142,25 @@ export function FileViewer({
           </button>
         )}
         <button
-          className="icon-btn"
+          className={ICON_BUTTON_CLASS_NAME}
           data-tip="Reload file"
           data-tip-align="end"
           aria-label="Reload file"
           onClick={() => setNonce((n) => n + 1)}
         >
-          {loading ? <span className="spinner" /> : <RotateCw size={13} />}
+          {loading ? <span className={SPINNER_CLASS_NAME} /> : <RotateCw size={13} />}
         </button>
       </div>
-      <div className="file-view-body">
+      <div className="file-view-body [flex:1] [min-height:0] [overflow:auto] [background:var(--base)]">
         {error ? (
-          <div className="file-view-note">Failed to load file: {error}</div>
+          <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">Failed to load file: {error}</div>
         ) : data === null ? (
-          <div className="file-view-note">Loading…</div>
+          <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">Loading…</div>
         ) : data.notFound ? (
-          <div className="file-view-note">{notFoundCopy(data)}</div>
+          <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">{notFoundCopy(data)}</div>
         ) : isImage && artifactsMode ? (
           <a
-            className="fpreview-image"
+            className="fpreview-image [display:flex] [align-items:flex-start] [justify-content:center] [padding:24px] [&_img]:[max-width:100%] [&_img]:[height:auto] [&_img]:[border:1px_solid_var(--border)] [&_img]:[border-radius:var(--radius-sm)]"
             href={artifactUrl(projectId, path)}
             target="_blank"
             rel="noopener noreferrer"
@@ -167,22 +168,22 @@ export function FileViewer({
             <img src={artifactUrl(projectId, path)} alt={path.split("/").pop() ?? path} />
           </a>
         ) : binary ? (
-          <div className="file-view-note">Binary file — no inline preview.</div>
+          <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">Binary file — no inline preview.</div>
         ) : (
           <>
             {!artifactsMode && !gitRef && sessionId && data.root === "clone" && (
-              <div className="file-view-note">
+              <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">
                 This session's worktree isn't available — showing the project clone's copy.
               </div>
             )}
             {viaArtifacts && (
-              <div className="file-view-note">
+              <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">
                 Not in the {data.root === "worktree" ? "session's worktree" : "project clone"} —
                 showing the copy from the project's artifacts.
               </div>
             )}
             {isMarkdown && !showSource ? (
-              <div className="file-view-md">
+              <div className="file-view-md [max-width:var(--readable-col)] [padding:18px_20px_32px] [&_.md]:[font-size:var(--fs-base)] [&_.md_h1]:[font-size:1.5em] [&_.md_h1]:[margin:18px_0_8px] [&_.md_h2]:[font-size:1.25em] [&_.md_h2]:[margin:16px_0_8px] [&_.md_h3]:[font-size:1.1em]">
                 {artifactsMode ? (
                   <ArtifactMarkdown
                     projectId={projectId}
@@ -200,7 +201,7 @@ export function FileViewer({
               <CodeView text={data.content} path={path} highlightLine={line} />
             )}
             {!artifactsMode && data.truncated && (
-              <div className="file-view-note">File truncated — showing the first 512 KB.</div>
+              <div className="file-view-note [padding:10px_16px] [font-size:var(--fs-sm)] [color:var(--muted)]">File truncated — showing the first 512 KB.</div>
             )}
           </>
         )}

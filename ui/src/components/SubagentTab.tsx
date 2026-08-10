@@ -2,6 +2,12 @@ import { useEffect, useState } from "react";
 import { getChatMessages, type ChatMessage, type ChatPart } from "../api";
 import { onChatEvent } from "../events";
 import { findPartById, SubagentTranscript } from "./ChatPanel";
+import { TAB_BODY_CLASS_NAME } from "../styleClasses";
+
+const PANE_CONTENT_CLASS_NAME = [
+  "pane-content [flex:1] [min-height:0] [position:relative] subagent-tab-content [overflow-y:auto]",
+  "[background:var(--base)] [padding:12px_16px]",
+].join(" ");
 
 /** Right-pane tab body for a sub-agent transcript. The spawn part (and its
  * streamed `children`) lives on the parent session's chat messages, so this
@@ -48,9 +54,9 @@ export function SubagentTab({
 
   if (messages === null) {
     return (
-      <div className="tab-body">
-        <div className="pane-content subagent-tab-content">
-          <div className="subagent-empty">Loading…</div>
+      <div className={TAB_BODY_CLASS_NAME}>
+        <div className={PANE_CONTENT_CLASS_NAME}>
+          <div className="subagent-empty [padding:3px_4px] [font-size:var(--fs-md)] [color:var(--muted)]">Loading…</div>
         </div>
       </div>
     );
@@ -64,8 +70,8 @@ export function SubagentTab({
   }
 
   return (
-    <div className="tab-body">
-      <div className="pane-content subagent-tab-content">
+    <div className={TAB_BODY_CLASS_NAME}>
+      <div className={PANE_CONTENT_CLASS_NAME}>
         {spawn ? (
           <SubagentTranscript
             spawn={spawn}
@@ -74,7 +80,7 @@ export function SubagentTab({
             onOpenSubagent={onOpenSubagent}
           />
         ) : (
-          <div className="subagent-empty">This sub-agent is no longer available.</div>
+          <div className="subagent-empty [padding:3px_4px] [font-size:var(--fs-md)] [color:var(--muted)]">This sub-agent is no longer available.</div>
         )}
       </div>
     </div>

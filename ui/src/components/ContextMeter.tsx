@@ -31,10 +31,10 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
   const fill = pct === null ? "var(--accent)" : tone(pct);
 
   return (
-    <div className="option-picker" ref={ref}>
+    <div className="option-picker [position:relative] [display:inline-flex]" ref={ref}>
       <button
         type="button"
-        className="composer-bare context-ring"
+        className="composer-bare [display:inline-flex] [align-items:center] [gap:3px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_4px] [border-radius:var(--radius-sm)] [&:hover]:[color:var(--text)] [&.context-ring]:[display:inline-flex] [&.context-ring]:[align-items:center] [&.context-ring]:[margin-right:8px] context-ring"
         title="Context window used"
         onClick={() => setOpen((v) => !v)}
       >
@@ -65,10 +65,10 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
         )}
       </button>
       {open && (
-        <div className="option-menu align-right context-meter-menu">
-          <div className="context-meter-head">
+        <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] align-right context-meter-menu [width:280px] [padding:10px_12px_12px] [&_.progress]:[margin:8px_0_0] [&_.progress-track]:[height:5px] [&_.progress-track]:[border:none] [&_.progress-track]:[background:var(--border)]">
+          <div className="context-meter-head [display:flex] [justify-content:space-between] [align-items:baseline] [gap:12px] [font-size:var(--fs-sm)] [color:var(--muted)]">
             <span>Context window</span>
-            <span className="context-meter-value">
+            <span className="context-meter-value [color:var(--text)] [font-variant-numeric:tabular-nums]">
               {pct === null
                 ? `${fmtTokens(usedTokens)} tokens`
                 : `${fmtTokens(usedTokens)} / ${fmtTokens(contextWindow!)} (${pct}%)`}

@@ -8,6 +8,7 @@ import {
   usePopoverPosition,
   useTourBounds,
 } from "./tourGeometry";
+import { GHOST_BUTTON_CLASS_NAME, ICON_BUTTON_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME } from "../styleClasses";
 
 /** Breathing room between a target's edges and the spotlight cutout. */
 const BOX_PADDING = 8;
@@ -129,15 +130,15 @@ export function Tour({ onClose }: { onClose: () => Promise<void> }) {
     : null;
 
   return createPortal(
-    <div className="tour-overlay">
+    <div className="tour-overlay [position:fixed] [inset:0] [z-index:200]">
       {box ? (
         <>
           {/* Dim everything except the spotlight via an oversized box-shadow. */}
-          <div className="tour-spotlight" style={box} />
-          <div className="tour-ring" style={box} />
+          <div className="tour-spotlight [position:absolute] [border-radius:var(--radius-lg)] [box-shadow:0_0_0_9999px_rgba(0,_0,_0,_0.55)] [transition:all_300ms_ease]" style={box} />
+          <div className="tour-ring [position:absolute] [border-radius:var(--radius-lg)] [border:2px_solid_var(--primary)] [transition:all_300ms_ease]" style={box} />
         </>
       ) : (
-        <div className="tour-dim" />
+        <div className="tour-dim [position:absolute] [inset:0] [background:rgba(0,_0,_0,_0.55)]" />
       )}
       <TourCard
         step={step}
@@ -196,31 +197,31 @@ function TourCard({
   return (
     <div
       ref={measure.ref}
-      className={`tour-card ${positioned ? "" : "centered"}`}
+      className={`tour-card [position:absolute] [width:390px] [max-width:calc(100vw_-_32px)] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-xl)] [box-shadow:0_24px_60px_rgba(0,_0,_0,_0.22)] [padding:21px_23px_0] [transition:left_200ms_ease,_top_200ms_ease] [&.centered]:[left:50%] [&.centered]:[top:50%] [&.centered]:[transform:translate(-50%,_-50%)] [&.centered]:[transition:none] [&_h3]:[margin:0_26px_7px_0] [&_h3]:[font-size:var(--fs-lg)] [&_h3]:[font-weight:var(--fw-semibold)] [&_p]:[margin:0] [&_p]:[font-size:var(--fs-base)] [&_p]:[line-height:1.55] [&_p]:[color:var(--text)] [&_.tour-close]:[position:absolute] [&_.tour-close]:[top:12px] [&_.tour-close]:[right:12px] ${positioned ? "" : "centered"}`}
       style={positioned ? { left: popover.x, top: popover.y } : undefined}
     >
       {positioned && step.anchor && (
         <Arrow anchor={step.anchor} adjustment={popover.arrowAdjustment} />
       )}
-      <button className="icon-btn tour-close" title="Skip tour" onClick={onClose} disabled={closing}>
+      <button className={`${ICON_BUTTON_CLASS_NAME} tour-close`} title="Skip tour" onClick={onClose} disabled={closing}>
         <X size={15} />
       </button>
       <h3>{step.title}</h3>
       <p>{step.description}</p>
       {closeError && <div className="error">Couldn't save tour progress. Try again.</div>}
-      <div className="tour-footer">
-        <div className="tour-footer-side">
+      <div className="tour-footer [display:flex] [align-items:center] [border-top:1px_solid_var(--border-variant)] [margin-top:16px] [padding:11px_0]">
+        <div className="tour-footer-side [flex:1] [display:flex] [&.end]:[justify-content:flex-end]">
           {index > 0 && (
-            <button className="btn ghost" onClick={onBack}>
+            <button className={GHOST_BUTTON_CLASS_NAME} onClick={onBack}>
               Back
             </button>
           )}
         </div>
-        <span className="tour-count">
+        <span className="tour-count [font-size:var(--fs-sm)] [color:var(--muted)] [font-variant-numeric:tabular-nums]">
           {index + 1} / {STEPS.length}
         </span>
-        <div className="tour-footer-side end">
-          <button className="btn primary" onClick={onNext} disabled={closing}>
+        <div className="tour-footer-side [flex:1] [display:flex] [&.end]:[justify-content:flex-end] end">
+          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={onNext} disabled={closing}>
             {closing ? "Saving…" : last ? "Done" : "Next"}
           </button>
         </div>
@@ -237,5 +238,5 @@ function TourCard({
 function Arrow({ anchor, adjustment }: { anchor: TourAnchor; adjustment: number }) {
   const cross =
     anchor === "above" || anchor === "below" ? `${adjustment}px 0` : `0 ${adjustment}px`;
-  return <div className={`tour-arrow ${anchor}`} style={{ translate: cross }} />;
+  return <div className={`tour-arrow [position:absolute] [width:12px] [height:12px] [background:var(--base)] [rotate:45deg] [pointer-events:none] [&.above]:[bottom:-6.5px] [&.above]:[left:calc(50%_-_6px)] [&.above]:[border-right:1px_solid_var(--border)] [&.above]:[border-bottom:1px_solid_var(--border)] [&.below]:[top:-6.5px] [&.below]:[left:calc(50%_-_6px)] [&.below]:[border-left:1px_solid_var(--border)] [&.below]:[border-top:1px_solid_var(--border)] [&.left]:[right:-6.5px] [&.left]:[top:calc(50%_-_6px)] [&.left]:[border-top:1px_solid_var(--border)] [&.left]:[border-right:1px_solid_var(--border)] [&.right]:[left:-6.5px] [&.right]:[top:calc(50%_-_6px)] [&.right]:[border-bottom:1px_solid_var(--border)] [&.right]:[border-left:1px_solid_var(--border)] ${anchor}`} style={{ translate: cross }} />;
 }

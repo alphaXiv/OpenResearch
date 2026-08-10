@@ -1,4 +1,5 @@
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 // Backend the dev server proxies to. Defaults to the standard `orx up` port;
@@ -6,7 +7,7 @@ import { defineConfig } from "vite";
 const backend = process.env.ORX_BACKEND ?? "http://127.0.0.1:4791";
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   build: { outDir: "dist" },
   server: {
     proxy: {

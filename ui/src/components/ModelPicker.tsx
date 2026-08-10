@@ -14,6 +14,19 @@ import {
 import { renderNote } from "./agentNote";
 import { onHarnessAuth } from "../events";
 import type { AgentSelection } from "../api";
+import { MODEL_ITEM_CLASS_NAME } from "../styleClasses";
+
+const MODEL_GROUP_CLASS_NAME = [
+  "model-group [display:flex] [align-items:center] [justify-content:space-between] [gap:8px]",
+  "[font-size:var(--fs-xs)] [font-weight:var(--fw-medium)] [color:var(--muted)] [padding:8px_8px_4px]",
+].join(" ");
+
+const MODEL_MORE_CLASS_NAME = [
+  "model-more [&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-xs)]",
+  "[&_code]:[background:var(--panel)] [&_code]:[border:1px_solid_var(--border-variant)]",
+  "[&_code]:[border-radius:var(--radius-xs)] [&_code]:[padding:1px_5px] [&_code]:[white-space:nowrap]",
+  "[padding:4px_8px_8px] [font-size:var(--fs-xs)] [color:var(--muted)]",
+].join(" ");
 
 export type ModelSelection = AgentSelection;
 
@@ -168,10 +181,10 @@ export function ModelPicker({
     : "Model";
 
   return (
-    <div className="model-picker" data-onboarding="model-picker" ref={rootRef}>
+    <div className="model-picker [position:relative] [display:inline-flex]" data-onboarding="model-picker" ref={rootRef}>
       <button
         type="button"
-        className="composer-pill"
+        className="composer-pill [display:inline-flex] [align-items:center] [gap:5px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_8px] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]"
         title="Harness + model for this chat"
         onClick={() => setOpen((v) => !v)}
       >
@@ -179,7 +192,7 @@ export function ModelPicker({
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className="model-menu align-right">
+        <div className="model-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [width:320px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&_input]:[border:none] [&_input]:[border-bottom:1px_solid_var(--border-variant)] [&_input]:[background:none] [&_input]:[padding:9px_12px] [&_input]:[font-size:var(--fs-md)] [&_input]:[outline:none] align-right">
           <input
             autoFocus
             type="text"
@@ -187,19 +200,19 @@ export function ModelPicker({
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
-          <div className="model-menu-list">
+          <div className="model-menu-list [overflow-y:auto] [padding:6px]">
             {groups.map(({ harness, models, hidden }) => (
               <div key={harness.id}>
-                <div className="model-group">
+                <div className={MODEL_GROUP_CLASS_NAME}>
                   <span>{harness.name}</span>
                   {!harness.agentReady && (
-                    <span className="model-group-status">
+                    <span className="model-group-status [display:inline-flex] [align-items:center] [gap:4px] [color:var(--accent-amber)] [font-weight:var(--fw-regular)]">
                       <Lock size={10} /> Unavailable
                     </span>
                   )}
                 </div>
                 {!harness.agentReady ? (
-                  <div className="model-more model-unavailable">
+                  <div className="model-more [&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-xs)] [&_code]:[background:var(--panel)] [&_code]:[border:1px_solid_var(--border-variant)] [&_code]:[border-radius:var(--radius-xs)] [&_code]:[padding:1px_5px] [&_code]:[white-space:nowrap] [padding:4px_8px_8px] [font-size:var(--fs-xs)] [color:var(--muted)] model-unavailable [line-height:1.5] [border-bottom:1px_solid_var(--border-variant)]">
                     {harness.agentNote ? renderNote(harness.agentNote) : "Not available"}
                   </div>
                 ) : (
@@ -210,7 +223,7 @@ export function ModelPicker({
                         With a discovered catalog the row is redundant noise:
                         the catalog's own default leads the list. */}
                     {harness.models.length === 0 && (
-                      <button className="model-item" onClick={() => pick(harness, null)}>
+                      <button className={MODEL_ITEM_CLASS_NAME} onClick={() => pick(harness, null)}>
                         <span>
                           Default model
                           <span className="model-id">CLI configuration</span>
@@ -223,7 +236,7 @@ export function ModelPicker({
                     {models.map((m) => (
                       <button
                         key={m.id}
-                        className="model-item"
+                        className={MODEL_ITEM_CLASS_NAME}
                         title={m.id}
                         onClick={() => pick(harness, m.id)}
                       >
@@ -240,7 +253,7 @@ export function ModelPicker({
                       </button>
                     ))}
                     {hidden > 0 && (
-                      <div className="model-more">{hidden} more — search to find</div>
+                      <div className={MODEL_MORE_CLASS_NAME}>{hidden} more — search to find</div>
                     )}
                     {/* Free-form escape hatch: the catalogs are curated menus,
                         not the set of ids the CLIs accept — `--model
@@ -249,7 +262,7 @@ export function ModelPicker({
                     {filter.trim().length > 0 &&
                       !harness.models.some((m) => m.id === filter.trim()) && (
                         <button
-                          className="model-item"
+                          className={MODEL_ITEM_CLASS_NAME}
                           onClick={() => pick(harness, filter.trim())}
                         >
                           <span>
@@ -262,10 +275,10 @@ export function ModelPicker({
                 )}
               </div>
             ))}
-            {harnesses.length === 0 && <div className="model-more">Detecting harnesses…</div>}
+            {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>Detecting harnesses…</div>}
           </div>
           {lockHarness && value && harnesses.length > 1 && (
-            <div className="model-locked-note">
+            <div className="model-locked-note [display:flex] [align-items:center] [gap:6px] [padding:7px_12px] [font-size:var(--fs-xs)] [color:var(--muted)] [border-top:1px_solid_var(--border-variant)] [&_svg]:[flex-shrink:0]">
               <Lock size={11} />
               Sessions keep their harness — new chat to switch
             </div>
@@ -328,10 +341,10 @@ export function OptionPicker({
   };
 
   return (
-    <div className="option-picker" ref={ref}>
+    <div className="option-picker [position:relative] [display:inline-flex]" ref={ref}>
       <button
         type="button"
-        className={variant === "pill" ? "composer-pill" : "composer-bare"}
+        className={variant === "pill" ? "composer-pill [display:inline-flex] [align-items:center] [gap:5px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_8px] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]" : "composer-bare [display:inline-flex] [align-items:center] [gap:3px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_4px] [border-radius:var(--radius-sm)] [&:hover]:[color:var(--text)] [&.context-ring]:[display:inline-flex] [&.context-ring]:[align-items:center] [&.context-ring]:[margin-right:8px]"}
         title={title}
         onClick={() => setOpen((v) => !v)}
       >
@@ -339,41 +352,41 @@ export function OptionPicker({
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu ${align === "right" ? "align-right" : ""}`}>
-          {header && <div className="model-group">{header}</div>}
+        <div className={`option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] ${align === "right" ? "align-right" : ""}`}>
+          {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
           {pinned && (
             <>
-              <button className="model-item" onClick={() => choose(pinned.id)}>
+              <button className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(pinned.id)}>
                 <span>
                   {pinned.label}
                   {/* An unnamed sentinel's label already IS "Default", so the
                       usual marker would read "Default · Default" — say where
                       the behavior comes from instead. A named one ("Adaptive")
                       gets the standard marker. */}
-                  <span className="option-default">
+                  <span className="option-default [color:var(--muted)] [font-weight:var(--fw-regular)]">
                     {pinned.label === "Default" ? " · CLI configuration" : " · Default"}
                   </span>
                 </span>
                 {effectiveId === pinned.id && <Check size={13} />}
               </button>
-              <div className="option-sep" />
+              <div className="option-sep [height:1px] [margin:5px_4px] [background:var(--border-variant)]" />
             </>
           )}
           {rest.map((c, i) => (
-            <button key={c.id} className="model-item" onClick={() => choose(c.id)}>
+            <button key={c.id} className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(c.id)}>
               <span>
                 {c.label}
                 {/* A concrete default renders inline, in ramp order, with just
                     the marker — it's one of the tiers, not a separate kind of
                     choice like the pinned sentinel above. */}
                 {!pinned && c.id === defaultId && (
-                  <span className="option-default"> · Default</span>
+                  <span className="option-default [color:var(--muted)] [font-weight:var(--fw-regular)]"> · Default</span>
                 )}
               </span>
               {effectiveId === c.id ? (
                 <Check size={13} />
               ) : (
-                numbered && <span className="option-num">{i + 1}</span>
+                numbered && <span className="option-num [color:var(--muted)] [font-size:var(--fs-xs)] [font-variant-numeric:tabular-nums]">{i + 1}</span>
               )}
             </button>
           ))}

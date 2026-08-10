@@ -8,6 +8,20 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { FileTypeIcon } from "./FileTypeIcon";
 
+const FILE_TREE_ROW_CLASS_NAME = [
+  "file-tree-row [display:flex] [align-items:center] [gap:6px] [width:100%] [padding:3px_10px] [border:none]",
+  "[background:transparent] [color:var(--text)] [text-align:left] [cursor:pointer] [font-family:inherit]",
+  "[font-size:inherit] [&:hover]:[background:var(--panel)] [&_>_svg]:[flex-shrink:0]",
+  "[&_>_svg]:[color:var(--subtext)] [&_>_svg.file-tree-chevron]:[color:var(--muted)]",
+].join(" ");
+
+const FILE_TREE_CHEVRON_CLASS_NAME = [
+  "file-tree-chevron [color:var(--muted)] [flex-shrink:0] [button&]:[display:inline-flex]",
+  "[button&]:[align-items:center] [button&]:[justify-content:center] [button&]:[width:13px]",
+  "[button&]:[height:13px] [button&]:[padding:0] [button&]:[border:0] [button&]:[background:transparent]",
+  "[button&_>_svg]:[transition:transform_0.12s_ease] [button&_>_svg.open]:[transform:rotate(90deg)]",
+].join(" ");
+
 /** A node in the nested tree derived from the flat path list. */
 export interface DirNode {
   /** Child directories, keyed by name, sorted on render. */
@@ -69,17 +83,17 @@ function DirRow({
     <>
       <button
         type="button"
-        className="file-tree-row"
+        className={FILE_TREE_ROW_CLASS_NAME}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => onToggle(path)}
         title={path}
       >
         {isOpen ? (
-          <ChevronDown size={13} className="file-tree-chevron" />
+          <ChevronDown size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         ) : (
-          <ChevronRight size={13} className="file-tree-chevron" />
+          <ChevronRight size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         )}
-        <span className="file-tree-name">{name}</span>
+        <span className="file-tree-name [flex:1] [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]">{name}</span>
       </button>
       {isOpen && (
         <TreeLevel
@@ -135,13 +149,13 @@ export function TreeLevel({
           <button
             key={`f:${path}`}
             type="button"
-            className="file-tree-row"
+            className={FILE_TREE_ROW_CLASS_NAME}
             style={{ paddingLeft: 8 + depth * 14 }}
             onClick={() => onOpenFile(path)}
             title={path}
           >
             <FileTypeIcon name={name} />
-            <span className="file-tree-name">{name}</span>
+            <span className="file-tree-name [flex:1] [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]">{name}</span>
           </button>
         );
       })}

@@ -75,6 +75,51 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
+import { ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PAPER_TITLE_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+
+const TOOL_LINE_CLASS_NAME = [
+  "tool-line [flex:1] [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]",
+  "[font-size:var(--fs-md)] [color:var(--subtext)]",
+].join(" ");
+
+const PROMPT_COLLAPSED_CLASS_NAME = [
+  "prompt-collapsed [color:var(--muted)] [font-size:var(--fs-md)] [margin:4px_0] [&_summary]:[display:flex]",
+  "[&_summary]:[align-items:baseline] [&_summary]:[gap:8px] [&_summary]:[cursor:pointer]",
+  "[&_summary]:[list-style:none] [&_summary]:[user-select:none] [&_summary::-webkit-details-marker]:[display:none]",
+  "[&_summary::after]:[content:'›'] [&_summary::after]:[color:var(--muted)]",
+  "[&_summary::after]:[transition:transform_80ms_ease] [&[open]_summary::after]:[transform:rotate(90deg)]",
+].join(" ");
+
+const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
+  "prompt-collapsed-body [margin-top:6px] [padding-left:12px] [border-left:2px_solid_var(--border)]",
+  "[font-size:var(--fs-md)] [color:var(--subtext)]",
+].join(" ");
+
+const PROMPT_HEAD_CLASS_NAME = [
+  "prompt-head [font-size:var(--fs-xs)] [font-weight:var(--fw-semibold)] [color:var(--text)]",
+  "[&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-sm)] [&_code]:[color:var(--text)]",
+].join(" ");
+
+const PROMPT_ACTIONS_CLASS_NAME = [
+  "prompt-actions [display:flex] [flex-wrap:wrap] [gap:8px] [&_.btn-primary]:[display:inline-flex]",
+  "[&_.btn-primary]:[align-items:center] [&_.btn-primary]:[gap:6px] [&_.btn-primary]:[padding:6px_13px]",
+  "[&_.btn-primary]:[font-family:inherit] [&_.btn-primary]:[font-size:var(--fs-sm)]",
+  "[&_.btn-primary]:[font-weight:var(--fw-semibold)] [&_.btn-primary]:[border:1px_solid_transparent]",
+  "[&_.btn-primary]:[border-radius:var(--radius-sm)] [&_.btn-primary]:[cursor:pointer]",
+  "[&_.btn-primary]:[transition:background_80ms_ease,_border-color_80ms_ease] [&_.btn-ghost]:[display:inline-flex]",
+  "[&_.btn-ghost]:[align-items:center] [&_.btn-ghost]:[gap:6px] [&_.btn-ghost]:[padding:6px_13px]",
+  "[&_.btn-ghost]:[font-family:inherit] [&_.btn-ghost]:[font-size:var(--fs-sm)]",
+  "[&_.btn-ghost]:[font-weight:var(--fw-semibold)] [&_.btn-ghost]:[border:1px_solid_transparent]",
+  "[&_.btn-ghost]:[border-radius:var(--radius-sm)] [&_.btn-ghost]:[cursor:pointer]",
+  "[&_.btn-ghost]:[transition:background_80ms_ease,_border-color_80ms_ease]",
+  "[&_.btn-primary]:[background:var(--primary)] [&_.btn-primary]:[color:var(--base)]",
+  "[&_.btn-primary:hover:not(:disabled)]:[opacity:0.9] [&_.btn-ghost]:[background:transparent]",
+  "[&_.btn-ghost]:[border-color:var(--border)] [&_.btn-ghost]:[color:var(--subtext)]",
+  "[&_.btn-ghost:hover:not(:disabled)]:[border-color:var(--border-strong)]",
+  "[&_.btn-ghost:hover:not(:disabled)]:[color:var(--text)]",
+  "[&_.btn-ghost:hover:not(:disabled)]:[background:var(--surface)] [&_button:disabled]:[opacity:0.5]",
+  "[&_button:disabled]:[cursor:default]",
+].join(" ");
 
 // --- chat state --------------------------------------------------------------
 
@@ -183,9 +228,10 @@ function reducer(state: ChatState, action: Action): ChatState {
 // --- rendering ---------------------------------------------------------------
 
 function toolStatusClass(status: string | undefined): string {
-  if (status === "error") return "tool-status error";
-  if (status === "completed") return "tool-status";
-  return "tool-status running"; // running = in-flight
+  const base = "tool-status [width:6px] [height:6px] [border-radius:50%] [flex-shrink:0]";
+  if (status === "error") return `${base} error [background:var(--accent-red)]`;
+  if (status === "completed") return `${base} [background:var(--muted)]`;
+  return `${base} running [background:var(--accent-amber)] [animation:or-pulse_1.2s_ease-in-out_infinite]`;
 }
 
 function relTime(ts: number | undefined): string {
@@ -283,20 +329,20 @@ function toolSummary(part: ChatPart): React.ReactNode {
       const body =
         call.kind === "paper" && call.id ? (
           <a
-            className="tool-lit-link"
+            className="tool-lit-link [display:inline-flex] [align-items:center] [gap:4px] [min-width:0] [color:inherit] [text-decoration:none] [&:hover]:[color:var(--primary)] [&:hover_.tool-lit-text]:[text-decoration:underline] [&:hover_.tool-lit-ext]:[opacity:1]"
             href={paperUrl(call.source, call.id)}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
           >
-            <span className="tool-lit-text">{text}</span>
-            <ArrowUpRight className="tool-lit-ext" size={13} aria-hidden="true" />
+            <span className="tool-lit-text [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]">{text}</span>
+            <ArrowUpRight className="tool-lit-ext [flex:0_0_auto] [opacity:0.5]" size={13} aria-hidden="true" />
           </a>
         ) : (
-          <span className="tool-lit-text">{text}</span>
+          <span className="tool-lit-text [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]">{text}</span>
         );
       return (
-        <span className="tool-lit">
+        <span className="tool-lit [display:inline-flex] [align-items:center] [gap:8px] [min-width:0] [max-width:100%] [vertical-align:bottom]">
           <LitSourceLogo source={call.source} />
           {body}
         </span>
@@ -344,13 +390,13 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
   const filePath = typeof state?.input?.filePath === "string" ? state.input.filePath : null;
   const hasDetail = Boolean(output || cmd || filePath);
   return (
-    <details className="tool-row" open={false}>
+    <details className="tool-row [display:flex] [flex-direction:column] [&_summary]:[display:flex] [&_summary]:[align-items:center] [&_summary]:[gap:8px] [&_summary]:[padding:3px_4px] [&_summary]:[cursor:pointer] [&_summary]:[list-style:none] [&_summary]:[user-select:none] [&_summary]:[min-width:0] [&_summary]:[border-radius:var(--radius-sm)] [&_summary:hover]:[background:var(--surface)] [&_summary::-webkit-details-marker]:[display:none]" open={false}>
       <summary>
         <span className={toolStatusClass(state?.status)} />
-        <span className="tool-line">{toolSummary(part)}</span>
+        <span className={TOOL_LINE_CLASS_NAME}>{toolSummary(part)}</span>
         {filePath && onOpenFile && (
           <button
-            className="tool-open file-link"
+            className="tool-open [flex-shrink:0] [font-size:var(--fs-xs)] [color:var(--primary)] [&:hover]:[text-decoration:underline] file-link"
             title={`Open ${filePath}`}
             onClick={(e) => {
               e.preventDefault();
@@ -363,12 +409,12 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
         )}
       </summary>
       {hasDetail && (
-        <div className="tool-detail">
-          {cmd && <div className="tool-cmd-full">{cmd}</div>}
+        <div className="tool-detail [margin:2px_0_4px_14px]">
+          {cmd && <div className="tool-cmd-full [padding:6px_10px] [font-family:var(--mono)] [font-size:var(--fs-xs)] [color:var(--text)] [background:var(--surface)] [border-radius:var(--radius-sm)] [white-space:pre-wrap] [word-break:break-word]">{cmd}</div>}
           {/* Safety net for pre-cap stored transcripts; the backend caps live
               tool output at 16k (TOOL_TEXT_CAP), so this slice must stay
               above that or it clips the truncation marker. */}
-          {output && <div className="tool-output">{output.slice(0, 20000)}</div>}
+          {output && <div className="tool-output [margin-top:3px] [padding:6px_10px] [font-family:var(--mono)] [font-size:var(--fs-xs)] [color:var(--subtext)] [white-space:pre-wrap] [word-break:break-word] [max-height:260px] [overflow-y:auto] [background:var(--base)] [border:1px_solid_var(--border-variant)] [border-radius:var(--radius-sm)]">{output.slice(0, 20000)}</div>}
         </div>
       )}
     </details>
@@ -390,7 +436,7 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
   // duplicate line whose detail was collapsed anyway.
   if (parts.length === 1) {
     return (
-      <div className={`tool-group ${errored ? "has-error" : ""}`}>
+      <div className={`tool-group [margin:2px_0] [&.has-error_.tool-group-summary]:[color:var(--accent-red)] [&.has-error_>_.tool-row_.tool-line]:[color:var(--accent-red)] ${errored ? "has-error" : ""}`}>
         <ToolRow part={parts[0]} onOpenFile={onOpenFile} />
       </div>
     );
@@ -404,14 +450,14 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
   const summary = `Used ${parts.length} tools`;
 
   return (
-    <div className={`tool-group ${errored ? "has-error" : ""}`}>
-      <button className="tool-group-summary" onClick={() => setOpen((v) => !v)}>
+    <div className={`tool-group [margin:2px_0] [&.has-error_.tool-group-summary]:[color:var(--accent-red)] [&.has-error_>_.tool-row_.tool-line]:[color:var(--accent-red)] ${errored ? "has-error" : ""}`}>
+      <button className="tool-group-summary [display:flex] [align-items:center] [gap:8px] [width:100%] [padding:3px_2px] [cursor:pointer] [color:var(--muted)] [font-size:var(--fs-md)] [text-align:left] [border-radius:var(--radius-sm)] [&:hover]:[color:var(--subtext)] [&:hover]:[background:var(--surface)]" onClick={() => setOpen((v) => !v)}>
         <span className={toolStatusClass(running ? "running" : errored ? "error" : "completed")} />
-        <span className="tool-line">{summary}</span>
-        <ChevronRight size={12} className={`tool-chevron ${expanded ? "open" : ""}`} />
+        <span className={TOOL_LINE_CLASS_NAME}>{summary}</span>
+        <ChevronRight size={12} className={`tool-chevron [flex-shrink:0] [color:var(--muted)] [transition:transform_0.12s_ease] [&.open]:[transform:rotate(90deg)] ${expanded ? "open" : ""}`} />
       </button>
       {expanded && (
-        <div className="tool-group-rows">
+        <div className="tool-group-rows [display:flex] [flex-direction:column] [gap:1px] [margin:2px_0_4px_7px] [padding-left:10px] [border-left:1px_solid_var(--border-variant)] [&_.tool-status]:[display:none]">
           {parts.map((p) => (
             <ToolRow key={p.id} part={p} onOpenFile={onOpenFile} />
           ))}
@@ -470,16 +516,16 @@ function PromptCard({
               : "rejected"
             : "";
       return (
-        <details className="prompt-collapsed">
+        <details className={PROMPT_COLLAPSED_CLASS_NAME}>
           <summary>
-            <span className="prompt-collapsed-title">
+            <span className="prompt-collapsed-title [font-weight:var(--fw-semibold)] [word-break:break-word]">
               {p.synthesized ? "Plan" : "Proposed plan"}
             </span>
-            <span className={`prompt-outcome ${outcomeClass}`}>{outcome}</span>
+            <span className={`prompt-outcome [font-size:var(--fs-sm)] [color:var(--subtext)] [word-break:break-word] [&.approved]:[color:var(--accent-green)] [&.chosen]:[color:var(--accent-green)] [&.approved::before]:[content:'✓_'] [&.chosen::before]:[content:'✓_'] [&.revised]:[color:var(--accent-amber)] [&.rejected]:[color:var(--accent-amber)] ${outcomeClass}`}>{outcome}</span>
           </summary>
-          <div className="prompt-collapsed-body">
+          <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
-            {p.note && <div className="prompt-collapsed-note">{p.note}</div>}
+            {p.note && <div className="prompt-collapsed-note [margin-top:6px] [font-style:italic]">{p.note}</div>}
           </div>
         </details>
       );
@@ -489,16 +535,16 @@ function PromptCard({
     // matching the plan row.
     const chosen = (p.answers ?? []).join(", ") || p.note || "";
     return (
-      <details className="prompt-collapsed">
+      <details className={PROMPT_COLLAPSED_CLASS_NAME}>
         <summary>
-          <span className="prompt-collapsed-title">{p.header || p.question || "Question"}</span>
-          <span className={`prompt-outcome ${chosen ? "chosen" : ""}`}>{chosen || "Resolved"}</span>
+          <span className="prompt-collapsed-title [font-weight:var(--fw-semibold)] [word-break:break-word]">{p.header || p.question || "Question"}</span>
+          <span className={`prompt-outcome [font-size:var(--fs-sm)] [color:var(--subtext)] [word-break:break-word] [&.approved]:[color:var(--accent-green)] [&.chosen]:[color:var(--accent-green)] [&.approved::before]:[content:'✓_'] [&.chosen::before]:[content:'✓_'] [&.revised]:[color:var(--accent-amber)] [&.rejected]:[color:var(--accent-amber)] ${chosen ? "chosen" : ""}`}>{chosen || "Resolved"}</span>
         </summary>
-        <div className="prompt-collapsed-body">
+        <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
           {/* The summary title already shows the question when there's no header. */}
-          {p.header && p.question && <div className="prompt-q">{p.question}</div>}
+          {p.header && p.question && <div className="prompt-q [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [line-height:1.5] [color:var(--text)]">{p.question}</div>}
           {(p.options ?? []).length > 0 && (
-            <ul className="prompt-collapsed-options">
+            <ul className="prompt-collapsed-options [margin:6px_0_0] [padding-left:18px] [&_.sel]:[color:var(--text)] [&_.sel]:[font-weight:var(--fw-semibold)]">
               {(p.options ?? []).map((o) => (
                 <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
                   {o.label}
@@ -507,7 +553,7 @@ function PromptCard({
             </ul>
           )}
           {/* A note-only answer is already the summary outcome — don't echo it twice. */}
-          {p.note && p.note !== chosen && <div className="prompt-collapsed-note">{p.note}</div>}
+          {p.note && p.note !== chosen && <div className="prompt-collapsed-note [margin-top:6px] [font-style:italic]">{p.note}</div>}
         </div>
       </details>
     );
@@ -521,22 +567,22 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card plan ${done ? "readonly" : ""}`}>
-        <div className="prompt-head">
+      <div className={`prompt-card [margin:8px_0] [padding:12px_14px] [border:1px_solid_var(--border)] [border-left:3px_solid_var(--border)] [border-radius:var(--radius-sm)] [background:var(--surface)] [display:flex] [flex-direction:column] [gap:9px] [&.plan]:[border-left-color:var(--accent-blue)] [&.permission]:[border-left-color:var(--accent-amber)] [&.question]:[border-left-color:var(--accent-purple)] [&.readonly]:[opacity:0.6] plan ${done ? "readonly" : ""}`}>
+        <div className={PROMPT_HEAD_CLASS_NAME}>
           {p.synthesized ? "Plan mode — ready to proceed?" : "Proposed plan"}
         </div>
-        <div className={`prompt-plan ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan [font-size:var(--fs-base)] [line-height:1.6] [color:var(--text)] [max-height:340px] [overflow-y:auto] [&.clamped]:[max-height:9.5em] [&.clamped]:[overflow:hidden] [&.clamped]:[position:relative] [&.clamped::after]:[content:''] [&.clamped::after]:[position:absolute] [&.clamped::after]:[inset:auto_0_0_0] [&.clamped::after]:[height:34px] [&.clamped::after]:[background:linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:[pointer-events:none] ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
-          <button className="prompt-plan-open" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
+          <button className="prompt-plan-open [align-self:flex-start] [border:none] [background:transparent] [color:var(--accent-blue)] [font-size:var(--fs-sm)] [padding:0] [cursor:pointer] [&:hover]:[text-decoration:underline]" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
             View full plan
           </button>
         )}
         {/* Strip-less fallback (unreachable in the main app — App always
             provides onOpenPlan): same action semantics as the strip. */}
         {!done && !docked && (
-          <div className="prompt-actions">
+          <div className={PROMPT_ACTIONS_CLASS_NAME}>
             <button className="btn-primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
               Accept and auto mode
             </button>
@@ -562,18 +608,18 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     return (
-      <div className={`prompt-card permission ${done ? "readonly" : ""}`}>
-        <div className="prompt-head">
+      <div className={`prompt-card [margin:8px_0] [padding:12px_14px] [border:1px_solid_var(--border)] [border-left:3px_solid_var(--border)] [border-radius:var(--radius-sm)] [background:var(--surface)] [display:flex] [flex-direction:column] [gap:9px] [&.plan]:[border-left-color:var(--accent-blue)] [&.permission]:[border-left-color:var(--accent-amber)] [&.question]:[border-left-color:var(--accent-purple)] [&.readonly]:[opacity:0.6] permission ${done ? "readonly" : ""}`}>
+        <div className={PROMPT_HEAD_CLASS_NAME}>
           Permission needed: <code>{p.tool}</code>
         </div>
-        {summary && <div className="prompt-sub">{summary}</div>}
-        {reason && <div className="prompt-sub">{reason}</div>}
+        {summary && <div className="prompt-sub [font-size:var(--fs-sm)] [color:var(--subtext)] [word-break:break-word]">{summary}</div>}
+        {reason && <div className="prompt-sub [font-size:var(--fs-sm)] [color:var(--subtext)] [word-break:break-word]">{reason}</div>}
         {!done && (
           // No resumeMode: the harness picks the right one for an approval.
           // Claude resumes under `bypass` (the only mode that actually grants a
           // blocked tool — acceptEdits would re-deny Bash); inline harnesses
           // (opencode) reply once/reject keyed off `approve`. Deny denies either way.
-          <div className="prompt-actions">
+          <div className={PROMPT_ACTIONS_CLASS_NAME}>
             <button className="btn-primary" onClick={() => respond({ approve: true })}>
               Allow
             </button>
@@ -596,27 +642,27 @@ function PromptCard({
         : [label],
     );
   return (
-    <div className={`prompt-card question ${done ? "readonly" : ""}`}>
-      {p.header && <div className="prompt-head">{p.header}</div>}
-      {p.question && <div className="prompt-q">{p.question}</div>}
-      <div className="prompt-options">
+    <div className={`prompt-card [margin:8px_0] [padding:12px_14px] [border:1px_solid_var(--border)] [border-left:3px_solid_var(--border)] [border-radius:var(--radius-sm)] [background:var(--surface)] [display:flex] [flex-direction:column] [gap:9px] [&.plan]:[border-left-color:var(--accent-blue)] [&.permission]:[border-left-color:var(--accent-amber)] [&.question]:[border-left-color:var(--accent-purple)] [&.readonly]:[opacity:0.6] question ${done ? "readonly" : ""}`}>
+      {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
+      {p.question && <div className="prompt-q [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [line-height:1.5] [color:var(--text)]">{p.question}</div>}
+      <div className="prompt-options [display:flex] [flex-direction:column] [gap:6px]">
         {(p.options ?? []).map((o) => {
           const sel = picked.includes(o.label);
           return (
             <button
               key={o.label}
-              className={`prompt-option ${sel ? "sel" : ""}`}
+              className={`prompt-option [display:flex] [flex-direction:column] [align-items:flex-start] [gap:2px] [width:100%] [padding:8px_11px] [text-align:left] [border:1px_solid_var(--border)] [border-radius:var(--radius-sm)] [background:var(--base)] [color:var(--text)] [cursor:pointer] [transition:border-color_80ms_ease,_background_80ms_ease] [&:hover:not(:disabled)]:[border-color:var(--border-strong)] [&:hover:not(:disabled)]:[background:var(--surface)] [&.sel]:[border-color:var(--primary)] [&.sel]:[background:var(--primary-subtle)] [&:disabled]:[cursor:default] ${sel ? "sel" : ""}`}
               disabled={done}
               onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
             >
-              <span className="prompt-option-label">{o.label}</span>
-              {o.description && <span className="prompt-option-desc">{o.description}</span>}
+              <span className="prompt-option-label [display:block] [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)]">{o.label}</span>
+              {o.description && <span className="prompt-option-desc [display:block] [font-size:var(--fs-sm)] [font-weight:var(--fw-regular)] [line-height:1.45] [color:var(--subtext)]">{o.description}</span>}
             </button>
           );
         })}
       </div>
       {p.multiSelect && !done && (
-        <div className="prompt-actions">
+        <div className={PROMPT_ACTIONS_CLASS_NAME}>
           <button
             className="btn-primary"
             disabled={picked.length === 0}
@@ -712,17 +758,17 @@ const Message = memo(function Message({
     const images = attachments.filter((a) => !a.isPdf);
     const files = attachments.filter((a) => a.isPdf);
     return (
-      <div className="msg-user">
+      <div className="msg-user [align-self:flex-end] [max-width:88%] [background:var(--surface)] [border-radius:16px] [padding:10px_15px] [font-size:var(--fs-base)] [white-space:pre-wrap] [word-break:break-word] [&_.skill-chip]:[margin-right:2px] [&_.skill-chip]:[vertical-align:baseline]">
         {command ? (
           <>
-            <span className="skill-chip">/{command.name}</span>
+            <span className="skill-chip [display:inline-flex] [align-items:center] [padding:1px_7px] [font-family:var(--mono)] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [color:var(--primary)] [background:var(--primary-subtle)] [border:1px_solid_var(--border-variant)] [border-radius:var(--radius-sm)]">/{command.name}</span>
             {slash![2]}
           </>
         ) : (
           text
         )}
         {images.length > 0 && (
-          <div className="msg-images">
+          <div className="msg-images [display:flex] [flex-wrap:wrap] [gap:6px] [margin-top:8px] [&_img]:[max-width:220px] [&_img]:[max-height:160px] [&_img]:[border:1px_solid_var(--border-variant)] [&_img]:[border-radius:var(--radius-xs)] [&_img]:[display:block]">
             {images.map((a, i) => (
               <a key={i} href={a.src} target="_blank" rel="noreferrer">
                 <img src={a.src} alt="attachment" />
@@ -731,9 +777,9 @@ const Message = memo(function Message({
           </div>
         )}
         {files.length > 0 && (
-          <div className="msg-files">
+          <div className="msg-files [display:flex] [flex-wrap:wrap] [gap:6px] [margin-top:8px]">
             {files.map((a, i) => (
-              <a key={i} className="msg-file" href={a.src} target="_blank" rel="noreferrer">
+              <a key={i} className="msg-file [display:inline-flex] [align-items:center] [gap:6px] [max-width:240px] [padding:6px_10px] [border:1px_solid_var(--border-variant)] [border-radius:var(--radius-sm)] [color:var(--text)] [text-decoration:none] [&:hover]:[border-color:var(--text)] [&_span]:[overflow:hidden] [&_span]:[text-overflow:ellipsis] [&_span]:[white-space:nowrap]" href={a.src} target="_blank" rel="noreferrer">
                 <FileText size={15} />
                 <span>{a.name}</span>
               </a>
@@ -744,7 +790,7 @@ const Message = memo(function Message({
     );
   }
   return (
-    <div className="msg-assistant">
+    <div className="msg-assistant [font-size:var(--fs-lg)] [line-height:1.62] [color:var(--text)] [min-width:0]">
       {renderParts(message.parts, { onOpenFile, onOpenRun, onRespond, onOpenPlan, onOpenSubagent })}
     </div>
   );
@@ -806,7 +852,7 @@ function renderParts(
       );
     else if (part.type === "reasoning")
       rendered.push(
-        <details key={part.id} className="reasoning">
+        <details key={part.id} className="reasoning [color:var(--muted)] [font-size:var(--fs-md)] [margin:2px_0] [&_summary]:[cursor:pointer] [&_summary]:[list-style:none] [&_summary]:[user-select:none] [&_summary]:[font-weight:var(--fw-semibold)] [&[open]]:[white-space:pre-wrap]">
           <summary>thinking…</summary>
           {part.text}
         </details>,
@@ -857,14 +903,14 @@ export function SubagentTranscript({
   // stored transcript of nothing but invisible parts must still read as empty.
   const rendered = renderParts(parts, { onOpenFile, onOpenRun, onOpenSubagent });
   return (
-    <div className="msg-assistant">
-      <div className="subagent-tab-header">
+    <div className="msg-assistant [font-size:var(--fs-lg)] [line-height:1.62] [color:var(--text)] [min-width:0]">
+      <div className="subagent-tab-header [display:flex] [align-items:center] [gap:8px] [padding-bottom:8px] [margin-bottom:8px] [border-bottom:1px_solid_var(--border-variant)]">
         <span className={toolStatusClass(spawn.state?.status)} />
-        <span className="tool-line">{toolLine(spawn)}</span>
-        {running && <span className="subagent-live">live</span>}
+        <span className={TOOL_LINE_CLASS_NAME}>{toolLine(spawn)}</span>
+        {running && <span className="subagent-live [flex-shrink:0] [font-size:var(--fs-xs)] [color:var(--accent-amber)]">live</span>}
       </div>
       {rendered.length === 0 ? (
-        <div className="subagent-empty">{running ? "Working…" : "No activity"}</div>
+        <div className="subagent-empty [padding:3px_4px] [font-size:var(--fs-md)] [color:var(--muted)]">{running ? "Working…" : "No activity"}</div>
       ) : (
         rendered
       )}
@@ -887,15 +933,15 @@ function SubagentBlock({
   const errored = part.state?.status === "error";
   return (
     <button
-      className={`subagent-row ${errored ? "has-error" : ""}`}
+      className={`subagent-row [display:flex] [align-items:center] [gap:8px] [width:100%] [margin:2px_0] [padding:3px_4px] [cursor:pointer] [color:var(--text)] [font-size:var(--fs-base)] [text-align:left] [border-radius:var(--radius-sm)] [&:hover:not(:disabled)]:[background:var(--surface)] [&:disabled]:[cursor:default] [&.has-error]:[color:var(--accent-red)] [&_.tool-line]:[font-size:var(--fs-base)] [&_.tool-line]:[color:var(--text)] ${errored ? "has-error" : ""}`}
       title="Open sub-agent transcript"
       onClick={() => onOpenSubagent?.(part.id)}
       disabled={!onOpenSubagent}
     >
-      <Users size={12} className="subagent-icon" />
+      <Users size={12} className="subagent-icon [flex-shrink:0] [color:var(--muted)]" />
       <span className={toolStatusClass(part.state?.status)} />
-      <span className="tool-line">{toolLine(part)}</span>
-      <ChevronRight size={12} className="subagent-row-chevron" />
+      <span className={TOOL_LINE_CLASS_NAME}>{toolLine(part)}</span>
+      <ChevronRight size={12} className="subagent-row-chevron [flex-shrink:0] [color:var(--muted)]" />
     </button>
   );
 }
@@ -966,9 +1012,9 @@ function SessionFilterMenu({
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
-    <div className="rail-filter" ref={ref}>
+    <div className="rail-filter [position:relative] [display:inline-flex]" ref={ref}>
       <button
-        className={`icon-btn rail-filter-btn ${value !== "active" ? "active" : ""}`}
+        className={`${ICON_BUTTON_BASE_CLASS_NAME} rail-filter-btn [width:24px] [height:24px] [border-radius:var(--radius-sm)] ${value !== "active" ? "active" : ""}`}
         title="Filter sessions"
         aria-label="Filter sessions"
         onClick={() => setOpen((v) => !v)}
@@ -976,11 +1022,11 @@ function SessionFilterMenu({
         <SlidersHorizontal size={13} />
       </button>
       {open && (
-        <div className="option-menu drop-down align-right">
+        <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] drop-down align-right">
           {SESSION_FILTERS.map((f) => (
             <button
               key={f.id}
-              className="model-item"
+              className={MODEL_ITEM_CLASS_NAME}
               onClick={() => {
                 onChange(f.id);
                 setOpen(false);
@@ -1027,7 +1073,7 @@ function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
           <span
             key={i}
             aria-hidden
-            className="title-reveal-char"
+            className="title-reveal-char [display:inline-block] [animation:title-char-in_240ms_ease-out_both] [@media((prefers-reduced-motion:_reduce))]:[animation:none]"
             style={{
               animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
             }}
@@ -1102,7 +1148,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row ${active ? "active" : ""} ${unread ? "unread" : ""} ${open ? "menu-open" : ""} ${
+      className={`session-row [position:relative] [display:flex] [align-items:center] [gap:8px] [width:100%] [text-align:left] [padding:7px_10px] [border-radius:var(--radius-md)] [font-size:var(--fs-md)] [color:var(--text)] [cursor:pointer] [user-select:none] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--surface)] [&.active]:[font-weight:var(--fw-medium)] [&_.session-dot]:[width:14px] [&_.session-dot]:[display:inline-flex] [&_.session-dot]:[align-items:center] [&_.session-dot]:[justify-content:center] [&_.session-dot]:[flex-shrink:0] [&_.session-title]:[flex:1] [&_.session-title]:[min-width:0] [&_.session-title]:[overflow:hidden] [&_.session-title]:[text-overflow:ellipsis] [&_.session-title]:[white-space:nowrap] [&.unread_.session-title]:[font-weight:var(--fw-semibold)] [&_.session-time]:[font-size:var(--fs-2xs)] [&_.session-time]:[color:var(--muted)] [&_.session-time]:[flex-shrink:0] [&_.session-menu-btn]:[display:none] [&_.session-menu-btn]:[align-items:center] [&_.session-menu-btn]:[justify-content:center] [&_.session-menu-btn]:[width:16px] [&_.session-menu-btn]:[height:16px] [&_.session-menu-btn]:[margin:-2px_0] [&_.session-menu-btn]:[border-radius:var(--radius-sm)] [&_.session-menu-btn]:[color:var(--muted)] [&_.session-menu-btn]:[flex-shrink:0] [&_.session-menu-btn:hover]:[color:var(--text)] [&_.session-menu-btn:hover]:[background:var(--panel)] [&:hover_.session-menu-btn]:[display:inline-flex] [&:focus-within_.session-menu-btn]:[display:inline-flex] [&.menu-open_.session-menu-btn]:[display:inline-flex] [&:hover_.session-time]:[display:none] [&:focus-within_.session-time]:[display:none] [&.menu-open_.session-time]:[display:none] [&_.busy-dot]:[width:7px] [&_.busy-dot]:[height:7px] [&_.busy-dot]:[border-radius:50%] [&_.busy-dot]:[background:var(--primary)] [&_.busy-dot]:[animation:or-pulse_1.2s_infinite] [&_.busy-dot]:[flex-shrink:0] [&_.unread-dot]:[width:7px] [&_.unread-dot]:[height:7px] [&_.unread-dot]:[border-radius:50%] [&_.unread-dot]:[background:var(--primary)] [&_.unread-dot]:[flex-shrink:0] [&_.busy-dot.waiting]:[animation:none] [&_.session-title-input]:[flex:1] [&_.session-title-input]:[min-width:0] [&_.session-title-input]:[padding:1px_5px] [&_.session-title-input]:[margin:-2px_0] [&_.session-title-input]:[font:inherit] [&_.session-title-input]:[color:var(--text)] [&_.session-title-input]:[background:var(--base)] [&_.session-title-input]:[border:1px_solid_var(--primary)] [&_.session-title-input]:[border-radius:var(--radius-sm)] [&_.session-title-input]:[outline:none] [&.editing]:[background:var(--surface)] [&.editing]:[cursor:default] [&.editing_.session-menu-btn]:[display:none] [&.editing_.session-time]:[display:none] ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
       }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
@@ -1177,9 +1223,9 @@ function SessionRow({
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="option-menu drop-down session-menu">
+        <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] drop-down session-menu">
           <button
-            className="model-item"
+            className={MODEL_ITEM_CLASS_NAME}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -1189,7 +1235,7 @@ function SessionRow({
             <span>Rename</span>
           </button>
           <button
-            className="model-item"
+            className={MODEL_ITEM_CLASS_NAME}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -1199,7 +1245,7 @@ function SessionRow({
             <span>{session.archived ? "Unarchive" : "Archive"}</span>
           </button>
           <button
-            className="model-item danger"
+            className={`${MODEL_ITEM_CLASS_NAME} danger`}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -2139,26 +2185,26 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className="session-rail floating-panel">
+    <aside className="session-rail [width:272px] [flex-shrink:0] [display:flex] [flex-direction:column] [margin:10px_14px_10px_0] [background:var(--base)] [min-height:0] [&_.rail-body]:[flex:1] [&_.rail-body]:[min-height:0] [&_.rail-body]:[overflow-y:auto] [&_.rail-body]:[padding:4px_8px] floating-panel [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] [overflow:hidden]">
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
-      <nav className="rail-nav">
+      <nav className="rail-nav [display:flex] [flex-direction:column] [gap:2px] [padding:8px] [flex-shrink:0]">
         <button
-          className={`rail-nav-item ${experimentsActive ? "active" : ""}`}
+          className={`rail-nav-item [display:flex] [align-items:center] [gap:10px] [padding:7px_10px] [font-size:var(--fs-base)] [color:var(--text)] [border-radius:var(--radius-md)] [text-align:left] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--panel)] [&.active]:[font-weight:var(--fw-semibold)] ${experimentsActive ? "active" : ""}`}
           onClick={onOpenExperiments}
         >
           <FlaskConical size={15} />
           Experiments
         </button>
         <button
-          className={`rail-nav-item ${filesActive ? "active" : ""}`}
+          className={`rail-nav-item [display:flex] [align-items:center] [gap:10px] [padding:7px_10px] [font-size:var(--fs-base)] [color:var(--text)] [border-radius:var(--radius-md)] [text-align:left] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--panel)] [&.active]:[font-weight:var(--fw-semibold)] ${filesActive ? "active" : ""}`}
           onClick={onOpenWorktree}
         >
           <FolderOpen size={15} />
           Files
         </button>
         <button
-          className={`rail-nav-item ${artifactsActive ? "active" : ""}`}
+          className={`rail-nav-item [display:flex] [align-items:center] [gap:10px] [padding:7px_10px] [font-size:var(--fs-base)] [color:var(--text)] [border-radius:var(--radius-md)] [text-align:left] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--panel)] [&.active]:[font-weight:var(--fw-semibold)] ${artifactsActive ? "active" : ""}`}
           data-onboarding="nav-artifacts"
           onClick={onOpenArtifacts}
         >
@@ -2168,7 +2214,7 @@ export function ChatPanel({
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item ${mainView !== "chat" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item [display:flex] [align-items:center] [gap:10px] [padding:7px_10px] [font-size:var(--fs-base)] [color:var(--text)] [border-radius:var(--radius-md)] [text-align:left] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--panel)] [&.active]:[font-weight:var(--fw-semibold)] ${mainView !== "chat" && item.activeTabs.includes(mainView) ? "active" : ""}`}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -2177,13 +2223,13 @@ export function ChatPanel({
           </button>
         ))}
       </nav>
-      <div className="rail-section-head">
-        <div className="rail-section-label">
+      <div className="rail-section-head [display:flex] [align-items:center] [justify-content:space-between] [flex-shrink:0] [padding:14px_10px_6px_18px]">
+        <div className="rail-section-label [padding:0] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [color:var(--subtext)]">
           {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel ?? "Recents"}
         </div>
-        <div className="rail-section-actions">
+        <div className="rail-section-actions [display:flex] [align-items:center] [gap:2px]">
           <button
-            className="rail-section-new tip-up"
+            className="rail-section-new [display:inline-flex] [align-items:center] [gap:4px] [padding:3px_6px] [border-radius:var(--radius-sm)] [color:var(--subtext)] [font-size:var(--fs-xs)] [font-weight:var(--fw-medium)] [&:hover]:[color:var(--text)] [&:hover]:[background:var(--surface)] tip-up [&[data-tip]::after]:[top:auto] [&[data-tip]::after]:[bottom:calc(100%_+_6px)]"
             data-onboarding="new-session"
             data-tip={newTaskShortcut}
             aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
@@ -2222,7 +2268,7 @@ export function ChatPanel({
           />
         ))}
         {visibleSessions.length === 0 && (
-          <div className="rail-empty">
+          <div className="rail-empty [padding:6px_10px] [font-size:var(--fs-md)] [color:var(--muted)]">
             {sessionFilter === "archived"
               ? "No archived sessions"
               : sessions.length > 0
@@ -2238,10 +2284,10 @@ export function ChatPanel({
   // (Claude-desktop style): the reopen toggle sits in the window's top-left
   // corner with the title beside it, instead of riding the centered readable
   // column.
-  const headerClass = `chat-header${railOpen ? "" : " rail-hidden"}`;
+  const headerClass = `chat-header [display:flex] [align-items:center] [gap:8px] [padding:0_16px] [background:var(--base)] [flex-shrink:0] [height:48px] [position:relative] [z-index:4] [width:100%] [max-width:var(--readable-col)] [margin:0_auto] [&.rail-hidden]:[max-width:none] [&.rail-hidden]:[padding:0_2px] [&::after]:[content:''] [&::after]:[position:absolute] [&::after]:[top:100%] [&::after]:[left:0] [&::after]:[right:0] [&::after]:[height:24px] [&::after]:[background:linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:[pointer-events:none]${railOpen ? "" : " rail-hidden"}`;
   const railReopen = !railOpen && (
     <button
-      className="icon-btn"
+      className={ICON_BUTTON_CLASS_NAME}
       title="Show sidebar"
       aria-label="Show sidebar"
       onClick={onShowRail}
@@ -2254,9 +2300,9 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane">
+        <section className="chat-pane [flex:1] [min-width:0] [display:flex] [flex-direction:column] [background:var(--base)] [min-height:0]">
           {!railOpen && <div className={headerClass}>{railReopen}</div>}
-          <div className="settings-view-scroll">{children}</div>
+          <div className="settings-view-scroll [flex:1] [min-height:0] [overflow-y:auto] [scrollbar-gutter:stable_both-edges]">{children}</div>
         </section>
       </>
     );
@@ -2265,13 +2311,13 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section className="chat-pane">
+      <section className="chat-pane [flex:1] [min-width:0] [display:flex] [flex-direction:column] [background:var(--base)] [min-height:0]">
       {/* Header — session title on the left, right-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
         <div
-          className="title"
+          className={PAPER_TITLE_CLASS_NAME}
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
         >
           {activeSession ? (
@@ -2286,7 +2332,7 @@ export function ChatPanel({
         </div>
         {onStartTour && (
           <button
-            className="icon-btn"
+            className={ICON_BUTTON_CLASS_NAME}
             data-tip="Replay tour"
             aria-label="Replay tour"
             onClick={onStartTour}
@@ -2297,24 +2343,24 @@ export function ChatPanel({
       </div>
 
       {historyLoading ? (
-        <div className="chat-loading" aria-live="polite" aria-busy="true">
-          <span className="spinner" />
+        <div className="chat-loading [flex:1] [display:flex] [align-items:center] [justify-content:center] [gap:12px] [color:var(--subtext)] [font-size:var(--fs-xl)] [padding:20px] [&_.spinner]:[width:22px] [&_.spinner]:[height:22px] [&_.spinner]:[border-width:3px]" aria-live="polite" aria-busy="true">
+          <span className={SPINNER_CLASS_NAME} />
           <span>Loading conversation…</span>
         </div>
       ) : !threadMounted ? (
-        <div className="chat-empty">
-          <div className="chat-empty-mark">
+        <div className="chat-empty [flex:1] [display:flex] [flex-direction:column] [align-items:center] [justify-content:center] [container-type:inline-size] [color:var(--text)] [padding:32px] [text-align:center] [&_h2]:[margin:0] [&_h2]:[font-size:var(--fs-5xl)] [&_h2]:[font-weight:var(--fw-medium)] [&_h2]:[letter-spacing:-0.015em] [&_h2]:[color:var(--text)]">
+          <div className="chat-empty-mark [width:42px] [height:42px] [margin-bottom:22px] [&_svg]:[display:block] [&_svg]:[width:100%] [&_svg]:[height:100%]">
             <BrandMark />
           </div>
           <h2>What should we research?</h2>
-          <div className="chat-empty-project">
+          <div className="chat-empty-project [display:inline-flex] [align-items:center] [gap:7px] [margin-top:12px] [padding:6px_12px] [border:1px_solid_var(--border)] [border-radius:var(--radius-full)] [color:var(--subtext)] [background:var(--surface)] [font-size:var(--fs-lg)] [font-weight:var(--fw-semibold)]">
             <FolderOpen size={19} />
             <span>{projectName}</span>
           </div>
-          <div className="chat-empty-starters">
+          <div className="chat-empty-starters [display:grid] [grid-template-columns:repeat(2,_minmax(0,_1fr))] [gap:10px] [width:min(100%,_620px)] [margin-top:76px] [@container((min-width:_500px))]:[grid-template-columns:repeat(4,_minmax(0,_1fr))] [@container((min-width:_500px))]:[width:min(100%,_720px)]">
             <button
               type="button"
-              className="chat-empty-starter blue"
+              className="chat-empty-starter [min-height:112px] [display:flex] [flex-direction:column] [align-items:flex-start] [justify-content:space-between] [gap:20px] [padding:16px] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [color:var(--text)] [background:var(--base)] [box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] [text-align:left] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [line-height:1.35] [transition:border-color_120ms_ease,_background_120ms_ease,_transform_120ms_ease] [&:hover]:[border-color:var(--muted)] [&:hover]:[background:var(--surface)] [&:hover]:[transform:translateY(-1px)] [&.blue_svg]:[color:var(--accent-blue)] [&.purple_svg]:[color:var(--accent-purple)] [&.green_svg]:[color:var(--accent-green)] [&.orange_svg]:[color:var(--accent-orange)] blue"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Explore this codebase and explain its architecture, key components, and open research questions.");
@@ -2326,7 +2372,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter purple"
+              className="chat-empty-starter [min-height:112px] [display:flex] [flex-direction:column] [align-items:flex-start] [justify-content:space-between] [gap:20px] [padding:16px] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [color:var(--text)] [background:var(--base)] [box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] [text-align:left] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [line-height:1.35] [transition:border-color_120ms_ease,_background_120ms_ease,_transform_120ms_ease] [&:hover]:[border-color:var(--muted)] [&:hover]:[background:var(--surface)] [&:hover]:[transform:translateY(-1px)] [&.blue_svg]:[color:var(--accent-blue)] [&.purple_svg]:[color:var(--accent-purple)] [&.green_svg]:[color:var(--accent-green)] [&.orange_svg]:[color:var(--accent-orange)] purple"
               onClick={() => {
                 const skill = skills.find((s) => s.name === "reproduce-paper");
                 if (paperId && skill) {
@@ -2348,7 +2394,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter green"
+              className="chat-empty-starter [min-height:112px] [display:flex] [flex-direction:column] [align-items:flex-start] [justify-content:space-between] [gap:20px] [padding:16px] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [color:var(--text)] [background:var(--base)] [box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] [text-align:left] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [line-height:1.35] [transition:border-color_120ms_ease,_background_120ms_ease,_transform_120ms_ease] [&:hover]:[border-color:var(--muted)] [&:hover]:[background:var(--surface)] [&:hover]:[transform:translateY(-1px)] [&.blue_svg]:[color:var(--accent-blue)] [&.purple_svg]:[color:var(--accent-purple)] [&.green_svg]:[color:var(--accent-green)] [&.orange_svg]:[color:var(--accent-orange)] green"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Set up and run an experiment for this project, including a baseline and meaningful variants.");
@@ -2360,7 +2406,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter orange"
+              className="chat-empty-starter [min-height:112px] [display:flex] [flex-direction:column] [align-items:flex-start] [justify-content:space-between] [gap:20px] [padding:16px] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [color:var(--text)] [background:var(--base)] [box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] [text-align:left] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [line-height:1.35] [transition:border-color_120ms_ease,_background_120ms_ease,_transform_120ms_ease] [&:hover]:[border-color:var(--muted)] [&:hover]:[background:var(--surface)] [&:hover]:[transform:translateY(-1px)] [&.blue_svg]:[color:var(--accent-blue)] [&.purple_svg]:[color:var(--accent-purple)] [&.green_svg]:[color:var(--accent-green)] [&.orange_svg]:[color:var(--accent-orange)] orange"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Analyze the latest experiment results and recommend the most useful next iteration.");
@@ -2374,14 +2420,14 @@ export function ChatPanel({
         </div>
       ) : (
         <div
-          className="chat-thread"
+          className="chat-thread [flex:1] [min-height:0] [overflow-y:auto] [scrollbar-gutter:stable_both-edges]"
           ref={threadRef}
           onScroll={(e) => {
             const el = e.currentTarget;
             stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
           }}
         >
-          <div className="chat-thread-inner" ref={threadInnerRef}>
+          <div className="chat-thread-inner [max-width:var(--readable-col)] [margin:0_auto] [padding:16px_16px_32px] [display:flex] [flex-direction:column] [gap:16px]" ref={threadInnerRef}>
             <Transcript
               messages={messages}
               onOpenFile={openFileInSession}
@@ -2393,10 +2439,10 @@ export function ChatPanel({
             />
             {busy &&
               (awaitingInput ? (
-                <div className="working awaiting">Waiting for your input…</div>
+                <div className="working [display:flex] [align-items:center] [gap:8px] [color:var(--subtext)] [font-size:var(--fs-md)] [padding:2px_0_8px] [&.awaiting]:[font-style:italic] awaiting">Waiting for your input…</div>
               ) : (
-                <div className="working">
-                  <span className="spinner" /> Working…
+                <div className="working [display:flex] [align-items:center] [gap:8px] [color:var(--subtext)] [font-size:var(--fs-md)] [padding:2px_0_8px] [&.awaiting]:[font-style:italic]">
+                  <span className={SPINNER_CLASS_NAME} /> Working…
                 </div>
               ))}
           </div>
@@ -2405,7 +2451,7 @@ export function ChatPanel({
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer">
+      <div className="composer [padding:0_12px_12px] [flex-shrink:0] [position:relative] [z-index:4] [background:var(--base)] [width:100%] [max-width:var(--readable-col)] [margin:0_auto] [&::before]:[content:''] [&::before]:[position:absolute] [&::before]:[bottom:100%] [&::before]:[left:0] [&::before]:[right:0] [&::before]:[height:24px] [&::before]:[background:linear-gradient(to_top,_var(--base),_transparent)] [&::before]:[pointer-events:none] [&_textarea]:[border:none] [&_textarea]:[background:none] [&_textarea]:[resize:none] [&_textarea]:[padding:10px_12px_4px] [&_textarea]:[font-size:var(--fs-base)] [&_textarea]:[field-sizing:content] [&_textarea]:[min-height:72px] [&_textarea]:[max-height:180px]">
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -2435,9 +2481,9 @@ export function ChatPanel({
             }}
           />
         )}
-        <div className="composer-box" data-onboarding="composer">
+        <div className="composer-box [position:relative] [display:flex] [flex-direction:column] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [background:var(--base)]" data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
-            <div className="composer-harness-warning">
+            <div className="composer-harness-warning [padding:8px_12px] [color:var(--subtext)] [font-size:var(--fs-xs)] [line-height:1.5] [border-bottom:1px_solid_var(--border-variant)] [&_strong]:[color:var(--accent-amber)] [&_strong]:[font-weight:var(--fw-medium)] [&_code]:[font-family:var(--mono)] [&_code]:[color:var(--text)]">
               <strong>{activeHarness.name} is unavailable.</strong>{" "}
               {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : "Re-check its setup."}
             </div>
@@ -2451,20 +2497,20 @@ export function ChatPanel({
             />
           )}
           {attachments.length > 0 && (
-            <div className="composer-attachments">
+            <div className="composer-attachments [display:flex] [flex-wrap:wrap] [gap:6px] [padding:8px_12px_0]">
               {attachments.map((a, i) => {
                 const remove = () =>
                   setAttachments((cur) => cur.filter((_, j) => j !== i));
                 return a.mediaType === "application/pdf" ? (
-                  <div key={i} className="attachment-file" title={a.name}>
+                  <div key={i} className="attachment-file [&_button]:[position:absolute] [&_button]:[top:-5px] [&_button]:[right:-5px] [&_button]:[display:inline-flex] [&_button]:[align-items:center] [&_button]:[justify-content:center] [&_button]:[width:16px] [&_button]:[height:16px] [&_button]:[padding:0] [&_button]:[border:1px_solid_var(--border)] [&_button]:[border-radius:50%] [&_button]:[background:var(--surface)] [&_button]:[color:var(--text)] [&_button]:[cursor:pointer] [&_button:hover]:[background:var(--text)] [&_button:hover]:[color:var(--base)] [position:relative] [display:inline-flex] [align-items:center] [gap:8px] [max-width:220px] [padding:8px_10px] [border:1px_solid_var(--border)] [border-radius:var(--radius-sm)] [color:var(--text)] [background:var(--surface)] [&_svg]:[flex-shrink:0] [&_svg]:[color:var(--muted)]" title={a.name}>
                     <FileText size={22} />
-                    <span className="attachment-file-name">{a.name ?? "document.pdf"}</span>
+                    <span className="attachment-file-name [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap] [font-size:var(--fs-sm)]">{a.name ?? "document.pdf"}</span>
                     <button title="Remove file" aria-label="Remove file" onClick={remove}>
                       <X size={11} />
                     </button>
                   </div>
                 ) : (
-                  <div key={i} className="attachment-thumb">
+                  <div key={i} className="attachment-thumb [position:relative] [&_img]:[width:52px] [&_img]:[height:52px] [&_img]:[object-fit:cover] [&_img]:[border:1px_solid_var(--border)] [&_img]:[border-radius:var(--radius-sm)] [&_img]:[display:block] [&_button]:[position:absolute] [&_button]:[top:-5px] [&_button]:[right:-5px] [&_button]:[display:inline-flex] [&_button]:[align-items:center] [&_button]:[justify-content:center] [&_button]:[width:16px] [&_button]:[height:16px] [&_button]:[padding:0] [&_button]:[border:1px_solid_var(--border)] [&_button]:[border-radius:50%] [&_button]:[background:var(--surface)] [&_button]:[color:var(--text)] [&_button]:[cursor:pointer] [&_button:hover]:[background:var(--text)] [&_button:hover]:[color:var(--base)]">
                     <img src={a.dataUrl} alt="pasted" />
                     <button title="Remove image" aria-label="Remove image" onClick={remove}>
                       <X size={11} />
@@ -2475,15 +2521,15 @@ export function ChatPanel({
             </div>
           )}
           {attachError && (
-            <div className="composer-attach-error" role="alert">
+            <div className="composer-attach-error [padding:6px_12px_0] [font-size:var(--fs-sm)] [color:var(--accent-red)]" role="alert">
               {attachError}
             </div>
           )}
-          <div className="composer-input">
+          <div className="composer-input [position:relative] [display:flex] [overflow:hidden] [&_textarea]:[flex:1]">
             {pickedSkill && (
               // Inert like inline text: clicks fall through to the textarea
               // (pointer-events: none); Backspace at the start removes it.
-              <span ref={chipRef} className="skill-chip composer-chip">
+              <span ref={chipRef} className="skill-chip [display:inline-flex] [align-items:center] [padding:1px_7px] [font-family:var(--mono)] [font-size:var(--fs-md)] [font-weight:var(--fw-medium)] [color:var(--primary)] [background:var(--primary-subtle)] [border:1px_solid_var(--border-variant)] [border-radius:var(--radius-sm)] composer-chip [position:absolute] [top:9px] [left:12px] [z-index:1] [pointer-events:none]">
                 /{pickedSkill.name}
               </span>
             )}
@@ -2590,7 +2636,7 @@ export function ChatPanel({
               }}
             />
           </div>
-          <div className="composer-actions">
+          <div className="composer-actions [display:flex] [justify-content:flex-end] [align-items:center] [gap:8px] [padding:6px_8px_8px]">
             {/* Bottom-left: permission mode + literature sources. */}
             <OptionPicker
               choices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
@@ -2617,7 +2663,7 @@ export function ChatPanel({
             />
             <button
               type="button"
-              className="composer-attach"
+              className="composer-attach [display:inline-flex] [align-items:center] [justify-content:center] [width:30px] [height:30px] [border-radius:var(--radius-md)] [color:var(--muted)] [cursor:pointer] [transition:background_100ms_ease,_color_100ms_ease] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]"
               title="Attach a PDF or image"
               aria-label="Attach a PDF or image"
               onClick={() => fileInputRef.current?.click()}
@@ -2651,12 +2697,12 @@ export function ChatPanel({
               // (their cards are the affordance; send() can't service them).
               // Send stays only when it actually works: idle, or a held
               // QUESTION card that owns typed text.
-              <button className="send-btn stop" title="Stop" aria-label="Stop" onClick={stop}>
+              <button className="send-btn [display:inline-flex] [align-items:center] [justify-content:center] [width:32px] [height:32px] [border-radius:var(--radius-md)] [background:var(--primary)] [color:var(--base)] [transition:background_100ms_ease,_opacity_100ms_ease] [&:hover:not(:disabled)]:[background:color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:[opacity:0.4] [&:disabled]:[cursor:default] [&.stop]:[background:var(--surface)] [&.stop]:[color:var(--text)] [&.stop:hover:not(:disabled)]:[background:color-mix(in_oklab,_var(--surface)_88%,_var(--text))] stop" title="Stop" aria-label="Stop" onClick={stop}>
                 <X size={16} />
               </button>
             ) : (
               <button
-                className="send-btn"
+                className="send-btn [display:inline-flex] [align-items:center] [justify-content:center] [width:32px] [height:32px] [border-radius:var(--radius-md)] [background:var(--primary)] [color:var(--base)] [transition:background_100ms_ease,_opacity_100ms_ease] [&:hover:not(:disabled)]:[background:color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:[opacity:0.4] [&:disabled]:[cursor:default] [&.stop]:[background:var(--surface)] [&.stop]:[color:var(--text)] [&.stop:hover:not(:disabled)]:[background:color-mix(in_oklab,_var(--surface)_88%,_var(--text))]"
                 title="Send"
                 aria-label="Send"
                 onClick={() => void send()}

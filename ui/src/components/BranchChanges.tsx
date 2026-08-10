@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getExperimentDiff, type DiffPayload, type Experiment } from "../api";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
+import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 
 export function BranchChanges({
   experiment,
@@ -35,13 +36,13 @@ export function BranchChanges({
   }, [experiment.id, refreshKey, onLoadingChange]);
 
   return (
-    <div className="code-tab-body branch-changes">
+    <div className={`${CODE_TAB_BODY_CLASS_NAME} branch-changes [&_>_.changes-note]:[margin:14px_16px] [&_>_.openresearch-diff]:[margin:14px_16px_0] [&_>_.truncated-notice]:[margin:14px_16px_0] [&_>_.diff-explorer]:[margin:14px_16px_0]`}>
       {error ? (
-        <div className="code-tab-note">Failed to load changes: {error}</div>
+        <div className={CODE_TAB_NOTE_CLASS_NAME}>Failed to load changes: {error}</div>
       ) : !diff ? (
-        <div className="code-tab-note">Loading changes…</div>
+        <div className={CODE_TAB_NOTE_CLASS_NAME}>Loading changes…</div>
       ) : !diff.diff.trim() ? (
-        <div className="changes-note">
+        <div className="changes-note [font-size:var(--fs-sm)] [color:var(--muted)]">
           {experiment.parentExperimentId
             ? "No committed changes from the parent branch."
             : "This is the baseline branch, so there is no parent comparison."}

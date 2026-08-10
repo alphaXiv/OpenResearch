@@ -8,6 +8,7 @@
 
 import { Boxes, Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
+import { MONO_CLASS_NAME } from "../styleClasses";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
 function backendName(kind: string): string {
@@ -165,12 +166,12 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
 export function BackendBadge({ backend }: { backend: Run["backend"] }) {
   const kind = backendKind(backend);
   const detail = backendDetail(backend);
-  if (!kind) return <span className="backend-badge muted">—</span>;
+  if (!kind) return <span className="backend-badge [display:inline-flex] [align-items:center] [gap:7px] [&_svg]:[flex:none] [&_svg]:[display:block] [&_.backend-name]:[font-weight:var(--fw-medium)] [&_.backend-detail]:[color:var(--muted)] [&.muted]:[color:var(--muted)] muted [color:var(--muted)]">—</span>;
   return (
-    <span className="backend-badge">
+    <span className="backend-badge [display:inline-flex] [align-items:center] [gap:7px] [&_svg]:[flex:none] [&_svg]:[display:block] [&_.backend-name]:[font-weight:var(--fw-medium)] [&_.backend-detail]:[color:var(--muted)] [&.muted]:[color:var(--muted)]">
       <BackendLogo kind={kind} />
       <span className="backend-name">{backendName(kind)}</span>
-      {detail && <span className="backend-detail mono">{detail}</span>}
+      {detail && <span className={`backend-detail ${MONO_CLASS_NAME}`}>{detail}</span>}
     </span>
   );
 }

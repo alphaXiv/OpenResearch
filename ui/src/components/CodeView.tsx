@@ -54,21 +54,21 @@ export function CodeView({
   }, [band]);
 
   return (
-    <div className="file-view-codewrap">
+    <div className="file-view-codewrap [display:flex] [align-items:flex-start] [min-width:max-content] [position:relative]">
       {/* No numbers for an empty file — an empty gutter is just a stray
           bordered strip. */}
       {lineCount > 0 && (
-        <pre className="file-view-gutter" aria-hidden="true">
+        <pre className="file-view-gutter [margin:0] [padding-top:14px] [padding-bottom:14px] [font-family:var(--mono)] [font-size:var(--fs-sm)] [line-height:1.55] [padding-left:14px] [padding-right:10px] [text-align:right] [color:var(--muted)] [user-select:none] [position:sticky] [left:0] [background:var(--base)] [border-right:1px_solid_var(--border-variant)] [flex-shrink:0]" aria-hidden="true">
           {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
         </pre>
       )}
-      <pre className="file-view-code" ref={codeRef}>
+      <pre className="file-view-code [margin:0] [padding-top:14px] [padding-bottom:14px] [font-family:var(--mono)] [font-size:var(--fs-sm)] [line-height:1.55] [padding-left:16px] [padding-right:16px] [tab-size:4] [min-width:max-content]" ref={codeRef}>
         <code>{rendered}</code>
       </pre>
       {band && (
         <div
           ref={bandRef}
-          className="file-view-line-highlight"
+          className="file-view-line-highlight [position:absolute] [left:0] [right:0] [pointer-events:none] [background:color-mix(in_srgb,_var(--primary)_16%,_transparent)] [box-shadow:inset_2px_0_0_var(--primary)]"
           style={{ top: band.top, height: band.height }}
           aria-hidden="true"
         />

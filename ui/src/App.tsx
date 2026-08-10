@@ -52,6 +52,16 @@ import { Tour } from "./components/Tour";
 import { clearReadDemoSessions } from "./demoSessionState";
 import { TreeView } from "./components/TreeView";
 import { useOrxEvents } from "./events";
+import { CODE_TAB_BODY_CLASS_NAME, ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, TAB_BODY_CLASS_NAME } from "./styleClasses";
+
+const EMPTY_STATE_CLASS_NAME = [
+  "empty-state [position:absolute] [inset:0] [display:flex] [flex-direction:column] [align-items:center]",
+  "[justify-content:center] [gap:10px] [padding:24px] [text-align:center] [color:var(--subtext)]",
+  "[&_p]:[max-width:46ch] [&_p]:[margin:0] [&_p]:[font-size:var(--fs-md)] [&_p]:[line-height:1.5]",
+  "[&_p]:[text-wrap:balance] [&_p.empty-state-title]:[font-size:var(--fs-2xl)]",
+  "[&_p.empty-state-title]:[font-weight:var(--fw-regular)] [&_p.empty-state-title]:[color:var(--text)]",
+  "[&_p.empty-state-hint]:[font-size:var(--fs-lg)] [&_p.empty-state-hint]:[color:var(--subtext)]",
+].join(" ");
 
 /** An experiment view open as a right-panel tab. */
 interface ExpViewDef {
@@ -926,10 +936,10 @@ export default function App() {
 
   if (startupError) {
     return (
-      <div className="app">
-        <div className="empty-state">
+      <div className="app [display:flex] [flex-direction:column] [height:100%]">
+        <div className={EMPTY_STATE_CLASS_NAME}>
           <p>{startupError}</p>
-          <button className="btn primary" onClick={loadInitialState}>Retry</button>
+          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={loadInitialState}>Retry</button>
         </div>
       </div>
     );
@@ -937,9 +947,9 @@ export default function App() {
 
   if (projects === null || uiState === null) {
     return (
-      <div className="app">
-        <div className="empty-state">
-          <span className="spinner" />
+      <div className="app [display:flex] [flex-direction:column] [height:100%]">
+        <div className={EMPTY_STATE_CLASS_NAME}>
+          <span className={SPINNER_CLASS_NAME} />
         </div>
       </div>
     );
@@ -948,7 +958,7 @@ export default function App() {
   // First boot: the walkthrough installs and opens the embedded demo project.
   if (projects.length === 0) {
     return (
-      <div className="app">
+      <div className="app [display:flex] [flex-direction:column] [height:100%]">
         {onboarded ? (
           <ProjectsHome
             projects={projects}
@@ -987,7 +997,7 @@ export default function App() {
   );
 
   return (
-    <div className="app">
+    <div className="app [display:flex] [flex-direction:column] [height:100%]">
       {homeOpen ? (
         <ProjectsHome
           projects={projects}
@@ -999,7 +1009,7 @@ export default function App() {
           onDeleted={onProjectDeleted}
         />
       ) : (
-      <div className="app-body">
+      <div className="app-body [display:flex] [flex:1] [min-height:0] [padding:0_14px]">
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1047,13 +1057,13 @@ export default function App() {
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane floating-panel ${panelMax ? "max" : ""}`}
+          className={`right-pane [position:relative] [flex-shrink:0] [min-width:0] [display:flex] [flex-direction:column] [margin:10px_0_10px_14px] [background:var(--canvas)] [&.max]:[position:fixed] [&.max]:[inset:10px] [&.max]:[margin:0] [&.max]:[z-index:60] [&.max]:[box-shadow:0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] [overflow:hidden] ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
-          {!panelMax && <div className="panel-resizer" onPointerDown={resizePanel} />}
-          <div className="tabs">
-            <div className="tab-strip">
+          {!panelMax && <div className="panel-resizer [position:absolute] [left:0] [top:0] [bottom:0] [width:6px] [cursor:col-resize] [z-index:30] [&:hover]:[background:color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:[background:color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizePanel} />}
+          <div className="tabs [display:flex] [align-items:flex-end] [gap:0] [padding:4px_6px_0_8px] [height:40px] [border-bottom:1px_solid_var(--border)] [background:var(--canvas)] [flex-shrink:0]">
+            <div className="tab-strip [display:flex] [align-items:flex-end] [gap:2px] [flex:1] [min-width:0] [overflow-x:auto] [scrollbar-width:none] [&::-webkit-scrollbar]:[display:none]">
               {artifactsTabOpen && (
                 <ClosableTab
                   active={rightTab === "artifacts"}
@@ -1144,9 +1154,9 @@ export default function App() {
                 );
               })}
             </div>
-            <div className="panel-controls">
+            <div className="panel-controls [display:inline-flex] [align-items:center] [gap:2px] [align-self:center] [padding:0_6px] [flex-shrink:0]">
               <button
-                className="icon-btn"
+                className={ICON_BUTTON_CLASS_NAME}
                 title={panelMax ? "Restore panel" : "Expand panel"}
                 aria-label={panelMax ? "Restore panel" : "Expand panel"}
                 onClick={() => setPanelMax((m) => !m)}
@@ -1154,7 +1164,7 @@ export default function App() {
                 {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
               <button
-                className="icon-btn"
+                className={ICON_BUTTON_CLASS_NAME}
                 title="Close panel"
                 aria-label="Close panel"
                 onClick={() => {
@@ -1167,7 +1177,7 @@ export default function App() {
             </div>
           </div>
           {rightTab === "artifacts" ? (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {activeProject && (
                 <ArtifactsTab
                   key={activeProject.id}
@@ -1179,14 +1189,14 @@ export default function App() {
               )}
             </div>
           ) : rightTab === "experiments" ? (
-            <div className="tab-body">
-              <div className={`pane-toolbar${view === "table" ? " table-view" : ""}`}>
+            <div className={TAB_BODY_CLASS_NAME}>
+              <div className={`pane-toolbar [display:flex] [align-items:center] [gap:8px] [flex-wrap:wrap] [padding:10px_12px_0] [flex-shrink:0] [&.table-view]:[background:var(--base)] [&.table-view]:[padding-bottom:12px]${view === "table" ? " table-view" : ""}`}>
                 <span style={{ flex: 1 }} />
-                <div className="experiments-toolbar-controls">
-                  <div className="option-picker" ref={scopeMenuRef}>
+                <div className="experiments-toolbar-controls [display:inline-flex] [align-items:center] [gap:5px]">
+                  <div className="option-picker [position:relative] [display:inline-flex]" ref={scopeMenuRef}>
                     <button
                       ref={scopeTriggerRef}
-                      className={`icon-btn experiment-scope-trigger${effectiveScope === "agent" ? " active" : ""}`}
+                      className={`${ICON_BUTTON_BASE_CLASS_NAME} experiment-scope-trigger [width:26px] [height:26px] [border-radius:var(--radius-sm)]${effectiveScope === "agent" ? " active" : ""}`}
                       title={`Experiment filter: ${effectiveScope === "agent" ? "Current task" : "Entire project"}`}
                       aria-label="Filter experiments"
                       aria-expanded={scopeMenuOpen}
@@ -1195,9 +1205,9 @@ export default function App() {
                       <Filter size={16} strokeWidth={2.5} />
                     </button>
                     {scopeMenuOpen && (
-                      <div className="option-menu drop-down align-right experiment-scope-menu">
+                      <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] drop-down align-right experiment-scope-menu [&_.model-item]:[white-space:nowrap] [&_.model-item:disabled]:[color:var(--muted)] [&_.model-item:disabled]:[cursor:default] [&_.model-item:disabled:hover]:[background:transparent]">
                         <button
-                          className="model-item"
+                          className={MODEL_ITEM_CLASS_NAME}
                           aria-pressed={effectiveScope === "agent"}
                           disabled={!activeSessionId || !allExperimentsAttributed}
                           title={
@@ -1216,7 +1226,7 @@ export default function App() {
                           {effectiveScope === "agent" && <Check size={13} />}
                         </button>
                         <button
-                          className="model-item"
+                          className={MODEL_ITEM_CLASS_NAME}
                           aria-pressed={effectiveScope === "project"}
                           onClick={() => {
                             setScope("project");
@@ -1230,7 +1240,7 @@ export default function App() {
                     )}
                   </div>
                   <div
-                    className="seg experiments-view-toggle"
+                    className="seg [display:inline-flex] [align-items:center] [gap:2px] [border-radius:var(--radius-md)] [background:color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:[font-weight:var(--fw-semibold)] [&_button]:[color:var(--text)] [&_button]:[border-radius:var(--radius-sm)] [&_button:not(:disabled):hover]:[color:var(--text)] [&_button.active]:[background:var(--base)] [&_button.active]:[box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:[color:var(--muted)] [&_button:disabled]:[cursor:default] experiments-view-toggle [padding:2px] [&_button]:[padding:2px_8px] [&_button]:[font-size:var(--fs-sm)]"
                     role="group"
                     aria-label="Experiment view"
                   >
@@ -1251,7 +1261,7 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className="pane-content">
+              <div className="pane-content [flex:1] [min-height:0] [position:relative] [background:var(--base)]">
                 {view === "tree" ? (
                   activeProject && (
                     <TreeView
@@ -1291,7 +1301,7 @@ export default function App() {
               </div>
             </div>
           ) : rightTab === "files" ? (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {activeProject ? (
                 <WorktreeTab
                   key={`files:${activeSessionId ?? `project:${activeProject.id}`}`}
@@ -1304,9 +1314,9 @@ export default function App() {
                   onOpenFile={openFileTab}
                 />
               ) : (
-                <div className="code-tab wt-tab">
-                  <div className="code-tab-body">
-                    <div className="wt-empty">
+                <div className="code-tab [display:flex] [flex-direction:column] [height:100%] [min-height:0] wt-tab">
+                  <div className={CODE_TAB_BODY_CLASS_NAME}>
+                    <div className="wt-empty [display:flex] [flex-direction:column] [align-items:center] [gap:10px] [padding:48px_24px] [text-align:center] [color:var(--muted)] [&_>_svg]:[color:var(--subtext)] [&_p]:[margin:0] [&_p]:[max-width:320px] [&_p]:[font-size:var(--fs-sm)]">
                       <FolderGit2 size={22} />
                       <p>Select a project to browse its files.</p>
                     </div>
@@ -1315,7 +1325,7 @@ export default function App() {
               )}
             </div>
           ) : fileTab ? (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {projectId && (
                 <FileViewer
                   key={fileTabKey(fileTab)}
@@ -1331,10 +1341,10 @@ export default function App() {
               )}
             </div>
           ) : planTab ? (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
-              <div className="pane-content plan-tab-content">
+              <div className="pane-content [flex:1] [min-height:0] [position:relative] plan-tab-content [overflow-y:auto] [background:var(--base)] [padding:18px_24px] [&_.md]:[max-width:var(--readable-col)]">
                 <Md
                   text={planTab.plan}
                   onOpenFile={(path) => openFileTab(path, planTab.sessionId)}
@@ -1352,7 +1362,7 @@ export default function App() {
               onOpenSubagent={(pid) => openSubagentTab(subagentTab.sessionId, pid)}
             />
           ) : codeTab ? (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {projectId && activeProject && codeTab && codeExperiment && (
                 <CodeTab
                   key={`code:${codeTab.branch}`}
@@ -1368,7 +1378,7 @@ export default function App() {
               )}
             </div>
           ) : (
-            <div className="tab-body">
+            <div className={TAB_BODY_CLASS_NAME}>
               {expTab && tabExperiment && activeProject && (
                 <DetailDrawer
                   key={`${expTab.id}:${expTab.view}`}
