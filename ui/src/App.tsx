@@ -1062,7 +1062,7 @@ export default function App() {
           data-onboarding="experiments"
         >
           {!panelMax && <div className="panel-resizer absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizePanel} />}
-          <div className="tabs flex items-end gap-0 pt-1 pr-1.5 pb-0 pl-2 h-10 border-b border-b-border bg-canvas shrink-0">
+          <div className="tabs flex items-end gap-0 pt-1 pr-1.5 pb-0 pl-2 h-10 border-b border-b-border bg-background shrink-0">
             <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {artifactsTabOpen && (
                 <ClosableTab
@@ -1190,7 +1190,7 @@ export default function App() {
             </div>
           ) : rightTab === "experiments" ? (
             <div className={TAB_BODY_CLASS_NAME}>
-              <div className={`pane-toolbar flex items-center gap-2 flex-wrap pt-2.5 px-3 pb-0 shrink-0 [&.table-view]:bg-background [&.table-view]:pb-3${view === "table" ? " table-view" : ""}`}>
+              <div className={`pane-toolbar flex items-center gap-2 flex-wrap pt-2.5 px-3 pb-0 shrink-0 bg-background [&.table-view]:pb-3${view === "table" ? " table-view" : ""}`}>
                 <span style={{ flex: 1 }} />
                 <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
                   <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
