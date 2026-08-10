@@ -182,7 +182,7 @@ export function WorktreeTab({
   const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
 
   return (
-    <div className="code-tab [display:flex] [flex-direction:column] [height:100%] [min-height:0] wt-tab">
+    <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
       <CodeBrowserHeader
         view={liveWorktree ? view : "files"}
         onViewChange={onViewChange}
@@ -204,9 +204,9 @@ export function WorktreeTab({
           <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? `Failed to load: ${error}` : "Loading…"}</div>
         </div>
       ) : liveWorktree && view === "changes" ? (
-        <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes [padding:0_16px_24px] [&_>_:first-child]:[margin-top:14px]`}>
+        <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes pt-0 px-4 pb-6 [&_>_:first-child]:mt-3.5`}>
           {fileCount === 0 || !liveWorktree.diff ? (
-            <div className="changes-note [font-size:var(--fs-sm)] [color:var(--muted)]">No changes yet.</div>
+            <div className="changes-note text-sm text-muted">No changes yet.</div>
           ) : (
             <>
               {liveWorktree.diff.truncated && (
@@ -232,7 +232,7 @@ export function WorktreeTab({
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
             <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
           ) : (
-            <div className="file-tree [padding:6px_0] [font-size:var(--fs-md)]">
+            <div className="file-tree py-1.5 px-0 text-md">
               <TreeLevel
                 node={filesTree}
                 parentPath=""

@@ -136,9 +136,9 @@ function TerminalView({
   }
 
   return (
-    <div className="term-view [position:absolute] [inset:0] [display:flex] [flex-direction:column] [background:var(--base)] [z-index:20]">
-      <div className="term-bar [display:flex] [align-items:center] [gap:8px] [height:40px] [padding:0_10px] [border-bottom:1px_solid_var(--border)] [flex-shrink:0] [&_.error]:[font-size:var(--fs-sm)] [&_.error]:[color:var(--accent-red)] [&_.btn]:[display:inline-flex] [&_.btn]:[align-items:center] [&_.btn]:[gap:5px]">
-        <div className="term-title [min-width:0] [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)] [color:var(--text)] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap]" title={experiment.title || experiment.slug}>
+    <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+        <div className="term-title min-w-0 text-md font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
         <span style={{ flex: 1 }} />
@@ -154,9 +154,9 @@ function TerminalView({
           </button>
         )}
         {expRuns.length > 0 && selectedRun && (
-          <div className="run-history [position:relative] [flex-shrink:0]" ref={historyRef}>
+          <div className="run-history relative shrink-0" ref={historyRef}>
             <button
-              className="run-picker [display:inline-flex] [align-items:center] [gap:8px] [padding:4px_6px_4px_10px] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [background:var(--base)] [color:var(--text)] [&:hover]:[background:var(--surface)] [&_.run-label]:[font-size:var(--fs-sm)] [&_.run-label]:[font-weight:var(--fw-semibold)]"
+              className="run-picker inline-flex items-center gap-2 pt-1 pr-1.5 pb-1 pl-2.5 border border-border rounded-md bg-background text-text [&:hover]:bg-surface [&_.run-label]:text-sm [&_.run-label]:font-semibold"
               title="Switch run"
               onClick={() => setHistoryOpen((v) => !v)}
             >
@@ -164,14 +164,14 @@ function TerminalView({
               <StatusBadge
                 status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
               />
-              <ChevronDown size={14} className="run-picker-chev [color:var(--muted)] [flex-shrink:0]" />
+              <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
             </button>
             {historyOpen && (
-              <div className="history-menu [position:absolute] [top:calc(100%_+_6px)] [right:0] [min-width:230px] [max-height:320px] [overflow-y:auto] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [padding:5px] [z-index:50]">
+              <div className="history-menu absolute top-[calc(100%_+_6px)] right-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] p-[5px] z-50">
                 {expRuns.map((r) => (
                   <button
                     key={r.id}
-                    className={`history-item [display:flex] [align-items:center] [gap:8px] [width:100%] [text-align:left] [padding:6px_8px] [font-size:var(--fs-sm)] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--surface)] [&.active]:[background:var(--surface)] [&_.run-label]:[font-weight:var(--fw-semibold)] [&_.when]:[margin-left:auto] [&_.when]:[font-size:var(--fs-xs)] [&_.when]:[color:var(--muted)] ${r.id === selectedRun?.id ? "active" : ""}`}
+                    className={`history-item flex items-center gap-2 w-full text-left py-1.5 px-2 text-sm rounded-sm [&:hover]:bg-surface [&.active]:bg-surface [&_.run-label]:font-semibold [&_.when]:ml-auto [&_.when]:text-xs [&_.when]:text-muted ${r.id === selectedRun?.id ? "active" : ""}`}
                     onClick={() => {
                       onSelectRun(r.id);
                       setHistoryOpen(false);
@@ -188,13 +188,13 @@ function TerminalView({
         )}
       </div>
 
-      <div className="term-fill [flex:1] [min-height:0] [background:var(--term-bg)] [padding:4px_0_4px_6px]">
+      <div className="term-fill flex-1 min-h-0 bg-[var(--term-bg)] pt-1 pr-0 pb-1 pl-1.5">
         {selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />
         ) : (
-          <div className="term-empty [height:100%] [display:flex] [align-items:center] [justify-content:center] [padding:24px] [text-align:center] [font-size:var(--fs-md)] [color:var(--muted)]">No runs yet — ask the agent to launch one.</div>
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-md text-muted">No runs yet — ask the agent to launch one.</div>
         )}
       </div>
     </div>

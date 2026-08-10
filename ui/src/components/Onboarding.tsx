@@ -21,35 +21,35 @@ import { onHarnessAuth } from "../events";
 import { GHOST_BUTTON_CLASS_NAME, MONO_CLASS_NAME, PAPER_TITLE_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, STATUS_BADGE_CLASS_NAME } from "../styleClasses";
 
 const ONB_GATE_HINT_CLASS_NAME = [
-  "onb-gate-hint [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [line-height:1.5] [color:var(--text)]",
-  "onb-agent-hint [margin:0_0_10px]",
+  "onb-gate-hint text-base font-semibold leading-normal text-text",
+  "onb-agent-hint mt-0 mx-0 mb-2.5",
 ].join(" ");
 
 const ONB_CARD_META_CLASS_NAME = [
-  "onb-card-meta [font-size:var(--fs-sm)] [color:var(--subtext)] [&_code]:[font-family:var(--mono)]",
-  "[&_code]:[font-size:var(--fs-xs)] [&_code]:[background:var(--panel)]",
-  "[&_code]:[border:1px_solid_var(--border-variant)] [&_code]:[border-radius:var(--radius-xs)]",
-  "[&_code]:[padding:1px_5px] [&_code]:[white-space:nowrap]",
+  "onb-card-meta text-sm text-subtext [&_code]:font-mono",
+  "[&_code]:text-xs [&_code]:bg-panel",
+  "[&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs",
+  "[&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
 ].join(" ");
 
 const GIT_RETRY_HINT_CLASS_NAME = [
-  "onb-gate-hint [margin:18px_0_0] [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [line-height:1.5]",
-  "[color:var(--text)] onb-git-hint [margin-top:8px]",
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-semibold leading-normal",
+  "text-text onb-git-hint mt-2",
 ].join(" ");
 
 const ONB_CARD_CLASS_NAME = [
-  "onb-card [display:flex] [flex-direction:column] [gap:5px] [background:var(--base)]",
-  "[border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [padding:18px_20px]",
+  "onb-card flex flex-col gap-[5px] bg-background",
+  "border border-border rounded-lg py-4.5 px-5",
 ].join(" ");
 
 const FINISH_ERROR_CLASS_NAME = [
-  "onb-gate-hint [margin:18px_0_0] [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [line-height:1.5]",
-  "[color:var(--text)]",
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-semibold leading-normal",
+  "text-text",
 ].join(" ");
 
 const ONB_AGENT_LOGO_CLASS_NAME = [
-  "onb-agent-logo [display:block] [width:18px] [height:18px] [flex:0_0_auto] [fill:currentColor]",
-  "[&.claude]:[color:#d97757]",
+  "onb-agent-logo block w-4.5 h-4.5 flex-none fill-current",
+  "[&.claude]:text-[#d97757]",
 ].join(" ");
 
 const RETRY_COPY = "Couldn't reach orx. Check it's still running, then re-check.";
@@ -217,15 +217,15 @@ export function Onboarding({
   };
 
   return (
-    <div className="home [flex:1] [min-height:0] [overflow-y:auto] [scrollbar-gutter:stable_both-edges] [background:var(--canvas)] onboarding [&_.home-inner]:[max-width:560px] [&_.home-inner]:[padding-top:96px]">
-      <div className="home-inner [max-width:620px] [margin:0_auto] [padding:48px_24px_64px]">
+    <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas onboarding [&_.home-inner]:max-w-140 [&_.home-inner]:pt-24">
+      <div className="home-inner max-w-155 my-0 mx-auto pt-12 px-6 pb-16">
         {step === 0 ? (
           <>
-            <div className="onb-eyebrow [font-size:var(--fs-xl)] [font-weight:var(--fw-semibold)] [color:var(--muted)] [margin-bottom:18px]">
+            <div className="onb-eyebrow text-xl font-semibold text-muted mb-4.5">
               <Wordmark /> · Step 1 of 2
             </div>
-            <h2 className="onb-title [margin:0_0_6px] [font-size:var(--fs-3xl)] [letter-spacing:-0.01em]">Choose a coding agent</h2>
-            <p className="onb-sub [color:var(--text)] [font-size:var(--fs-base)] [line-height:1.55] [margin:0_0_22px] [max-width:480px]">OpenResearch uses an agent already signed in on this machine.</p>
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em]">Choose a coding agent</h2>
+            <p className="onb-sub text-text text-base leading-[1.55] mt-0 mx-0 mb-5.5 max-w-120">OpenResearch uses an agent already signed in on this machine.</p>
             {harnesses !== null && !anyAgentReady && (
               <p className={ONB_GATE_HINT_CLASS_NAME}>
                 Sign in to at least one agent to continue.
@@ -236,7 +236,7 @@ export function Onboarding({
                 Choose a coding agent to continue.
               </p>
             )}
-            <div className="onb-cards [display:flex] [flex-direction:column] [gap:10px]">
+            <div className="onb-cards flex flex-col gap-2.5">
               {harnesses !== null ? (
                 harnesses.map((h) => (
                   <AgentCard
@@ -250,13 +250,13 @@ export function Onboarding({
                 // Never a spinner next to an error — detection isn't running.
                 <div className={ONB_CARD_META_CLASS_NAME}>{RETRY_COPY}</div>
               ) : (
-                <div className="onb-loading [display:flex] [align-items:center] [gap:8px] [color:var(--subtext)] [font-size:var(--fs-md)] [padding:8px_0]">
+                <div className="onb-loading flex items-center gap-2 text-subtext text-md py-2 px-0">
                   <span className={SPINNER_CLASS_NAME} /> Detecting Claude Code, Codex, OpenCode…
                 </div>
               )}
             </div>
             {(gitVersion === null || gitError) && (
-              <div className="onb-git-check [margin-top:28px]" role="status" aria-live="polite">
+              <div className="onb-git-check mt-7" role="status" aria-live="polite">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
                 {gitError ? (
                   <p className={GIT_RETRY_HINT_CLASS_NAME}>{RETRY_COPY}</p>
@@ -267,13 +267,13 @@ export function Onboarding({
                 )}
               </div>
             )}
-            <div className="onb-actions [display:flex] [align-items:center] [gap:10px] [margin-top:22px]">
+            <div className="onb-actions flex items-center gap-2.5 mt-5.5">
               {(harnessError ||
                 gitError ||
                 gitVersion === null ||
                 (harnesses !== null && !anyAgentReady)) && (
                 <button className={GHOST_BUTTON_CLASS_NAME} onClick={() => load(true, true)} disabled={checking}>
-                  <RefreshCw size={12} className={checking ? "spin [animation:settings-spin_0.9s_linear_infinite]" : ""} /> Re-check
+                  <RefreshCw size={12} className={checking ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Re-check
                 </button>
               )}
               <div style={{ flex: 1 }} />
@@ -303,18 +303,18 @@ export function Onboarding({
           </>
         ) : (
           <>
-            <div className="onb-eyebrow [font-size:var(--fs-xl)] [font-weight:var(--fw-semibold)] [color:var(--muted)] [margin-bottom:18px]">
+            <div className="onb-eyebrow text-xl font-semibold text-muted mb-4.5">
               <Wordmark /> · Step 2 of 2
             </div>
-            <h2 className="onb-title [margin:0_0_6px] [font-size:var(--fs-3xl)] [letter-spacing:-0.01em] onb-profile-title [margin-bottom:22px]">Tell us about your research</h2>
-            <div className="onb-cards [display:flex] [flex-direction:column] [gap:10px]">
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em] onb-profile-title mb-5.5">Tell us about your research</h2>
+            <div className="onb-cards flex flex-col gap-2.5">
               <div className={ONB_CARD_CLASS_NAME}>
-                <fieldset className="onb-fieldset [border:0] [margin:0_0_18px] [padding:0] [&_legend]:[font-size:var(--fs-base)] [&_legend]:[font-weight:var(--fw-semibold)] [&_legend]:[margin-bottom:6px]">
+                <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-semibold [&_legend]:mb-1.5">
                   <legend>What areas are you interested in?</legend>
-                  <p className="onb-field-hint [color:var(--muted)] [font-size:var(--fs-sm)] [line-height:1.4] [margin:0_0_8px]">Choose one or more.</p>
-                  <div className="onb-area-options [display:grid] [grid-template-columns:repeat(2,_minmax(0,_1fr))] [gap:8px]">
+                  <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">Choose one or more.</p>
+                  <div className="onb-area-options grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2">
                     {RESEARCH_AREAS.map((area) => (
-                      <label key={area} className="onb-area-option [display:flex] [align-items:center] [gap:8px] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [cursor:pointer] [padding:9px_10px] [&:has(input:checked)]:[border-color:var(--accent)] [&:has(input:checked)]:[background:var(--primary-subtle)] [&_input]:[margin:0]">
+                      <label key={area} className="onb-area-option flex items-center gap-2 border border-border rounded-md cursor-pointer py-[9px] px-2.5 [&:has(input:checked)]:border-accent [&:has(input:checked)]:bg-primary-subtle [&_input]:m-0">
                         <input
                           type="checkbox"
                           checked={researchAreas.includes(area)}
@@ -327,7 +327,7 @@ export function Onboarding({
                   </div>
                   {researchAreas.includes("Other") && (
                     <input
-                      className="onb-other-area [width:100%] [margin-top:8px]"
+                      className="onb-other-area w-full mt-2"
                       value={otherArea}
                       onChange={(event) => setOtherArea(event.target.value)}
                       disabled={finishing}
@@ -336,26 +336,26 @@ export function Onboarding({
                     />
                   )}
                 </fieldset>
-                <label className="onb-field-label [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [margin-bottom:6px]" htmlFor="onb-background">
+                <label className="onb-field-label text-base font-semibold mb-1.5" htmlFor="onb-background">
                   Research background
                 </label>
                 <textarea
                   id="onb-background"
-                  className="onb-textarea [width:100%] [resize:vertical] [min-height:78px] [line-height:1.5] [font-size:var(--fs-base)] [margin-bottom:14px]"
+                  className="onb-textarea w-full resize-y min-h-19.5 leading-normal text-base mb-3.5"
                   value={background}
                   onChange={(e) => setBackground(e.target.value)}
                   disabled={finishing}
                   rows={4}
                   placeholder="e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods."
                 />
-                <label className="onb-field-label [font-size:var(--fs-base)] [font-weight:var(--fw-semibold)] [margin-bottom:6px]" htmlFor="onb-paper-search">
+                <label className="onb-field-label text-base font-semibold mb-1.5" htmlFor="onb-paper-search">
                   Representative papers
                 </label>
-                <p className="onb-field-hint [color:var(--muted)] [font-size:var(--fs-sm)] [line-height:1.4] [margin:0_0_8px]">
+                <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">
                   Add papers that represent your research interests, including papers by other
                   authors.
                 </p>
-                <div className="onb-paper-search [display:flex] [flex-direction:column] [gap:6px] [margin-top:12px] [&_input]:[width:100%]">
+                <div className="onb-paper-search flex flex-col gap-1.5 mt-3 [&_input]:w-full">
                   <input
                     id="onb-paper-search"
                     value={paperQuery}
@@ -366,7 +366,7 @@ export function Onboarding({
                   {searchingPapers ? (
                     <div className={ONB_CARD_META_CLASS_NAME}>Searching alphaXiv…</div>
                   ) : paperHits.length > 0 ? (
-                    <div className="onb-paper-results [display:flex] [flex-direction:column] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [max-height:200px] [overflow-y:auto] [&_button]:[display:flex] [&_button]:[flex-direction:column] [&_button]:[align-items:flex-start] [&_button]:[gap:2px] [&_button]:[padding:8px_10px] [&_button]:[background:none] [&_button]:[border:none] [&_button]:[border-bottom:1px_solid_var(--border-variant)] [&_button]:[text-align:left] [&_button]:[font:inherit] [&_button]:[color:var(--text)] [&_button]:[cursor:pointer] [&_button:last-child]:[border-bottom:none] [&_button:hover]:[background:var(--surface)] [&_.title]:[font-size:var(--fs-md)] [&_.title]:[font-weight:var(--fw-medium)] [&_.id]:[font-family:var(--mono)] [&_.id]:[font-size:var(--fs-xs)] [&_.id]:[color:var(--muted)]">
+                    <div className="onb-paper-results flex flex-col border border-border rounded-md max-h-50 overflow-y-auto [&_button]:flex [&_button]:flex-col [&_button]:items-start [&_button]:gap-0.5 [&_button]:py-2 [&_button]:px-2.5 [&_button]:bg-none [&_button]:bg-transparent [&_button]:border-0 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-left [&_button]:[font:inherit] [&_button]:text-text [&_button]:cursor-pointer [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_.title]:text-md [&_.title]:font-medium [&_.id]:font-mono [&_.id]:text-xs [&_.id]:text-muted">
                       {paperHits.map((h) => (
                         <button
                           key={h.paperId}
@@ -382,9 +382,9 @@ export function Onboarding({
                   ) : null}
                 </div>
                 {papers.length > 0 && (
-                  <div className="onb-paper-chips [display:flex] [flex-wrap:wrap] [gap:6px] [margin-top:10px]">
+                  <div className="onb-paper-chips flex flex-wrap gap-1.5 mt-2.5">
                     {papers.map((p) => (
-                      <span key={p.paperId} className="onb-paper-chip [display:inline-flex] [align-items:center] [gap:6px] [padding:4px_4px_4px_10px] [border:1px_solid_var(--border)] [border-radius:var(--radius-sm)] [background:var(--surface)] [font-size:var(--fs-sm)] [max-width:100%] [&_.title]:[font-weight:var(--fw-medium)] [&_.title]:[overflow:hidden] [&_.title]:[text-overflow:ellipsis] [&_.title]:[white-space:nowrap] [&_.title]:[max-width:240px] [&_.id]:[font-family:var(--mono)] [&_.id]:[font-size:var(--fs-xs)] [&_.id]:[color:var(--muted)] [&_button]:[display:inline-flex] [&_button]:[align-items:center] [&_button]:[justify-content:center] [&_button]:[padding:2px] [&_button]:[border:none] [&_button]:[background:none] [&_button]:[color:var(--muted)] [&_button]:[cursor:pointer] [&_button]:[border-radius:var(--radius-xs)] [&_button:hover]:[color:var(--text)] [&_button:hover]:[background:var(--panel)]">
+                      <span key={p.paperId} className="onb-paper-chip inline-flex items-center gap-1.5 pt-1 pr-1 pb-1 pl-2.5 border border-border rounded-sm bg-surface text-sm max-w-full [&_.title]:font-medium [&_.title]:overflow-hidden [&_.title]:text-ellipsis [&_.title]:whitespace-nowrap [&_.title]:max-w-60 [&_.id]:font-mono [&_.id]:text-xs [&_.id]:text-muted [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:p-0.5 [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent [&_button]:text-muted [&_button]:cursor-pointer [&_button]:rounded-xs [&_button:hover]:text-text [&_button:hover]:bg-panel">
                         <span className={PAPER_TITLE_CLASS_NAME}>{p.title || p.paperId}</span>
                         <span className="id">{p.paperId}</span>
                         <button
@@ -402,13 +402,13 @@ export function Onboarding({
               </div>
             </div>
             {!researchProfileValid && (
-              <p className="onb-profile-hint [color:var(--accent-red)] [font-size:var(--fs-sm)] [margin:8px_0_0]">
+              <p className="onb-profile-hint text-accent-red text-sm mt-2 mx-0 mb-0">
                 {researchAreas.length === 0
                   ? "Choose at least one research area to continue."
                   : "Describe your research area to continue."}
               </p>
             )}
-            <div className="onb-actions [display:flex] [align-items:center] [gap:10px] [margin-top:22px]">
+            <div className="onb-actions flex items-center gap-2.5 mt-5.5">
               <button className={GHOST_BUTTON_CLASS_NAME} onClick={() => setStep(0)} disabled={finishing}>
                 <ArrowLeft size={12} /> Back
               </button>
@@ -472,8 +472,8 @@ function selectionFor(harness: Harness): AgentSelection {
 function AgentLogo({ harness }: { harness: HarnessId }) {
   if (harness === "claude-code") {
     return (
-      <svg className="onb-agent-logo [display:block] [width:18px] [height:18px] [flex:0_0_auto] [fill:currentColor] [&.claude]:[color:#d97757] claude" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
+      <svg className="onb-agent-logo block w-4.5 h-4.5 flex-none fill-current [&.claude]:text-[#d97757] claude" viewBox="0 0 24 24" aria-hidden="true">
+        <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-0.5707-.1215-0.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-0.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-0.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
       </svg>
     );
   }
@@ -504,10 +504,10 @@ function AgentCard({
   const visibleBadge = selected ? { cls: "st-done", label: "Selected" } : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
   const head = (
-    <div className="onb-card-head [display:flex] [align-items:center] [justify-content:space-between] [gap:12px]">
-      <span className="onb-card-identity [display:flex] [align-items:center] [gap:10px] [min-width:0]">
+    <div className="onb-card-head flex items-center justify-between gap-3">
+      <span className="onb-card-identity flex items-center gap-2.5 min-w-0">
         <AgentLogo harness={h.id} />
-        <span className="onb-card-name [font-weight:var(--fw-semibold)] [font-size:var(--fs-base)]">{h.name}</span>
+        <span className="onb-card-name font-semibold text-base">{h.name}</span>
       </span>
       <span className={`${STATUS_BADGE_CLASS_NAME} ${visibleBadge.cls}`}>
         {h.agentReady ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
@@ -519,7 +519,7 @@ function AgentCard({
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
     return (
-      <div className="onb-card [display:flex] [flex-direction:column] [gap:5px] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [padding:18px_20px] onb-agent-choice [width:100%] [color:inherit] [font:inherit] [text-align:left] [transition:border-color_120ms_ease,_box-shadow_120ms_ease] [button&]:[cursor:pointer] [button&:hover]:[border-color:var(--muted)] [&.selected]:[border-color:var(--accent)] [&.selected]:[box-shadow:0_0_0_1px_var(--accent)]">
+      <div className="onb-card flex flex-col gap-[5px] bg-background border border-border rounded-lg py-4.5 px-5 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]">
         {head}
         <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
       </div>
@@ -528,7 +528,7 @@ function AgentCard({
   return (
     <button
       type="button"
-      className={`onb-card [display:flex] [flex-direction:column] [gap:5px] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [padding:18px_20px] onb-agent-choice [width:100%] [color:inherit] [font:inherit] [text-align:left] [transition:border-color_120ms_ease,_box-shadow_120ms_ease] [button&]:[cursor:pointer] [button&:hover]:[border-color:var(--muted)] [&.selected]:[border-color:var(--accent)] [&.selected]:[box-shadow:0_0_0_1px_var(--accent)]${selected ? " selected" : ""}`}
+      className={`onb-card flex flex-col gap-[5px] bg-background border border-border rounded-lg py-4.5 px-5 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
@@ -562,8 +562,8 @@ function LocalGitCard({
 }) {
   return (
     <div className={ONB_CARD_CLASS_NAME}>
-      <div className="onb-card-head [display:flex] [align-items:center] [justify-content:space-between] [gap:12px]">
-        <span className="onb-card-name [font-weight:var(--fw-semibold)] [font-size:var(--fs-base)]">Local Git</span>
+      <div className="onb-card-head flex items-center justify-between gap-3">
+        <span className="onb-card-name font-semibold text-base">Local Git</span>
         <span
           className={`${STATUS_BADGE_CLASS_NAME} ${gitVersion ? "st-done" : error || gitVersion === null ? "st-failed" : "st-starting"}`}
         >

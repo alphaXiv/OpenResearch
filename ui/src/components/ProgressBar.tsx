@@ -20,12 +20,12 @@ export function ProgressBar({
 }) {
   const pct = max > 0 ? Math.min(100, Math.round((value / max) * 100)) : 0;
   return (
-    <div className="progress [margin:12px_0_4px]" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
-      <div className="progress-track [height:8px] [border-radius:var(--radius-full)] [background:var(--surface)] [border:1px_solid_var(--border)] [overflow:hidden]">
-        <div className="progress-fill [height:100%] [background:var(--accent)] [border-radius:var(--radius-full)] [transition:width_0.2s_ease]" style={{ width: `${pct}%`, background: fillColor }} />
+    <div className="progress mt-3 mx-0 mb-1" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+      <div className="progress-track h-2 rounded-full bg-surface border border-border overflow-hidden">
+        <div className="progress-fill h-full bg-accent rounded-full transition-[width] duration-200 ease-standard" style={{ width: `${pct}%`, background: fillColor }} />
       </div>
       {(label !== undefined || caption !== undefined) && (
-        <div className="progress-caption [display:flex] [justify-content:space-between] [margin-top:6px] [font-size:var(--fs-sm)] [color:var(--muted)]">
+        <div className="progress-caption flex justify-between mt-1.5 text-sm text-muted">
           <span>{label ?? `${pct}%`}</span>
           {caption}
         </div>

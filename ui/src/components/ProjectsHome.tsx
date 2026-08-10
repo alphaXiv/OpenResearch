@@ -71,14 +71,14 @@ export function NewProjectDialog({
 
   return (
     <div
-      className="modal-backdrop [position:fixed] [inset:0] [background:rgba(29,_27,_26,_0.4)] [display:flex] [align-items:flex-start] [justify-content:center] [padding:var(--modal-top)_16px_24px] [overflow-y:auto] [z-index:100]"
+      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.4)] flex items-start justify-center pt-[var(--modal-top)] px-4 pb-6 overflow-y-auto z-100"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={dialogRef}
-        className="modal [width:480px] [max-width:94vw] [max-height:calc(100vh_-_var(--modal-top)_-_48px)] [overflow-y:auto] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-xl)] [box-shadow:0_24px_60px_rgba(0,_0,_0,_0.22)] [padding:24px] [&_h2]:[margin:0_0_14px] [&_h2]:[font-size:var(--fs-xl)]"
+        className="modal w-120 max-w-[94vw] max-h-[calc(100vh_-_var(--modal-top)_-_48px)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl"
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-project-dialog-title"
@@ -124,20 +124,20 @@ export function ProjectsHome({
   }
 
   return (
-    <div className="home [flex:1] [min-height:0] [overflow-y:auto] [scrollbar-gutter:stable_both-edges] [background:var(--canvas)]">
-      <div className="home-inner [max-width:620px] [margin:0_auto] [padding:48px_24px_64px]">
-        <div className="home-brand [font-weight:var(--fw-display)] [font-size:var(--fs-4xl)] [letter-spacing:-0.02em] [margin-bottom:36px]">
+    <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas">
+      <div className="home-inner max-w-155 my-0 mx-auto pt-12 px-6 pb-16">
+        <div className="home-brand font-display text-4xl tracking-[-0.02em] mb-9">
           <Wordmark />
         </div>
-        <div className="home-head [display:flex] [align-items:center] [justify-content:space-between] [gap:12px] [margin-bottom:18px] [&_h2]:[margin:0] [&_h2]:[font-size:var(--fs-2xl)] [&_h2]:[letter-spacing:-0.01em]">
+        <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-2xl [&_h2]:tracking-[-0.01em]">
           <h2>Projects</h2>
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => setModalOpen(true)}>
             <Plus size={13} /> New project
           </button>
         </div>
-        <div className="home-list [display:flex] [flex-direction:column] [gap:10px]">
+        <div className="home-list flex flex-col gap-2.5">
           {projects.length === 0 ? (
-            <div className="changes-note [font-size:var(--fs-sm)] [color:var(--muted)]">No projects yet — create one to get started.</div>
+            <div className="changes-note text-sm text-muted">No projects yet — create one to get started.</div>
           ) : (
             [...projects].sort((a, b) => b.updatedAt - a.updatedAt).map((p) => {
               const hasGithubRepository = Boolean(p.githubUrl || (p.githubOwner && p.githubRepo));
@@ -154,15 +154,15 @@ export function ProjectsHome({
               return (
               <div
                 key={p.id}
-                className="project-card [position:relative] [display:flex] [flex-direction:column] [gap:4px] [text-align:left] [padding:14px_16px] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [cursor:pointer] [transition:box-shadow_120ms_ease] [&:hover]:[box-shadow:0_3px_12px_color-mix(in_srgb,_var(--text)_8%,_transparent)] [&_>_:not(.project-card-open,_.project-delete)]:[position:relative] [&_>_:not(.project-card-open,_.project-delete)]:[z-index:1] [&_>_:not(.project-card-open,_.project-delete)]:[pointer-events:none] [&_.project-delete]:[position:absolute] [&_.project-delete]:[top:10px] [&_.project-delete]:[right:10px] [&_.project-delete]:[z-index:2] [&_.project-delete]:[display:none] [&_.project-delete]:[padding:5px] [&_.project-delete]:[border-radius:var(--radius-sm)] [&_.project-delete]:[color:var(--muted)] [&_.project-delete]:[line-height:0] [&:is(:hover,_:focus-within)_.project-delete]:[display:block] [&_.name]:[font-weight:var(--fw-semibold)] [&_.name]:[font-size:var(--fs-base)] [&_.paper]:[font-size:var(--fs-xs)] [&_.paper]:[color:var(--muted)] [&_.time]:[font-size:var(--fs-xs)] [&_.time]:[color:var(--muted)]"
+                className="project-card relative flex flex-col gap-1 text-left py-3.5 px-4 bg-background border border-border rounded-lg cursor-pointer transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-[0_3px_12px_color-mix(in_srgb,_var(--text)_8%,_transparent)] [&_>_:not(.project-card-open,_.project-delete)]:relative [&_>_:not(.project-card-open,_.project-delete)]:z-1 [&_>_:not(.project-card-open,_.project-delete)]:pointer-events-none [&_.project-delete]:absolute [&_.project-delete]:top-2.5 [&_.project-delete]:right-2.5 [&_.project-delete]:z-2 [&_.project-delete]:hidden [&_.project-delete]:p-[5px] [&_.project-delete]:rounded-sm [&_.project-delete]:text-muted [&_.project-delete]:leading-[0] [&:is(:hover,_:focus-within)_.project-delete]:block [&_.name]:font-semibold [&_.name]:text-base [&_.paper]:text-xs [&_.paper]:text-muted [&_.time]:text-xs [&_.time]:text-muted"
               >
                 <button
-                  className="project-card-open [position:absolute] [inset:0] [border-radius:inherit] [&:focus-visible]:[outline:2px_solid_var(--text)] [&:focus-visible]:[outline-offset:2px]"
+                  className="project-card-open absolute inset-0 rounded-[inherit] [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2"
                   aria-label={`Open ${p.name}`}
                   onClick={() => onOpen(p.id)}
                 />
                 <span className="name">{p.name}</span>
-                <span className={`project-card-sync [&_a]:[pointer-events:auto] [display:inline-flex] [align-items:center] [align-self:flex-start] [gap:7px] [color:var(--text)] [&_a]:[display:inline-flex] [&_a]:[color:var(--subtext)] [&_a:hover]:[color:var(--text)] ${MONO_CLASS_NAME}`}>
+                <span className={`project-card-sync [&_a]:pointer-events-auto inline-flex items-center self-start gap-[7px] text-text [&_a]:inline-flex [&_a]:text-subtext [&_a:hover]:text-text ${MONO_CLASS_NAME}`}>
                   {githubState}
                   {p.githubEnabled && githubUrl && (
                     <a
@@ -180,7 +180,7 @@ export function ProjectsHome({
                 {p.paperId && <span className={`paper ${MONO_CLASS_NAME}`}>arXiv {p.paperId}</span>}
                 <span className="time">created {timeAgo(p.createdAt)}</span>
                 <button
-                  className="project-delete [&:hover]:[color:var(--danger,_#d33)] [&:hover]:[background:var(--overlay,_rgba(0,_0,_0,_0.05))]"
+                  className="project-delete [&:hover]:text-[var(--danger,_#d33)] [&:hover]:bg-[var(--overlay,_rgba(0,_0,_0,_0.05))]"
                   data-tip={`Delete ${p.name}`}
                   data-tip-align="end"
                   aria-label={`Delete ${p.name}`}

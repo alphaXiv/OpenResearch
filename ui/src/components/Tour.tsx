@@ -130,15 +130,15 @@ export function Tour({ onClose }: { onClose: () => Promise<void> }) {
     : null;
 
   return createPortal(
-    <div className="tour-overlay [position:fixed] [inset:0] [z-index:200]">
+    <div className="tour-overlay fixed inset-0 z-200">
       {box ? (
         <>
           {/* Dim everything except the spotlight via an oversized box-shadow. */}
-          <div className="tour-spotlight [position:absolute] [border-radius:var(--radius-lg)] [box-shadow:0_0_0_9999px_rgba(0,_0,_0,_0.55)] [transition:all_300ms_ease]" style={box} />
-          <div className="tour-ring [position:absolute] [border-radius:var(--radius-lg)] [border:2px_solid_var(--primary)] [transition:all_300ms_ease]" style={box} />
+          <div className="tour-spotlight absolute rounded-lg shadow-[0_0_0_9999px_rgba(0,_0,_0,_0.55)] transition-all duration-300 ease-standard" style={box} />
+          <div className="tour-ring absolute rounded-lg border-2 border-primary transition-all duration-300 ease-standard" style={box} />
         </>
       ) : (
-        <div className="tour-dim [position:absolute] [inset:0] [background:rgba(0,_0,_0,_0.55)]" />
+        <div className="tour-dim absolute inset-0 bg-[rgba(0,_0,_0,_0.55)]" />
       )}
       <TourCard
         step={step}
@@ -197,7 +197,7 @@ function TourCard({
   return (
     <div
       ref={measure.ref}
-      className={`tour-card [position:absolute] [width:390px] [max-width:calc(100vw_-_32px)] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-xl)] [box-shadow:0_24px_60px_rgba(0,_0,_0,_0.22)] [padding:21px_23px_0] [transition:left_200ms_ease,_top_200ms_ease] [&.centered]:[left:50%] [&.centered]:[top:50%] [&.centered]:[transform:translate(-50%,_-50%)] [&.centered]:[transition:none] [&_h3]:[margin:0_26px_7px_0] [&_h3]:[font-size:var(--fs-lg)] [&_h3]:[font-weight:var(--fw-semibold)] [&_p]:[margin:0] [&_p]:[font-size:var(--fs-base)] [&_p]:[line-height:1.55] [&_p]:[color:var(--text)] [&_.tour-close]:[position:absolute] [&_.tour-close]:[top:12px] [&_.tour-close]:[right:12px] ${positioned ? "" : "centered"}`}
+      className={`tour-card absolute w-97.5 max-w-[calc(100vw_-_32px)] bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] pt-[21px] px-[23px] pb-0 transition-[left,top] duration-200 ease-standard [&.centered]:left-1/2 [&.centered]:top-1/2 [&.centered]:-translate-x-1/2 [&.centered]:-translate-y-1/2 [&.centered]:transition-none [&_h3]:mt-0 [&_h3]:mr-6.5 [&_h3]:mb-[7px] [&_h3]:ml-0 [&_h3]:text-lg [&_h3]:font-semibold [&_p]:m-0 [&_p]:text-base [&_p]:leading-[1.55] [&_p]:text-text [&_.tour-close]:absolute [&_.tour-close]:top-3 [&_.tour-close]:right-3 ${positioned ? "" : "centered"}`}
       style={positioned ? { left: popover.x, top: popover.y } : undefined}
     >
       {positioned && step.anchor && (
@@ -209,18 +209,18 @@ function TourCard({
       <h3>{step.title}</h3>
       <p>{step.description}</p>
       {closeError && <div className="error">Couldn't save tour progress. Try again.</div>}
-      <div className="tour-footer [display:flex] [align-items:center] [border-top:1px_solid_var(--border-variant)] [margin-top:16px] [padding:11px_0]">
-        <div className="tour-footer-side [flex:1] [display:flex] [&.end]:[justify-content:flex-end]">
+      <div className="tour-footer flex items-center border-t border-t-border-variant mt-4 py-[11px] px-0">
+        <div className="tour-footer-side flex-1 flex [&.end]:justify-end">
           {index > 0 && (
             <button className={GHOST_BUTTON_CLASS_NAME} onClick={onBack}>
               Back
             </button>
           )}
         </div>
-        <span className="tour-count [font-size:var(--fs-sm)] [color:var(--muted)] [font-variant-numeric:tabular-nums]">
+        <span className="tour-count text-sm text-muted tabular-nums">
           {index + 1} / {STEPS.length}
         </span>
-        <div className="tour-footer-side [flex:1] [display:flex] [&.end]:[justify-content:flex-end] end">
+        <div className="tour-footer-side flex-1 flex [&.end]:justify-end end">
           <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={onNext} disabled={closing}>
             {closing ? "Saving…" : last ? "Done" : "Next"}
           </button>
@@ -238,5 +238,5 @@ function TourCard({
 function Arrow({ anchor, adjustment }: { anchor: TourAnchor; adjustment: number }) {
   const cross =
     anchor === "above" || anchor === "below" ? `${adjustment}px 0` : `0 ${adjustment}px`;
-  return <div className={`tour-arrow [position:absolute] [width:12px] [height:12px] [background:var(--base)] [rotate:45deg] [pointer-events:none] [&.above]:[bottom:-6.5px] [&.above]:[left:calc(50%_-_6px)] [&.above]:[border-right:1px_solid_var(--border)] [&.above]:[border-bottom:1px_solid_var(--border)] [&.below]:[top:-6.5px] [&.below]:[left:calc(50%_-_6px)] [&.below]:[border-left:1px_solid_var(--border)] [&.below]:[border-top:1px_solid_var(--border)] [&.left]:[right:-6.5px] [&.left]:[top:calc(50%_-_6px)] [&.left]:[border-top:1px_solid_var(--border)] [&.left]:[border-right:1px_solid_var(--border)] [&.right]:[left:-6.5px] [&.right]:[top:calc(50%_-_6px)] [&.right]:[border-bottom:1px_solid_var(--border)] [&.right]:[border-left:1px_solid_var(--border)] ${anchor}`} style={{ translate: cross }} />;
+  return <div className={`tour-arrow absolute w-3 h-3 bg-background rotate-45 pointer-events-none [&.above]:-bottom-[6.5px] [&.above]:left-[calc(50%_-_6px)] [&.above]:border-r [&.above]:border-r-border [&.above]:border-b [&.above]:border-b-border [&.below]:-top-[6.5px] [&.below]:left-[calc(50%_-_6px)] [&.below]:border-l [&.below]:border-l-border [&.below]:border-t [&.below]:border-t-border [&.left]:-right-[6.5px] [&.left]:top-[calc(50%_-_6px)] [&.left]:border-t [&.left]:border-t-border [&.left]:border-r [&.left]:border-r-border [&.right]:-left-[6.5px] [&.right]:top-[calc(50%_-_6px)] [&.right]:border-b [&.right]:border-b-border [&.right]:border-l [&.right]:border-l-border ${anchor}`} style={{ translate: cross }} />;
 }

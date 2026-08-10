@@ -2,11 +2,11 @@ import { githubBranchUrl } from "../api";
 import { GitHubMark } from "./BackendLogos";
 
 const FILES_PILL_CLASS_NAME = [
-  "files-pill [display:inline-flex] [align-items:center] [gap:8px] [min-width:0] [border:1px_solid_var(--border)]",
-  "[border-radius:var(--radius-md)] [padding:7px_11px] [background:var(--base)] [color:var(--text)]",
-  "[text-decoration:none] [&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-sm)]",
-  "[&_code]:[overflow:hidden] [&_code]:[text-overflow:ellipsis] [&_code]:[white-space:nowrap]",
-  "[&_>_svg]:[flex-shrink:0] [&_>_svg]:[color:var(--muted)] [a&:hover]:[border-color:var(--muted)]",
+  "files-pill inline-flex items-center gap-2 min-w-0 border border-border",
+  "rounded-md py-[7px] px-[11px] bg-background text-text",
+  "no-underline [&_code]:font-mono [&_code]:text-sm",
+  "[&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap",
+  "[&_>_svg]:shrink-0 [&_>_svg]:text-muted [a&:hover]:border-muted",
 ].join(" ");
 
 /** A branch name as a pill linking to its GitHub tree view (files-pill

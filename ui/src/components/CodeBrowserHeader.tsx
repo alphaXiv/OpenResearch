@@ -26,9 +26,9 @@ export function CodeBrowserHeader({
   onRefresh: () => void;
 }) {
   return (
-    <div className="code-tab-header [display:flex] [align-items:center] [gap:8px] [padding:6px_12px] [border-bottom:1px_solid_var(--border-variant)] [flex-shrink:0] [&_>_.seg]:[padding:2px] [&_>_.seg]:[border-radius:var(--radius-sm)] [&_>_.seg_button]:[padding:2px_8px] [&_>_.seg_button]:[font-size:var(--fs-sm)] [&_>_.seg_button]:[font-weight:var(--fw-medium)]">
+    <div className="code-tab-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant shrink-0 [&_>_.seg]:p-0.5 [&_>_.seg]:rounded-sm [&_>_.seg_button]:py-0.5 [&_>_.seg_button]:px-2 [&_>_.seg_button]:text-sm [&_>_.seg_button]:font-medium">
       {showViewToggle && (
-        <div className="seg [display:inline-flex] [align-items:center] [gap:2px] [padding:3px] [border-radius:var(--radius-md)] [background:color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:[padding:3px_12px] [&_button]:[font-size:var(--fs-md)] [&_button]:[font-weight:var(--fw-semibold)] [&_button]:[color:var(--text)] [&_button]:[border-radius:var(--radius-sm)] [&_button:not(:disabled):hover]:[color:var(--text)] [&_button.active]:[background:var(--base)] [&_button.active]:[box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:[color:var(--muted)] [&_button:disabled]:[cursor:default]" role="group" aria-label="Code browser view">
+        <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-[color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-md [&_button]:font-semibold [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:text-muted [&_button:disabled]:cursor-default" role="group" aria-label="Code browser view">
           <button
             type="button"
             className={view === "files" ? "active" : ""}
@@ -48,9 +48,9 @@ export function CodeBrowserHeader({
         </div>
       )}
       {branchLabel && (
-        <span className="wt-branch-chip [display:inline-flex] [align-items:center] [gap:4px] [min-width:0] [padding:2px_8px] [border-radius:var(--radius-full)] [background:color-mix(in_oklab,_var(--text)_8%,_transparent)] [color:var(--subtext)] [font-size:var(--fs-xs)] [&_>_svg]:[flex-shrink:0]" title={branchTitle}>
+        <span className="wt-branch-chip inline-flex items-center gap-1 min-w-0 py-0.5 px-2 rounded-full bg-[color-mix(in_oklab,_var(--text)_8%,_transparent)] text-subtext text-xs [&_>_svg]:shrink-0" title={branchTitle}>
           <GitBranch size={12} />
-          <span className="wt-branch-name [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap] [font-family:var(--mono)]">{branchLabel}</span>
+          <span className="wt-branch-name overflow-hidden text-ellipsis whitespace-nowrap font-mono">{branchLabel}</span>
         </span>
       )}
       {githubHref && (

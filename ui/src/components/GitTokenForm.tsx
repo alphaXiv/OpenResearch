@@ -25,7 +25,7 @@ export function GitTokenForm({ onSaved }: { onSaved: (g: GitSettings) => void })
   }
 
   return (
-    <form className="onb-token-form [display:flex] [align-items:center] [flex-wrap:wrap] [gap:8px] [margin-top:8px] [&_input]:[flex:1] [&_input]:[min-width:220px] [&_input]:[font-family:var(--mono)] [&_input]:[font-size:var(--fs-sm)] [&_a]:[font-size:var(--fs-sm)] [&_a]:[color:var(--subtext)] [&_a]:[white-space:nowrap] [&_.error]:[flex-basis:100%] [&_.error]:[color:var(--accent-red)] [&_.error]:[font-size:var(--fs-md)] [&_.error]:[white-space:pre-wrap]" onSubmit={submit}>
+    <form className="onb-token-form flex items-center flex-wrap gap-2 mt-2 [&_input]:flex-1 [&_input]:min-w-55 [&_input]:font-mono [&_input]:text-sm [&_a]:text-sm [&_a]:text-subtext [&_a]:whitespace-nowrap [&_.error]:basis-full [&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap" onSubmit={submit}>
       <input
         type="password"
         value={token}

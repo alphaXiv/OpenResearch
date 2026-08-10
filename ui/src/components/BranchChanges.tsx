@@ -36,13 +36,13 @@ export function BranchChanges({
   }, [experiment.id, refreshKey, onLoadingChange]);
 
   return (
-    <div className={`${CODE_TAB_BODY_CLASS_NAME} branch-changes [&_>_.changes-note]:[margin:14px_16px] [&_>_.openresearch-diff]:[margin:14px_16px_0] [&_>_.truncated-notice]:[margin:14px_16px_0] [&_>_.diff-explorer]:[margin:14px_16px_0]`}>
+    <div className={`${CODE_TAB_BODY_CLASS_NAME} branch-changes [&_>_.changes-note]:my-3.5 [&_>_.changes-note]:mx-4 [&_>_.openresearch-diff]:mt-3.5 [&_>_.openresearch-diff]:mx-4 [&_>_.openresearch-diff]:mb-0 [&_>_.truncated-notice]:mt-3.5 [&_>_.truncated-notice]:mx-4 [&_>_.truncated-notice]:mb-0 [&_>_.diff-explorer]:mt-3.5 [&_>_.diff-explorer]:mx-4 [&_>_.diff-explorer]:mb-0`}>
       {error ? (
         <div className={CODE_TAB_NOTE_CLASS_NAME}>Failed to load changes: {error}</div>
       ) : !diff ? (
         <div className={CODE_TAB_NOTE_CLASS_NAME}>Loading changes…</div>
       ) : !diff.diff.trim() ? (
-        <div className="changes-note [font-size:var(--fs-sm)] [color:var(--muted)]">
+        <div className="changes-note text-sm text-muted">
           {experiment.parentExperimentId
             ? "No committed changes from the parent branch."
             : "This is the baseline branch, so there is no parent comparison."}

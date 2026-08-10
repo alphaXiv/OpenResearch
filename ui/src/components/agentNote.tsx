@@ -7,11 +7,11 @@ import { MONO_CLASS_NAME } from "../styleClasses";
 function CommandPill({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <span className="cmd-inline [display:inline-flex] [align-items:center] [gap:4px] [vertical-align:baseline]">
+    <span className="cmd-inline inline-flex items-center gap-1 align-baseline">
       <code className={MONO_CLASS_NAME}>{cmd}</code>
       <button
         type="button"
-        className="cmd-inline-copy [display:inline-flex] [align-items:center] [padding:2px] [border:0] [border-radius:var(--radius-xs)] [background:none] [color:var(--muted)] [cursor:pointer] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]"
+        className="cmd-inline-copy inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text"
         onClick={() => {
           void navigator.clipboard
             .writeText(cmd)

@@ -2,35 +2,35 @@ import { ChevronDown, CornerDownLeft, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 const PROMPT_ACTIONS_CLASS_NAME = [
-  "prompt-actions [display:flex] [flex-wrap:wrap] [&_.btn-primary]:[display:inline-flex]",
-  "[&_.btn-primary]:[align-items:center] [&_.btn-primary]:[gap:6px] [&_.btn-primary]:[padding:6px_13px]",
-  "[&_.btn-primary]:[font-family:inherit] [&_.btn-primary]:[font-size:var(--fs-sm)]",
-  "[&_.btn-primary]:[font-weight:var(--fw-semibold)] [&_.btn-primary]:[border-radius:var(--radius-sm)]",
-  "[&_.btn-primary]:[cursor:pointer] [&_.btn-primary]:[transition:background_80ms_ease,_border-color_80ms_ease]",
-  "[&_.btn-ghost]:[display:inline-flex] [&_.btn-ghost]:[align-items:center] [&_.btn-ghost]:[gap:6px]",
-  "[&_.btn-ghost]:[padding:6px_13px] [&_.btn-ghost]:[font-family:inherit] [&_.btn-ghost]:[font-size:var(--fs-sm)]",
-  "[&_.btn-ghost]:[font-weight:var(--fw-semibold)] [&_.btn-ghost]:[border-radius:var(--radius-sm)]",
-  "[&_.btn-ghost]:[cursor:pointer] [&_.btn-ghost]:[transition:background_80ms_ease,_border-color_80ms_ease]",
-  "[&_.btn-ghost]:[border-color:var(--border)] [&_button:disabled]:[opacity:0.5]",
-  "[&_button:disabled]:[cursor:default] plan-strip-actions [gap:6px_8px] [justify-content:flex-end]",
-  "[&_.btn-primary]:[background:transparent] [&_.btn-primary]:[border:1px_solid_var(--text)]",
-  "[&_.btn-primary]:[color:var(--text)] [&_.btn-ghost]:[background:transparent]",
-  "[&_.btn-ghost]:[border:1px_solid_var(--text)] [&_.btn-ghost]:[color:var(--text)]",
-  "[&_.btn-primary:hover:not(:disabled)]:[background:var(--surface-2,_rgb(0_0_0_/_5%))]",
-  "[&_.btn-primary:hover:not(:disabled)]:[border-color:var(--text)]",
-  "[&_.btn-primary:hover:not(:disabled)]:[color:var(--text)] [&_.btn-primary:hover:not(:disabled)]:[opacity:1]",
-  "[&_.btn-ghost:hover:not(:disabled)]:[background:var(--surface-2,_rgb(0_0_0_/_5%))]",
-  "[&_.btn-ghost:hover:not(:disabled)]:[border-color:var(--text)]",
-  "[&_.btn-ghost:hover:not(:disabled)]:[color:var(--text)] [&_.btn-ghost:hover:not(:disabled)]:[opacity:1]",
-  "[&_.plan-strip-primary]:[background:var(--text)] [&_.plan-strip-primary]:[border-color:var(--text)]",
-  "[&_.plan-strip-primary]:[color:var(--base)]",
-  "[&_.plan-strip-primary:hover:not(:disabled)]:[background:color-mix(in_oklab,_var(--text)_85%,_var(--base))]",
-  "[&_.plan-strip-primary:hover:not(:disabled)]:[border-color:var(--text)]",
-  "[&_.plan-strip-primary:hover:not(:disabled)]:[color:var(--base)]",
-  "[&_.plan-strip-caret]:[border-top-left-radius:0] [&_.plan-strip-caret]:[border-bottom-left-radius:0]",
-  "[&_.plan-strip-caret]:[padding:0_6px] [&_.plan-strip-caret]:[display:flex]",
-  "[&_.plan-strip-caret]:[align-items:center]",
-  "[&_.plan-strip-caret]:[border-left:1px_solid_color-mix(in_oklab,_var(--base)_35%,_var(--text))]",
+  "prompt-actions flex flex-wrap [&_.btn-primary]:inline-flex",
+  "[&_.btn-primary]:items-center [&_.btn-primary]:gap-1.5 [&_.btn-primary]:py-1.5 [&_.btn-primary]:px-[13px]",
+  "[&_.btn-primary]:font-[inherit] [&_.btn-primary]:text-sm",
+  "[&_.btn-primary]:font-semibold [&_.btn-primary]:rounded-sm",
+  "[&_.btn-primary]:cursor-pointer [&_.btn-primary]:transition-[background,border-color] [&_.btn-primary]:duration-80 [&_.btn-primary]:ease-standard",
+  "[&_.btn-ghost]:inline-flex [&_.btn-ghost]:items-center [&_.btn-ghost]:gap-1.5",
+  "[&_.btn-ghost]:py-1.5 [&_.btn-ghost]:px-[13px] [&_.btn-ghost]:font-[inherit] [&_.btn-ghost]:text-sm",
+  "[&_.btn-ghost]:font-semibold [&_.btn-ghost]:rounded-sm",
+  "[&_.btn-ghost]:cursor-pointer [&_.btn-ghost]:transition-[background,border-color] [&_.btn-ghost]:duration-80 [&_.btn-ghost]:ease-standard",
+  "[&_.btn-ghost]:border-border [&_button:disabled]:opacity-50",
+  "[&_button:disabled]:cursor-default plan-strip-actions gap-y-1.5 gap-x-2 justify-end",
+  "[&_.btn-primary]:bg-transparent [&_.btn-primary]:border [&_.btn-primary]:border-text",
+  "[&_.btn-primary]:text-text [&_.btn-ghost]:bg-transparent",
+  "[&_.btn-ghost]:border [&_.btn-ghost]:border-text [&_.btn-ghost]:text-text",
+  "[&_.btn-primary:hover:not(:disabled)]:bg-[var(--surface-2,_rgb(0_0_0_/_5%))]",
+  "[&_.btn-primary:hover:not(:disabled)]:border-text",
+  "[&_.btn-primary:hover:not(:disabled)]:text-text [&_.btn-primary:hover:not(:disabled)]:opacity-100",
+  "[&_.btn-ghost:hover:not(:disabled)]:bg-[var(--surface-2,_rgb(0_0_0_/_5%))]",
+  "[&_.btn-ghost:hover:not(:disabled)]:border-text",
+  "[&_.btn-ghost:hover:not(:disabled)]:text-text [&_.btn-ghost:hover:not(:disabled)]:opacity-100",
+  "[&_.plan-strip-primary]:bg-text [&_.plan-strip-primary]:border-text",
+  "[&_.plan-strip-primary]:text-background",
+  "[&_.plan-strip-primary:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--text)_85%,_var(--base))]",
+  "[&_.plan-strip-primary:hover:not(:disabled)]:border-text",
+  "[&_.plan-strip-primary:hover:not(:disabled)]:text-background",
+  "[&_.plan-strip-caret]:rounded-tl-none [&_.plan-strip-caret]:rounded-bl-none",
+  "[&_.plan-strip-caret]:py-0 [&_.plan-strip-caret]:px-1.5 [&_.plan-strip-caret]:flex",
+  "[&_.plan-strip-caret]:items-center",
+  "[&_.plan-strip-caret]:border-l [&_.plan-strip-caret]:border-l-[color-mix(in_oklab,_var(--base)_35%,_var(--text))]",
 ].join(" ");
 
 /** Docked strip above the composer while a plan awaits the user's decision.
@@ -100,13 +100,13 @@ export function PlanStrip({
   };
 
   return (
-    <div className="plan-strip [position:relative] [width:100%] [margin:0_0_10px] [padding:11px_13px] [display:flex] [flex-direction:column] [align-items:stretch] [gap:10px] [border:1px_solid_var(--border)] [border-left:3px_solid_var(--accent-blue)] [border-radius:var(--radius-md)] [background:var(--surface)] [box-shadow:0_2px_10px_rgb(0_0_0_/_6%)]">
-      <div className="plan-strip-info [display:flex] [align-items:baseline] [gap:8px] [min-width:0]">
-        <ScrollText size={14} className="plan-strip-icon [color:var(--accent-blue)] [flex-shrink:0] [align-self:center]" />
-        <span className="plan-strip-title [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)] [white-space:nowrap]">
+    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-l-[3px] border-l-accent-blue rounded-md bg-surface shadow-[0_2px_10px_rgb(0_0_0_/_6%)]">
+      <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
+        <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
+        <span className="plan-strip-title text-md font-semibold whitespace-nowrap">
           {synthesized ? `${agentLabel} is ready to proceed` : `${agentLabel} proposed a plan`}
         </span>
-        <button className="plan-strip-open [margin-left:auto] [padding:0] [border:none] [background:none] [color:var(--accent-blue)] [font-size:var(--fs-md)] [cursor:pointer] [white-space:nowrap] [flex-shrink:0] [&:hover]:[text-decoration:underline]" onClick={onView}>
+        <button className="plan-strip-open ml-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline" onClick={onView}>
           Open plan
         </button>
       </div>
@@ -114,7 +114,7 @@ export function PlanStrip({
         <>
           <textarea
             ref={textareaRef}
-            className="plan-strip-revise-input [width:100%] [resize:none] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [padding:9px_11px] [font-size:var(--fs-md)] [font-family:inherit] [background:var(--base)] [color:var(--text)] [&:focus]:[border-color:var(--accent-blue)]"
+            className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-[9px] px-[11px] text-md font-[inherit] bg-background text-text [&:focus]:border-accent-blue"
             placeholder="What should change? (optional)"
             rows={2}
             value={note}
@@ -140,7 +140,7 @@ export function PlanStrip({
             >
               Back
             </button>
-            <span className="plan-strip-spacer [flex:1]" />
+            <span className="plan-strip-spacer flex-1" />
             <button className="btn-primary plan-strip-primary" onClick={submitRevision}>
               Revise
               <CornerDownLeft size={13} />
@@ -155,8 +155,8 @@ export function PlanStrip({
           <button className="btn-ghost" onClick={() => setRevising(true)}>
             Revise…
           </button>
-          <span className="plan-strip-spacer [flex:1]" />
-          <div className="plan-strip-approve [position:relative] [display:flex] [&_.btn-primary:first-child]:[border-top-right-radius:0] [&_.btn-primary:first-child]:[border-bottom-right-radius:0]" ref={menuRef}>
+          <span className="plan-strip-spacer flex-1" />
+          <div className="plan-strip-approve relative flex [&_.btn-primary:first-child]:rounded-tr-none [&_.btn-primary:first-child]:rounded-br-none" ref={menuRef}>
             <button className="btn-primary plan-strip-primary" onClick={() => onApprove("auto")}>
               Accept and auto mode
             </button>
@@ -168,7 +168,7 @@ export function PlanStrip({
               <ChevronDown size={13} />
             </button>
             {menuOpen && (
-              <div className="plan-strip-menu [position:absolute] [right:0] [bottom:calc(100%_+_4px)] [display:flex] [flex-direction:column] [min-width:190px] [padding:4px] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [background:var(--surface)] [box-shadow:0_6px_20px_rgb(0_0_0_/_12%)] [z-index:6] [&_button]:[text-align:left] [&_button]:[padding:7px_9px] [&_button]:[border:none] [&_button]:[border-radius:var(--radius-sm)] [&_button]:[background:transparent] [&_button]:[color:var(--text)] [&_button]:[font-size:var(--fs-md)] [&_button]:[cursor:pointer] [&_button:hover]:[background:var(--surface-2,_rgb(0_0_0_/_5%))]">
+              <div className="plan-strip-menu absolute right-0 bottom-[calc(100%_+_4px)] flex flex-col min-w-47.5 p-1 border border-border rounded-md bg-surface shadow-[0_6px_20px_rgb(0_0_0_/_12%)] z-6 [&_button]:text-left [&_button]:py-[7px] [&_button]:px-[9px] [&_button]:border-0 [&_button]:rounded-sm [&_button]:bg-transparent [&_button]:text-text [&_button]:text-md [&_button]:cursor-pointer [&_button:hover]:bg-[var(--surface-2,_rgb(0_0_0_/_5%))]">
                 <button
                   onClick={() => {
                     setMenuOpen(false);

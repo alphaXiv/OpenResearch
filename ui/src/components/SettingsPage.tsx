@@ -89,132 +89,132 @@ import { StatusBadge } from "./StatusBadge";
 import { BADGE_CLASS_NAME, BUTTON_CLASS_NAME, ERROR_BADGE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MONO_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SETTINGS_LOADING_CLASS_NAME, SMALL_BUTTON_CLASS_NAME, SMALL_PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, SUCCESS_BADGE_CLASS_NAME, WARNING_BADGE_CLASS_NAME } from "../styleClasses";
 
 const SETTINGS_CARD_CLASS_NAME = [
-  "settings-card [&_>_.error]:[color:var(--accent-red)] [&_>_.error]:[font-size:var(--fs-md)]",
-  "[&_>_.error]:[white-space:pre-wrap] [background:var(--base)] [border:1px_solid_var(--border)]",
-  "[border-radius:var(--radius-lg)] [padding:16px_18px] [margin-bottom:16px] [&_h3]:[margin:0_0_10px]",
-  "[&_h3]:[font-size:var(--fs-sm)] [&_h3]:[font-weight:var(--fw-semibold)] [&_h3]:[color:var(--text)]",
-  "[&_.settings-sub]:[margin-bottom:12px] [&_.kv]:[gap:6px_18px]",
-  "[&_>_.project-default-row:first-child]:[padding-top:0] [&_>_.project-default-row:first-child]:[border-top:none]",
+  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md",
+  "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
+  "rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5",
+  "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text",
+  "[&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5",
+  "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
 ].join(" ");
 
 const KV_CLASS_NAME = [
-  "kv [display:grid] [grid-template-columns:auto_1fr] [gap:3px_14px] [font-size:var(--fs-md)]",
-  "[&_.k]:[color:var(--subtext)] [&_.v]:[font-family:var(--mono)] [&_.v]:[font-size:var(--fs-sm)]",
-  "[&_.v]:[word-break:break-all]",
+  "kv grid grid-cols-[auto_1fr] gap-y-[3px] gap-x-3.5 text-md",
+  "[&_.k]:text-subtext [&_.v]:font-mono [&_.v]:text-sm",
+  "[&_.v]:break-all",
 ].join(" ");
 
 const SETTINGS_NOTE_CLASS_NAME = [
-  "settings-note [margin:10px_0_0] [font-size:var(--fs-sm)] [padding:8px_10px]",
-  "[border:1px_solid_var(--accent-amber)] [border-radius:var(--radius-md)] [background:var(--accent-amber-subtle)]",
-  "[color:var(--accent-amber)] [font-weight:var(--fw-medium)]",
+  "settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5",
+  "border border-accent-amber rounded-md bg-accent-amber-subtle",
+  "text-accent-amber font-medium",
 ].join(" ");
 
 const FORM_CLASS_NAME = [
-  "form [&_.form-seg]:[align-self:flex-start] [&_.form-seg]:[margin-bottom:2px]",
-  "[&_.form-seg_button]:[padding:5px_12px] [&_.repo-hint]:[font-family:var(--mono)]",
-  "[&_.repo-hint]:[font-weight:var(--fw-regular)] [&_.repo-hint]:[font-size:var(--fs-xs)]",
-  "[&_.repo-hint]:[color:var(--muted)] [&_.repo-hint.ok]:[color:var(--accent-teal)]",
-  "[&_.folder-picker-control]:[display:flex] [&_.folder-picker-control]:[align-items:center]",
-  "[&_.folder-picker-control]:[gap:9px] [&_.folder-picker-control]:[width:100%]",
-  "[&_.folder-picker-control]:[min-width:0] [&_.folder-picker-control]:[padding:8px_10px]",
-  "[&_.folder-picker-control]:[overflow:hidden] [&_.folder-picker-control]:[background:var(--base)]",
-  "[&_.folder-picker-control]:[border:1px_solid_var(--border)]",
-  "[&_.folder-picker-control]:[border-radius:var(--radius-md)] [&_.folder-picker-control]:[cursor:pointer]",
-  "[&_.folder-picker-control]:[text-align:left]",
-  "[&_.folder-picker-control]:[transition:border-color_120ms_ease,_box-shadow_120ms_ease]",
-  "[&_.folder-picker-control:hover:not(:disabled)]:[border-color:var(--muted)]",
-  "[&_.folder-picker-control:hover:not(:disabled)]:[box-shadow:0_2px_8px_rgb(0_0_0_/_5%)]",
-  "[&_.folder-picker-control:focus-visible]:[outline:2px_solid_var(--text)]",
-  "[&_.folder-picker-control:focus-visible]:[outline-offset:2px] [&_.folder-picker-control_span]:[flex:1]",
-  "[&_.folder-picker-control_span]:[min-width:0] [&_.folder-picker-control_span]:[overflow:hidden]",
-  "[&_.folder-picker-control_span]:[text-overflow:ellipsis] [&_.folder-picker-control_span]:[white-space:nowrap]",
-  "[&_.folder-picker-control_.placeholder]:[color:var(--muted)] [&_.folder-picker-icon]:[flex:none]",
-  "[&_.folder-picker-icon]:[color:currentColor] [&_.folder-picker-chevron]:[flex:none]",
-  "[&_.folder-picker-chevron]:[color:var(--muted)]",
-  "[&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:[color:var(--subtext)]",
-  "[&_.folder-picker-hint]:[color:var(--subtext)] [&_.folder-picker-hint]:[font-size:var(--fs-sm)]",
-  "[&_.folder-picker-hint]:[font-weight:var(--fw-regular)] [&_.folder-picker-hint]:[line-height:1.4]",
-  "[&_.project-location-field]:[display:flex] [&_.project-location-field]:[flex-direction:column]",
-  "[&_.project-location-field]:[gap:8px] [&_.project-location-label]:[color:var(--text)]",
-  "[&_.project-location-label]:[font-size:var(--fs-base)]",
-  "[&_.project-location-label]:[font-weight:var(--fw-semibold)] [&_.project-field-label]:[color:var(--text)]",
-  "[&_.project-field-label]:[font-size:var(--fs-base)] [&_.project-field-label]:[font-weight:var(--fw-semibold)]",
-  "[&_.folder-picker-control:disabled]:[cursor:default] [&_.folder-picker-control:disabled]:[opacity:0.65]",
-  "[&_.paper-destination]:[display:flex] [&_.paper-destination]:[align-items:center]",
-  "[&_.paper-destination]:[gap:10px] [&_.paper-destination]:[padding:8px_8px_8px_12px]",
-  "[&_.paper-destination]:[border:1px_solid_var(--border)] [&_.paper-destination]:[border-radius:var(--radius-md)]",
-  "[&_.paper-destination]:[background:var(--base)] [&_.paper-destination_code]:[flex:1]",
-  "[&_.paper-destination_code]:[min-width:0] [&_.paper-destination_code]:[overflow:hidden]",
-  "[&_.paper-destination_code]:[color:var(--text)] [&_.paper-destination_code]:[font-size:var(--fs-sm)]",
-  "[&_.paper-destination_code]:[font-weight:var(--fw-regular)]",
-  "[&_.paper-destination_code]:[text-overflow:ellipsis] [&_.paper-destination_code]:[white-space:nowrap]",
-  "[&_.paper-destination_.btn]:[flex:none] [&_.project-path-notice]:[padding:9px_11px]",
-  "[&_.project-path-notice]:[border:1px_solid_var(--border-variant)]",
-  "[&_.project-path-notice]:[border-radius:var(--radius-sm)] [&_.project-path-notice]:[background:var(--surface)]",
-  "[&_.project-path-notice]:[color:var(--subtext)] [&_.project-path-notice]:[font-size:var(--fs-sm)]",
-  "[&_.project-path-notice]:[line-height:1.4]",
-  "[&_.project-path-notice.error]:[border-color:color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))]",
-  "[&_.paper-results]:[display:flex] [&_.paper-results]:[flex-direction:column]",
-  "[&_.paper-results]:[border:1px_solid_var(--border)] [&_.paper-results]:[border-radius:var(--radius-md)]",
-  "[&_.paper-results]:[max-height:240px] [&_.paper-results]:[overflow-y:auto]",
-  "[&_.paper-results_button]:[display:flex] [&_.paper-results_button]:[flex-direction:column]",
-  "[&_.paper-results_button]:[align-items:flex-start] [&_.paper-results_button]:[gap:2px]",
-  "[&_.paper-results_button]:[padding:8px_10px] [&_.paper-results_button]:[background:none]",
-  "[&_.paper-results_button]:[border:none]",
-  "[&_.paper-results_button]:[border-bottom:1px_solid_var(--border-variant)]",
-  "[&_.paper-results_button]:[text-align:left] [&_.paper-results_button]:[font:inherit]",
-  "[&_.paper-results_button]:[color:var(--text)] [&_.paper-results_button]:[cursor:pointer]",
-  "[&_.paper-results_button:last-child]:[border-bottom:none]",
-  "[&_.paper-results_button:hover]:[background:var(--surface)] [&_.paper-results_.title]:[font-size:var(--fs-md)]",
-  "[&_.paper-results_.title]:[font-weight:var(--fw-medium)] [&_.paper-results_.id]:[font-family:var(--mono)]",
-  "[&_.paper-results_.id]:[font-size:var(--fs-xs)] [&_.paper-results_.id]:[color:var(--muted)]",
-  "[&_.paper-pick_.id]:[font-family:var(--mono)] [&_.paper-pick_.id]:[font-size:var(--fs-xs)]",
-  "[&_.paper-pick_.id]:[color:var(--muted)] [&_.paper-pick]:[display:flex] [&_.paper-pick]:[align-items:center]",
-  "[&_.paper-pick]:[justify-content:space-between] [&_.paper-pick]:[gap:10px] [&_.paper-pick]:[padding:10px_12px]",
-  "[&_.paper-pick]:[border:1px_solid_var(--border)] [&_.paper-pick]:[border-radius:var(--radius-md)]",
-  "[&_.paper-pick]:[background:var(--surface)] [&_.paper-pick_.meta]:[min-width:0]",
-  "[&_.paper-pick_.title]:[font-size:var(--fs-md)] [&_.paper-pick_.title]:[font-weight:var(--fw-semibold)]",
-  "[display:flex] [flex-direction:column] [gap:10px] [&_label]:[display:flex] [&_label]:[flex-direction:column]",
-  "[&_label]:[gap:4px] [&_label]:[font-size:var(--fs-xs)] [&_label]:[color:var(--text)]",
-  "[&_label]:[font-weight:var(--fw-medium)] [&_.row2]:[display:grid] [&_.row2]:[grid-template-columns:1fr_1fr]",
-  "[&_.row2]:[gap:10px] [&_.actions]:[display:flex] [&_.actions]:[justify-content:flex-end]",
-  "[&_.actions]:[gap:10px] [&_.actions]:[margin-top:6px] [&_.new-project-actions]:[justify-content:flex-start]",
-  "[&_.new-project-actions]:[margin-top:10px] [&_.new-project-actions_.primary]:[margin-left:auto]",
-  "[&_.error]:[color:var(--accent-red)] [&_.error]:[font-size:var(--fs-md)] [&_.error]:[white-space:pre-wrap]",
-  "settings-form [margin-top:14px] [padding-top:14px] [border-top:1px_solid_var(--border)]",
+  "form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
+  "[&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-mono",
+  "[&_.repo-hint]:font-normal [&_.repo-hint]:text-xs",
+  "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
+  "[&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center",
+  "[&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full",
+  "[&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5",
+  "[&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background",
+  "[&_.folder-picker-control]:border [&_.folder-picker-control]:border-border",
+  "[&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer",
+  "[&_.folder-picker-control]:text-left",
+  "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
+  "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
+  "[&_.folder-picker-control:hover:not(:disabled)]:shadow-[0_2px_8px_rgb(0_0_0_/_5%)]",
+  "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text",
+  "[&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1",
+  "[&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden",
+  "[&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap",
+  "[&_.folder-picker-control_.placeholder]:text-muted [&_.folder-picker-icon]:flex-none",
+  "[&_.folder-picker-icon]:text-current [&_.folder-picker-chevron]:flex-none",
+  "[&_.folder-picker-chevron]:text-muted",
+  "[&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext",
+  "[&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm",
+  "[&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4]",
+  "[&_.project-location-field]:flex [&_.project-location-field]:flex-col",
+  "[&_.project-location-field]:gap-2 [&_.project-location-label]:text-text",
+  "[&_.project-location-label]:text-base",
+  "[&_.project-location-label]:font-semibold [&_.project-field-label]:text-text",
+  "[&_.project-field-label]:text-base [&_.project-field-label]:font-semibold",
+  "[&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65",
+  "[&_.paper-destination]:flex [&_.paper-destination]:items-center",
+  "[&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pr-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:pl-3",
+  "[&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md",
+  "[&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1",
+  "[&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden",
+  "[&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm",
+  "[&_.paper-destination_code]:font-normal",
+  "[&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap",
+  "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px]",
+  "[&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant",
+  "[&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface",
+  "[&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm",
+  "[&_.project-path-notice]:leading-[1.4]",
+  "[&_.project-path-notice.error]:border-[color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))]",
+  "[&_.paper-results]:flex [&_.paper-results]:flex-col",
+  "[&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md",
+  "[&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto",
+  "[&_.paper-results_button]:flex [&_.paper-results_button]:flex-col",
+  "[&_.paper-results_button]:items-start [&_.paper-results_button]:gap-0.5",
+  "[&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent",
+  "[&_.paper-results_button]:border-0",
+  "[&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant",
+  "[&_.paper-results_button]:text-left [&_.paper-results_button]:[font:inherit]",
+  "[&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer",
+  "[&_.paper-results_button:last-child]:border-b-0",
+  "[&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-md",
+  "[&_.paper-results_.title]:font-medium [&_.paper-results_.id]:font-mono",
+  "[&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted",
+  "[&_.paper-pick_.id]:font-mono [&_.paper-pick_.id]:text-xs",
+  "[&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center",
+  "[&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3",
+  "[&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md",
+  "[&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0",
+  "[&_.paper-pick_.title]:text-md [&_.paper-pick_.title]:font-semibold",
+  "flex flex-col gap-2.5 [&_label]:flex [&_label]:flex-col",
+  "[&_label]:gap-1 [&_label]:text-xs [&_label]:text-text",
+  "[&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2",
+  "[&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end",
+  "[&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start",
+  "[&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ml-auto",
+  "[&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap",
+  "settings-form mt-3.5 pt-3.5 border-t border-t-border",
 ].join(" ");
 
 const PROJECT_DEFAULT_ROW_CLASS_NAME = [
-  "project-default-row [display:flex] [align-items:center] [justify-content:space-between] [gap:24px]",
-  "[padding-top:14px] [border-top:1px_solid_var(--border-variant)] [&_p]:[margin:3px_0_0]",
-  "[&_p]:[color:var(--muted)] [&_p]:[font-size:var(--fs-sm)]",
+  "project-default-row flex items-center justify-between gap-6",
+  "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
+  "[&_p]:text-muted [&_p]:text-sm",
 ].join(" ");
 
 const GIT_SETTINGS_CARD_CLASS_NAME = [
-  "settings-card [&_>_.error]:[color:var(--accent-red)] [&_>_.error]:[font-size:var(--fs-md)]",
-  "[&_>_.error]:[white-space:pre-wrap] [background:var(--base)] [border:1px_solid_var(--border)]",
-  "[border-radius:var(--radius-lg)] [margin-bottom:16px] [&_h3]:[margin:0_0_10px] [&_h3]:[font-size:var(--fs-sm)]",
-  "[&_h3]:[font-weight:var(--fw-semibold)] [&_h3]:[color:var(--text)] [&_.settings-sub]:[margin-bottom:12px]",
-  "[&_>_.project-default-row:first-child]:[padding-top:0] [&_>_.project-default-row:first-child]:[border-top:none]",
-  "git-settings-card [padding:14px_16px] [&_h3]:[margin-bottom:12px]",
-  "[&_.kv]:[grid-template-columns:132px_minmax(0,_1fr)] [&_.kv]:[align-items:center] [&_.kv]:[gap:9px_18px]",
-  "[&_.kv_.k]:[font-size:var(--fs-sm)] [&_.kv_.v]:[display:flex] [&_.kv_.v]:[align-items:center]",
-  "[&_.kv_.v]:[flex-wrap:wrap] [&_.kv_.v]:[gap:7px] [&_.kv_.v]:[min-width:0] [&_.kv_.v]:[font-family:var(--sans)]",
-  "[&_.kv_.v]:[font-size:var(--fs-md)] [&_.kv_.v]:[word-break:normal] [&_.kv_.v.mono]:[font-family:var(--mono)]",
-  "[&_.kv_.v.mono]:[font-size:var(--fs-sm)] [&_.kv_.v_.mono]:[font-family:var(--mono)]",
-  "[&_.kv_.v_.mono]:[font-size:var(--fs-sm)] [&_.kv_.k.mono]:[font-family:var(--mono)]",
-  "[&_.kv_.k.mono]:[font-size:var(--fs-sm)] [@media((max-width:_640px))]:[&_.kv]:[grid-template-columns:1fr]",
-  "[@media((max-width:_640px))]:[&_.kv]:[gap:3px] [@media((max-width:_640px))]:[&_.kv_.v_+_.k]:[margin-top:7px]",
+  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md",
+  "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
+  "rounded-lg mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm",
+  "[&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3",
+  "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
+  "git-settings-card py-3.5 px-4 [&_h3]:mb-3",
+  "[&_.kv]:grid-cols-[132px_minmax(0,_1fr)] [&_.kv]:items-center [&_.kv]:gap-y-[9px] [&_.kv]:gap-x-4.5",
+  "[&_.kv_.k]:text-sm [&_.kv_.v]:flex [&_.kv_.v]:items-center",
+  "[&_.kv_.v]:flex-wrap [&_.kv_.v]:gap-[7px] [&_.kv_.v]:min-w-0 [&_.kv_.v]:font-sans",
+  "[&_.kv_.v]:text-md [&_.kv_.v]:break-normal [&_.kv_.v.mono]:font-mono",
+  "[&_.kv_.v.mono]:text-sm [&_.kv_.v_.mono]:font-mono",
+  "[&_.kv_.v_.mono]:text-sm [&_.kv_.k.mono]:font-mono",
+  "[&_.kv_.k.mono]:text-sm [@media((max-width:_640px))]:[&_.kv]:grid-cols-1",
+  "[@media((max-width:_640px))]:[&_.kv]:gap-[3px] [@media((max-width:_640px))]:[&_.kv_.v_+_.k]:mt-[7px]",
 ].join(" ");
 
 const GIT_CARD_ACTIONS_CLASS_NAME = [
-  "git-card-actions [display:flex] [flex-wrap:wrap] [gap:8px] [margin-top:14px] [padding-top:14px]",
-  "[border-top:1px_solid_var(--border-variant)]",
+  "git-card-actions flex flex-wrap gap-2 mt-3.5 pt-3.5",
+  "border-t border-t-border-variant",
 ].join(" ");
 
 const SETTINGS_STACK_SECTION_CLASS_NAME = [
-  "settings-stack-section [&_+_.settings-stack-section]:[margin-top:24px] [&_>_:last-child]:[margin-bottom:0]",
-  "[&_>_h2]:[margin:0_0_6px] [&_>_h2]:[font-size:var(--fs-xl)]",
+  "settings-stack-section [&_+_.settings-stack-section]:mt-6 [&_>_:last-child]:mb-0",
+  "[&_>_h2]:mt-0 [&_>_h2]:mx-0 [&_>_h2]:mb-1.5 [&_>_h2]:text-xl",
 ].join(" ");
 
 export type SettingsTab =
@@ -265,12 +265,12 @@ function HarnessesTab() {
   return (
     <>
       <h2>Harnesses</h2>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Coding-agent setups detected on this machine. The research agent chat is served by
         OpenCode; Claude Code and Codex accounts surface their models in the composer's model
         picker.
       </p>
-      <div className="harness-tabs [display:flex] [gap:4px] [margin-bottom:14px] [border-bottom:1px_solid_var(--border-variant)] [&_button]:[display:inline-flex] [&_button]:[align-items:center] [&_button]:[gap:7px] [&_button]:[padding:7px_12px] [&_button]:[font-size:var(--fs-md)] [&_button]:[font-weight:var(--fw-semibold)] [&_button]:[color:var(--text)] [&_button]:[border-bottom:2px_solid_transparent] [&_button]:[margin-bottom:-1px] [&_button:hover]:[color:var(--text)] [&_button.active]:[border-bottom-color:var(--primary)]">
+      <div className="harness-tabs flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-md [&_button]:font-semibold [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
         {(harnesses ?? []).map((x) => (
           <button
             key={x.id}
@@ -278,7 +278,7 @@ function HarnessesTab() {
             onClick={() => setActive(x.id)}
           >
             {x.name}
-            <span className={`harness-dot [width:7px] [height:7px] [border-radius:50%] [background:var(--muted)] [&.ok]:[background:var(--accent-green)] [&.err]:[background:var(--accent-red)] [&.warn]:[background:var(--accent-amber)] ${harnessStatus(x).cls}`} />
+            <span className={`harness-dot w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
           </button>
         ))}
       </div>
@@ -288,11 +288,11 @@ function HarnessesTab() {
         </div>
       ) : !h ? null : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head [display:flex] [align-items:center] [gap:10px] [margin-bottom:12px]">
+          <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <span className={`${BADGE_CLASS_NAME} ${harnessStatus(h).cls}`}>{harnessStatus(h).label}</span>
             <div className="spacer" style={{ flex: 1 }} />
             <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "spin [animation:settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+              <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
             </button>
           </div>
           <div className={KV_CLASS_NAME}>
@@ -391,7 +391,7 @@ function K8sSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run on your own cluster with <code>--backend k8s</code>. The run&apos;s resources
         (image, GPUs, topology) come from a manifest committed on the experiment branch
         (default <code>.orx/k8s.yaml</code>); only the cluster context and namespace live
@@ -450,10 +450,10 @@ function K8sSection() {
             </div>
           </form>
           <div className={SETTINGS_CARD_CLASS_NAME}>
-            <div className="settings-card-head [display:flex] [align-items:center] [gap:10px] [margin-bottom:12px]">
+            <div className="settings-card-head flex items-center gap-2.5 mb-3">
               <h3>Run manifest</h3>
             </div>
-            <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+            <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
               Each run applies the manifest committed on its experiment branch — default{" "}
               <code>.orx/k8s.yaml</code>, or <code>--manifest &lt;path&gt;</code>. It declares
               whatever the run needs (image, GPU requests, an Indexed Job across nodes, extra
@@ -514,7 +514,7 @@ function ModalSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Serverless GPUs on your own Modal account with{" "}
         <code>--backend modal --flavor &lt;name&gt;</code> (t4, a10g, a100-80gb, h100, …). orx
         manages a dedicated Python env with the Modal SDK; sandboxes scale to zero between runs.
@@ -574,7 +574,7 @@ function ModalSection() {
 type HostTest = "testing" | SshPreflight;
 
 function HostTestCell({ test }: { test: HostTest | undefined }) {
-  if (test === undefined) return <span className="muted [color:var(--muted)]">never tested</span>;
+  if (test === undefined) return <span className="muted text-muted">never tested</span>;
   if (test === "testing") return <span className={SPINNER_CLASS_NAME} />;
   const badge = !test.reachable ? (
     <span className={ERROR_BADGE_CLASS_NAME} title={test.error ?? undefined}>Unreachable</span>
@@ -586,7 +586,7 @@ function HostTestCell({ test }: { test: HostTest | undefined }) {
   return (
     <>
       {badge}
-      <span className="ssh-tested-at [display:block] [margin-top:2px] [color:var(--muted)] [font-size:var(--fs-xs)]">{timeAgo(test.testedAt)}</span>
+      <span className="ssh-tested-at block mt-0.5 text-muted text-xs">{timeAgo(test.testedAt)}</span>
     </>
   );
 }
@@ -621,7 +621,7 @@ function SshSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run experiments directly on your own boxes with{" "}
         <code>--backend ssh --host &lt;alias&gt;</code>. Hosts come from{" "}
         <code>~/.ssh/config</code>; auth uses your keys/agent (orx never reads a key). The host
@@ -632,9 +632,9 @@ function SshSection() {
           <span className={SPINNER_CLASS_NAME} /> Reading ~/.ssh/config…
         </div>
       ) : hosts.length === 0 ? (
-        <p className="settings-empty [color:var(--muted)] [font-size:var(--fs-md)] [margin:4px_0_0]">No hosts found in ~/.ssh/config.</p>
+        <p className="settings-empty text-muted text-md mt-1 mx-0 mb-0">No hosts found in ~/.ssh/config.</p>
       ) : (
-        <table className="flavor-table [width:100%] [border-collapse:collapse] [font-size:var(--fs-md)] [&_th]:[padding:5px_10px_5px_0] [&_th]:[border-bottom:1px_solid_var(--border)] [&_th]:[text-align:left] [&_th]:[font-weight:var(--fw-medium)] [&_th]:[color:var(--text)] [&_td]:[padding:5px_10px_5px_0] [&_td]:[border-bottom:1px_solid_var(--border-variant)] ssh-table [table-layout:fixed] [&_th:nth-child(1)]:[width:20%] [&_th:nth-child(2)]:[width:26%] [&_th:nth-child(4)]:[width:108px] [&_th:nth-child(5)]:[width:52px] [&_td]:[overflow-wrap:anywhere] [&_td:last-child]:[padding-right:0] [&_td:last-child]:[text-align:right]">
+        <table className="flavor-table w-full border-collapse text-md [&_th]:pt-[5px] [&_th]:pr-2.5 [&_th]:pb-[5px] [&_th]:pl-0 [&_th]:border-b [&_th]:border-b-border [&_th]:text-left [&_th]:font-medium [&_th]:text-text [&_td]:pt-[5px] [&_td]:pr-2.5 [&_td]:pb-[5px] [&_td]:pl-0 [&_td]:border-b [&_td]:border-b-border-variant ssh-table table-fixed [&_th:nth-child(1)]:w-[20%] [&_th:nth-child(2)]:w-[26%] [&_th:nth-child(4)]:w-27 [&_th:nth-child(5)]:w-13 [&_td]:wrap-anywhere [&_td:last-child]:pr-0 [&_td:last-child]:text-right">
           <thead>
             <tr>
               <th>Host</th>
@@ -648,11 +648,11 @@ function SshSection() {
             {hosts.map((h) => (
               <tr key={h.host}>
                 <td className={MONO_CLASS_NAME}>{h.host}</td>
-                <td className={`${MONO_CLASS_NAME} muted [color:var(--muted)]`}>
+                <td className={`${MONO_CLASS_NAME} muted text-muted`}>
                   {[h.user, h.hostname ?? "—"].filter(Boolean).join("@")}
                   {h.port ? `:${h.port}` : ""}
                 </td>
-                <td className={`${MONO_CLASS_NAME} muted [color:var(--muted)]`}>{h.identityFile ?? "—"}</td>
+                <td className={`${MONO_CLASS_NAME} muted text-muted`}>{h.identityFile ?? "—"}</td>
                 <td>
                   {/* Session-local result wins; the persisted one covers restarts. */}
                   <HostTestCell test={tests[h.host] ?? h.lastTest} />
@@ -763,7 +763,7 @@ function SlurmSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run on your own cluster with <code>--backend slurm [--flavor h100:2]</code>. orx
         submits via <code>sbatch</code> on the login node over ssh (auth is your keys/agent;
         orx never reads a key) and the job runs in your cluster environment. The defaults
@@ -925,7 +925,7 @@ function RaySection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run on a Ray cluster with <code>--backend ray [--flavor gpu:1]</code>. orx
         submits via the Ray Jobs API (Dashboard URL). Address resolution: this
         setting, then <code>ASTROAI_RAY_JOBS_ADDRESS</code> /{" "}
@@ -1009,7 +1009,7 @@ function LocalSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run experiments as detached, supervised processes on the machine running orx with{" "}
         <code>--backend local</code> — handy when you&apos;re already on a GPU box and using
         this dashboard over port forwarding. Runs share CPU/RAM/GPU with the dashboard
@@ -1065,7 +1065,7 @@ function OpenResearchSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run on an ephemeral OpenResearch box billed to your org with{" "}
         <code>--backend openresearch --flavor &lt;shape&gt;</code> (h100_sxm, cpu5c, …; browse
         with <code>orx compute</code>). The box is provisioned for the run and deleted when it
@@ -1217,7 +1217,7 @@ function DefaultFlavorEditor({
 
   const unchanged = value.trim() === (flavor ?? "");
   return (
-    <form className="form [&_.form-seg]:[align-self:flex-start] [&_.form-seg]:[margin-bottom:2px] [&_.form-seg_button]:[padding:5px_12px] [&_.repo-hint]:[font-family:var(--mono)] [&_.repo-hint]:[font-weight:var(--fw-regular)] [&_.repo-hint]:[font-size:var(--fs-xs)] [&_.repo-hint]:[color:var(--muted)] [&_.repo-hint.ok]:[color:var(--accent-teal)] [&_.folder-picker-control]:[display:flex] [&_.folder-picker-control]:[align-items:center] [&_.folder-picker-control]:[gap:9px] [&_.folder-picker-control]:[width:100%] [&_.folder-picker-control]:[min-width:0] [&_.folder-picker-control]:[padding:8px_10px] [&_.folder-picker-control]:[overflow:hidden] [&_.folder-picker-control]:[background:var(--base)] [&_.folder-picker-control]:[border:1px_solid_var(--border)] [&_.folder-picker-control]:[border-radius:var(--radius-md)] [&_.folder-picker-control]:[cursor:pointer] [&_.folder-picker-control]:[text-align:left] [&_.folder-picker-control]:[transition:border-color_120ms_ease,_box-shadow_120ms_ease] [&_.folder-picker-control:hover:not(:disabled)]:[border-color:var(--muted)] [&_.folder-picker-control:hover:not(:disabled)]:[box-shadow:0_2px_8px_rgb(0_0_0_/_5%)] [&_.folder-picker-control:focus-visible]:[outline:2px_solid_var(--text)] [&_.folder-picker-control:focus-visible]:[outline-offset:2px] [&_.folder-picker-control_span]:[flex:1] [&_.folder-picker-control_span]:[min-width:0] [&_.folder-picker-control_span]:[overflow:hidden] [&_.folder-picker-control_span]:[text-overflow:ellipsis] [&_.folder-picker-control_span]:[white-space:nowrap] [&_.folder-picker-control_.placeholder]:[color:var(--muted)] [&_.folder-picker-icon]:[flex:none] [&_.folder-picker-icon]:[color:currentColor] [&_.folder-picker-chevron]:[flex:none] [&_.folder-picker-chevron]:[color:var(--muted)] [&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:[color:var(--subtext)] [&_.folder-picker-hint]:[color:var(--subtext)] [&_.folder-picker-hint]:[font-size:var(--fs-sm)] [&_.folder-picker-hint]:[font-weight:var(--fw-regular)] [&_.folder-picker-hint]:[line-height:1.4] [&_.project-location-field]:[display:flex] [&_.project-location-field]:[flex-direction:column] [&_.project-location-field]:[gap:8px] [&_.project-location-label]:[color:var(--text)] [&_.project-location-label]:[font-size:var(--fs-base)] [&_.project-location-label]:[font-weight:var(--fw-semibold)] [&_.project-field-label]:[color:var(--text)] [&_.project-field-label]:[font-size:var(--fs-base)] [&_.project-field-label]:[font-weight:var(--fw-semibold)] [&_.folder-picker-control:disabled]:[cursor:default] [&_.folder-picker-control:disabled]:[opacity:0.65] [&_.paper-destination]:[display:flex] [&_.paper-destination]:[align-items:center] [&_.paper-destination]:[gap:10px] [&_.paper-destination]:[padding:8px_8px_8px_12px] [&_.paper-destination]:[border:1px_solid_var(--border)] [&_.paper-destination]:[border-radius:var(--radius-md)] [&_.paper-destination]:[background:var(--base)] [&_.paper-destination_code]:[flex:1] [&_.paper-destination_code]:[min-width:0] [&_.paper-destination_code]:[overflow:hidden] [&_.paper-destination_code]:[color:var(--text)] [&_.paper-destination_code]:[font-size:var(--fs-sm)] [&_.paper-destination_code]:[font-weight:var(--fw-regular)] [&_.paper-destination_code]:[text-overflow:ellipsis] [&_.paper-destination_code]:[white-space:nowrap] [&_.paper-destination_.btn]:[flex:none] [&_.project-path-notice]:[padding:9px_11px] [&_.project-path-notice]:[border:1px_solid_var(--border-variant)] [&_.project-path-notice]:[border-radius:var(--radius-sm)] [&_.project-path-notice]:[background:var(--surface)] [&_.project-path-notice]:[color:var(--subtext)] [&_.project-path-notice]:[font-size:var(--fs-sm)] [&_.project-path-notice]:[line-height:1.4] [&_.project-path-notice.error]:[border-color:color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))] [&_.paper-results]:[display:flex] [&_.paper-results]:[flex-direction:column] [&_.paper-results]:[border:1px_solid_var(--border)] [&_.paper-results]:[border-radius:var(--radius-md)] [&_.paper-results]:[max-height:240px] [&_.paper-results]:[overflow-y:auto] [&_.paper-results_button]:[display:flex] [&_.paper-results_button]:[flex-direction:column] [&_.paper-results_button]:[align-items:flex-start] [&_.paper-results_button]:[gap:2px] [&_.paper-results_button]:[padding:8px_10px] [&_.paper-results_button]:[background:none] [&_.paper-results_button]:[border:none] [&_.paper-results_button]:[border-bottom:1px_solid_var(--border-variant)] [&_.paper-results_button]:[text-align:left] [&_.paper-results_button]:[font:inherit] [&_.paper-results_button]:[color:var(--text)] [&_.paper-results_button]:[cursor:pointer] [&_.paper-results_button:last-child]:[border-bottom:none] [&_.paper-results_button:hover]:[background:var(--surface)] [&_.paper-results_.title]:[font-size:var(--fs-md)] [&_.paper-results_.title]:[font-weight:var(--fw-medium)] [&_.paper-results_.id]:[font-family:var(--mono)] [&_.paper-results_.id]:[font-size:var(--fs-xs)] [&_.paper-results_.id]:[color:var(--muted)] [&_.paper-pick_.id]:[font-family:var(--mono)] [&_.paper-pick_.id]:[font-size:var(--fs-xs)] [&_.paper-pick_.id]:[color:var(--muted)] [&_.paper-pick]:[display:flex] [&_.paper-pick]:[align-items:center] [&_.paper-pick]:[justify-content:space-between] [&_.paper-pick]:[gap:10px] [&_.paper-pick]:[padding:10px_12px] [&_.paper-pick]:[border:1px_solid_var(--border)] [&_.paper-pick]:[border-radius:var(--radius-md)] [&_.paper-pick]:[background:var(--surface)] [&_.paper-pick_.meta]:[min-width:0] [&_.paper-pick_.title]:[font-size:var(--fs-md)] [&_.paper-pick_.title]:[font-weight:var(--fw-semibold)] [display:flex] [flex-direction:column] [gap:10px] [&_label]:[display:flex] [&_label]:[flex-direction:column] [&_label]:[gap:4px] [&_label]:[font-size:var(--fs-xs)] [&_label]:[color:var(--text)] [&_label]:[font-weight:var(--fw-medium)] [&_.row2]:[display:grid] [&_.row2]:[grid-template-columns:1fr_1fr] [&_.row2]:[gap:10px] [&_.actions]:[display:flex] [&_.actions]:[justify-content:flex-end] [&_.actions]:[gap:10px] [&_.actions]:[margin-top:6px] [&_.new-project-actions]:[justify-content:flex-start] [&_.new-project-actions]:[margin-top:10px] [&_.new-project-actions_.primary]:[margin-left:auto] [&_.error]:[color:var(--accent-red)] [&_.error]:[font-size:var(--fs-md)] [&_.error]:[white-space:pre-wrap] settings-form [margin-top:14px] [padding-top:14px] [border-top:1px_solid_var(--border)] compute-flavor-form [margin-bottom:14px] [&_label]:[max-width:320px]" onSubmit={submit}>
+    <form className="form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5 [&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-mono [&_.repo-hint]:font-normal [&_.repo-hint]:text-xs [&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal [&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center [&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full [&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5 [&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background [&_.folder-picker-control]:border [&_.folder-picker-control]:border-border [&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer [&_.folder-picker-control]:text-left [&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard [&_.folder-picker-control:hover:not(:disabled)]:border-muted [&_.folder-picker-control:hover:not(:disabled)]:shadow-[0_2px_8px_rgb(0_0_0_/_5%)] [&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text [&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1 [&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden [&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap [&_.folder-picker-control_.placeholder]:text-muted [&_.folder-picker-icon]:flex-none [&_.folder-picker-icon]:text-current [&_.folder-picker-chevron]:flex-none [&_.folder-picker-chevron]:text-muted [&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext [&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm [&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4] [&_.project-location-field]:flex [&_.project-location-field]:flex-col [&_.project-location-field]:gap-2 [&_.project-location-label]:text-text [&_.project-location-label]:text-base [&_.project-location-label]:font-semibold [&_.project-field-label]:text-text [&_.project-field-label]:text-base [&_.project-field-label]:font-semibold [&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65 [&_.paper-destination]:flex [&_.paper-destination]:items-center [&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pr-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:pl-3 [&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md [&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1 [&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden [&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm [&_.paper-destination_code]:font-normal [&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap [&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px] [&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant [&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface [&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm [&_.project-path-notice]:leading-[1.4] [&_.project-path-notice.error]:border-[color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))] [&_.paper-results]:flex [&_.paper-results]:flex-col [&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md [&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto [&_.paper-results_button]:flex [&_.paper-results_button]:flex-col [&_.paper-results_button]:items-start [&_.paper-results_button]:gap-0.5 [&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent [&_.paper-results_button]:border-0 [&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant [&_.paper-results_button]:text-left [&_.paper-results_button]:[font:inherit] [&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer [&_.paper-results_button:last-child]:border-b-0 [&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-md [&_.paper-results_.title]:font-medium [&_.paper-results_.id]:font-mono [&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted [&_.paper-pick_.id]:font-mono [&_.paper-pick_.id]:text-xs [&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center [&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3 [&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md [&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0 [&_.paper-pick_.title]:text-md [&_.paper-pick_.title]:font-semibold flex flex-col gap-2.5 [&_label]:flex [&_label]:flex-col [&_label]:gap-1 [&_label]:text-xs [&_label]:text-text [&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2 [&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end [&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start [&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ml-auto [&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap settings-form mt-3.5 pt-3.5 border-t border-t-border compute-flavor-form mb-3.5 [&_label]:max-w-80" onSubmit={submit}>
       <label>
         Default flavor
         <input
@@ -1246,7 +1246,7 @@ function DefaultFlavorEditor({
           {saving ? "Saving…" : "Save flavor"}
         </button>
         {FLAVOR_REQUIRED.includes(target) && !flavor && (
-          <span className="muted [color:var(--muted)] compute-flavor-hint [font-size:var(--fs-sm)]">
+          <span className="muted text-muted compute-flavor-hint text-sm">
             This backend requires a flavor — without a default one, each launch must pass{" "}
             <code>--flavor</code>.
           </span>
@@ -1296,23 +1296,23 @@ function TargetRow({
   }
 
   return (
-    <div className={`compute-row [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [&.disabled]:[opacity:0.52] [&.disabled_.compute-row-head]:[cursor:default] [&.open_.compute-row-head:hover]:[border-radius:var(--radius-lg)_var(--radius-lg)_0_0] [&.open_.compute-chevron]:[transform:rotate(180deg)]${open ? " open" : ""}${target.enabled ? "" : " disabled"}`}>
+    <div className={`compute-row bg-background border border-border rounded-lg [&.disabled]:opacity-52 [&.disabled_.compute-row-head]:cursor-default [&.open_.compute-row-head:hover]:rounded-[var(--radius-lg)_var(--radius-lg)_0_0] [&.open_.compute-chevron]:rotate-180${open ? " open" : ""}${target.enabled ? "" : " disabled"}`}>
       {/* The head is a plain clickable div, NOT role="button": it holds real
           buttons (Make default, the chevron), and interactive elements must
           not nest. The chevron is the keyboard-reachable expand control. */}
-      <div className="compute-row-head [display:flex] [align-items:center] [gap:10px] [padding:12px_14px] [cursor:pointer] [user-select:none] [&:hover]:[background:var(--surface)] [&:hover]:[border-radius:var(--radius-lg)] [&_.badge]:[flex:none]" onClick={target.enabled ? onToggle : undefined}>
-        <span className="compute-row-logo [display:inline-flex] [align-items:center] [flex:none]">
+      <div className="compute-row-head flex items-center gap-2.5 py-3 px-3.5 cursor-pointer select-none [&:hover]:bg-surface [&:hover]:rounded-lg [&_.badge]:flex-none" onClick={target.enabled ? onToggle : undefined}>
+        <span className="compute-row-logo inline-flex items-center flex-none">
           <BackendLogo kind={TARGET_KIND[target.id]} size={18} />
         </span>
-        <span className="compute-row-name [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)] [color:var(--text)] [flex:none]">{TARGET_LABELS[target.id]}</span>
-        <span className="compute-row-summary [flex:1] [min-width:0] [overflow:hidden] [text-overflow:ellipsis] [white-space:nowrap] [color:var(--muted)] [font-size:var(--fs-sm)]">{target.summary}</span>
+        <span className="compute-row-name text-md font-semibold text-text flex-none">{TARGET_LABELS[target.id]}</span>
+        <span className="compute-row-summary flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-muted text-sm">{target.summary}</span>
         <TargetStatusBadge t={target} isDefault={isDefault} />
         {isDefault ? (
-          <span className="badge [display:inline-flex] [align-items:center] [font-family:var(--sans)] [font-size:var(--fs-xs)] [font-weight:var(--fw-medium)] [padding:1px_7px] [border:1px_solid_var(--border)] [border-radius:var(--radius-sm)] [&.ok]:[color:var(--accent-green)] [&.ok]:[border-color:var(--accent-green)] [&.ok]:[background:var(--accent-green-subtle)] [&.err]:[color:var(--accent-red)] [&.err]:[border-color:var(--accent-red)] [&.err]:[background:var(--accent-red-subtle)] [&.warn]:[color:var(--accent-amber)] [&.warn]:[border-color:var(--accent-amber)] [&.warn]:[background:var(--accent-amber-subtle)] compute-default-pill [flex:none] [color:var(--primary)] [border-color:var(--primary)]">{isFallbackDefault ? "Local fallback" : "Default"}</span>
+          <span className="badge inline-flex items-center font-sans text-xs font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle compute-default-pill flex-none text-primary border-primary">{isFallbackDefault ? "Local fallback" : "Default"}</span>
         ) : (
           <button
             type="button"
-            className={`${SMALL_BUTTON_CLASS_NAME} compute-make-default [flex:none]`}
+            className={`${SMALL_BUTTON_CLASS_NAME} compute-make-default flex-none`}
             onClick={(e) => {
               e.stopPropagation(); // the header click is expand/collapse
               void setDefault(target.id);
@@ -1324,7 +1324,7 @@ function TargetRow({
         )}
         <button
           type="button"
-          className="compute-chevron-btn [flex:none] [display:inline-flex] [align-items:center] [padding:2px] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--panel)]"
+          className="compute-chevron-btn flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
           aria-expanded={open}
           aria-label={`${open ? "Collapse" : "Expand"} ${TARGET_LABELS[target.id]}`}
           disabled={!target.enabled}
@@ -1333,13 +1333,13 @@ function TargetRow({
             if (target.enabled) onToggle();
           }}
         >
-          <ChevronDown size={16} className="compute-chevron [color:var(--muted)] [transition:transform_120ms_ease]" />
+          <ChevronDown size={16} className="compute-chevron text-muted transition-transform duration-120 ease-standard" />
         </button>
       </div>
       {visited && target.enabled && (
-        <div className="compute-row-body [border-top:1px_solid_var(--border)] [padding:14px] [&_.settings-card]:[margin-bottom:0] [&_.settings-card]:[margin-top:14px]" hidden={!open}>
+        <div className="compute-row-body border-t border-t-border p-3.5 [&_.settings-card]:mb-0 [&_.settings-card]:mt-3.5" hidden={!open}>
           {isDefault && !isFallbackDefault && (
-            <p className="settings-note [margin:10px_0_0] [font-size:var(--fs-sm)] [padding:8px_10px] [border:1px_solid_var(--accent-amber)] [border-radius:var(--radius-md)] [background:var(--accent-amber-subtle)] [color:var(--accent-amber)] [font-weight:var(--fw-medium)] compute-default-note [display:flex] [align-items:center] [gap:10px] [flex-wrap:wrap]">
+            <p className="settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5 border border-accent-amber rounded-md bg-accent-amber-subtle text-accent-amber font-medium compute-default-note flex items-center gap-2.5 flex-wrap">
               The agent launches runs here unless you tell it otherwise, and so does{" "}
               <code>orx exp run</code> with no <code>--backend</code> flag.{" "}
               <button
@@ -1464,12 +1464,12 @@ function ComputeTab({
   return (
     <>
       <h1>Compute</h1>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Where <code>orx exp run</code> executes. Pick a default target; the agent uses it when
         a launch doesn&apos;t name a backend (<code>--backend &lt;name&gt;</code> always wins).
       </p>
       <ComputeActivity onViewHistory={onViewHistory} />
-      <h2 className="compute-section-title [margin:0_0_10px] [font-size:var(--fs-lg)]">Targets</h2>
+      <h2 className="compute-section-title mt-0 mx-0 mb-2.5 text-lg">Targets</h2>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !targets ? (
@@ -1479,10 +1479,10 @@ function ComputeTab({
       ) : (
         <>
           {error && <div className="error">{error}</div>}
-          <div className="compute-list [display:flex] [flex-direction:column] [gap:10px] [margin-bottom:14px]">
+          <div className="compute-list flex flex-col gap-2.5 mb-3.5">
             {targets.filter((target) => target.id === "local").map(renderTarget)}
             {githubBlocksRemoteCompute && (
-              <div className="compute-github-gate [display:flex] [align-items:center] [justify-content:space-between] [gap:24px] [margin:22px_2px_2px] [&_h3]:[margin:0] [&_h3]:[font-size:var(--fs-md)] [&_h3]:[font-weight:var(--fw-semibold)] [&_p]:[margin:3px_0_0] [&_p]:[color:var(--subtext)] [&_p]:[font-size:var(--fs-sm)] [&_.btn]:[flex:none] [@media((max-width:_640px))]:[align-items:stretch] [@media((max-width:_640px))]:[flex-direction:column] [@media((max-width:_640px))]:[gap:12px]">
+              <div className="compute-github-gate flex items-center justify-between gap-6 mt-5.5 mx-0.5 mb-0.5 [&_h3]:m-0 [&_h3]:text-md [&_h3]:font-semibold [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0 [&_p]:text-subtext [&_p]:text-sm [&_.btn]:flex-none [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col [@media((max-width:_640px))]:gap-3">
                 <div>
                   <h3>Remote targets</h3>
                   <p>
@@ -1502,7 +1502,7 @@ function ComputeTab({
               Using this machine while the project is local-only. Your saved {settings?.configuredDefaultBackend} default will return after GitHub is enabled.
             </p>
           )}
-          <p className="compute-footnote [display:flex] [align-items:flex-start] [gap:6px] [margin:2px_0_0] [font-size:var(--fs-sm)] [color:var(--muted)] [&_svg]:[flex:none] [&_svg]:[margin-top:1px]">
+          <p className="compute-footnote flex items-start gap-1.5 mt-0.5 mx-0 mb-0 text-sm text-muted [&_svg]:flex-none [&_svg]:mt-px">
             <Info size={14} aria-hidden="true" />
             <span>
               The default target and flavor are included in the research agent&apos;s
@@ -1580,7 +1580,7 @@ function HfSection() {
 
   return (
     <>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Run experiments on your Hugging Face account with{" "}
         <code>--backend hf --flavor &lt;name&gt;</code> (t4-small, a10g-small, a100-large, …).
         Billed to HF per minute.
@@ -1724,7 +1724,7 @@ function EnvRow({
     <>
       <tr>
         <td className={MONO_CLASS_NAME}>{name}</td>
-        <td className={`${MONO_CLASS_NAME} muted [color:var(--muted)]`}>
+        <td className={`${MONO_CLASS_NAME} muted text-muted`}>
           {entry ? (
             <>
               {entry.maskedValue}
@@ -1890,7 +1890,7 @@ function EnvVarsSection() {
 
   return (
     <div className={SETTINGS_CARD_CLASS_NAME}>
-      <div className="settings-card-head [display:flex] [align-items:center] [gap:10px] [margin-bottom:12px]">
+      <div className="settings-card-head flex items-center gap-2.5 mb-3">
         <h3>Environment variables</h3>
         <div className="spacer" style={{ flex: 1 }} />
         <button
@@ -1901,7 +1901,7 @@ function EnvVarsSection() {
           <Plus size={12} /> Add variable
         </button>
       </div>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Stored in <code>~/.openresearch/env</code> and passed to runs and the research agent.{" "}
         <code>HF_TOKEN</code> and <code>WANDB_API_KEY</code> are always listed since runs
         typically need them. Variables set in orx's own environment win on conflicts.
@@ -1913,7 +1913,7 @@ function EnvVarsSection() {
           <span className={SPINNER_CLASS_NAME} /> Loading…
         </div>
       ) : (
-        <table className="env-table [width:100%] [border-collapse:collapse] [font-size:var(--fs-md)] [table-layout:fixed] [&_td:first-child]:[width:32%] [&_td:first-child]:[overflow-wrap:anywhere] [&_.badge]:[margin-left:8px] [&_input]:[width:100%] [&_input]:[border:none] [&_input]:[background:transparent] [&_input]:[padding:0] [&_input:focus]:[box-shadow:0_1px_0_0_var(--text)] [&_td]:[height:36px] [&_td]:[padding:0_10px_0_0] [&_td]:[vertical-align:middle] [&_td]:[border-bottom:1px_solid_var(--border-variant)] [&_td:last-child]:[width:116px] [&_td:last-child]:[white-space:nowrap] [&_td:last-child]:[text-align:right] [&_td[colspan]]:[white-space:normal] [&_td[colspan]]:[text-align:left] [&_.icon-btn]:[margin-left:8px] [&_.icon-btn]:[vertical-align:middle] [&_.icon-btn:hover]:[color:var(--accent-red)]">
+        <table className="env-table w-full border-collapse text-md table-fixed [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ml-2 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:p-0 [&_input:focus]:shadow-[0_1px_0_0_var(--text)] [&_td]:h-9 [&_td]:pt-0 [&_td]:pr-2.5 [&_td]:pb-0 [&_td]:pl-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-right [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-left [&_.icon-btn]:ml-2 [&_.icon-btn]:align-middle [&_.icon-btn:hover]:text-accent-red">
           <tbody>
             {names.map((name) => (
               <EnvRow
@@ -1977,15 +1977,15 @@ function AppearanceTab() {
   return (
     <>
       <h2>Appearance</h2>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">How the interface looks on this device.</p>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">How the interface looks on this device.</p>
       <div className={SETTINGS_CARD_CLASS_NAME}>
         <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div>
-            <div className="project-default-title [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)]">Theme</div>
+            <div className="project-default-title text-md font-semibold">Theme</div>
             <p>System follows your operating system's light or dark setting.</p>
           </div>
           <div
-            className="theme-segmented [display:inline-flex] [flex:0_0_auto] [gap:2px] [padding:2px] [border:1px_solid_var(--border)] [border-radius:var(--radius-md)] [background:var(--surface)]"
+            className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
             role="radiogroup"
             aria-label="Theme"
             onKeyDown={onKeyDown}
@@ -1997,7 +1997,7 @@ function AppearanceTab() {
                 role="radio"
                 aria-checked={preference === value}
                 tabIndex={preference === value ? 0 : -1}
-                className={`theme-segment [display:inline-flex] [align-items:center] [gap:6px] [padding:5px_10px] [border-radius:var(--radius-sm)] [color:var(--subtext)] [font-size:var(--fs-sm)] [cursor:pointer] [transition:background_120ms_ease,_color_120ms_ease] [&:hover:not(.on)]:[color:var(--text)] [&:hover:not(.on)]:[background:var(--highlight)] [&.on]:[color:var(--base)] [&.on]:[background:var(--primary)] [&:focus-visible]:[outline:2px_solid_var(--text)] [&:focus-visible]:[outline-offset:2px] ${preference === value ? "on" : ""}`}
+                className={`theme-segment inline-flex items-center gap-1.5 py-[5px] px-2.5 rounded-sm text-subtext text-sm cursor-pointer transition-[background,color] duration-120 ease-standard [&:hover:not(.on)]:text-text [&:hover:not(.on)]:bg-highlight [&.on]:text-background [&.on]:bg-primary [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${preference === value ? "on" : ""}`}
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
@@ -2040,12 +2040,12 @@ function ProjectDefaultsTab() {
   return (
     <>
       <h2>General</h2>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">Defaults applied when you create a project.</p>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">Defaults applied when you create a project.</p>
       {!settings ? (
         error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
       ) : (
-        <div className="settings-card [&_>_.error]:[color:var(--accent-red)] [&_>_.error]:[font-size:var(--fs-md)] [&_>_.error]:[white-space:pre-wrap] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [padding:16px_18px] [margin-bottom:16px] [&_h3]:[margin:0_0_10px] [&_h3]:[font-size:var(--fs-sm)] [&_h3]:[font-weight:var(--fw-semibold)] [&_h3]:[color:var(--text)] [&_.settings-sub]:[margin-bottom:12px] [&_.kv]:[gap:6px_18px] [&_>_.project-default-row:first-child]:[padding-top:0] [&_>_.project-default-row:first-child]:[border-top:none] project-defaults-card [&_.settings-card-head]:[justify-content:space-between] [&_.settings-card-head]:[margin-bottom:0] [&_.settings-card-head]:[padding-bottom:12px] [&_.settings-card-head_h3]:[margin:0]">
-          <div className="settings-card-head [display:flex] [align-items:center] [gap:10px] [margin-bottom:12px]">
+        <div className="settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5 [&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0">
+          <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>GitHub publishing</h3>
             <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : ""}`}>
               {settings.githubAuthenticated ? `Connected via ${settings.githubTokenSource}` : "Not connected"}
@@ -2053,7 +2053,7 @@ function ProjectDefaultsTab() {
           </div>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title [font-size:var(--fs-md)] [font-weight:var(--fw-semibold)]">Enable GitHub syncing for new projects</div>
+              <div className="project-default-title text-md font-semibold">Enable GitHub syncing for new projects</div>
               <p>
                 When enabled, each new project gets a private GitHub repository. Experiment
                 branches are pushed automatically so their code can run on remote compute.
@@ -2064,7 +2064,7 @@ function ProjectDefaultsTab() {
               role="switch"
               aria-checked={settings.githubForNewProjects}
               aria-label="Enable GitHub syncing for new projects"
-              className={`settings-switch [position:relative] [flex:0_0_auto] [width:38px] [height:22px] [border:1px_solid_var(--border)] [border-radius:var(--radius-full)] [background:var(--surface)] [transition:background_120ms_ease,_border-color_120ms_ease] [&_span]:[position:absolute] [&_span]:[top:3px] [&_span]:[left:3px] [&_span]:[width:14px] [&_span]:[height:14px] [&_span]:[border-radius:50%] [&_span]:[background:var(--muted)] [&_span]:[transition:transform_120ms_ease,_background_120ms_ease] [&.on]:[border-color:var(--primary)] [&.on]:[background:var(--primary)] [&.on_span]:[background:var(--base)] [&.on_span]:[transform:translateX(16px)] [&:disabled]:[opacity:0.45] [&:disabled]:[cursor:default] [&:focus-visible]:[outline:2px_solid_var(--text)] [&:focus-visible]:[outline-offset:2px] ${settings.githubForNewProjects ? "on" : ""}`}
+              className={`settings-switch relative flex-none w-9.5 h-5.5 border border-border rounded-full bg-surface transition-[background,border-color] duration-120 ease-standard [&_span]:absolute [&_span]:top-[3px] [&_span]:left-[3px] [&_span]:w-3.5 [&_span]:h-3.5 [&_span]:rounded-full [&_span]:bg-muted [&_span]:transition-[translate,background] [&_span]:duration-120 [&_span]:ease-standard [&.on]:border-primary [&.on]:bg-primary [&.on_span]:bg-background [&.on_span]:translate-x-4 [&:disabled]:opacity-45 [&:disabled]:cursor-default [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${settings.githubForNewProjects ? "on" : ""}`}
               disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
               onClick={toggle}
             >
@@ -2072,7 +2072,7 @@ function ProjectDefaultsTab() {
             </button>
           </div>
           {!settings.githubAuthenticated && (
-            <div className="project-default-connect [&_p]:[margin:3px_0_0] [&_p]:[color:var(--muted)] [&_p]:[font-size:var(--fs-sm)] [margin-top:14px] [padding-top:14px] [border-top:1px_solid_var(--border-variant)] [&_.onb-token-form]:[margin-top:10px]">
+            <div className="project-default-connect [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0 [&_p]:text-muted [&_p]:text-sm mt-3.5 pt-3.5 border-t border-t-border-variant [&_.onb-token-form]:mt-2.5">
               <p>Connect GitHub to make publishing the default for new projects.</p>
               <GitTokenForm onSaved={load} />
             </div>
@@ -2168,7 +2168,7 @@ function GitTab({
   return (
     <>
       <h1>Repository</h1>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Git and GitHub settings for <strong>{project?.name ?? "the current project"}</strong>.
         Local Git powers experiments; publishing is optional.
       </p>
@@ -2196,13 +2196,13 @@ function GitTab({
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : ""}`}>{status.github.authenticated ? "Connected" : "Not connected"}</span>{status.github.authenticated && <span className="git-detail-meta [color:var(--muted)] [font-size:var(--fs-sm)]">via {status.github.tokenSource}</span>}</span>
-              <span className="k">Project</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge [display:inline-flex] [align-items:center] [font-family:var(--sans)] [font-weight:var(--fw-medium)] [padding:1px_7px] [border:1px_solid_var(--border)] [border-radius:var(--radius-sm)] [&.ok]:[color:var(--accent-green)] [&.ok]:[border-color:var(--accent-green)] [&.ok]:[background:var(--accent-green-subtle)] [&.err]:[color:var(--accent-red)] [&.err]:[border-color:var(--accent-red)] [&.err]:[background:var(--accent-red-subtle)] [&.warn]:[color:var(--accent-amber)] [&.warn]:[border-color:var(--accent-amber)] [&.warn]:[background:var(--accent-amber-subtle)] git-detail-meta [color:var(--muted)] [font-size:var(--fs-sm)]">Syncing off</span>}</> : <span className={BADGE_CLASS_NAME}>Local only</span>}</span>
+              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : ""}`}>{status.github.authenticated ? "Connected" : "Not connected"}</span>{status.github.authenticated && <span className="git-detail-meta text-muted text-sm">via {status.github.tokenSource}</span>}</span>
+              <span className="k">Project</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">Syncing off</span>}</> : <span className={BADGE_CLASS_NAME}>Local only</span>}</span>
               {status.github.enabled && <><span className="k">Sync</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
             {!status.github.authenticated && (
               <>
-                <p className="git-card-helper [color:var(--muted)] [font-size:var(--fs-sm)] [margin:14px_0_0]">
+                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
                   GitHub is optional. Connect only when you want remote compute or a hosted copy.
                 </p>
                 <GitTokenForm onSaved={() => load()} />
@@ -2210,7 +2210,7 @@ function GitTab({
             )}
             {status.github.authenticated && !status.github.enabled && (
               <>
-                <p className="git-card-helper [color:var(--muted)] [font-size:var(--fs-sm)] [margin:14px_0_0]">
+                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
                   {hasGithubRepository
                     ? "Use this repository for automatic experiment-branch pushes when your connected account can write to it. Otherwise, OpenResearch creates a separate private repository for syncing and remote compute."
                     : "Create a private repository for this project and automatically push experiment branches so they can run on remote compute."}
@@ -2223,7 +2223,7 @@ function GitTab({
             )}
             {status.github.enabled && (
               <>
-                <p className="git-card-helper [color:var(--muted)] [font-size:var(--fs-sm)] [margin:14px_0_0]">
+                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
                   Disabling syncing stops automatic pushes and remote compute. It does not delete
                   the GitHub repository or any code already pushed there.
                 </p>
@@ -2239,9 +2239,9 @@ function GitTab({
         </>
       )}
       {defaultPromptOpen && (
-        <div className="modal-backdrop [position:fixed] [inset:0] [background:rgba(29,_27,_26,_0.4)] [display:flex] [align-items:flex-start] [justify-content:center] [padding:var(--modal-top)_16px_24px] [overflow-y:auto] [z-index:100]" onClick={() => finishDefaultPrompt(false)}>
+        <div className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.4)] flex items-start justify-center pt-[var(--modal-top)] px-4 pb-6 overflow-y-auto z-100" onClick={() => finishDefaultPrompt(false)}>
           <div
-            className="modal [max-width:94vw] [max-height:calc(100vh_-_var(--modal-top)_-_48px)] [overflow-y:auto] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-xl)] [box-shadow:0_24px_60px_rgba(0,_0,_0,_0.22)] [padding:24px] [&_h2]:[margin:0_0_14px] [&_h2]:[font-size:var(--fs-xl)] github-default-modal [width:440px] [&_>_p]:[margin:0] [&_>_p]:[color:var(--muted)] [&_>_p]:[font-size:var(--fs-md)] [&_>_p]:[line-height:1.5] [&_>_.error]:[margin-top:14px]"
+            className="modal max-w-[94vw] max-h-[calc(100vh_-_var(--modal-top)_-_48px)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl github-default-modal w-110 [&_>_p]:m-0 [&_>_p]:text-muted [&_>_p]:text-md [&_>_p]:leading-normal [&_>_.error]:mt-3.5"
             role="dialog"
             aria-modal="true"
             aria-labelledby="github-default-title"
@@ -2254,7 +2254,7 @@ function GitTab({
               when needed and pushing experiment branches for remote runs.
             </p>
             {defaultPromptError && <div className="error">{defaultPromptError}</div>}
-            <div className="github-default-actions [display:flex] [justify-content:flex-end] [gap:10px] [margin-top:22px]">
+            <div className="github-default-actions flex justify-end gap-2.5 mt-5.5">
               <button className={BUTTON_CLASS_NAME} disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(false)}>
                 Not now
               </button>
@@ -2379,7 +2379,7 @@ function StorageTab() {
   return (
     <>
       <h2>Storage</h2>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Where orx keeps everything on this machine — the local database, run logs, artifacts, and
         chat attachments for <strong>all</strong> projects. Moving it copies the whole store to the
         new location and activates it there.
@@ -2394,7 +2394,7 @@ function StorageTab() {
         </div>
       ) : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head [display:flex] [align-items:center] [gap:10px] [margin-bottom:12px]">
+          <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>Data directory</h3>
             <div className="spacer" style={{ flex: 1 }} />
             <span className={BADGE_CLASS_NAME}>{settings.isDefault ? "Default" : "Custom"}</span>
@@ -2517,11 +2517,11 @@ function runtimeLabel(inst: Instance): string {
 /** One section's table: backend (logo + flavor), project, status, started, runtime. */
 function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; emptyLabel: string }) {
   if (instances.length === 0) {
-    return <p className="instances-empty [margin:0] [padding:14px_16px] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [background:var(--base)] [color:var(--subtext)] [font-size:var(--fs-md)]">{emptyLabel}</p>;
+    return <p className="instances-empty m-0 py-3.5 px-4 border border-border rounded-lg bg-background text-subtext text-md">{emptyLabel}</p>;
   }
   return (
-    <div className="instances-table-wrap [overflow-x:auto]">
-      <table className="runs-table [width:100%] [border-collapse:collapse] [font-size:var(--fs-md)] [background:var(--base)] [&_th]:[text-align:left] [&_th]:[color:var(--text)] [&_th]:[font-size:var(--fs-xs)] [&_th]:[font-weight:var(--fw-semibold)] [&_th]:[padding:8px_12px] [&_th]:[border-bottom:1px_solid_var(--border)] [&_th]:[position:sticky] [&_th]:[top:0] [&_th]:[background:var(--base)] [&_th]:[z-index:1] [&_td]:[padding:8px_12px] [&_td]:[border-bottom:1px_solid_color-mix(in_oklab,_var(--text)_6%,_transparent)] [&_td]:[white-space:nowrap] [&_tr:last-child_td]:[border-bottom:none] [&_tr.clickable]:[cursor:pointer] [&_tr.clickable:hover_td]:[background:var(--canvas)]">
+    <div className="instances-table-wrap overflow-x-auto">
+      <table className="runs-table w-full border-collapse text-md bg-background [&_th]:text-left [&_th]:text-text [&_th]:text-xs [&_th]:font-semibold [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-[color-mix(in_oklab,_var(--text)_6%,_transparent)] [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
         <thead>
           <tr>
             <th>Backend</th>
@@ -2538,7 +2538,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
             return (
               <tr key={inst.id}>
                 <td>
-                  <span className="backend-cell [display:inline-flex] [align-items:center] [gap:2px] [&_.icon-btn]:[width:22px] [&_.icon-btn]:[height:22px]">
+                  <span className="backend-cell inline-flex items-center gap-0.5 [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5">
                     <BackendBadge backend={inst.backend} />
                     {url && (
                       <a
@@ -2606,8 +2606,8 @@ function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
 
   return (
-    <section className="compute-activity [&_.count-badge]:[display:inline-flex] [&_.count-badge]:[align-items:center] [&_.count-badge]:[justify-content:center] [&_.count-badge]:[min-width:18px] [&_.count-badge]:[height:18px] [&_.count-badge]:[padding:0_5px] [&_.count-badge]:[border-radius:var(--radius-md)] [&_.count-badge]:[background:var(--canvas)] [&_.count-badge]:[border:1px_solid_var(--border)] [&_.count-badge]:[font-size:var(--fs-xs)] [&_.count-badge]:[font-weight:var(--fw-medium)] [&_.count-badge]:[color:var(--text)] [margin:22px_0_26px]">
-      <div className="compute-activity-head [display:flex] [align-items:flex-start] [justify-content:space-between] [gap:20px] [margin-bottom:14px] [&_h2]:[display:flex] [&_h2]:[align-items:center] [&_h2]:[gap:8px] [&_h2]:[margin:0] [&_h2]:[font-size:var(--fs-lg)] [&_p]:[margin:3px_0_0] [&_p]:[color:var(--muted)] [&_p]:[font-size:var(--fs-sm)] [@media((max-width:_640px))]:[align-items:stretch] [@media((max-width:_640px))]:[flex-direction:column]">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-canvas [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-6.5">
+      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0 [&_p]:text-muted [&_p]:text-sm [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
             Running instances
@@ -2615,9 +2615,9 @@ function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
           </h2>
           <p>Compute currently active across all projects.</p>
         </div>
-        <div className="compute-activity-actions [display:flex] [gap:8px] [flex:none] [@media((max-width:_640px))]:[justify-content:flex-start]">
+        <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-            <RefreshCw size={12} className={refreshing ? "spin [animation:settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+            <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
           </button>
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={onViewHistory}>
             {`View history${past?.length ? ` (${past.length})` : ""}`}
@@ -2662,16 +2662,16 @@ function InstanceHistory({ onBack }: { onBack: () => void }) {
 
   return (
     <>
-      <button type="button" className="settings-back [display:inline-flex] [align-items:center] [gap:6px] [margin:0_0_18px] [color:var(--subtext)] [font-size:var(--fs-sm)] [font-weight:var(--fw-medium)] [&:hover]:[color:var(--text)]" onClick={onBack}>
+      <button type="button" className="settings-back inline-flex items-center gap-1.5 mt-0 mx-0 mb-4.5 text-subtext text-sm font-medium [&:hover]:text-text" onClick={onBack}>
         <ArrowLeft size={14} /> Back to Compute
       </button>
-      <div className="settings-head-row [display:flex] [align-items:center] [justify-content:space-between] [gap:10px] [&_h1]:[margin:0]">
+      <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h1]:m-0">
         <h1>Instance history</h1>
         <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-          <RefreshCw size={12} className={refreshing ? "spin [animation:settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+          <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
         </button>
       </div>
-      <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">Every compute instance spun up across your projects.</p>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">Every compute instance spun up across your projects.</p>
       {error && <div className="error">{error}</div>}
       {!instances ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
@@ -2731,11 +2731,11 @@ export function SettingsView({
   const showsSettings = tab === "settings" || isSettingsSection(tab);
 
   return (
-    <div className="settings-view [max-width:var(--readable-col)] [margin:0_auto] [padding:24px_32px_60px] [&_h1]:[margin:0_0_6px] [&_h1]:[font-size:var(--fs-3xl)] [&_>_.error]:[color:var(--accent-red)] [&_>_.error]:[font-size:var(--fs-md)] [&_>_.error]:[white-space:pre-wrap] [&_>_.error]:[margin:0_0_12px]">
+    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
           <h1>Settings</h1>
-          <div className="settings-stack [margin-top:18px]">
+          <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
@@ -2762,7 +2762,7 @@ export function SettingsView({
       {tab === "environment" && (
         <>
           <h1>Environment</h1>
-          <p className="settings-sub [margin:0_0_18px] [color:var(--text)] [font-size:var(--fs-md)]">
+          <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
             Variables available to runs and the research agent (API keys, tokens).
           </p>
           <EnvVarsSection />

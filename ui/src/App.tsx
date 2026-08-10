@@ -55,12 +55,12 @@ import { useOrxEvents } from "./events";
 import { CODE_TAB_BODY_CLASS_NAME, ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, TAB_BODY_CLASS_NAME } from "./styleClasses";
 
 const EMPTY_STATE_CLASS_NAME = [
-  "empty-state [position:absolute] [inset:0] [display:flex] [flex-direction:column] [align-items:center]",
-  "[justify-content:center] [gap:10px] [padding:24px] [text-align:center] [color:var(--subtext)]",
-  "[&_p]:[max-width:46ch] [&_p]:[margin:0] [&_p]:[font-size:var(--fs-md)] [&_p]:[line-height:1.5]",
-  "[&_p]:[text-wrap:balance] [&_p.empty-state-title]:[font-size:var(--fs-2xl)]",
-  "[&_p.empty-state-title]:[font-weight:var(--fw-regular)] [&_p.empty-state-title]:[color:var(--text)]",
-  "[&_p.empty-state-hint]:[font-size:var(--fs-lg)] [&_p.empty-state-hint]:[color:var(--subtext)]",
+  "empty-state absolute inset-0 flex flex-col items-center",
+  "justify-center gap-2.5 p-6 text-center text-subtext",
+  "[&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:text-md [&_p]:leading-normal",
+  "[&_p]:text-balance [&_p.empty-state-title]:text-2xl",
+  "[&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text",
+  "[&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext",
 ].join(" ");
 
 /** An experiment view open as a right-panel tab. */
@@ -936,7 +936,7 @@ export default function App() {
 
   if (startupError) {
     return (
-      <div className="app [display:flex] [flex-direction:column] [height:100%]">
+      <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
           <p>{startupError}</p>
           <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={loadInitialState}>Retry</button>
@@ -947,7 +947,7 @@ export default function App() {
 
   if (projects === null || uiState === null) {
     return (
-      <div className="app [display:flex] [flex-direction:column] [height:100%]">
+      <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
           <span className={SPINNER_CLASS_NAME} />
         </div>
@@ -958,7 +958,7 @@ export default function App() {
   // First boot: the walkthrough installs and opens the embedded demo project.
   if (projects.length === 0) {
     return (
-      <div className="app [display:flex] [flex-direction:column] [height:100%]">
+      <div className="app flex flex-col h-full">
         {onboarded ? (
           <ProjectsHome
             projects={projects}
@@ -997,7 +997,7 @@ export default function App() {
   );
 
   return (
-    <div className="app [display:flex] [flex-direction:column] [height:100%]">
+    <div className="app flex flex-col h-full">
       {homeOpen ? (
         <ProjectsHome
           projects={projects}
@@ -1009,7 +1009,7 @@ export default function App() {
           onDeleted={onProjectDeleted}
         />
       ) : (
-      <div className="app-body [display:flex] [flex:1] [min-height:0] [padding:0_14px]">
+      <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1057,13 +1057,13 @@ export default function App() {
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane [position:relative] [flex-shrink:0] [min-width:0] [display:flex] [flex-direction:column] [margin:10px_0_10px_14px] [background:var(--canvas)] [&.max]:[position:fixed] [&.max]:[inset:10px] [&.max]:[margin:0] [&.max]:[z-index:60] [&.max]:[box-shadow:0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] [overflow:hidden] ${panelMax ? "max" : ""}`}
+          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-2.5 mr-0 mb-2.5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-hidden ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
-          {!panelMax && <div className="panel-resizer [position:absolute] [left:0] [top:0] [bottom:0] [width:6px] [cursor:col-resize] [z-index:30] [&:hover]:[background:color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:[background:color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizePanel} />}
-          <div className="tabs [display:flex] [align-items:flex-end] [gap:0] [padding:4px_6px_0_8px] [height:40px] [border-bottom:1px_solid_var(--border)] [background:var(--canvas)] [flex-shrink:0]">
-            <div className="tab-strip [display:flex] [align-items:flex-end] [gap:2px] [flex:1] [min-width:0] [overflow-x:auto] [scrollbar-width:none] [&::-webkit-scrollbar]:[display:none]">
+          {!panelMax && <div className="panel-resizer absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizePanel} />}
+          <div className="tabs flex items-end gap-0 pt-1 pr-1.5 pb-0 pl-2 h-10 border-b border-b-border bg-canvas shrink-0">
+            <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {artifactsTabOpen && (
                 <ClosableTab
                   active={rightTab === "artifacts"}
@@ -1154,7 +1154,7 @@ export default function App() {
                 );
               })}
             </div>
-            <div className="panel-controls [display:inline-flex] [align-items:center] [gap:2px] [align-self:center] [padding:0_6px] [flex-shrink:0]">
+            <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
               <button
                 className={ICON_BUTTON_CLASS_NAME}
                 title={panelMax ? "Restore panel" : "Expand panel"}
@@ -1190,13 +1190,13 @@ export default function App() {
             </div>
           ) : rightTab === "experiments" ? (
             <div className={TAB_BODY_CLASS_NAME}>
-              <div className={`pane-toolbar [display:flex] [align-items:center] [gap:8px] [flex-wrap:wrap] [padding:10px_12px_0] [flex-shrink:0] [&.table-view]:[background:var(--base)] [&.table-view]:[padding-bottom:12px]${view === "table" ? " table-view" : ""}`}>
+              <div className={`pane-toolbar flex items-center gap-2 flex-wrap pt-2.5 px-3 pb-0 shrink-0 [&.table-view]:bg-background [&.table-view]:pb-3${view === "table" ? " table-view" : ""}`}>
                 <span style={{ flex: 1 }} />
-                <div className="experiments-toolbar-controls [display:inline-flex] [align-items:center] [gap:5px]">
-                  <div className="option-picker [position:relative] [display:inline-flex]" ref={scopeMenuRef}>
+                <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
+                  <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
                     <button
                       ref={scopeTriggerRef}
-                      className={`${ICON_BUTTON_BASE_CLASS_NAME} experiment-scope-trigger [width:26px] [height:26px] [border-radius:var(--radius-sm)]${effectiveScope === "agent" ? " active" : ""}`}
+                      className={`${ICON_BUTTON_BASE_CLASS_NAME} experiment-scope-trigger w-6.5 h-6.5 rounded-sm${effectiveScope === "agent" ? " active" : ""}`}
                       title={`Experiment filter: ${effectiveScope === "agent" ? "Current task" : "Entire project"}`}
                       aria-label="Filter experiments"
                       aria-expanded={scopeMenuOpen}
@@ -1205,7 +1205,7 @@ export default function App() {
                       <Filter size={16} strokeWidth={2.5} />
                     </button>
                     {scopeMenuOpen && (
-                      <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] drop-down align-right experiment-scope-menu [&_.model-item]:[white-space:nowrap] [&_.model-item:disabled]:[color:var(--muted)] [&_.model-item:disabled]:[cursor:default] [&_.model-item:disabled:hover]:[background:transparent]">
+                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                         <button
                           className={MODEL_ITEM_CLASS_NAME}
                           aria-pressed={effectiveScope === "agent"}
@@ -1240,7 +1240,7 @@ export default function App() {
                     )}
                   </div>
                   <div
-                    className="seg [display:inline-flex] [align-items:center] [gap:2px] [border-radius:var(--radius-md)] [background:color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:[font-weight:var(--fw-semibold)] [&_button]:[color:var(--text)] [&_button]:[border-radius:var(--radius-sm)] [&_button:not(:disabled):hover]:[color:var(--text)] [&_button.active]:[background:var(--base)] [&_button.active]:[box-shadow:0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:[color:var(--muted)] [&_button:disabled]:[cursor:default] experiments-view-toggle [padding:2px] [&_button]:[padding:2px_8px] [&_button]:[font-size:var(--fs-sm)]"
+                    className="seg inline-flex items-center gap-0.5 rounded-md bg-[color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:font-semibold [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
                     role="group"
                     aria-label="Experiment view"
                   >
@@ -1261,7 +1261,7 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className="pane-content [flex:1] [min-height:0] [position:relative] [background:var(--base)]">
+              <div className="pane-content flex-1 min-h-0 relative bg-background">
                 {view === "tree" ? (
                   activeProject && (
                     <TreeView
@@ -1314,9 +1314,9 @@ export default function App() {
                   onOpenFile={openFileTab}
                 />
               ) : (
-                <div className="code-tab [display:flex] [flex-direction:column] [height:100%] [min-height:0] wt-tab">
+                <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
                   <div className={CODE_TAB_BODY_CLASS_NAME}>
-                    <div className="wt-empty [display:flex] [flex-direction:column] [align-items:center] [gap:10px] [padding:48px_24px] [text-align:center] [color:var(--muted)] [&_>_svg]:[color:var(--subtext)] [&_p]:[margin:0] [&_p]:[max-width:320px] [&_p]:[font-size:var(--fs-sm)]">
+                    <div className="wt-empty flex flex-col items-center gap-2.5 py-12 px-6 text-center text-muted [&_>_svg]:text-subtext [&_p]:m-0 [&_p]:max-w-80 [&_p]:text-sm">
                       <FolderGit2 size={22} />
                       <p>Select a project to browse its files.</p>
                     </div>
@@ -1344,7 +1344,7 @@ export default function App() {
             <div className={TAB_BODY_CLASS_NAME}>
               {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
-              <div className="pane-content [flex:1] [min-height:0] [position:relative] plan-tab-content [overflow-y:auto] [background:var(--base)] [padding:18px_24px] [&_.md]:[max-width:var(--readable-col)]">
+              <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
                 <Md
                   text={planTab.plan}
                   onOpenFile={(path) => openFileTab(path, planTab.sessionId)}

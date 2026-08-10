@@ -17,15 +17,15 @@ import type { AgentSelection } from "../api";
 import { MODEL_ITEM_CLASS_NAME } from "../styleClasses";
 
 const MODEL_GROUP_CLASS_NAME = [
-  "model-group [display:flex] [align-items:center] [justify-content:space-between] [gap:8px]",
-  "[font-size:var(--fs-xs)] [font-weight:var(--fw-medium)] [color:var(--muted)] [padding:8px_8px_4px]",
+  "model-group flex items-center justify-between gap-2",
+  "text-xs font-medium text-muted pt-2 px-2 pb-1",
 ].join(" ");
 
 const MODEL_MORE_CLASS_NAME = [
-  "model-more [&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-xs)]",
-  "[&_code]:[background:var(--panel)] [&_code]:[border:1px_solid_var(--border-variant)]",
-  "[&_code]:[border-radius:var(--radius-xs)] [&_code]:[padding:1px_5px] [&_code]:[white-space:nowrap]",
-  "[padding:4px_8px_8px] [font-size:var(--fs-xs)] [color:var(--muted)]",
+  "model-more [&_code]:font-mono [&_code]:text-xs",
+  "[&_code]:bg-panel [&_code]:border [&_code]:border-border-variant",
+  "[&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
+  "pt-1 px-2 pb-2 text-xs text-muted",
 ].join(" ");
 
 export type ModelSelection = AgentSelection;
@@ -181,10 +181,10 @@ export function ModelPicker({
     : "Model";
 
   return (
-    <div className="model-picker [position:relative] [display:inline-flex]" data-onboarding="model-picker" ref={rootRef}>
+    <div className="model-picker relative inline-flex" data-onboarding="model-picker" ref={rootRef}>
       <button
         type="button"
-        className="composer-pill [display:inline-flex] [align-items:center] [gap:5px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_8px] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]"
+        className="composer-pill inline-flex items-center gap-[5px] text-md text-text py-[5px] px-2 rounded-sm [&:hover]:bg-surface [&:hover]:text-text"
         title="Harness + model for this chat"
         onClick={() => setOpen((v) => !v)}
       >
@@ -192,7 +192,7 @@ export function ModelPicker({
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className="model-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [width:320px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&_input]:[border:none] [&_input]:[border-bottom:1px_solid_var(--border-variant)] [&_input]:[background:none] [&_input]:[padding:9px_12px] [&_input]:[font-size:var(--fs-md)] [&_input]:[outline:none] align-right">
+        <div className="model-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden w-80 [&.align-right]:left-auto [&.align-right]:right-0 [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-[9px] [&_input]:px-3 [&_input]:text-md [&_input]:outline-none align-right">
           <input
             autoFocus
             type="text"
@@ -200,19 +200,19 @@ export function ModelPicker({
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
-          <div className="model-menu-list [overflow-y:auto] [padding:6px]">
+          <div className="model-menu-list overflow-y-auto p-1.5">
             {groups.map(({ harness, models, hidden }) => (
               <div key={harness.id}>
                 <div className={MODEL_GROUP_CLASS_NAME}>
                   <span>{harness.name}</span>
                   {!harness.agentReady && (
-                    <span className="model-group-status [display:inline-flex] [align-items:center] [gap:4px] [color:var(--accent-amber)] [font-weight:var(--fw-regular)]">
+                    <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
                       <Lock size={10} /> Unavailable
                     </span>
                   )}
                 </div>
                 {!harness.agentReady ? (
-                  <div className="model-more [&_code]:[font-family:var(--mono)] [&_code]:[font-size:var(--fs-xs)] [&_code]:[background:var(--panel)] [&_code]:[border:1px_solid_var(--border-variant)] [&_code]:[border-radius:var(--radius-xs)] [&_code]:[padding:1px_5px] [&_code]:[white-space:nowrap] [padding:4px_8px_8px] [font-size:var(--fs-xs)] [color:var(--muted)] model-unavailable [line-height:1.5] [border-bottom:1px_solid_var(--border-variant)]">
+                  <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-xs text-muted model-unavailable leading-normal border-b border-b-border-variant">
                     {harness.agentNote ? renderNote(harness.agentNote) : "Not available"}
                   </div>
                 ) : (
@@ -278,7 +278,7 @@ export function ModelPicker({
             {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>Detecting harnesses…</div>}
           </div>
           {lockHarness && value && harnesses.length > 1 && (
-            <div className="model-locked-note [display:flex] [align-items:center] [gap:6px] [padding:7px_12px] [font-size:var(--fs-xs)] [color:var(--muted)] [border-top:1px_solid_var(--border-variant)] [&_svg]:[flex-shrink:0]">
+            <div className="model-locked-note flex items-center gap-1.5 py-[7px] px-3 text-xs text-muted border-t border-t-border-variant [&_svg]:shrink-0">
               <Lock size={11} />
               Sessions keep their harness — new chat to switch
             </div>
@@ -341,10 +341,10 @@ export function OptionPicker({
   };
 
   return (
-    <div className="option-picker [position:relative] [display:inline-flex]" ref={ref}>
+    <div className="option-picker relative inline-flex" ref={ref}>
       <button
         type="button"
-        className={variant === "pill" ? "composer-pill [display:inline-flex] [align-items:center] [gap:5px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_8px] [border-radius:var(--radius-sm)] [&:hover]:[background:var(--surface)] [&:hover]:[color:var(--text)]" : "composer-bare [display:inline-flex] [align-items:center] [gap:3px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_4px] [border-radius:var(--radius-sm)] [&:hover]:[color:var(--text)] [&.context-ring]:[display:inline-flex] [&.context-ring]:[align-items:center] [&.context-ring]:[margin-right:8px]"}
+        className={variant === "pill" ? "composer-pill inline-flex items-center gap-[5px] text-md text-text py-[5px] px-2 rounded-sm [&:hover]:bg-surface [&:hover]:text-text" : "composer-bare inline-flex items-center gap-[3px] text-md text-text py-[5px] px-1 rounded-sm [&:hover]:text-text [&.context-ring]:inline-flex [&.context-ring]:items-center [&.context-ring]:mr-2"}
         title={title}
         onClick={() => setOpen((v) => !v)}
       >
@@ -352,7 +352,7 @@ export function OptionPicker({
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [min-width:190px] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] ${align === "right" ? "align-right" : ""}`}>
+        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${align === "right" ? "align-right" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
           {pinned && (
             <>
@@ -363,13 +363,13 @@ export function OptionPicker({
                       usual marker would read "Default · Default" — say where
                       the behavior comes from instead. A named one ("Adaptive")
                       gets the standard marker. */}
-                  <span className="option-default [color:var(--muted)] [font-weight:var(--fw-regular)]">
+                  <span className="option-default text-muted font-normal">
                     {pinned.label === "Default" ? " · CLI configuration" : " · Default"}
                   </span>
                 </span>
                 {effectiveId === pinned.id && <Check size={13} />}
               </button>
-              <div className="option-sep [height:1px] [margin:5px_4px] [background:var(--border-variant)]" />
+              <div className="option-sep h-px my-[5px] mx-1 bg-border-variant" />
             </>
           )}
           {rest.map((c, i) => (
@@ -380,13 +380,13 @@ export function OptionPicker({
                     the marker — it's one of the tiers, not a separate kind of
                     choice like the pinned sentinel above. */}
                 {!pinned && c.id === defaultId && (
-                  <span className="option-default [color:var(--muted)] [font-weight:var(--fw-regular)]"> · Default</span>
+                  <span className="option-default text-muted font-normal"> · Default</span>
                 )}
               </span>
               {effectiveId === c.id ? (
                 <Check size={13} />
               ) : (
-                numbered && <span className="option-num [color:var(--muted)] [font-size:var(--fs-xs)] [font-variant-numeric:tabular-nums]">{i + 1}</span>
+                numbered && <span className="option-num text-muted text-xs tabular-nums">{i + 1}</span>
               )}
             </button>
           ))}

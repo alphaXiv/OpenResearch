@@ -102,7 +102,7 @@ export function CodeTab({
   );
 
   return (
-    <div className="code-tab [display:flex] [flex-direction:column] [height:100%] [min-height:0]">
+    <div className="code-tab flex flex-col h-full min-h-0">
       <CodeBrowserHeader
         view={view}
         onViewChange={onViewChange}
@@ -138,7 +138,7 @@ export function CodeTab({
             ) : tree.dirs.size === 0 && tree.files.length === 0 ? (
               <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
             ) : (
-              <div className="file-tree [padding:6px_0] [font-size:var(--fs-md)]">
+              <div className="file-tree py-1.5 px-0 text-md">
                 <TreeLevel
                   node={tree}
                   parentPath=""

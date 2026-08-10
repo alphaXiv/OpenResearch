@@ -36,10 +36,10 @@ export function LitSourcesPicker() {
   };
 
   return (
-    <div className="option-picker [position:relative] [display:inline-flex]" ref={ref}>
+    <div className="option-picker relative inline-flex" ref={ref}>
       <button
         type="button"
-        className="composer-bare [display:inline-flex] [align-items:center] [gap:3px] [font-size:var(--fs-md)] [color:var(--text)] [padding:5px_4px] [border-radius:var(--radius-sm)] [&:hover]:[color:var(--text)] [&.context-ring]:[display:inline-flex] [&.context-ring]:[align-items:center] [&.context-ring]:[margin-right:8px]"
+        className="composer-bare inline-flex items-center gap-[3px] text-md text-text py-[5px] px-1 rounded-sm [&:hover]:text-text [&.context-ring]:inline-flex [&.context-ring]:items-center [&.context-ring]:mr-2"
         title="Literature sources for orx lit / orx paper"
         aria-label="Literature sources"
         onClick={() => setOpen((v) => !v)}
@@ -47,10 +47,10 @@ export function LitSourcesPicker() {
         <ToggleRight size={16} />
       </button>
       {open && (
-        <div className="option-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [max-height:380px] [display:flex] [flex-direction:column] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden] [padding:6px] [&.align-right]:[left:auto] [&.align-right]:[right:0] [&.drop-down]:[bottom:auto] [&.drop-down]:[top:calc(100%_+_4px)] [&.session-menu]:[left:auto] [&.session-menu]:[right:6px] [&.session-menu]:[top:calc(100%_-_2px)] [&.session-menu]:[min-width:140px] lit-sources-menu [min-width:210px]">
-          <div className="model-group [display:flex] [align-items:center] [justify-content:space-between] [gap:8px] [font-size:var(--fs-xs)] [font-weight:var(--fw-medium)] [color:var(--muted)] [padding:8px_8px_4px]">Literature sources</div>
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 lit-sources-menu min-w-52.5">
+          <div className="model-group flex items-center justify-between gap-2 text-xs font-medium text-muted pt-2 px-2 pb-1">Literature sources</div>
           {!settings ? (
-            <div className="lit-sources-loading [padding:6px_8px] [color:var(--muted)] [font-size:var(--fs-sm)]">Loading…</div>
+            <div className="lit-sources-loading py-1.5 px-2 text-muted text-sm">Loading…</div>
           ) : (
             LIT_SOURCES.map((key) => {
               const on = settings[key];
@@ -64,11 +64,11 @@ export function LitSourcesPicker() {
                   disabled={saving}
                   onClick={() => toggle(key)}
                 >
-                  <span className="lit-source-item-label [display:inline-flex] [align-items:center] [gap:9px]">
+                  <span className="lit-source-item-label inline-flex items-center gap-[9px]">
                     <LitSourceLogo source={key} size={16} decorative />
                     {LIT_SOURCE_NAME[key]}
                   </span>
-                  <span className={`settings-switch [position:relative] [flex:0_0_auto] [width:38px] [height:22px] [border:1px_solid_var(--border)] [border-radius:var(--radius-full)] [background:var(--surface)] [transition:background_120ms_ease,_border-color_120ms_ease] [&_span]:[position:absolute] [&_span]:[top:3px] [&_span]:[left:3px] [&_span]:[width:14px] [&_span]:[height:14px] [&_span]:[border-radius:50%] [&_span]:[background:var(--muted)] [&_span]:[transition:transform_120ms_ease,_background_120ms_ease] [&.on]:[border-color:var(--primary)] [&.on]:[background:var(--primary)] [&.on_span]:[background:var(--base)] [&.on_span]:[transform:translateX(16px)] [&:disabled]:[opacity:0.45] [&:disabled]:[cursor:default] [&:focus-visible]:[outline:2px_solid_var(--text)] [&:focus-visible]:[outline-offset:2px] ${on ? "on" : ""}`} aria-hidden="true">
+                  <span className={`settings-switch relative flex-none w-9.5 h-5.5 border border-border rounded-full bg-surface transition-[background,border-color] duration-120 ease-standard [&_span]:absolute [&_span]:top-[3px] [&_span]:left-[3px] [&_span]:w-3.5 [&_span]:h-3.5 [&_span]:rounded-full [&_span]:bg-muted [&_span]:transition-[translate,background] [&_span]:duration-120 [&_span]:ease-standard [&.on]:border-primary [&.on]:bg-primary [&.on_span]:bg-background [&.on_span]:translate-x-4 [&:disabled]:opacity-45 [&:disabled]:cursor-default [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2 ${on ? "on" : ""}`} aria-hidden="true">
                     <span />
                   </span>
                 </button>

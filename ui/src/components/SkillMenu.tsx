@@ -14,12 +14,12 @@ export function SkillMenu({
   onHover: (index: number) => void;
 }) {
   return (
-    <div className="skill-menu [position:absolute] [bottom:calc(100%_+_8px)] [left:0] [min-width:340px] [max-width:100%] [padding:6px] [background:var(--base)] [border:1px_solid_var(--border)] [border-radius:var(--radius-lg)] [box-shadow:0_12px_32px_rgba(0,_0,_0,_0.18)] [z-index:50] [overflow:hidden]">
+    <div className="skill-menu absolute bottom-[calc(100%_+_8px)] left-0 min-w-85 max-w-full p-1.5 bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden">
       {skills.map((s, i) => (
         <button
           key={s.name}
           type="button"
-          className={`skill-item [display:flex] [flex-direction:column] [gap:2px] [width:100%] [text-align:left] [padding:7px_8px] [border-radius:var(--radius-sm)] [&.active]:[background:var(--surface)] [&_.skill-name]:[font-size:var(--fs-md)] [&_.skill-hint]:[color:var(--muted)] [&_.skill-desc]:[font-size:var(--fs-sm)] [&_.skill-desc]:[color:var(--subtext)] ${i === activeIndex ? "active" : ""}`}
+          className={`skill-item flex flex-col gap-0.5 w-full text-left py-[7px] px-2 rounded-sm [&.active]:bg-surface [&_.skill-name]:text-md [&_.skill-hint]:text-muted [&_.skill-desc]:text-sm [&_.skill-desc]:text-subtext ${i === activeIndex ? "active" : ""}`}
           // mousedown + preventDefault keeps the textarea focused.
           onMouseDown={(e) => {
             e.preventDefault();
