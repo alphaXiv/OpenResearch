@@ -12,6 +12,7 @@ import {
 import { BranchChanges } from "./BranchChanges";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
+import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 
 export type CodeView = CodeBrowserView;
 
@@ -101,7 +102,7 @@ export function CodeTab({
   );
 
   return (
-    <div className="code-tab">
+    <div className="code-tab flex flex-col h-full min-h-0">
       <CodeBrowserHeader
         view={view}
         onViewChange={onViewChange}
@@ -127,17 +128,17 @@ export function CodeTab({
         />
       ) : (
         <>
-          {data?.truncated && <div className="code-tab-note">listing truncated</div>}
-          {error && tree && <div className="code-tab-note">Refresh failed: {error}</div>}
-          <div className="code-tab-body">
+          {data?.truncated && <div className={CODE_TAB_NOTE_CLASS_NAME}>listing truncated</div>}
+          {error && tree && <div className={CODE_TAB_NOTE_CLASS_NAME}>Refresh failed: {error}</div>}
+          <div className={CODE_TAB_BODY_CLASS_NAME}>
             {!tree ? (
-              <div className="code-tab-note">
+              <div className={CODE_TAB_NOTE_CLASS_NAME}>
                 {error ? `Failed to load: ${error}` : "Loading…"}
               </div>
             ) : tree.dirs.size === 0 && tree.files.length === 0 ? (
-              <div className="code-tab-note">No files.</div>
+              <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
             ) : (
-              <div className="file-tree">
+              <div className="file-tree py-1.5 px-0 text-md">
                 <TreeLevel
                   node={tree}
                   parentPath=""

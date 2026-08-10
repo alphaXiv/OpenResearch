@@ -62,7 +62,7 @@ export function FileTypeIcon({ name }: { name: string }) {
     glyph = (
       <>
         <path d="M2 2h12v12H2z" fill="currentColor" opacity=".18" />
-        <path d="M7 2h2v2H7V2Zm0 3h2v2H7V5Zm0 3h2v2H7V8Zm-.5 3h3v2h-3v-2Z" fill="currentColor" />
+        <path d="M7 2h2v2H7V2Zm0 3h2v2H7V5Zm0 3h2v2H7V8Zm-0.5 3h3v2h-3v-2Z" fill="currentColor" />
       </>
     );
   } else {
@@ -76,7 +76,7 @@ export function FileTypeIcon({ name }: { name: string }) {
   }
 
   return (
-    <svg className={`file-tree-icon ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
+    <svg className={`file-tree-icon w-[15px] h-[15px] shrink-0 text-muted overflow-visible [&.markdown]:text-accent-blue [&.image]:text-accent-purple [&.spreadsheet]:text-accent-green [&.code]:text-accent-orange [&.archive]:text-accent-amber [&.pdf]:text-accent-red [&.document]:text-subtext ${kind}`} viewBox="0 0 16 16" aria-hidden="true">
       {glyph}
     </svg>
   );

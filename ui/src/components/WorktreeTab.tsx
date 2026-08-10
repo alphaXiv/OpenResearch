@@ -28,6 +28,7 @@ import { onChatEvent } from "../events";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
+import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 
 /** Poll cadence while the session's agent is working. */
 const POLL_MS = 5000;
@@ -181,7 +182,7 @@ export function WorktreeTab({
   const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
 
   return (
-    <div className="code-tab wt-tab">
+    <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
       <CodeBrowserHeader
         view={liveWorktree ? view : "files"}
         onViewChange={onViewChange}
@@ -197,15 +198,15 @@ export function WorktreeTab({
         refreshing={loading}
         onRefresh={load}
       />
-      {error && (wt || tree) && <div className="code-tab-note">Refresh failed: {error}</div>}
+      {error && (wt || tree) && <div className={CODE_TAB_NOTE_CLASS_NAME}>Refresh failed: {error}</div>}
       {!tree || (sessionId && !wt) ? (
-        <div className="code-tab-body">
-          <div className="code-tab-note">{error ? `Failed to load: ${error}` : "Loading…"}</div>
+        <div className={CODE_TAB_BODY_CLASS_NAME}>
+          <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? `Failed to load: ${error}` : "Loading…"}</div>
         </div>
       ) : liveWorktree && view === "changes" ? (
-        <div className="code-tab-body wt-changes">
+        <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes pt-0 px-4 pb-6 [&_>_:first-child]:mt-3.5`}>
           {fileCount === 0 || !liveWorktree.diff ? (
-            <div className="changes-note">No changes yet.</div>
+            <div className="changes-note text-sm text-muted">No changes yet.</div>
           ) : (
             <>
               {liveWorktree.diff.truncated && (
@@ -222,16 +223,16 @@ export function WorktreeTab({
           )}
         </div>
       ) : (
-        <div className="code-tab-body">
+        <div className={CODE_TAB_BODY_CLASS_NAME}>
           {tree.truncated && (
-            <div className="code-tab-note">Listing truncated.</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>Listing truncated.</div>
           )}
           {!filesTree ? (
-            <div className="code-tab-note">Loading…</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>Loading…</div>
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
-            <div className="code-tab-note">No files.</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
           ) : (
-            <div className="file-tree">
+            <div className="file-tree py-1.5 px-0 text-md">
               <TreeLevel
                 node={filesTree}
                 parentPath=""

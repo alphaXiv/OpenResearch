@@ -1,7 +1,7 @@
 // Shared refractor highlighting used by the file viewer (path → language) and
 // chat markdown code blocks (fence info → language). Both render the resulting
 // hast into <span class="token …"> nodes styled by the .token theme in
-// styles.css.
+// Tailwind utilities on the markdown container.
 
 import type { ReactNode } from "react";
 import { refractor } from "refractor";

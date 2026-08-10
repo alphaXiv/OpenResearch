@@ -31,10 +31,10 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
   const fill = pct === null ? "var(--accent)" : tone(pct);
 
   return (
-    <div className="option-picker" ref={ref}>
+    <div className="option-picker relative inline-flex" ref={ref}>
       <button
         type="button"
-        className="composer-bare context-ring"
+        className="composer-bare inline-flex items-center gap-[3px] text-md text-text py-[5px] px-1 rounded-sm [&:hover]:text-text [&.context-ring]:inline-flex [&.context-ring]:items-center [&.context-ring]:mr-2 context-ring"
         title="Context window used"
         onClick={() => setOpen((v) => !v)}
       >
@@ -65,10 +65,10 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
         )}
       </button>
       {open && (
-        <div className="option-menu align-right context-meter-menu">
-          <div className="context-meter-head">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 align-right context-meter-menu w-70 pt-2.5 px-3 pb-3 [&_.progress]:mt-2 [&_.progress]:mx-0 [&_.progress]:mb-0 [&_.progress-track]:h-[5px] [&_.progress-track]:border-0 [&_.progress-track]:bg-border">
+          <div className="context-meter-head flex justify-between items-baseline gap-3 text-sm text-muted">
             <span>Context window</span>
-            <span className="context-meter-value">
+            <span className="context-meter-value text-text tabular-nums">
               {pct === null
                 ? `${fmtTokens(usedTokens)} tokens`
                 : `${fmtTokens(usedTokens)} / ${fmtTokens(contextWindow!)} (${pct}%)`}

@@ -8,6 +8,7 @@ import {
   usePopoverPosition,
   useTourBounds,
 } from "./tourGeometry";
+import { GHOST_BUTTON_CLASS_NAME, ICON_BUTTON_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME } from "../styleClasses";
 
 /** Breathing room between a target's edges and the spotlight cutout. */
 const BOX_PADDING = 8;
@@ -129,15 +130,15 @@ export function Tour({ onClose }: { onClose: () => Promise<void> }) {
     : null;
 
   return createPortal(
-    <div className="tour-overlay">
+    <div className="tour-overlay fixed inset-0 z-200">
       {box ? (
         <>
           {/* Dim everything except the spotlight via an oversized box-shadow. */}
-          <div className="tour-spotlight" style={box} />
-          <div className="tour-ring" style={box} />
+          <div className="tour-spotlight absolute rounded-lg shadow-[0_0_0_9999px_rgba(0,_0,_0,_0.55)] transition-all duration-300 ease-standard" style={box} />
+          <div className="tour-ring absolute rounded-lg border-2 border-primary transition-all duration-300 ease-standard" style={box} />
         </>
       ) : (
-        <div className="tour-dim" />
+        <div className="tour-dim absolute inset-0 bg-[rgba(0,_0,_0,_0.55)]" />
       )}
       <TourCard
         step={step}
@@ -196,31 +197,31 @@ function TourCard({
   return (
     <div
       ref={measure.ref}
-      className={`tour-card ${positioned ? "" : "centered"}`}
+      className={`tour-card absolute w-97.5 max-w-[calc(100vw_-_32px)] bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] pt-[21px] px-[23px] pb-0 transition-[left,top] duration-200 ease-standard [&.centered]:left-1/2 [&.centered]:top-1/2 [&.centered]:-translate-x-1/2 [&.centered]:-translate-y-1/2 [&.centered]:transition-none [&_h3]:mt-0 [&_h3]:mr-6.5 [&_h3]:mb-[7px] [&_h3]:ml-0 [&_h3]:text-lg [&_h3]:font-semibold [&_p]:m-0 [&_p]:text-base [&_p]:leading-[1.55] [&_p]:text-text [&_.tour-close]:absolute [&_.tour-close]:top-3 [&_.tour-close]:right-3 ${positioned ? "" : "centered"}`}
       style={positioned ? { left: popover.x, top: popover.y } : undefined}
     >
       {positioned && step.anchor && (
         <Arrow anchor={step.anchor} adjustment={popover.arrowAdjustment} />
       )}
-      <button className="icon-btn tour-close" title="Skip tour" onClick={onClose} disabled={closing}>
+      <button className={`${ICON_BUTTON_CLASS_NAME} tour-close`} title="Skip tour" onClick={onClose} disabled={closing}>
         <X size={15} />
       </button>
       <h3>{step.title}</h3>
       <p>{step.description}</p>
       {closeError && <div className="error">Couldn't save tour progress. Try again.</div>}
-      <div className="tour-footer">
-        <div className="tour-footer-side">
+      <div className="tour-footer flex items-center border-t border-t-border-variant mt-4 py-[11px] px-0">
+        <div className="tour-footer-side flex-1 flex [&.end]:justify-end">
           {index > 0 && (
-            <button className="btn ghost" onClick={onBack}>
+            <button className={GHOST_BUTTON_CLASS_NAME} onClick={onBack}>
               Back
             </button>
           )}
         </div>
-        <span className="tour-count">
+        <span className="tour-count text-sm text-muted tabular-nums">
           {index + 1} / {STEPS.length}
         </span>
-        <div className="tour-footer-side end">
-          <button className="btn primary" onClick={onNext} disabled={closing}>
+        <div className="tour-footer-side flex-1 flex [&.end]:justify-end end">
+          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={onNext} disabled={closing}>
             {closing ? "Saving…" : last ? "Done" : "Next"}
           </button>
         </div>
@@ -237,5 +238,5 @@ function TourCard({
 function Arrow({ anchor, adjustment }: { anchor: TourAnchor; adjustment: number }) {
   const cross =
     anchor === "above" || anchor === "below" ? `${adjustment}px 0` : `0 ${adjustment}px`;
-  return <div className={`tour-arrow ${anchor}`} style={{ translate: cross }} />;
+  return <div className={`tour-arrow absolute w-3 h-3 bg-background rotate-45 pointer-events-none [&.above]:-bottom-[6.5px] [&.above]:left-[calc(50%_-_6px)] [&.above]:border-r [&.above]:border-r-border [&.above]:border-b [&.above]:border-b-border [&.below]:-top-[6.5px] [&.below]:left-[calc(50%_-_6px)] [&.below]:border-l [&.below]:border-l-border [&.below]:border-t [&.below]:border-t-border [&.left]:-right-[6.5px] [&.left]:top-[calc(50%_-_6px)] [&.left]:border-t [&.left]:border-t-border [&.left]:border-r [&.left]:border-r-border [&.right]:-left-[6.5px] [&.right]:top-[calc(50%_-_6px)] [&.right]:border-b [&.right]:border-b-border [&.right]:border-l [&.right]:border-l-border ${anchor}`} style={{ translate: cross }} />;
 }

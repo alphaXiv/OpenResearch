@@ -10,6 +10,7 @@ import { artifactUrl, getArtifactFileText, getProjectFile, type ProjectFile } fr
 import { CodeView } from "./CodeView";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import { Md } from "./Md";
+import { ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
 
 export function FileViewer({
   projectId,
@@ -117,21 +118,21 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view">
-      <div className="file-view-header">
+    <div className="file-view flex flex-col h-full min-h-0">
+      <div className="file-view-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant text-text shrink-0">
         <FileText size={13} style={{ flexShrink: 0 }} />
-        <code className="file-view-path" title={path}>
+        <code className="file-view-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={path}>
           {path}
         </code>
         {branchLabel && (
-          <span className="file-view-branch" title={`Branch: ${branchLabel}`}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 font-mono text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={`Branch: ${branchLabel}`}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
         )}
         {isMarkdown && (
           <button
-            className={`icon-btn ${showSource ? "active" : ""}`}
+            className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
             data-tip={showSource ? "Rendered view" : "View source"}
             data-tip-align="end"
             aria-label={showSource ? "Rendered view" : "View source"}
@@ -141,25 +142,25 @@ export function FileViewer({
           </button>
         )}
         <button
-          className="icon-btn"
+          className={ICON_BUTTON_CLASS_NAME}
           data-tip="Reload file"
           data-tip-align="end"
           aria-label="Reload file"
           onClick={() => setNonce((n) => n + 1)}
         >
-          {loading ? <span className="spinner" /> : <RotateCw size={13} />}
+          {loading ? <span className={SPINNER_CLASS_NAME} /> : <RotateCw size={13} />}
         </button>
       </div>
-      <div className="file-view-body">
+      <div className="file-view-body flex-1 min-h-0 overflow-auto bg-background">
         {error ? (
-          <div className="file-view-note">Failed to load file: {error}</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">Failed to load file: {error}</div>
         ) : data === null ? (
-          <div className="file-view-note">Loading…</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">Loading…</div>
         ) : data.notFound ? (
-          <div className="file-view-note">{notFoundCopy(data)}</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">{notFoundCopy(data)}</div>
         ) : isImage && artifactsMode ? (
           <a
-            className="fpreview-image"
+            className="fpreview-image flex items-start justify-center p-6 [&_img]:max-w-full [&_img]:h-auto [&_img]:border [&_img]:border-border [&_img]:rounded-sm"
             href={artifactUrl(projectId, path)}
             target="_blank"
             rel="noopener noreferrer"
@@ -167,22 +168,22 @@ export function FileViewer({
             <img src={artifactUrl(projectId, path)} alt={path.split("/").pop() ?? path} />
           </a>
         ) : binary ? (
-          <div className="file-view-note">Binary file — no inline preview.</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">Binary file — no inline preview.</div>
         ) : (
           <>
             {!artifactsMode && !gitRef && sessionId && data.root === "clone" && (
-              <div className="file-view-note">
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">
                 This session's worktree isn't available — showing the project clone's copy.
               </div>
             )}
             {viaArtifacts && (
-              <div className="file-view-note">
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">
                 Not in the {data.root === "worktree" ? "session's worktree" : "project clone"} —
                 showing the copy from the project's artifacts.
               </div>
             )}
             {isMarkdown && !showSource ? (
-              <div className="file-view-md">
+              <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-[1.5em] [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-[1.25em] [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-[1.1em]">
                 {artifactsMode ? (
                   <ArtifactMarkdown
                     projectId={projectId}
@@ -200,7 +201,7 @@ export function FileViewer({
               <CodeView text={data.content} path={path} highlightLine={line} />
             )}
             {!artifactsMode && data.truncated && (
-              <div className="file-view-note">File truncated — showing the first 512 KB.</div>
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">File truncated — showing the first 512 KB.</div>
             )}
           </>
         )}

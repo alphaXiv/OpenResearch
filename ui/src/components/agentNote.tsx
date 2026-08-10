@@ -1,16 +1,17 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
+import { MONO_CLASS_NAME } from "../styleClasses";
 
 /** A backtick command from an `agentNote`, rendered as a code pill with its own
  * copy button so the user can grab it without retyping. */
 function CommandPill({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <span className="cmd-inline">
-      <code className="mono">{cmd}</code>
+    <span className="cmd-inline inline-flex items-center gap-1 align-baseline">
+      <code className={MONO_CLASS_NAME}>{cmd}</code>
       <button
         type="button"
-        className="cmd-inline-copy"
+        className="cmd-inline-copy inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text"
         onClick={() => {
           void navigator.clipboard
             .writeText(cmd)

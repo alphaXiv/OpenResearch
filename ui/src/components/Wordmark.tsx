@@ -14,7 +14,7 @@ export function BrandMark() {
 // Single source for the brand lockup (home and onboarding).
 export function Wordmark() {
   return (
-    <span className="wordmark">
+    <span className="wordmark inline-flex items-center gap-[0.4em] text-text [&_svg]:w-[1em] [&_svg]:h-[1em] [&_svg]:shrink-0">
       <BrandMark />
       OpenResearch
     </span>

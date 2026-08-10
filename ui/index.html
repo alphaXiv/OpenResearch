@@ -22,13 +22,16 @@
       })();
     </script>
     <style>
-      /* Pre-CSS background; keep in sync with --base in src/styles.css. */
+      /* Pre-CSS background; keep in sync with --base in src/tailwind.css. */
       html { background: #ffffff; }
       html[data-theme="dark"] { background: #0e0c0c; }
     </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div
+      id="root"
+      class="[&_:where([data-tip])]:relative [&_:where([data-tip])::after]:content-[attr(data-tip)] [&_:where([data-tip])::after]:absolute [&_:where([data-tip])::after]:top-[calc(100%_+_6px)] [&_:where([data-tip])::after]:left-1/2 [&_:where([data-tip])::after]:-translate-x-1/2 [&_:where([data-tip])::after]:bg-text [&_:where([data-tip])::after]:text-background [&_:where([data-tip])::after]:text-xs [&_:where([data-tip])::after]:font-medium [&_:where([data-tip])::after]:leading-none [&_:where([data-tip])::after]:py-[5px] [&_:where([data-tip])::after]:px-2 [&_:where([data-tip])::after]:rounded-sm [&_:where([data-tip])::after]:whitespace-nowrap [&_:where([data-tip])::after]:opacity-0 [&_:where([data-tip])::after]:invisible [&_:where([data-tip])::after]:pointer-events-none [&_:where([data-tip])::after]:z-60 [&_:where([data-tip]):is(:hover,:focus-visible)::after]:opacity-100 [&_:where([data-tip]):is(:hover,:focus-visible)::after]:visible [&_:where([data-tip-align='start'])::after]:left-0 [&_:where([data-tip-align='start'])::after]:translate-none [&_:where([data-tip-align='end'])::after]:right-0 [&_:where([data-tip-align='end'])::after]:left-auto [&_:where([data-tip-align='end'])::after]:translate-none"
+    ></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

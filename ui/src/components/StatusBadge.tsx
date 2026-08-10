@@ -2,6 +2,8 @@
 // live statuses pulse. STATUS_STYLES is the single source of truth for status
 // coloring across the table, graph and drawer.
 
+import { STATUS_BADGE_CLASS_NAME } from "../styleClasses";
+
 export interface StatusStyle {
   className: string;
   live: boolean;
@@ -29,7 +31,7 @@ function sentenceCase(s: string): string {
 export function StatusBadge({ status, label }: { status: string; label?: string }) {
   const style = statusStyle(status);
   return (
-    <span className={`status-badge ${style.className}${style.live ? " live" : ""}`}>
+    <span className={`${STATUS_BADGE_CLASS_NAME} ${style.className}${style.live ? " live" : ""}`}>
       <span className="dot" />
       {label ?? sentenceCase(status)}
     </span>

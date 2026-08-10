@@ -24,12 +24,21 @@ import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { StatusBadge } from "./StatusBadge";
 
+const EMPTY_STATE_CLASS_NAME = [
+  "empty-state absolute inset-0 flex flex-col items-center",
+  "justify-center p-6 text-center text-subtext [&_p]:max-w-[46ch]",
+  "[&_p]:m-0 [&_p]:text-md [&_p]:leading-normal [&_p]:text-balance",
+  "[&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal",
+  "[&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg",
+  "[&_p.empty-state-hint]:text-subtext empty-state-cta gap-1.5",
+].join(" ");
+
 const NODE_W = 264;
 const NODE_H = 132;
 const GAP_X = 44;
 const GAP_Y = 72;
 const MAX_SQUARES = 8;
-// Keep in sync with `.elided-node` in styles.css.
+// Keep in sync with the inline `.elided-node` classes below.
 const ELIDED_W = 148;
 const ELIDED_H = 44;
 
@@ -179,7 +188,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node ${live ? "live" : ""}`}
+      className={`exp-node w-66 border border-border rounded-md bg-background py-2.5 px-3 shadow-[0_1px_2px_rgba(0,_0,_0,_0.04)] text-md transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-[0_2px_8px_rgba(0,_0,_0,_0.08)] [&.live]:border-accent-teal [&.live]:shadow-[0_2px_12px_rgba(32,_154,_132,_0.2)] [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-left [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-2xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:font-mono [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-2xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ml-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px] ${live ? "live" : ""}`}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
     >
@@ -208,11 +217,11 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         <div className="node-meta">
           <span>Runs</span>
           {squares.length > 0 ? (
-            <span className="run-squares">
+            <span className="run-squares flex items-center gap-[3px]">
               {squares.map((run) => (
                 <span
                   key={run.id}
-                  className={`run-sq ${runSquareClass(runDisplayStatus(run))}`}
+                  className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-[color-mix(in_oklab,_var(--accent-red)_55%,_transparent)] [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
                   title={runDisplayStatus(run)}
                 />
               ))}
@@ -285,7 +294,7 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   // body is a single action.
   return (
     <div
-      className="elided-node"
+      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-[color-mix(in_oklab,_var(--text)_3%,_transparent)] text-muted text-2xs font-medium text-left transition-[border-color,color] duration-120 ease-standard [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
       title="Switch to Entire project to see all experiments"
@@ -430,7 +439,7 @@ export function TreeView({
 
   if (experiments.length === 0) {
     return (
-      <div className="empty-state empty-state-cta">
+      <div className={EMPTY_STATE_CLASS_NAME}>
         <p className="empty-state-title">No experiments yet</p>
         <p className="empty-state-hint">Ask the agent in chat to create and run your first experiment.</p>
       </div>
@@ -440,7 +449,7 @@ export function TreeView({
   // Only Current task scope can filter a non-empty forest down to nothing.
   if (nodes.length === 0 && agentSessionId) {
     return (
-      <div className="empty-state empty-state-cta">
+      <div className={EMPTY_STATE_CLASS_NAME}>
         <p className="empty-state-title">No experiments from the current task yet</p>
         <p className="empty-state-hint">
           Ask in this task to create one, or switch to Entire project to see all experiments.
@@ -451,6 +460,7 @@ export function TreeView({
 
   return (
     <ReactFlow
+      className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // fitView only runs on mount, so remount when the scope changes to re-fit.
       key={agentSessionId ?? "project"}
       nodes={nodes}

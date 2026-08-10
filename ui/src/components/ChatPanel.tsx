@@ -75,6 +75,51 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
+import { ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PAPER_TITLE_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+
+const TOOL_LINE_CLASS_NAME = [
+  "tool-line flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
+  "text-md text-subtext",
+].join(" ");
+
+const PROMPT_COLLAPSED_CLASS_NAME = [
+  "prompt-collapsed text-muted text-md my-1 mx-0 [&_summary]:flex",
+  "[&_summary]:items-baseline [&_summary]:gap-2 [&_summary]:cursor-pointer",
+  "[&_summary]:list-none [&_summary]:select-none [&_summary::-webkit-details-marker]:hidden",
+  "[&_summary::after]:content-['›'] [&_summary::after]:text-muted",
+  "[&_summary::after]:transition-transform [&_summary::after]:duration-80 [&_summary::after]:ease-standard [&[open]_summary::after]:rotate-90",
+].join(" ");
+
+const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
+  "prompt-collapsed-body mt-1.5 pl-3 border-l-2 border-l-border",
+  "text-md text-subtext",
+].join(" ");
+
+const PROMPT_HEAD_CLASS_NAME = [
+  "prompt-head text-xs font-semibold text-text",
+  "[&_code]:font-mono [&_code]:text-sm [&_code]:text-text",
+].join(" ");
+
+const PROMPT_ACTIONS_CLASS_NAME = [
+  "prompt-actions flex flex-wrap gap-2 [&_.btn-primary]:inline-flex",
+  "[&_.btn-primary]:items-center [&_.btn-primary]:gap-1.5 [&_.btn-primary]:py-1.5 [&_.btn-primary]:px-[13px]",
+  "[&_.btn-primary]:font-[inherit] [&_.btn-primary]:text-sm",
+  "[&_.btn-primary]:font-semibold [&_.btn-primary]:border [&_.btn-primary]:border-transparent",
+  "[&_.btn-primary]:rounded-sm [&_.btn-primary]:cursor-pointer",
+  "[&_.btn-primary]:transition-[background,border-color] [&_.btn-primary]:duration-80 [&_.btn-primary]:ease-standard [&_.btn-ghost]:inline-flex",
+  "[&_.btn-ghost]:items-center [&_.btn-ghost]:gap-1.5 [&_.btn-ghost]:py-1.5 [&_.btn-ghost]:px-[13px]",
+  "[&_.btn-ghost]:font-[inherit] [&_.btn-ghost]:text-sm",
+  "[&_.btn-ghost]:font-semibold [&_.btn-ghost]:border [&_.btn-ghost]:border-transparent",
+  "[&_.btn-ghost]:rounded-sm [&_.btn-ghost]:cursor-pointer",
+  "[&_.btn-ghost]:transition-[background,border-color] [&_.btn-ghost]:duration-80 [&_.btn-ghost]:ease-standard",
+  "[&_.btn-primary]:bg-primary [&_.btn-primary]:text-background",
+  "[&_.btn-primary:hover:not(:disabled)]:opacity-90 [&_.btn-ghost]:bg-transparent",
+  "[&_.btn-ghost]:border-border [&_.btn-ghost]:text-subtext",
+  "[&_.btn-ghost:hover:not(:disabled)]:border-border-strong",
+  "[&_.btn-ghost:hover:not(:disabled)]:text-text",
+  "[&_.btn-ghost:hover:not(:disabled)]:bg-surface [&_button:disabled]:opacity-50",
+  "[&_button:disabled]:cursor-default",
+].join(" ");
 
 // --- chat state --------------------------------------------------------------
 
@@ -183,9 +228,10 @@ function reducer(state: ChatState, action: Action): ChatState {
 // --- rendering ---------------------------------------------------------------
 
 function toolStatusClass(status: string | undefined): string {
-  if (status === "error") return "tool-status error";
-  if (status === "completed") return "tool-status";
-  return "tool-status running"; // running = in-flight
+  const base = "tool-status w-1.5 h-1.5 rounded-full shrink-0";
+  if (status === "error") return `${base} error bg-accent-red`;
+  if (status === "completed") return `${base} bg-muted`;
+  return `${base} running bg-accent-amber animate-[or-pulse_1.2s_ease-in-out_infinite]`;
 }
 
 function relTime(ts: number | undefined): string {
@@ -283,20 +329,20 @@ function toolSummary(part: ChatPart): React.ReactNode {
       const body =
         call.kind === "paper" && call.id ? (
           <a
-            className="tool-lit-link"
+            className="tool-lit-link inline-flex items-center gap-1 min-w-0 text-inherit no-underline [&:hover]:text-primary [&:hover_.tool-lit-text]:underline [&:hover_.tool-lit-ext]:opacity-100"
             href={paperUrl(call.source, call.id)}
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
           >
-            <span className="tool-lit-text">{text}</span>
-            <ArrowUpRight className="tool-lit-ext" size={13} aria-hidden="true" />
+            <span className="tool-lit-text min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{text}</span>
+            <ArrowUpRight className="tool-lit-ext flex-none opacity-50" size={13} aria-hidden="true" />
           </a>
         ) : (
-          <span className="tool-lit-text">{text}</span>
+          <span className="tool-lit-text min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{text}</span>
         );
       return (
-        <span className="tool-lit">
+        <span className="tool-lit inline-flex items-center gap-2 min-w-0 max-w-full align-bottom">
           <LitSourceLogo source={call.source} />
           {body}
         </span>
@@ -344,13 +390,13 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
   const filePath = typeof state?.input?.filePath === "string" ? state.input.filePath : null;
   const hasDetail = Boolean(output || cmd || filePath);
   return (
-    <details className="tool-row" open={false}>
+    <details className="tool-row flex flex-col [&_summary]:flex [&_summary]:items-center [&_summary]:gap-2 [&_summary]:py-[3px] [&_summary]:px-1 [&_summary]:cursor-pointer [&_summary]:list-none [&_summary]:select-none [&_summary]:min-w-0 [&_summary]:rounded-sm [&_summary:hover]:bg-surface [&_summary::-webkit-details-marker]:hidden" open={false}>
       <summary>
         <span className={toolStatusClass(state?.status)} />
-        <span className="tool-line">{toolSummary(part)}</span>
+        <span className={TOOL_LINE_CLASS_NAME}>{toolSummary(part)}</span>
         {filePath && onOpenFile && (
           <button
-            className="tool-open file-link"
+            className="tool-open shrink-0 text-xs text-primary [&:hover]:underline file-link"
             title={`Open ${filePath}`}
             onClick={(e) => {
               e.preventDefault();
@@ -363,12 +409,12 @@ function ToolRow({ part, onOpenFile }: { part: ChatPart; onOpenFile?: (path: str
         )}
       </summary>
       {hasDetail && (
-        <div className="tool-detail">
-          {cmd && <div className="tool-cmd-full">{cmd}</div>}
+        <div className="tool-detail mt-0.5 mr-0 mb-1 ml-3.5">
+          {cmd && <div className="tool-cmd-full py-1.5 px-2.5 font-mono text-xs text-text bg-surface rounded-sm whitespace-pre-wrap wrap-anywhere">{cmd}</div>}
           {/* Safety net for pre-cap stored transcripts; the backend caps live
               tool output at 16k (TOOL_TEXT_CAP), so this slice must stay
               above that or it clips the truncation marker. */}
-          {output && <div className="tool-output">{output.slice(0, 20000)}</div>}
+          {output && <div className="tool-output mt-[3px] py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">{output.slice(0, 20000)}</div>}
         </div>
       )}
     </details>
@@ -390,7 +436,7 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
   // duplicate line whose detail was collapsed anyway.
   if (parts.length === 1) {
     return (
-      <div className={`tool-group ${errored ? "has-error" : ""}`}>
+      <div className={`tool-group my-0.5 mx-0 [&.has-error_.tool-group-summary]:text-accent-red [&.has-error_>_.tool-row_.tool-line]:text-accent-red ${errored ? "has-error" : ""}`}>
         <ToolRow part={parts[0]} onOpenFile={onOpenFile} />
       </div>
     );
@@ -404,14 +450,14 @@ function ToolGroup({ parts, onOpenFile }: { parts: ChatPart[]; onOpenFile?: (pat
   const summary = `Used ${parts.length} tools`;
 
   return (
-    <div className={`tool-group ${errored ? "has-error" : ""}`}>
-      <button className="tool-group-summary" onClick={() => setOpen((v) => !v)}>
+    <div className={`tool-group my-0.5 mx-0 [&.has-error_.tool-group-summary]:text-accent-red [&.has-error_>_.tool-row_.tool-line]:text-accent-red ${errored ? "has-error" : ""}`}>
+      <button className="tool-group-summary flex items-center gap-2 w-full py-[3px] px-0.5 cursor-pointer text-muted text-md text-left rounded-sm [&:hover]:text-subtext [&:hover]:bg-surface" onClick={() => setOpen((v) => !v)}>
         <span className={toolStatusClass(running ? "running" : errored ? "error" : "completed")} />
-        <span className="tool-line">{summary}</span>
-        <ChevronRight size={12} className={`tool-chevron ${expanded ? "open" : ""}`} />
+        <span className={TOOL_LINE_CLASS_NAME}>{summary}</span>
+        <ChevronRight size={12} className={`tool-chevron shrink-0 text-muted transition-transform duration-120 ease-standard [&.open]:rotate-90 ${expanded ? "open" : ""}`} />
       </button>
       {expanded && (
-        <div className="tool-group-rows">
+        <div className="tool-group-rows flex flex-col gap-px mt-0.5 mr-0 mb-1 ml-[7px] pl-2.5 border-l border-l-border-variant [&_.tool-status]:hidden">
           {parts.map((p) => (
             <ToolRow key={p.id} part={p} onOpenFile={onOpenFile} />
           ))}
@@ -470,16 +516,16 @@ function PromptCard({
               : "rejected"
             : "";
       return (
-        <details className="prompt-collapsed">
+        <details className={PROMPT_COLLAPSED_CLASS_NAME}>
           <summary>
-            <span className="prompt-collapsed-title">
+            <span className="prompt-collapsed-title font-semibold wrap-anywhere">
               {p.synthesized ? "Plan" : "Proposed plan"}
             </span>
-            <span className={`prompt-outcome ${outcomeClass}`}>{outcome}</span>
+            <span className={`prompt-outcome text-sm text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${outcomeClass}`}>{outcome}</span>
           </summary>
-          <div className="prompt-collapsed-body">
+          <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
-            {p.note && <div className="prompt-collapsed-note">{p.note}</div>}
+            {p.note && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
           </div>
         </details>
       );
@@ -489,16 +535,16 @@ function PromptCard({
     // matching the plan row.
     const chosen = (p.answers ?? []).join(", ") || p.note || "";
     return (
-      <details className="prompt-collapsed">
+      <details className={PROMPT_COLLAPSED_CLASS_NAME}>
         <summary>
-          <span className="prompt-collapsed-title">{p.header || p.question || "Question"}</span>
-          <span className={`prompt-outcome ${chosen ? "chosen" : ""}`}>{chosen || "Resolved"}</span>
+          <span className="prompt-collapsed-title font-semibold wrap-anywhere">{p.header || p.question || "Question"}</span>
+          <span className={`prompt-outcome text-sm text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || "Resolved"}</span>
         </summary>
-        <div className="prompt-collapsed-body">
+        <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
           {/* The summary title already shows the question when there's no header. */}
-          {p.header && p.question && <div className="prompt-q">{p.question}</div>}
+          {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
           {(p.options ?? []).length > 0 && (
-            <ul className="prompt-collapsed-options">
+            <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 pl-4.5 [&_.sel]:text-text [&_.sel]:font-semibold">
               {(p.options ?? []).map((o) => (
                 <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
                   {o.label}
@@ -507,7 +553,7 @@ function PromptCard({
             </ul>
           )}
           {/* A note-only answer is already the summary outcome — don't echo it twice. */}
-          {p.note && p.note !== chosen && <div className="prompt-collapsed-note">{p.note}</div>}
+          {p.note && p.note !== chosen && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
         </div>
       </details>
     );
@@ -521,22 +567,22 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card plan ${done ? "readonly" : ""}`}>
-        <div className="prompt-head">
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-l-[3px] border-l-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-l-accent-blue [&.permission]:border-l-accent-amber [&.question]:border-l-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+        <div className={PROMPT_HEAD_CLASS_NAME}>
           {p.synthesized ? "Plan mode — ready to proceed?" : "Proposed plan"}
         </div>
-        <div className={`prompt-plan ${docked ? "clamped" : ""}`}>
+        <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
-          <button className="prompt-plan-open" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
+          <button className="prompt-plan-open self-start border-0 bg-transparent text-accent-blue text-sm p-0 cursor-pointer [&:hover]:underline" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
             View full plan
           </button>
         )}
         {/* Strip-less fallback (unreachable in the main app — App always
             provides onOpenPlan): same action semantics as the strip. */}
         {!done && !docked && (
-          <div className="prompt-actions">
+          <div className={PROMPT_ACTIONS_CLASS_NAME}>
             <button className="btn-primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
               Accept and auto mode
             </button>
@@ -562,18 +608,18 @@ function PromptCard({
     const reason =
       (typeof p.toolInput?.reason === "string" && p.toolInput.reason) || "";
     return (
-      <div className={`prompt-card permission ${done ? "readonly" : ""}`}>
-        <div className="prompt-head">
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-l-[3px] border-l-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-l-accent-blue [&.permission]:border-l-accent-amber [&.question]:border-l-accent-purple [&.readonly]:opacity-60 permission ${done ? "readonly" : ""}`}>
+        <div className={PROMPT_HEAD_CLASS_NAME}>
           Permission needed: <code>{p.tool}</code>
         </div>
-        {summary && <div className="prompt-sub">{summary}</div>}
-        {reason && <div className="prompt-sub">{reason}</div>}
+        {summary && <div className="prompt-sub text-sm text-subtext wrap-anywhere">{summary}</div>}
+        {reason && <div className="prompt-sub text-sm text-subtext wrap-anywhere">{reason}</div>}
         {!done && (
           // No resumeMode: the harness picks the right one for an approval.
           // Claude resumes under `bypass` (the only mode that actually grants a
           // blocked tool — acceptEdits would re-deny Bash); inline harnesses
           // (opencode) reply once/reject keyed off `approve`. Deny denies either way.
-          <div className="prompt-actions">
+          <div className={PROMPT_ACTIONS_CLASS_NAME}>
             <button className="btn-primary" onClick={() => respond({ approve: true })}>
               Allow
             </button>
@@ -596,27 +642,27 @@ function PromptCard({
         : [label],
     );
   return (
-    <div className={`prompt-card question ${done ? "readonly" : ""}`}>
-      {p.header && <div className="prompt-head">{p.header}</div>}
-      {p.question && <div className="prompt-q">{p.question}</div>}
-      <div className="prompt-options">
+    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-l-[3px] border-l-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-l-accent-blue [&.permission]:border-l-accent-amber [&.question]:border-l-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
+      {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
+      {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
+      <div className="prompt-options flex flex-col gap-1.5">
         {(p.options ?? []).map((o) => {
           const sel = picked.includes(o.label);
           return (
             <button
               key={o.label}
-              className={`prompt-option ${sel ? "sel" : ""}`}
+              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-left border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
               disabled={done}
               onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
             >
-              <span className="prompt-option-label">{o.label}</span>
-              {o.description && <span className="prompt-option-desc">{o.description}</span>}
+              <span className="prompt-option-label block text-md font-semibold">{o.label}</span>
+              {o.description && <span className="prompt-option-desc block text-sm font-normal leading-[1.45] text-subtext">{o.description}</span>}
             </button>
           );
         })}
       </div>
       {p.multiSelect && !done && (
-        <div className="prompt-actions">
+        <div className={PROMPT_ACTIONS_CLASS_NAME}>
           <button
             className="btn-primary"
             disabled={picked.length === 0}
@@ -712,17 +758,17 @@ const Message = memo(function Message({
     const images = attachments.filter((a) => !a.isPdf);
     const files = attachments.filter((a) => a.isPdf);
     return (
-      <div className="msg-user">
+      <div className="msg-user self-end max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:mr-0.5 [&_.skill-chip]:align-baseline">
         {command ? (
           <>
-            <span className="skill-chip">/{command.name}</span>
+            <span className="skill-chip inline-flex items-center py-px px-[7px] font-mono text-md font-medium text-primary bg-primary-subtle border border-border-variant rounded-sm">/{command.name}</span>
             {slash![2]}
           </>
         ) : (
           text
         )}
         {images.length > 0 && (
-          <div className="msg-images">
+          <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
             {images.map((a, i) => (
               <a key={i} href={a.src} target="_blank" rel="noreferrer">
                 <img src={a.src} alt="attachment" />
@@ -731,9 +777,9 @@ const Message = memo(function Message({
           </div>
         )}
         {files.length > 0 && (
-          <div className="msg-files">
+          <div className="msg-files flex flex-wrap gap-1.5 mt-2">
             {files.map((a, i) => (
-              <a key={i} className="msg-file" href={a.src} target="_blank" rel="noreferrer">
+              <a key={i} className="msg-file inline-flex items-center gap-1.5 max-w-60 py-1.5 px-2.5 border border-border-variant rounded-sm text-text no-underline [&:hover]:border-text [&_span]:overflow-hidden [&_span]:text-ellipsis [&_span]:whitespace-nowrap" href={a.src} target="_blank" rel="noreferrer">
                 <FileText size={15} />
                 <span>{a.name}</span>
               </a>
@@ -744,7 +790,7 @@ const Message = memo(function Message({
     );
   }
   return (
-    <div className="msg-assistant">
+    <div className="msg-assistant text-lg leading-[1.62] text-text min-w-0">
       {renderParts(message.parts, { onOpenFile, onOpenRun, onRespond, onOpenPlan, onOpenSubagent })}
     </div>
   );
@@ -806,7 +852,7 @@ function renderParts(
       );
     else if (part.type === "reasoning")
       rendered.push(
-        <details key={part.id} className="reasoning">
+        <details key={part.id} className="reasoning text-muted text-md my-0.5 mx-0 [&_summary]:cursor-pointer [&_summary]:list-none [&_summary]:select-none [&_summary]:font-semibold [&[open]]:whitespace-pre-wrap">
           <summary>thinking…</summary>
           {part.text}
         </details>,
@@ -857,14 +903,14 @@ export function SubagentTranscript({
   // stored transcript of nothing but invisible parts must still read as empty.
   const rendered = renderParts(parts, { onOpenFile, onOpenRun, onOpenSubagent });
   return (
-    <div className="msg-assistant">
-      <div className="subagent-tab-header">
+    <div className="msg-assistant text-lg leading-[1.62] text-text min-w-0">
+      <div className="subagent-tab-header flex items-center gap-2 pb-2 mb-2 border-b border-b-border-variant">
         <span className={toolStatusClass(spawn.state?.status)} />
-        <span className="tool-line">{toolLine(spawn)}</span>
-        {running && <span className="subagent-live">live</span>}
+        <span className={TOOL_LINE_CLASS_NAME}>{toolLine(spawn)}</span>
+        {running && <span className="subagent-live shrink-0 text-xs text-accent-amber">live</span>}
       </div>
       {rendered.length === 0 ? (
-        <div className="subagent-empty">{running ? "Working…" : "No activity"}</div>
+        <div className="subagent-empty py-[3px] px-1 text-md text-muted">{running ? "Working…" : "No activity"}</div>
       ) : (
         rendered
       )}
@@ -887,15 +933,15 @@ function SubagentBlock({
   const errored = part.state?.status === "error";
   return (
     <button
-      className={`subagent-row ${errored ? "has-error" : ""}`}
+      className={`subagent-row flex items-center gap-2 w-full my-0.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-left rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&.has-error]:text-accent-red [&_.tool-line]:text-base [&_.tool-line]:text-text ${errored ? "has-error" : ""}`}
       title="Open sub-agent transcript"
       onClick={() => onOpenSubagent?.(part.id)}
       disabled={!onOpenSubagent}
     >
-      <Users size={12} className="subagent-icon" />
+      <Users size={12} className="subagent-icon shrink-0 text-muted" />
       <span className={toolStatusClass(part.state?.status)} />
-      <span className="tool-line">{toolLine(part)}</span>
-      <ChevronRight size={12} className="subagent-row-chevron" />
+      <span className={TOOL_LINE_CLASS_NAME}>{toolLine(part)}</span>
+      <ChevronRight size={12} className="subagent-row-chevron shrink-0 text-muted" />
     </button>
   );
 }
@@ -966,9 +1012,9 @@ function SessionFilterMenu({
 }) {
   const { open, setOpen, ref } = usePopover();
   return (
-    <div className="rail-filter" ref={ref}>
+    <div className="rail-filter relative inline-flex" ref={ref}>
       <button
-        className={`icon-btn rail-filter-btn ${value !== "active" ? "active" : ""}`}
+        className={`${ICON_BUTTON_BASE_CLASS_NAME} rail-filter-btn w-6 h-6 rounded-sm ${value !== "active" ? "active" : ""}`}
         title="Filter sessions"
         aria-label="Filter sessions"
         onClick={() => setOpen((v) => !v)}
@@ -976,11 +1022,11 @@ function SessionFilterMenu({
         <SlidersHorizontal size={13} />
       </button>
       {open && (
-        <div className="option-menu drop-down align-right">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           {SESSION_FILTERS.map((f) => (
             <button
               key={f.id}
-              className="model-item"
+              className={MODEL_ITEM_CLASS_NAME}
               onClick={() => {
                 onChange(f.id);
                 setOpen(false);
@@ -1027,7 +1073,7 @@ function TitleReveal({ title, animate }: { title: string; animate: boolean }) {
           <span
             key={i}
             aria-hidden
-            className="title-reveal-char"
+            className="title-reveal-char inline-block animate-[title-char-in_240ms_ease-out_both] [@media((prefers-reduced-motion:_reduce))]:animate-none"
             style={{
               animationDelay: `${Math.min(i * TITLE_CHAR_STAGGER_MS, TITLE_STAGGER_CAP_MS)}ms`,
             }}
@@ -1102,7 +1148,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row ${active ? "active" : ""} ${unread ? "unread" : ""} ${open ? "menu-open" : ""} ${
+      className={`session-row relative flex items-center gap-2 w-full text-left py-[7px] px-2.5 rounded-md text-md text-text cursor-pointer select-none [&:hover]:bg-surface [&.active]:bg-surface [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-2xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
       }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
@@ -1177,9 +1223,9 @@ function SessionRow({
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="option-menu drop-down session-menu">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <button
-            className="model-item"
+            className={MODEL_ITEM_CLASS_NAME}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -1189,7 +1235,7 @@ function SessionRow({
             <span>Rename</span>
           </button>
           <button
-            className="model-item"
+            className={MODEL_ITEM_CLASS_NAME}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -1199,7 +1245,7 @@ function SessionRow({
             <span>{session.archived ? "Unarchive" : "Archive"}</span>
           </button>
           <button
-            className="model-item danger"
+            className={`${MODEL_ITEM_CLASS_NAME} danger`}
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -2139,26 +2185,26 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className="session-rail floating-panel">
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-2.5 mr-3.5 mb-2.5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-hidden">
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
-      <nav className="rail-nav">
+      <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
-          className={`rail-nav-item ${experimentsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${experimentsActive ? "active" : ""}`}
           onClick={onOpenExperiments}
         >
           <FlaskConical size={15} />
           Experiments
         </button>
         <button
-          className={`rail-nav-item ${filesActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${filesActive ? "active" : ""}`}
           onClick={onOpenWorktree}
         >
           <FolderOpen size={15} />
           Files
         </button>
         <button
-          className={`rail-nav-item ${artifactsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${artifactsActive ? "active" : ""}`}
           data-onboarding="nav-artifacts"
           onClick={onOpenArtifacts}
         >
@@ -2168,7 +2214,7 @@ export function ChatPanel({
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item ${mainView !== "chat" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView !== "chat" && item.activeTabs.includes(mainView) ? "active" : ""}`}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -2177,13 +2223,13 @@ export function ChatPanel({
           </button>
         ))}
       </nav>
-      <div className="rail-section-head">
-        <div className="rail-section-label">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pr-2.5 pb-1.5 pl-4.5">
+        <div className="rail-section-label p-0 text-md font-medium text-subtext">
           {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel ?? "Recents"}
         </div>
-        <div className="rail-section-actions">
+        <div className="rail-section-actions flex items-center gap-0.5">
           <button
-            className="rail-section-new tip-up"
+            className="rail-section-new inline-flex items-center gap-1 py-[3px] px-1.5 rounded-sm text-subtext text-xs font-medium [&:hover]:text-text [&:hover]:bg-surface tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
             data-onboarding="new-session"
             data-tip={newTaskShortcut}
             aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
@@ -2222,7 +2268,7 @@ export function ChatPanel({
           />
         ))}
         {visibleSessions.length === 0 && (
-          <div className="rail-empty">
+          <div className="rail-empty py-1.5 px-2.5 text-md text-muted">
             {sessionFilter === "archived"
               ? "No archived sessions"
               : sessions.length > 0
@@ -2238,10 +2284,10 @@ export function ChatPanel({
   // (Claude-desktop style): the reopen toggle sits in the window's top-left
   // corner with the title beside it, instead of riding the centered readable
   // column.
-  const headerClass = `chat-header${railOpen ? "" : " rail-hidden"}`;
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&.rail-hidden]:max-w-none [&.rail-hidden]:py-0 [&.rail-hidden]:px-0.5 [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:left-0 [&::after]:right-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none${railOpen ? "" : " rail-hidden"}`;
   const railReopen = !railOpen && (
     <button
-      className="icon-btn"
+      className={ICON_BUTTON_CLASS_NAME}
       title="Show sidebar"
       aria-label="Show sidebar"
       onClick={onShowRail}
@@ -2254,9 +2300,9 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane">
+        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {!railOpen && <div className={headerClass}>{railReopen}</div>}
-          <div className="settings-view-scroll">{children}</div>
+          <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">{children}</div>
         </section>
       </>
     );
@@ -2265,13 +2311,13 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section className="chat-pane">
+      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
       {/* Header — session title on the left, right-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
         <div
-          className="title"
+          className={PAPER_TITLE_CLASS_NAME}
           title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
         >
           {activeSession ? (
@@ -2286,7 +2332,7 @@ export function ChatPanel({
         </div>
         {onStartTour && (
           <button
-            className="icon-btn"
+            className={ICON_BUTTON_CLASS_NAME}
             data-tip="Replay tour"
             aria-label="Replay tour"
             onClick={onStartTour}
@@ -2297,24 +2343,24 @@ export function ChatPanel({
       </div>
 
       {historyLoading ? (
-        <div className="chat-loading" aria-live="polite" aria-busy="true">
-          <span className="spinner" />
+        <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
+          <span className={SPINNER_CLASS_NAME} />
           <span>Loading conversation…</span>
         </div>
       ) : !threadMounted ? (
-        <div className="chat-empty">
-          <div className="chat-empty-mark">
+        <div className="chat-empty flex-1 flex flex-col items-center justify-center @container text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+          <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
             <BrandMark />
           </div>
           <h2>What should we research?</h2>
-          <div className="chat-empty-project">
+          <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-semibold">
             <FolderOpen size={19} />
             <span>{projectName}</span>
           </div>
-          <div className="chat-empty-starters">
+          <div className="chat-empty-starters grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2.5 w-[min(100%,_620px)] mt-19 [@container((min-width:_500px))]:grid-cols-[repeat(4,_minmax(0,_1fr))] [@container((min-width:_500px))]:w-[min(100%,_720px)]">
             <button
               type="button"
-              className="chat-empty-starter blue"
+              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange blue"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Explore this codebase and explain its architecture, key components, and open research questions.");
@@ -2326,7 +2372,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter purple"
+              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange purple"
               onClick={() => {
                 const skill = skills.find((s) => s.name === "reproduce-paper");
                 if (paperId && skill) {
@@ -2348,7 +2394,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter green"
+              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange green"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Set up and run an experiment for this project, including a baseline and meaningful variants.");
@@ -2360,7 +2406,7 @@ export function ChatPanel({
             </button>
             <button
               type="button"
-              className="chat-empty-starter orange"
+              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange orange"
               onClick={() => {
                 setPickedSkill(null);
                 setDraft("Analyze the latest experiment results and recommend the most useful next iteration.");
@@ -2374,14 +2420,14 @@ export function ChatPanel({
         </div>
       ) : (
         <div
-          className="chat-thread"
+          className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
           ref={threadRef}
           onScroll={(e) => {
             const el = e.currentTarget;
             stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
           }}
         >
-          <div className="chat-thread-inner" ref={threadInnerRef}>
+          <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
             <Transcript
               messages={messages}
               onOpenFile={openFileInSession}
@@ -2393,10 +2439,10 @@ export function ChatPanel({
             />
             {busy &&
               (awaitingInput ? (
-                <div className="working awaiting">Waiting for your input…</div>
+                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">Waiting for your input…</div>
               ) : (
-                <div className="working">
-                  <span className="spinner" /> Working…
+                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic">
+                  <span className={SPINNER_CLASS_NAME} /> Working…
                 </div>
               ))}
           </div>
@@ -2405,7 +2451,7 @@ export function ChatPanel({
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer">
+      <div className="composer pt-0 px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -2435,9 +2481,9 @@ export function ChatPanel({
             }}
           />
         )}
-        <div className="composer-box" data-onboarding="composer">
+        <div className="composer-box relative flex flex-col border border-border rounded-md bg-background" data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
-            <div className="composer-harness-warning">
+            <div className="composer-harness-warning py-2 px-3 text-subtext text-xs leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
               <strong>{activeHarness.name} is unavailable.</strong>{" "}
               {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : "Re-check its setup."}
             </div>
@@ -2451,20 +2497,20 @@ export function ChatPanel({
             />
           )}
           {attachments.length > 0 && (
-            <div className="composer-attachments">
+            <div className="composer-attachments flex flex-wrap gap-1.5 pt-2 px-3 pb-0">
               {attachments.map((a, i) => {
                 const remove = () =>
                   setAttachments((cur) => cur.filter((_, j) => j !== i));
                 return a.mediaType === "application/pdf" ? (
-                  <div key={i} className="attachment-file" title={a.name}>
+                  <div key={i} className="attachment-file [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background relative inline-flex items-center gap-2 max-w-55 py-2 px-2.5 border border-border rounded-sm text-text bg-surface [&_svg]:shrink-0 [&_svg]:text-muted" title={a.name}>
                     <FileText size={22} />
-                    <span className="attachment-file-name">{a.name ?? "document.pdf"}</span>
+                    <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
                     <button title="Remove file" aria-label="Remove file" onClick={remove}>
                       <X size={11} />
                     </button>
                   </div>
                 ) : (
-                  <div key={i} className="attachment-thumb">
+                  <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
                     <img src={a.dataUrl} alt="pasted" />
                     <button title="Remove image" aria-label="Remove image" onClick={remove}>
                       <X size={11} />
@@ -2475,15 +2521,15 @@ export function ChatPanel({
             </div>
           )}
           {attachError && (
-            <div className="composer-attach-error" role="alert">
+            <div className="composer-attach-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
               {attachError}
             </div>
           )}
-          <div className="composer-input">
+          <div className="composer-input relative flex overflow-hidden [&_textarea]:flex-1">
             {pickedSkill && (
               // Inert like inline text: clicks fall through to the textarea
               // (pointer-events: none); Backspace at the start removes it.
-              <span ref={chipRef} className="skill-chip composer-chip">
+              <span ref={chipRef} className="skill-chip inline-flex items-center py-px px-[7px] font-mono text-md font-medium text-primary bg-primary-subtle border border-border-variant rounded-sm composer-chip absolute top-[9px] left-3 z-1 pointer-events-none">
                 /{pickedSkill.name}
               </span>
             )}
@@ -2590,7 +2636,7 @@ export function ChatPanel({
               }}
             />
           </div>
-          <div className="composer-actions">
+          <div className="composer-actions flex justify-end items-center gap-2 pt-1.5 px-2 pb-2">
             {/* Bottom-left: permission mode + literature sources. */}
             <OptionPicker
               choices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
@@ -2617,7 +2663,7 @@ export function ChatPanel({
             />
             <button
               type="button"
-              className="composer-attach"
+              className="composer-attach inline-flex items-center justify-center w-7.5 h-7.5 rounded-md text-muted cursor-pointer transition-[background,color] duration-100 ease-standard [&:hover]:bg-surface [&:hover]:text-text"
               title="Attach a PDF or image"
               aria-label="Attach a PDF or image"
               onClick={() => fileInputRef.current?.click()}
@@ -2651,12 +2697,12 @@ export function ChatPanel({
               // (their cards are the affordance; send() can't service them).
               // Send stays only when it actually works: idle, or a held
               // QUESTION card that owns typed text.
-              <button className="send-btn stop" title="Stop" aria-label="Stop" onClick={stop}>
+              <button className="send-btn inline-flex items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))] stop" title="Stop" aria-label="Stop" onClick={stop}>
                 <X size={16} />
               </button>
             ) : (
               <button
-                className="send-btn"
+                className="send-btn inline-flex items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))]"
                 title="Send"
                 aria-label="Send"
                 onClick={() => void send()}
