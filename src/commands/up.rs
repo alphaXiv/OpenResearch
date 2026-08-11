@@ -42,6 +42,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
+
+    // Brand logo in the macOS Dock for the server's lifetime (no-op elsewhere).
+    // After the bind so a port-conflict exit doesn't flash an icon; on the main
+    // thread since `up` is awaited on the block_on root future, not spawned.
+    crate::dock::show_in_dock();
+
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;

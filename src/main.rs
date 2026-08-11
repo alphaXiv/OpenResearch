@@ -16,6 +16,7 @@ mod client;
 mod commands;
 mod compute;
 mod config;
+mod dock;
 mod error;
 mod folder_picker;
 mod jobs;

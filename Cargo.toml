@@ -47,6 +47,14 @@ sha2 = "0.10"
 # transitively; taken as a direct dep only on unix, where we call it.
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# `orx up` Dock presence (src/dock.rs): a regular activation-policy NSApplication
+# painting the brand icon while the dashboard server runs. macOS-only so the
+# static musl Linux builds are untouched.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSData"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSImage", "NSResponder", "NSRunningApplication"] }
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
