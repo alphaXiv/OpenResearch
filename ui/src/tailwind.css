@@ -348,6 +348,11 @@ textarea::placeholder {
   animation: tool-running-shimmer 1.75s linear infinite;
 }
 
+.tool-running-shimmer::selection {
+  color: var(--text);
+  -webkit-text-fill-color: var(--text);
+}
+
 .tool-running-shimmer-icon {
   color: var(--muted);
   animation: tool-running-shimmer-icon 1.75s ease-in-out infinite;
@@ -485,6 +490,11 @@ textarea::placeholder {
     background: none;
     -webkit-text-fill-color: currentColor;
     animation: none;
+  }
+
+  .tool-running-shimmer::selection {
+    color: HighlightText;
+    -webkit-text-fill-color: HighlightText;
   }
 
   .tool-running-shimmer-icon {
