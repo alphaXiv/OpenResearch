@@ -3,17 +3,48 @@
 //! `~/.cache/openresearch/repos/<owner>/<repo>`, the same convention SKILL.md
 //! documents for manual diffing.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::unix::{ffi::OsStrExt, process::CommandExt};
 
 use crate::error::{anyhow, Result};
 
 pub const GITHUB_REMOTE: &str = "github";
+pub const INITIAL_SNAPSHOT_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+pub const INITIAL_SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+
+const MANAGED_IGNORE_START: &str = "# >>> OpenResearch large-file exclusions >>>";
+const MANAGED_IGNORE_END: &str = "# <<< OpenResearch large-file exclusions <<<";
+const PROJECT_TOO_LARGE: &str = "This project is too large to import. After excluding files 50 MB or larger, the remaining files exceed OpenResearch's 1 GB limit.";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryState {
+    NotRepository,
+    Unborn,
+    Ready,
+    Detached,
+    Invalid,
+}
+
+impl RepositoryState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRepository => "notRepository",
+            Self::Unborn => "unborn",
+            Self::Ready => "ready",
+            Self::Detached => "detached",
+            Self::Invalid => "invalid",
+        }
+    }
+
+    pub fn is_initialized(self) -> bool {
+        matches!(self, Self::Unborn | Self::Ready | Self::Detached)
+    }
+}
 
 pub fn clones_root() -> PathBuf {
     cache_root().join("repos")
@@ -140,6 +171,27 @@ pub fn is_repository(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+pub fn repository_state(path: &Path) -> RepositoryState {
+    if !is_repository(path) {
+        return if path.join(".git").exists() || git(Some(path), &["rev-parse", "--git-dir"]).is_ok()
+        {
+            RepositoryState::Invalid
+        } else {
+            RepositoryState::NotRepository
+        };
+    }
+
+    let has_head = git(Some(path), &["rev-parse", "--verify", "HEAD"]).is_ok();
+    let has_branch = git(Some(path), &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .is_ok_and(|branch| !branch.is_empty());
+    match (has_head, has_branch) {
+        (true, true) => RepositoryState::Ready,
+        (true, false) => RepositoryState::Detached,
+        (false, true) => RepositoryState::Unborn,
+        (false, false) => RepositoryState::Invalid,
+    }
+}
+
 pub fn repository_root(path: &Path) -> Result<PathBuf> {
     let root = git(Some(path), &["rev-parse", "--show-toplevel"])?;
     std::fs::canonicalize(root).map_err(Into::into)
@@ -156,22 +208,569 @@ pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(resolved).map_err(Into::into)
 }
 
-pub fn initialize_repository(path: &Path) -> Result<()> {
-    git(Some(path), &["init", "-b", "main"])?;
-    git(Some(path), &["add", "-A"])?;
-    git(
-        Some(path),
-        &[
-            "-c",
-            "user.name=OpenResearch",
-            "-c",
-            "user.email=local@openresearch.sh",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "Initialize OpenResearch project",
-        ],
+struct TemporaryDirectory(PathBuf);
+
+impl TemporaryDirectory {
+    fn new(prefix: &str) -> Result<Self> {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for TemporaryDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn repository_git_dir(path: &Path) -> Result<PathBuf> {
+    let value = PathBuf::from(git(Some(path), &["rev-parse", "--git-dir"])?);
+    let resolved = if value.is_absolute() {
+        value
+    } else {
+        path.join(value)
+    };
+    std::fs::canonicalize(resolved).map_err(Into::into)
+}
+
+fn git_context_bytes(
+    work_tree: &Path,
+    git_dir: &Path,
+    index_file: &Path,
+    args: &[&str],
+) -> Result<Vec<u8>> {
+    let out = Command::new("git")
+        .current_dir(work_tree)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_DIR", git_dir)
+        .env("GIT_WORK_TREE", work_tree)
+        .env("GIT_INDEX_FILE", index_file)
+        .args(args)
+        .output()
+        .map_err(|error| anyhow!("Could not run git: {error}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(out.stdout)
+}
+
+fn scan_git_dir(work_tree: &Path, operation: &TemporaryDirectory) -> Result<PathBuf> {
+    if is_repository(work_tree) {
+        return repository_git_dir(work_tree);
+    }
+    let git_dir = operation.0.join("scan.git");
+    let git_dir_arg = git_dir
+        .to_str()
+        .ok_or_else(|| anyhow!("Temporary Git path is not valid UTF-8."))?;
+    git(None, &["init", "--bare", git_dir_arg])?;
+    Ok(git_dir)
+}
+
+#[derive(Debug)]
+struct InitialSnapshot {
+    excluded_paths: Vec<Vec<u8>>,
+    included_paths: Vec<Vec<u8>>,
+    included_bytes: u64,
+}
+
+#[cfg(unix)]
+fn path_from_git_bytes(path: &[u8]) -> Result<PathBuf> {
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(path)))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_bytes(path: &[u8]) -> Result<PathBuf> {
+    Ok(PathBuf::from(std::str::from_utf8(path).map_err(|_| {
+        anyhow!("A filename that is not valid UTF-8 cannot be imported safely.")
+    })?))
+}
+
+fn initial_snapshot(path: &Path) -> Result<InitialSnapshot> {
+    let operation = TemporaryDirectory::new("orx-initial-snapshot-scan")?;
+    let git_dir = scan_git_dir(path, &operation)?;
+    let index_file = operation.0.join("index");
+    git_context_bytes(path, &git_dir, &index_file, &["read-tree", "--empty"])?;
+    let bytes = git_context_bytes(
+        path,
+        &git_dir,
+        &index_file,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
     )?;
+    let mut excluded_paths = Vec::new();
+    let mut included_paths = Vec::new();
+    let mut included_bytes = 0_u64;
+    for relative in bytes.split(|byte| *byte == 0).filter(|raw| !raw.is_empty()) {
+        if relative.ends_with(b"/") {
+            let nested = path.join(path_from_git_bytes(&relative[..relative.len() - 1])?);
+            if matches!(
+                repository_state(&nested),
+                RepositoryState::Ready | RepositoryState::Detached
+            ) {
+                included_paths.push(relative.to_vec());
+            } else {
+                excluded_paths.push(relative.to_vec());
+            }
+            continue;
+        }
+        let file = path.join(path_from_git_bytes(relative)?);
+        let metadata = std::fs::symlink_metadata(&file)?;
+        let size = if metadata.file_type().is_symlink() {
+            std::fs::read_link(&file)?
+                .as_os_str()
+                .to_string_lossy()
+                .len() as u64
+        } else if metadata.is_file() {
+            metadata.len()
+        } else {
+            continue;
+        };
+        if metadata.is_file() && size >= INITIAL_SNAPSHOT_MAX_FILE_BYTES {
+            excluded_paths.push(relative.to_vec());
+        } else {
+            included_paths.push(relative.to_vec());
+            included_bytes = included_bytes
+                .checked_add(size)
+                .ok_or_else(|| anyhow!(PROJECT_TOO_LARGE))?;
+        }
+    }
+    excluded_paths.sort();
+    included_paths.sort();
+    Ok(InitialSnapshot {
+        excluded_paths,
+        included_paths,
+        included_bytes,
+    })
+}
+
+fn escaped_gitignore_path(path: &[u8]) -> Result<Vec<u8>> {
+    if path.contains(&b'\n') || path.contains(&b'\r') {
+        return Err(anyhow!(
+            "The file {:?} has a newline in its name and cannot be excluded automatically.",
+            String::from_utf8_lossy(path)
+        ));
+    }
+    let mut escaped = vec![b'/'];
+    for byte in path {
+        if matches!(
+            *byte,
+            b'\\' | b'!' | b'#' | b'[' | b']' | b'*' | b'?' | b' '
+        ) {
+            escaped.push(b'\\');
+        }
+        escaped.push(*byte);
+    }
+    Ok(escaped)
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn include_following_newline(contents: &[u8], index: usize) -> usize {
+    if contents.get(index) == Some(&b'\r') && contents.get(index + 1) == Some(&b'\n') {
+        index + 2
+    } else if contents.get(index) == Some(&b'\n') {
+        index + 1
+    } else {
+        index
+    }
+}
+
+fn managed_gitignore(existing: &[u8], excluded_paths: &[Vec<u8>]) -> Result<Vec<u8>> {
+    let mut updated = existing.to_vec();
+    let start = MANAGED_IGNORE_START.as_bytes();
+    let end = MANAGED_IGNORE_END.as_bytes();
+    while let Some(start_index) = find_bytes(&updated, start) {
+        let after_start = start_index + start.len();
+        let remove_end = match find_bytes(&updated[after_start..], end) {
+            Some(index) => include_following_newline(&updated, after_start + index + end.len()),
+            None => include_following_newline(&updated, after_start),
+        };
+        updated.drain(start_index..remove_end);
+    }
+    if excluded_paths.is_empty() {
+        return Ok(updated);
+    }
+    if !updated.is_empty() && !updated.ends_with(b"\n") {
+        updated.push(b'\n');
+    }
+    updated.extend_from_slice(MANAGED_IGNORE_START.as_bytes());
+    updated.push(b'\n');
+    for path in excluded_paths {
+        updated.extend_from_slice(&escaped_gitignore_path(path)?);
+        updated.push(b'\n');
+    }
+    updated.extend_from_slice(MANAGED_IGNORE_END.as_bytes());
+    updated.push(b'\n');
+    Ok(updated)
+}
+
+#[derive(Debug)]
+enum FileBackup {
+    Missing,
+    Contents(Vec<u8>),
+}
+
+fn file_backup(path: &Path) -> Result<FileBackup> {
+    match std::fs::read(path) {
+        Ok(contents) => Ok(FileBackup::Contents(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(FileBackup::Missing),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
+    let temporary = parent.join(format!(".openresearch-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            std::fs::set_permissions(&temporary, metadata.permissions())?;
+        }
+        if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()) {
+            return Err(anyhow!(
+                "Refusing to replace the symlink at {}.",
+                path.display()
+            ));
+        }
+        std::fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+fn restore_file(path: &Path, backup: &FileBackup) -> Result<()> {
+    match backup {
+        FileBackup::Missing => {
+            if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()) {
+                return Err(anyhow!(
+                    "Refusing to remove the symlink at {} during rollback.",
+                    path.display()
+                ));
+            }
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        }
+        FileBackup::Contents(contents) => atomic_write(path, contents),
+    }
+}
+
+fn replace_managed_ignore_file(path: &Path, excluded_paths: &[Vec<u8>]) -> Result<()> {
+    let existing = match std::fs::read(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+    atomic_write(path, &managed_gitignore(&existing, excluded_paths)?)
+}
+
+fn replace_managed_gitignore(path: &Path, excluded_paths: &[Vec<u8>]) -> Result<()> {
+    replace_managed_ignore_file(&path.join(".gitignore"), excluded_paths)
+}
+
+struct PreparedInitialSnapshot {
+    gitignore_backup: Option<FileBackup>,
+    excluded_paths: Vec<Vec<u8>>,
+    included_paths: Vec<Vec<u8>>,
+    write_git_exclude: bool,
+}
+
+fn prepare_initial_snapshot(path: &Path) -> Result<PreparedInitialSnapshot> {
+    let snapshot = initial_snapshot(path)?;
+    if snapshot.included_bytes >= INITIAL_SNAPSHOT_MAX_TOTAL_BYTES {
+        return Err(anyhow!(PROJECT_TOO_LARGE));
+    }
+    if snapshot.excluded_paths.is_empty() {
+        return Ok(PreparedInitialSnapshot {
+            gitignore_backup: None,
+            excluded_paths: Vec::new(),
+            included_paths: snapshot.included_paths,
+            write_git_exclude: false,
+        });
+    }
+
+    let gitignore = path.join(".gitignore");
+    if std::fs::symlink_metadata(&gitignore).is_ok_and(|metadata| metadata.is_symlink()) {
+        let verified = initial_snapshot(path)?;
+        if verified.included_bytes >= INITIAL_SNAPSHOT_MAX_TOTAL_BYTES {
+            return Err(anyhow!(PROJECT_TOO_LARGE));
+        }
+        return Ok(PreparedInitialSnapshot {
+            gitignore_backup: None,
+            excluded_paths: verified.excluded_paths,
+            included_paths: verified.included_paths,
+            write_git_exclude: true,
+        });
+    }
+    let backup = file_backup(&gitignore)?;
+    let mut excluded_paths = snapshot.excluded_paths;
+    let result = (|| -> Result<Vec<Vec<u8>>> {
+        loop {
+            replace_managed_gitignore(path, &excluded_paths)?;
+            let updated = initial_snapshot(path)?;
+            if updated.included_bytes >= INITIAL_SNAPSHOT_MAX_TOTAL_BYTES {
+                return Err(anyhow!(PROJECT_TOO_LARGE));
+            }
+            let previous_count = excluded_paths.len();
+            for excluded in updated.excluded_paths {
+                if !excluded_paths.contains(&excluded) {
+                    excluded_paths.push(excluded);
+                }
+            }
+            if excluded_paths.len() == previous_count {
+                return Ok(updated.included_paths);
+            }
+            excluded_paths.sort();
+        }
+    })();
+    let included_paths = match result {
+        Ok(included_paths) => included_paths,
+        Err(error) => {
+            if let Err(restore_error) = restore_file(&gitignore, &backup) {
+                return Err(anyhow!(
+                    "{error}; additionally failed to restore {}: {restore_error}",
+                    gitignore.display()
+                ));
+            }
+            return Err(error);
+        }
+    };
+    Ok(PreparedInitialSnapshot {
+        gitignore_backup: Some(backup),
+        excluded_paths,
+        included_paths,
+        write_git_exclude: false,
+    })
+}
+
+fn repository_index_path(path: &Path) -> Result<PathBuf> {
+    let value = PathBuf::from(git(Some(path), &["rev-parse", "--git-path", "index"])?);
+    Ok(if value.is_absolute() {
+        value
+    } else {
+        path.join(value)
+    })
+}
+
+fn repository_exclude_path(path: &Path) -> Result<PathBuf> {
+    let value = PathBuf::from(git(
+        Some(path),
+        &["rev-parse", "--git-path", "info/exclude"],
+    )?);
+    Ok(if value.is_absolute() {
+        value
+    } else {
+        path.join(value)
+    })
+}
+
+fn stage_initial_snapshot(path: &Path, included_paths: &[Vec<u8>]) -> Result<()> {
+    if included_paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut child = Command::new("git")
+        .current_dir(path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .args(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| anyhow!("Could not run git: {error}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow!("Could not open git add input."))?;
+    for included in included_paths {
+        stdin.write_all(b":(top,literal)")?;
+        stdin.write_all(included)?;
+        stdin.write_all(b"\0")?;
+    }
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|error| anyhow!("Could not run git: {error}"))?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "Could not stage the initial project snapshot: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+fn remove_excluded_paths_from_index(path: &Path, excluded_paths: &[Vec<u8>]) -> Result<()> {
+    for paths in excluded_paths.chunks(128) {
+        let mut command = Command::new("git");
+        command
+            .current_dir(path)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args([
+                "--literal-pathspecs",
+                "update-index",
+                "--force-remove",
+                "--",
+            ]);
+        for path in paths {
+            command.arg(path_from_git_bytes(path)?);
+        }
+        let output = command
+            .output()
+            .map_err(|error| anyhow!("Could not run git: {error}"))?;
+        if !output.status.success() {
+            return Err(anyhow!(
+                "Could not exclude large files from the initial commit: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn create_initial_commit(
+    path: &Path,
+    included_paths: &[Vec<u8>],
+    excluded_paths: &[Vec<u8>],
+) -> Result<()> {
+    let operation = TemporaryDirectory::new("orx-initial-snapshot-commit")?;
+    let hooks_dir = operation.0.join("hooks");
+    std::fs::create_dir(&hooks_dir)?;
+    let index_path = repository_index_path(path)?;
+    let index_backup = file_backup(&index_path)?;
+    let hooks_config = format!("core.hooksPath={}", hooks_dir.display());
+    let result = (|| -> Result<()> {
+        git(Some(path), &["read-tree", "--empty"])?;
+        stage_initial_snapshot(path, included_paths)?;
+        remove_excluded_paths_from_index(path, excluded_paths)?;
+        git(
+            Some(path),
+            &[
+                "-c",
+                &hooks_config,
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "user.name=OpenResearch",
+                "-c",
+                "user.email=local@openresearch.sh",
+                "commit",
+                "--no-verify",
+                "--no-gpg-sign",
+                "--allow-empty",
+                "-m",
+                "Initialize OpenResearch project",
+            ],
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(restore_error) = restore_file(&index_path, &index_backup) {
+            return Err(anyhow!(
+                "{error}; additionally failed to restore the Git index: {restore_error}"
+            ));
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub fn initialize_repository(path: &Path) -> Result<()> {
+    let state = repository_state(path);
+    if state == RepositoryState::Ready {
+        return Ok(());
+    }
+    if state == RepositoryState::Detached {
+        return Err(anyhow!(
+            "The repository is on a detached HEAD. Check out a branch first."
+        ));
+    }
+    if state == RepositoryState::Invalid {
+        return Err(anyhow!("{} is not a valid Git repository", path.display()));
+    }
+
+    let root = if state == RepositoryState::Unborn {
+        repository_root(path)?
+    } else {
+        std::fs::canonicalize(path)?
+    };
+    let snapshot = prepare_initial_snapshot(&root)?;
+
+    let initialized_here = state == RepositoryState::NotRepository;
+    let mut created_git_dir = None;
+    let mut git_exclude_backup = None;
+    let result = (|| -> Result<()> {
+        if initialized_here {
+            let git_dir = root.join(".git");
+            std::fs::create_dir(&git_dir)?;
+            created_git_dir = Some(git_dir);
+            git(Some(&root), &["init", "-b", "main"])?;
+        }
+        if snapshot.write_git_exclude {
+            let exclude_path = repository_exclude_path(&root)?;
+            let backup = file_backup(&exclude_path)?;
+            git_exclude_backup = Some((exclude_path.clone(), backup));
+            // Keep these path exclusions durable, matching the managed .gitignore behavior.
+            replace_managed_ignore_file(&exclude_path, &snapshot.excluded_paths)?;
+        }
+        create_initial_commit(&root, &snapshot.included_paths, &snapshot.excluded_paths)
+    })();
+
+    if let Err(error) = result {
+        let mut cleanup_errors = Vec::new();
+        if let Some((exclude_path, backup)) = &git_exclude_backup {
+            if let Err(restore_error) = restore_file(exclude_path, backup) {
+                cleanup_errors.push(format!(
+                    "failed to restore {}: {restore_error}",
+                    exclude_path.display()
+                ));
+            }
+        }
+        if let Some(backup) = &snapshot.gitignore_backup {
+            if let Err(restore_error) = restore_file(&root.join(".gitignore"), backup) {
+                cleanup_errors.push(format!(
+                    "failed to restore .gitignore, which may still contain OpenResearch exclusions: {restore_error}"
+                ));
+            }
+        }
+        if let Some(git_dir) = created_git_dir {
+            if let Err(cleanup_error) = std::fs::remove_dir_all(&git_dir) {
+                if cleanup_error.kind() != std::io::ErrorKind::NotFound {
+                    cleanup_errors.push(format!(
+                        "failed to remove the incomplete repository at {}: {cleanup_error}",
+                        git_dir.display()
+                    ));
+                }
+            }
+        }
+        if !cleanup_errors.is_empty() {
+            return Err(anyhow!(
+                "{error}; additionally {}",
+                cleanup_errors.join("; ")
+            ));
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -1576,6 +2175,111 @@ pub fn file_bytes_at_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_large_file_ignores_are_anchored_escaped_and_idempotent() {
+        let paths = vec![b"data set/checkpoint[1].bin".to_vec()];
+        let first = managed_gitignore(b"target/\n", &paths).unwrap();
+        let second = managed_gitignore(&first, &paths).unwrap();
+
+        assert_eq!(first, second);
+        let text = String::from_utf8(first).unwrap();
+        assert!(text.starts_with("target/\n"));
+        assert!(text.contains("/data\\ set/checkpoint\\[1\\].bin\n"));
+        assert_eq!(text.matches(MANAGED_IGNORE_START).count(), 1);
+    }
+
+    #[test]
+    fn managed_gitignore_preserves_rules_after_an_orphaned_start_marker() {
+        let existing = format!("before\n{MANAGED_IGNORE_START}\nsecret.env\nafter\n");
+
+        let updated =
+            managed_gitignore(existing.as_bytes(), &[b"checkpoint.bin".to_vec()]).unwrap();
+        let text = String::from_utf8(updated).unwrap();
+
+        assert!(text.starts_with("before\nsecret.env\nafter\n"));
+        assert!(text.contains("/checkpoint.bin\n"));
+        assert_eq!(text.matches(MANAGED_IGNORE_START).count(), 1);
+        assert_eq!(text.matches(MANAGED_IGNORE_END).count(), 1);
+    }
+
+    #[test]
+    fn repository_state_distinguishes_unborn_ready_and_detached() {
+        let dir = std::env::temp_dir().join(format!("orx-git-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(repository_state(&dir), RepositoryState::NotRepository);
+        let invalid = dir.join("invalid");
+        std::fs::create_dir_all(invalid.join(".git")).unwrap();
+        assert_eq!(repository_state(&invalid), RepositoryState::Invalid);
+        run(&dir, &["init", "-q", "-b", "main"]);
+        assert_eq!(repository_state(&dir), RepositoryState::Unborn);
+        write(&dir, "seed.txt", "seed\n");
+        run(&dir, &["add", "-A"]);
+        run(
+            &dir,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "seed",
+            ],
+        );
+        assert_eq!(repository_state(&dir), RepositoryState::Ready);
+        run(&dir, &["checkout", "-q", "--detach"]);
+        assert_eq!(repository_state(&dir), RepositoryState::Detached);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initial_snapshot_measures_a_symlink_instead_of_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("orx-symlink-scan-{}", uuid::Uuid::new_v4()));
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let target = root.join("checkpoint.bin");
+        std::fs::File::create(&target)
+            .unwrap()
+            .set_len(INITIAL_SNAPSHOT_MAX_TOTAL_BYTES)
+            .unwrap();
+        symlink(&target, project.join("checkpoint-link")).unwrap();
+
+        let snapshot = initial_snapshot(&project).unwrap();
+
+        assert!(snapshot.excluded_paths.is_empty());
+        assert_eq!(
+            snapshot.included_bytes,
+            target.as_os_str().to_string_lossy().len() as u64
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn initial_snapshot_preserves_non_utf8_paths_for_exclusion() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let root =
+            std::env::temp_dir().join(format!("orx-byte-path-scan-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let raw_name = vec![
+            b'c', b'h', b'e', b'c', b'k', b'p', b'o', b'i', b'n', b't', 0xff,
+        ];
+        std::fs::File::create(root.join(std::ffi::OsString::from_vec(raw_name.clone())))
+            .unwrap()
+            .set_len(INITIAL_SNAPSHOT_MAX_FILE_BYTES)
+            .unwrap();
+
+        let snapshot = initial_snapshot(&root).unwrap();
+
+        assert_eq!(snapshot.excluded_paths, vec![raw_name]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A throwaway git repo under the temp dir with one seed commit on `main`.
     /// Configured with a fixed identity and no signing/hooks so `commit`

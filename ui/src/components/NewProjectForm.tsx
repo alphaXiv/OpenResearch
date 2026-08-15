@@ -313,6 +313,9 @@ export function NewProjectForm({
     Boolean(path.trim()) && pathStatus?.exists === true && pathStatus.directory === false;
   const nonemptyPaperCloneFolder =
     mode === "paper" && Boolean(paper?.repoUrl) && pathStatus?.empty === false;
+  const unusableRepository =
+    mode === "folder" &&
+    (pathStatus?.gitState === "detached" || pathStatus?.gitState === "invalid");
   const paperDestinationHasError = invalidProjectDestination || nonemptyPaperCloneFolder;
   const paperDestinationDescription = invalidProjectDestination
     ? "Choose a different destination. This path is a file, not a folder."
@@ -336,6 +339,7 @@ export function NewProjectForm({
     !missingLocalFolder &&
     !invalidProjectDestination &&
     !nonemptyPaperCloneFolder &&
+    !unusableRepository &&
     (mode !== "paper" || Boolean(paper?.repoUrl)) &&
     (!githubSyncEnabled ||
       (typeof githubLogin === "string" &&
@@ -479,10 +483,16 @@ export function NewProjectForm({
             <span className={`repo-hint ${MONO_CLASS_NAME}`}>Checking folder…</span>
           )}
           {!gitMissing && mode === "folder" && path.trim() && !checkingPath && pathStatus?.exists === false && (
-            <div className="project-path-notice error">Choose an existing folder.</div>
+            <div className="project-path-notice error">That folder no longer exists. Choose it again.</div>
           )}
           {!gitMissing && mode === "folder" && path.trim() && !checkingPath && invalidProjectDestination && (
             <div className="project-path-notice error">The selected path is not a folder.</div>
+          )}
+          {!gitMissing && mode === "folder" && !checkingPath && pathStatus?.gitState === "detached" && (
+            <div className="project-path-notice error">Check out a Git branch before importing this folder.</div>
+          )}
+          {!gitMissing && mode === "folder" && !checkingPath && pathStatus?.gitState === "invalid" && (
+            <div className="project-path-notice error">The selected folder contains an invalid Git repository.</div>
           )}
           {!gitMissing &&
             mode === "folder" &&

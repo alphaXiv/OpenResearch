@@ -141,6 +141,7 @@ export interface ProjectPathStatus {
   directory: boolean | null;
   empty: boolean | null;
   initialized: boolean | null;
+  gitState?: "notRepository" | "unborn" | "ready" | "detached" | "invalid" | null;
   githubOwner?: string | null;
   githubRepo?: string | null;
 }

@@ -65,6 +65,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         claude: claude.clone(),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
+        project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
@@ -152,6 +153,7 @@ struct AppState {
     /// limited to once per TTL unless the UI asks for a refresh.
     harnesses: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
     project_lifecycle: Arc<ProjectLifecycle>,
+    project_creation_lock: Arc<tokio::sync::Mutex<()>>,
     publication_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
     /// Set while a data-dir move is running. New chat turns and run launches
     /// check it and refuse (409) so nothing starts writing the store mid-move —
@@ -855,6 +857,7 @@ async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
                 "directory": null,
                 "empty": null,
                 "initialized": null,
+                "gitState": null,
             })));
         };
         let resolved = local::projects::expand_path(&path)?;
@@ -865,8 +868,9 @@ async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
         } else {
             None
         };
-        let initialized =
-            git_version.is_some() && directory && local::git::is_repository(&resolved);
+        let git_state =
+            (git_version.is_some() && directory).then(|| local::git::repository_state(&resolved));
+        let initialized = git_state.is_some_and(local::git::RepositoryState::is_initialized);
         let github_publication = initialized
             .then(|| local::git::github_publication(&resolved))
             .flatten();
@@ -877,6 +881,7 @@ async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
             "directory": directory,
             "empty": empty,
             "initialized": initialized,
+            "gitState": git_state.map(local::git::RepositoryState::as_str),
             "githubOwner": github_publication.as_ref().map(|(owner, _)| owner),
             "githubRepo": github_publication.as_ref().map(|(_, repo)| repo),
         })))
@@ -978,6 +983,7 @@ async fn create_project(
     };
     let shallow_clone = local::github::should_shallow_clone(repo_size_kb);
     let run_command = req.run_command;
+    let creation_guard = state.project_creation_lock.lock().await;
     let result = tokio::task::spawn_blocking(move || {
         let store = Store::open()?;
         local::projects::create_project(
@@ -997,6 +1003,7 @@ async fn create_project(
     .await
     .map_err(|e| anyhow!("project task failed: {e}"))?;
     let project = result.map_err(bad_request)?;
+    drop(creation_guard);
     let _project_admission = state
         .project_lifecycle
         .admit(&project.id)
@@ -1118,15 +1125,14 @@ async fn initialize_project_git(
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     reject_if_moving(&state)?;
     let _lock = project_publication_lock(&state, &id).await;
+    let _creation_guard = state.project_creation_lock.lock().await;
     tokio::task::spawn_blocking(move || {
         let store = Store::open()?;
         let mut project = store
             .get_local_project(&id)?
             .ok_or_else(|| anyhow!("project not found"))?;
         let path = std::path::Path::new(&project.repo_path);
-        if !local::git::is_repository(path) {
-            local::git::initialize_repository(path)?;
-        }
+        local::git::initialize_repository(path)?;
         local::git::validate_project_repository(path)?;
         project.baseline_branch = local::git::require_current_branch(path)?;
         store.update_local_project(&project)?;
@@ -4830,6 +4836,32 @@ async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn project_path_status_reports_an_unborn_repository_as_importable() {
+        let path =
+            std::env::temp_dir().join(format!("orx-project-path-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        let status = std::process::Command::new("git")
+            .current_dir(&path)
+            .args(["init", "-q", "-b", "main"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let response = project_path_status(Query(ProjectPathStatusQ {
+            path: Some(path.to_string_lossy().into_owned()),
+        }))
+        .await;
+        let Json(body) = match response {
+            Ok(body) => body,
+            Err(error) => panic!("unexpected path status error: {}", error.1),
+        };
+
+        assert_eq!(body["gitState"], "unborn");
+        assert_eq!(body["initialized"], true);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn plan_never_becomes_the_preferred_mode_for_new_sessions() {
