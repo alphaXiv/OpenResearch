@@ -5,7 +5,8 @@
 //! Detection is read-only and best-effort: missing files or unparseable JSON
 //! just mean "not detected", never an error.
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -108,6 +109,9 @@ pub struct HarnessInfo {
     pub id: &'static str,
     pub name: &'static str,
     pub installed: bool,
+    /// On PATH, but the binary can't run: `--version` failed conclusively.
+    /// Never `agent_ready` — spawning it just dumps its own crash into the chat.
+    pub install_broken: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,7 +128,7 @@ pub struct HarnessInfo {
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// Usable as a chat backend right now (installed + signed in).
+    /// Usable as a chat backend right now (installed, runs, and signed in).
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
@@ -142,6 +146,7 @@ impl HarnessInfo {
             id,
             name,
             installed: false,
+            install_broken: false,
             bin_path: None,
             version: None,
             authenticated: false,
@@ -164,6 +169,32 @@ impl HarnessInfo {
         self.models = models;
         self
     }
+
+    pub(super) fn record_bin(&mut self, bin: &Path, probe: BinProbe) {
+        self.installed = true;
+        self.bin_path = Some(bin.to_string_lossy().into_owned());
+        match probe {
+            BinProbe::Answered(version) => self.version = version,
+            // The evidence never reaches `agent_note` — that stays a clean
+            // "reinstall it" — so log it for the bug report that follows.
+            BinProbe::Broken(evidence) => {
+                self.install_broken = true;
+                eprintln!("orx up: {} --version failed: {evidence}", bin.display());
+            }
+            BinProbe::Unknown => {}
+        }
+    }
+
+    pub(super) fn ready(&self) -> bool {
+        self.installed && !self.install_broken && self.authenticated
+    }
+
+    pub(super) fn broken_note(&self, fix: &str) -> String {
+        format!(
+            "{} is installed but failed to run. {fix}, then re-check this harness.",
+            self.name
+        )
+    }
 }
 
 /// Dereference symlinks to the real installed binary. Installers commonly drop
@@ -177,29 +208,75 @@ pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-/// `<bin> --version`, first line, with a timeout (node CLIs can be slow).
-pub(super) async fn bin_version(bin: &PathBuf) -> Option<String> {
+/// What `<bin> --version` said about an install found on PATH.
+#[derive(Debug)]
+pub(super) enum BinProbe {
+    /// Ran and named itself — the first line, when it printed one.
+    Answered(Option<String>),
+    /// Said nothing usable and failed in a way that won't fix itself. Every
+    /// healthy CLI answers `--version`, so this means the install is broken.
+    /// Carries the CLI's own first complaint, for the log.
+    Broken(String),
+    /// No evidence either way (a timeout, a transient spawn failure); the
+    /// install is left alone and re-probed on the next detection pass.
+    Unknown,
+}
+
+/// `<bin> --version`, with a timeout (node CLIs can be slow).
+pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
-    // A node-shebang install needs `node` on PATH to answer at all, and an
-    // unparseable version downgrades a signed-in harness to `Unknown` — which
-    // is also why a synced `FORCE_COLOR` must not reach the version line.
+    // An unparseable version downgrades a signed-in harness to `Unknown` —
+    // which is why a synced `FORCE_COLOR` must not reach the version line.
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let fut = cmd.output();
-    let out = tokio::time::timeout(VERSION_TIMEOUT, fut)
-        .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let line = String::from_utf8_lossy(&out.stdout)
+    let Ok(result) = tokio::time::timeout(VERSION_TIMEOUT, cmd.output()).await else {
+        return BinProbe::Unknown;
+    };
+    let out = match result {
+        Ok(out) => out,
+        // Only a stable cause is evidence of a broken install. Fork/descriptor
+        // pressure would otherwise tell a user to reinstall three working CLIs.
+        Err(error) => {
+            return match error.kind() {
+                ErrorKind::NotFound | ErrorKind::PermissionDenied => broken(&error.to_string()),
+                _ => BinProbe::Unknown,
+            }
+        }
+    };
+    // A version has a digit in it; anything else is the CLI complaining, and
+    // must not reach the `Version` row as though it were one.
+    let version = String::from_utf8_lossy(&out.stdout)
         .lines()
-        .next()?
-        .trim()
-        .to_string();
-    (!line.is_empty()).then_some(line)
+        .next()
+        .map(str::trim)
+        .filter(|line| line.chars().any(|c| c.is_ascii_digit()))
+        .map(str::to_string);
+    // A CLI that named itself works, whatever it did with its exit code.
+    if version.is_none() && !out.status.success() {
+        return broken(&String::from_utf8_lossy(&out.stderr));
+    }
+    BinProbe::Answered(version)
+}
+
+fn broken(evidence: &str) -> BinProbe {
+    BinProbe::Broken(
+        evidence
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no output")
+            .to_string(),
+    )
+}
+
+/// `<bin> --version`, first line — for callers that only want the version and
+/// treat every failure the same.
+pub(super) async fn bin_version(bin: &Path) -> Option<String> {
+    match probe_bin(bin).await {
+        BinProbe::Answered(version) => version,
+        BinProbe::Broken(_) | BinProbe::Unknown => None,
+    }
 }
 
 /// An API key from the process env, else orx's own synced env file — the two
@@ -291,5 +368,89 @@ mod tests {
     fn resolve_symlinks_keeps_unresolvable_path() {
         let missing = PathBuf::from("/nonexistent/orx-detect-test/codex");
         assert_eq!(resolve_symlinks(missing.clone()), missing);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_bin_reports_broken_only_on_conclusive_evidence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("orx-probe-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        let working = script("working", "#!/bin/sh\necho 'codex-cli 0.147.0'\n");
+        assert!(matches!(
+            probe_bin(&working).await,
+            BinProbe::Answered(Some(v)) if v == "codex-cli 0.147.0"
+        ));
+
+        // The shape of the reported bug: the wrapper runs, fails to find the
+        // binary it wraps, and exits non-zero having printed no version.
+        let broken = script("broken", "#!/bin/sh\necho 'spawn ENOENT' >&2\nexit 1\n");
+        assert!(matches!(probe_bin(&broken).await, BinProbe::Broken(e) if e == "spawn ENOENT"));
+        // Stands in for the shebang whose interpreter is gone — there the spawn
+        // itself fails, before the CLI can say anything.
+        assert!(matches!(
+            probe_bin(&dir.join("absent")).await,
+            BinProbe::Broken(_)
+        ));
+
+        // Answered, but with nothing usable — still a working install.
+        let quiet = script("quiet", "#!/bin/sh\nexit 0\n");
+        assert!(matches!(probe_bin(&quiet).await, BinProbe::Answered(None)));
+
+        // A CLI that names itself is working, whatever its exit code says —
+        // but a complaint on stdout is not a version.
+        let grumpy = script("grumpy", "#!/bin/sh\necho '1.2.3'\necho warn >&2\nexit 1\n");
+        assert!(matches!(
+            probe_bin(&grumpy).await,
+            BinProbe::Answered(Some(v)) if v == "1.2.3"
+        ));
+        let sulky = script("sulky", "#!/bin/sh\necho 'cannot find module'\nexit 1\n");
+        assert!(matches!(probe_bin(&sulky).await, BinProbe::Broken(_)));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn signed_in_with(probe: BinProbe) -> HarnessInfo {
+        let mut info = HarnessInfo::new("codex", "Codex");
+        info.record_bin(&PathBuf::from("/usr/local/bin/codex"), probe);
+        info.authenticated = true;
+        info
+    }
+
+    #[test]
+    fn record_bin_broken_is_never_ready() {
+        let info = signed_in_with(BinProbe::Broken("spawn ENOENT".into()));
+
+        assert!(info.installed, "a broken install is still on PATH");
+        assert!(!info.ready(), "a CLI that cannot run cannot run a turn");
+        assert!(info
+            .broken_note("Reinstall it")
+            .starts_with("Codex is installed but failed to run."));
+    }
+
+    #[test]
+    fn record_bin_answered_keeps_version_and_path() {
+        let info = signed_in_with(BinProbe::Answered(Some("0.147.0".into())));
+
+        assert!(info.ready());
+        assert_eq!(info.version.as_deref(), Some("0.147.0"));
+        assert_eq!(info.bin_path.as_deref(), Some("/usr/local/bin/codex"));
+    }
+
+    #[test]
+    fn record_bin_unknown_leaves_the_install_alone() {
+        let info = signed_in_with(BinProbe::Unknown);
+
+        assert!(info.ready(), "an inconclusive probe must not lock chat out");
+        assert!(!info.install_broken);
+        assert!(info.version.is_none());
     }
 }

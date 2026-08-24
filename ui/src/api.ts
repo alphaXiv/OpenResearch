@@ -1139,6 +1139,9 @@ export interface Harness {
   id: HarnessId;
   name: string;
   installed: boolean;
+  /** On PATH, but `--version` failed — a broken install a reinstall repairs.
+   * Never `agentReady`: spawning it just dumps the CLI's own crash into chat. */
+  installBroken: boolean;
   binPath?: string;
   version?: string;
   authenticated: boolean;

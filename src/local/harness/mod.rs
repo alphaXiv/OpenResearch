@@ -374,7 +374,7 @@ async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
         if info.auth_state == HarnessAuthState::Unknown {
             info.auth_state = if info.agent_ready {
                 HarnessAuthState::Ready
-            } else if info.installed && info.id != "claude-code" {
+            } else if info.installed && !info.install_broken && info.id != "claude-code" {
                 HarnessAuthState::NeedsLogin
             } else {
                 HarnessAuthState::Unknown

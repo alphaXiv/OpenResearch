@@ -241,6 +241,7 @@ function harnessStatus(h: Harness): { cls: string; label: string } {
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
   if (!h.installed) return { cls: "warn", label: "Not installed" };
+  if (h.installBroken) return { cls: "warn", label: "Install broken" };
   if (h.authState === "unknown") return { cls: "warn", label: "Unable to verify" };
   if (h.authState === "unsupported") return { cls: "warn", label: "Update required" };
   return { cls: "warn", label: "Not signed in" };

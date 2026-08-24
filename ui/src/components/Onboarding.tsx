@@ -550,6 +550,7 @@ function cleanPaperTitle(title: string): string {
 function agentBadge(h: Harness): { cls: string; label: string } {
   if (h.agentReady) return { cls: "st-done", label: "Signed in" };
   if (!h.installed) return { cls: "st-idle", label: "Not detected" };
+  if (h.installBroken) return { cls: "st-starting", label: "Install broken" };
   if (h.authState === "unknown") return { cls: "st-starting", label: "Unable to verify" };
   if (h.authState === "unsupported") return { cls: "st-starting", label: "Update required" };
   if (h.installed) return { cls: "st-starting", label: "Not signed in" };

@@ -3112,6 +3112,8 @@ fn spawn_agent_preflight() {
                         Some(acct) => format!("{} ✓ ({acct})", h.name),
                         None => format!("{} ✓", h.name),
                     }
+                } else if h.install_broken {
+                    format!("{} — installed but failed to run", h.name)
                 } else if h.installed {
                     format!("{} — not signed in", h.name)
                 } else {
@@ -4652,6 +4654,11 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
     else {
         return;
     };
+    // Overlaying would replace the reinstall note with advice that runs the
+    // failing binary.
+    if entry_install_broken(claude) {
+        return;
+    }
     claude["authState"] = json!(snapshot.state);
     if snapshot.state == local::harness::HarnessAuthState::Ready {
         return;
@@ -4683,15 +4690,30 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
     });
 }
 
-fn payload_has_ready_claude(payload: &Value) -> bool {
+fn claude_entry(payload: &Value) -> Option<&Value> {
     payload
-        .get("harnesses")
-        .and_then(Value::as_array)
-        .and_then(|harnesses| {
-            harnesses
-                .iter()
-                .find(|h| h.get("id").and_then(Value::as_str) == Some("claude-code"))
-        })
+        .get("harnesses")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("id").and_then(Value::as_str) == Some("claude-code"))
+}
+
+fn entry_install_broken(entry: &Value) -> bool {
+    entry.get("installBroken").and_then(Value::as_bool) == Some(true)
+}
+
+/// A claude the cached entry must never be restored over: one that can't run,
+/// or isn't there at all. Both would resurrect `agentReady` for a binary no
+/// turn can spawn.
+fn claude_unspawnable(payload: &Value) -> bool {
+    claude_entry(payload).is_none_or(|claude| {
+        entry_install_broken(claude)
+            || claude.get("installed").and_then(Value::as_bool) != Some(true)
+    })
+}
+
+fn payload_has_ready_claude(payload: &Value) -> bool {
+    claude_entry(payload)
         .and_then(|claude| claude.get("agentReady"))
         .and_then(Value::as_bool)
         == Some(true)
@@ -4756,6 +4778,14 @@ async fn list_harnesses(
     }
     let mut payload = json!({ "harnesses": harnesses });
     let mut snapshot = state.claude.auth_snapshot();
+    // A claude that broke mid-session leaves the snapshot `Ready` — `detect`
+    // skips the probe, and `observe_auth_state` won't downgrade on `Unknown` —
+    // so drop it here instead, or the resurrection below would restore
+    // `agentReady` for a binary that cannot start.
+    if snapshot.state == local::harness::HarnessAuthState::Ready && claude_unspawnable(&payload) {
+        state.claude.defer_auth_verification(snapshot.generation);
+        snapshot = state.claude.auth_snapshot();
+    }
     if snapshot.state == local::harness::HarnessAuthState::Ready
         && !payload_has_ready_claude(&payload)
     {

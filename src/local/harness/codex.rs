@@ -38,8 +38,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, jwt_payload, nonempty_str, parse_version, read_json, resolve_symlinks, title_case,
-    HarnessInfo, ModelInfo,
+    bin_version, jwt_payload, nonempty_str, parse_version, probe_bin, read_json, resolve_symlinks,
+    title_case, HarnessInfo, ModelInfo,
 };
 use super::options::{
     resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
@@ -116,6 +116,10 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
 /// model that isn't in `CODEX_MODELS` (a `-c model=…` override, or a newer id
 /// this build doesn't know).
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
+/// naming one installer would send a brew or standalone install to npm.
+const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
 
 /// The effort ids a given codex model accepts per the FALLBACK table, or the
 /// conservative intersection. Send-time validation only — detection prefers
@@ -441,9 +445,7 @@ impl Harness for Codex {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_codex() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
         }
         let home = codex_home();
         let config_raw = home
@@ -483,7 +485,7 @@ impl Harness for Codex {
             }
         }
 
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
             // The first-party catalog is meaningless for a custom provider, so
             // offer only the model that provider is configured with (the
@@ -535,6 +537,10 @@ impl Harness for Codex {
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
                 );
             }
+        } else if info.install_broken {
+            // Outranks both notes below: neither signing in nor a provider key
+            // helps a codex that can't start.
+            info.agent_note = Some(info.broken_note(CODEX_REINSTALL));
         } else if info.agent_note.is_some() {
             // A configured custom provider already said which env var to set;
             // `codex login` is the wrong instruction for it.
@@ -551,8 +557,14 @@ impl Harness for Codex {
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         if !runs_app_server().await {
-            return run_turn_exec(ctx)
-                .await
+            let result = run_turn_exec(ctx).await;
+            // Still `Unknown` after a failure means codex died before its first
+            // event — nothing was delivered, so the card must offer Retry, not a
+            // Continue that re-runs the same doomed spawn.
+            if result.is_err() && ctx.delivery_state() == DeliveryState::Unknown {
+                ctx.mark_delivery(DeliveryState::NotSent);
+            }
+            return result
                 .map(|()| TurnOutcome::Completed)
                 .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
         }
@@ -3359,6 +3371,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     };
     cmd.arg(prompt);
     prepare_env(&mut cmd);
+    // Plain text only: a synced FORCE_COLOR would put escape codes in the
+    // `--json` event stream, and every unparseable line reads as "not delivered".
+    cmd.env("NO_COLOR", "1");
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
