@@ -126,6 +126,7 @@ import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import {
   COMPOSER_CONTROL_CLASS_NAME,
   COMPOSER_ICON_CONTROL_CLASS_NAME,
+  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
   ICON_BUTTON_BASE_CLASS_NAME,
   ICON_BUTTON_CLASS_NAME,
   MODEL_ITEM_CLASS_NAME,
@@ -2113,14 +2114,16 @@ function ToolActivityLabel({
     return (
       <>
         {activity.labelPrefix}
-        <button
+        <span
           className="tool-target"
-          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+          role="button"
+          tabIndex={0}
+          {...tabOpenGestureHandlers<HTMLSpanElement>((intent) =>
             onOpenFile(filePath, undefined, undefined, activity.fileRef, intent),
           { stopPropagation: true })}
         >
           {activity.labelTarget}
-        </button>
+        </span>
       </>
     );
   }
@@ -5710,7 +5713,7 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-2.5 mr-3.5 mb-2.5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-visible">
+    <aside className={`session-rail w-68 shrink-0 flex flex-col mt-5 mr-3.5 mb-5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg overflow-visible ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`}>
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
@@ -6006,7 +6009,7 @@ export function ChatPanel({
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer pt-0 px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+      <div className="composer py-5 px-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -6100,7 +6103,7 @@ export function ChatPanel({
             ))}
           </div>
         )}
-        <div className="composer-box relative flex flex-col border border-border rounded-md bg-background" data-onboarding="composer">
+        <div className={`composer-box relative flex flex-col border border-border rounded-lg bg-background ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`} data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
             <div className="composer-harness-warning py-2 px-3 text-subtext text-xs leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
               <strong>{activeHarness.name} is unavailable.</strong>{" "}
@@ -6336,19 +6339,21 @@ export function ChatPanel({
             {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-            <ModelPicker
-              value={composerSelection}
-              onSelect={selectModel}
-              permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
-              defaultPermissionId={opts?.defaultPermissionMode ?? null}
-              onSelectPermission={setPermissionMode}
-              reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
-              defaultReasoningId={reasoning.defaultId}
-              onSelectReasoning={setReasoningLevel}
-              onHarnesses={setHarnesses}
-              lockHarness={!!openSession}
-            />
-            <ContextMeter usage={openSession?.contextUsage} />
+            <div className="flex min-w-0 items-center">
+              <ModelPicker
+                value={composerSelection}
+                onSelect={selectModel}
+                permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                defaultPermissionId={opts?.defaultPermissionMode ?? null}
+                onSelectPermission={setPermissionMode}
+                reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
+                defaultReasoningId={reasoning.defaultId}
+                onSelectReasoning={setReasoningLevel}
+                onHarnesses={setHarnesses}
+                lockHarness={!!openSession}
+              />
+              <ContextMeter usage={openSession?.contextUsage} />
+            </div>
             {busy && !pendingQuestion ? (
               // Stop whenever the turn is busy and typed text has nowhere to
               // go — actively streaming, or held on a plan/permission card

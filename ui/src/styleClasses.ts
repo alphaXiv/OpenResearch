@@ -1,3 +1,6 @@
+export const ELEVATED_SURFACE_SHADOW_CLASS_NAME =
+  "shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)]";
+
 export const ICON_BUTTON_BASE_CLASS_NAME = [
   "icon-btn relative inline-flex items-center justify-center",
   "text-subtext [&:hover]:text-text [&:hover]:bg-surface",

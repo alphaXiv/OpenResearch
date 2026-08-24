@@ -59,7 +59,16 @@ import { DemoWelcomeModal } from "./components/Tour";
 import { clearReadDemoSessions } from "./demoSessionState";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
-import { CODE_TAB_BODY_CLASS_NAME, ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, TAB_BODY_CLASS_NAME } from "./styleClasses";
+import {
+  CODE_TAB_BODY_CLASS_NAME,
+  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
+  ICON_BUTTON_BASE_CLASS_NAME,
+  ICON_BUTTON_CLASS_NAME,
+  MODEL_ITEM_CLASS_NAME,
+  PRIMARY_BUTTON_CLASS_NAME,
+  SPINNER_CLASS_NAME,
+  TAB_BODY_CLASS_NAME,
+} from "./styleClasses";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -1770,7 +1779,7 @@ export default function App() {
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-2.5 mr-0 mb-2.5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-hidden ${panelMax ? "max" : ""}`}
+          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 mr-0 mb-5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg overflow-hidden ${ELEVATED_SURFACE_SHADOW_CLASS_NAME} ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
