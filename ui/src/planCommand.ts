@@ -3,7 +3,6 @@ import type { SkillInfo } from "./api";
 export const PLAN_COMMAND: SkillInfo = {
   name: "plan",
   description: "Toggle Plan mode for this chat",
-  argHint: "",
   source: "command",
 };
 
@@ -26,16 +25,6 @@ export function slashCommandContext(
   const query = text.slice(start + 1, end);
   if (query.includes("/")) return null;
   return { query: query.toLowerCase(), start, end };
-}
-
-/** Whether the `/name` opens the draft or one of its lines, which is the point
- * at which it is unambiguously a command rather than part of a sentence. */
-export function isAnchoredSlashCommand(
-  text: string,
-  context: SlashCommandContext,
-): boolean {
-  const before = text.slice(0, context.start);
-  return !before.slice(before.lastIndexOf("\n") + 1).trim();
 }
 
 interface CommandSegment {
@@ -65,32 +54,36 @@ export function splitCommandTokens(
   return segments;
 }
 
-/** Only a leading command expands, and the backend matches its lowercase slug
- * exactly — so a typed `/Lit-Review` has to reach the wire as `/lit-review`.
- * Every other token is the user's prose and stays as written. */
-export function normalizeLeadingCommand(
-  text: string,
-  isCommand: (name: string) => boolean,
-): string {
-  const segments = splitCommandTokens(text, isCommand);
-  if (!segments[0]?.command) return text;
-  return segments[0].text.toLowerCase() + segments.slice(1).map((s) => s.text).join("");
-}
-
 /** Replace the `/query` token under the caret with the chosen command, leaving
  * the rest of the message where it was. */
 export function insertSlashCommand(
   text: string,
   context: SlashCommandContext,
   name: string,
+  marginSpaces = 1,
 ): { text: string; cursor: number } {
-  const before = text.slice(0, context.start);
-  const after = text.slice(context.end);
-  // The caret lands where the args go, past whatever space now separates them.
-  const gap = /^\s/.exec(after)?.[0] ?? " ";
+  const margin = " ".repeat(marginSpaces);
+  let before = text.slice(0, context.start);
+  if (marginSpaces > 1 && /[ \t]$/.test(before)) {
+    before = before.replace(/[ \t]+$/, (spaces) => {
+      if (spaces.includes("\t")) return spaces;
+      return spaces.length >= marginSpaces ? spaces : margin;
+    });
+  }
+  let after = text.slice(context.end);
+  if (!after) {
+    after = margin;
+  } else if (!after.startsWith("\n")) {
+    const leading = /^[ \t]+/.exec(after)?.[0];
+    after = leading
+      ? `${leading.length >= marginSpaces ? leading : margin}${after.slice(leading.length)}`
+      : margin + after;
+  }
+  // The caret lands past the reserved inline margin, where surrounding prose continues.
+  const gap = /^[ \t]+/.exec(after)?.[0].length ?? 0;
   return {
-    text: `${before}/${name}${/^\s/.test(after) ? "" : " "}${after}`,
-    cursor: before.length + name.length + 1 + gap.length,
+    text: `${before}/${name}${after}`,
+    cursor: before.length + name.length + 1 + gap,
   };
 }
 

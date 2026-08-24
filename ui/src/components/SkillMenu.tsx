@@ -5,14 +5,11 @@ import type { SkillInfo } from "../api";
 export function SkillMenu({
   skills,
   activeIndex,
-  advisory,
   onPick,
   onHover,
 }: {
   skills: SkillInfo[];
   activeIndex: number;
-  /** Mid-sentence Enter still sends, so name the key that does accept. */
-  advisory: boolean;
   onPick: (skill: SkillInfo) => void;
   onHover: (index: number) => void;
 }) {
@@ -22,7 +19,7 @@ export function SkillMenu({
         <button
           key={s.name}
           type="button"
-          className={`skill-item flex flex-col gap-0.5 w-full text-left py-[7px] px-2 rounded-sm [&.active]:bg-surface [&_.skill-name]:text-md [&_.skill-hint]:text-muted [&_.skill-desc]:text-sm [&_.skill-desc]:text-subtext ${i === activeIndex ? "active" : ""}`}
+          className={`skill-item flex flex-col gap-0.5 w-full text-left py-[7px] px-2 rounded-sm [&.active]:bg-surface [&_.skill-name]:text-md [&_.skill-desc]:text-sm [&_.skill-desc]:text-subtext ${i === activeIndex ? "active" : ""}`}
           // mousedown + preventDefault keeps the textarea focused.
           onMouseDown={(e) => {
             e.preventDefault();
@@ -30,9 +27,13 @@ export function SkillMenu({
           }}
           onMouseEnter={() => onHover(i)}
         >
-          <span className="skill-name flex items-baseline gap-1">
-            /{s.name} <span className="skill-hint">{s.argHint}</span>
-            {advisory && i === activeIndex && <span className="skill-hint ml-auto">Tab</span>}
+          <span className="skill-name flex items-center gap-1.5">
+            /{s.name}
+            {s.source !== "command" && (
+              <span className="inline-flex h-4 items-center rounded-full border border-border-variant bg-canvas px-1.5 text-2xs font-semibold tracking-[0.05em] text-muted">
+                SKILL
+              </span>
+            )}
           </span>
           <span className="skill-desc">{s.description}</span>
         </button>

@@ -31,8 +31,8 @@ const LITERATURE_ASSISTANT_MESSAGE_ID: &str = "msg_demo_nanochat_literature_assi
 const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
-const BASELINE_SHA: &str = "1b3a42272a65478d26306696cb7bcb80e26c2e18";
-const EXPERIMENT_SHA: &str = "346231fe75f91cd62b3040195993f33dc0e1853b";
+const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
+const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.

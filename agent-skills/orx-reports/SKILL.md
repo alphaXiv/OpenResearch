@@ -16,4 +16,6 @@ output without relying on its directory, for example:
 
 Write at the artifacts root unless a folder is useful. Markdown may reference
 nearby images by relative path; no name such as `project/`, an experiment slug,
-or `report.md` is reserved. Cite outputs in chat using the `orx-evidence` skill.
+or `report.md` is reserved. In the chat handoff, link every finished output using
+the session playbook's evidence-and-links contract. Load `orx-evidence` when the
+report makes claims derived from run results.

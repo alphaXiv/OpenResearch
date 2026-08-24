@@ -144,7 +144,7 @@ fn parse_scalar(v: &str) -> String {
 
 /// Slug rule shared with the built-in skills: `^[a-z0-9]+(-[a-z0-9]+)*$`. This
 /// is also what the harnesses require of a skill `name`.
-fn is_valid_slug(name: &str) -> bool {
+pub(crate) fn is_valid_slug(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_NAME_LEN
         && name.split('-').all(|seg| {
@@ -389,6 +389,36 @@ fn find_in(root: &Path, name: &str, project_id: Option<&str>) -> Option<UserSkil
         .find(|s| s.name == name)
 }
 
+/// The Markdown body of the applicable skill's `SKILL.md`, for the composer
+/// hover preview. Project scope wins over global just as invocation does.
+pub fn content(name: &str, project_id: Option<&str>) -> Option<String> {
+    content_in(&root(), name, project_id)
+}
+
+fn content_in(root: &Path, name: &str, project_id: Option<&str>) -> Option<String> {
+    let skill = find_in(root, name, project_id)?;
+    let scope_project = if skill.scope == Scope::Project {
+        Some(project_id?)
+    } else {
+        None
+    };
+    let path = scope_dir(root, skill.scope, scope_project)
+        .ok()?
+        .join(&skill.name)
+        .join("SKILL.md");
+    let content = fs::read_to_string(path).ok()?;
+    let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
+    let after_open = content
+        .strip_prefix("---\n")
+        .or_else(|| content.strip_prefix("---\r\n"))?;
+    let end = after_open.find("\n---")?;
+    Some(
+        after_open[end + 4..]
+            .trim_start_matches(['\r', '\n'])
+            .to_string(),
+    )
+}
+
 pub fn delete(name: &str, scope: Scope, project_id: Option<&str>) -> Result<()> {
     delete_in(&root(), name, scope, project_id)
 }
@@ -609,29 +639,15 @@ fn write_into_session_in(
     Ok(())
 }
 
-/// Expand a leading `/name [args]` that names a user skill into a prompt that
-/// tells the agent to use it — the skill's full `SKILL.md` is already in the
-/// worktree (see [`write_into_session`]), so the harness loads it by name.
-/// `None` when the text is not a known user skill (the caller sends it on).
-pub fn expand(text: &str, project_id: &str) -> Option<String> {
-    expand_in(&root(), text, project_id)
+/// Build the instruction for one selected user skill. Its complete `SKILL.md`
+/// is already in the worktree; the chat layer supplies the shared user request.
+pub fn instructions(name: &str, project_id: &str) -> Option<String> {
+    instructions_in(&root(), name, project_id)
 }
 
-fn expand_in(root: &Path, text: &str, project_id: &str) -> Option<String> {
-    let rest = text.strip_prefix('/')?;
-    let (cmd, args) = match rest.split_once(char::is_whitespace) {
-        Some((cmd, args)) => (cmd, args.trim()),
-        None => (rest.trim_end(), ""),
-    };
-    let skill = find_in(root, cmd, Some(project_id))?;
-    Some(if args.is_empty() {
-        format!("Use the `{}` skill.", skill.name)
-    } else {
-        format!(
-            "Use the `{}` skill for the following:\n\n{args}",
-            skill.name
-        )
-    })
+fn instructions_in(root: &Path, name: &str, project_id: &str) -> Option<String> {
+    let skill = find_in(root, name, Some(project_id))?;
+    Some(format!("Use the `{}` skill.", skill.name))
 }
 
 // --- fs helpers ---------------------------------------------------------------
@@ -888,18 +904,19 @@ mod tests {
     }
 
     #[test]
-    fn expand_invokes_user_skill() {
+    fn instructions_invoke_user_skill() {
         let root = temp_root();
         save_skill_md_in(&root, skill_md("greeter").as_bytes(), Scope::Global, None).unwrap();
-        let out = expand_in(&root, "/greeter hello there", "p1").unwrap();
-        assert!(out.contains("greeter"));
-        assert!(out.contains("hello there"));
         assert_eq!(
-            expand_in(&root, "/greeter", "p1").unwrap(),
+            instructions_in(&root, "greeter", "p1").unwrap(),
             "Use the `greeter` skill."
         );
-        assert!(expand_in(&root, "/unknown", "p1").is_none());
-        assert!(expand_in(&root, "plain text", "p1").is_none());
+        assert_eq!(
+            content_in(&root, "greeter", Some("p1")).unwrap(),
+            "# greeter\nbody\n"
+        );
+        assert!(content_in(&root, "../../etc/passwd", Some("p1")).is_none());
+        assert!(instructions_in(&root, "unknown", "p1").is_none());
         let _ = fs::remove_dir_all(&root);
     }
 

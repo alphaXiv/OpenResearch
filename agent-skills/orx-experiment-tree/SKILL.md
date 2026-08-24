@@ -129,10 +129,8 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
    #   …edit only the files that idea touches…
    git commit -am "cosine LR + warmup"
    ```
-   **Leave the run command alone.** While you're in the code, make the run print
-   the evidence you'll need to judge it — final metrics, a compact summary block,
-   and the key config it actually used. The run log is the evidence channel; if
-   a result is not printed there, it cannot be inspected later.
+   **Leave the run command alone.** Before launching, load `orx-evidence` and
+   make sure the committed code emits enough run evidence to judge the node.
 5. **Launch the round's ready children**: `orx exp run <childId> --backend <b>`
    (or omit `--backend` when a default target is set — see `orx-compute`). Remote
    backends can run siblings in parallel; `--backend local` shares this machine's
@@ -196,8 +194,8 @@ the `orx-reports` skill for naming and optional folder guidance.
 
 Close any turn that ran or changed experiments with a short experiment summary:
 one line per relevant node with what it tested, its status, and the headline
-result. Use the evidence syntax from `orx-evidence`. Plain questions and turns
-that launch or change no experiments need no summary.
+result. Follow the session playbook's evidence-and-links contract. Plain
+questions and turns that launch or change no experiments need no summary.
 
 ## Experiment description / notes — `orx exp desc`
 

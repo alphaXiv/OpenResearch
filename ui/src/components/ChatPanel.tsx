@@ -87,6 +87,7 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  containsShellGlob,
   orxArgsMatch,
   orxArgv,
   shellWords,
@@ -113,8 +114,6 @@ import {
   commandsForHarness,
   effectiveCommandPlanMode,
   insertSlashCommand,
-  isAnchoredSlashCommand,
-  normalizeLeadingCommand,
   parsePlanCommand,
   removeSlashCommand,
   slashCommandContext,
@@ -1138,7 +1137,13 @@ function stripHeredocBodies(command: string): string {
 
 function validReadTarget(value: string | undefined): string | null {
   const target = value?.replace(/[)'\"]+$/, "");
-  if (!target || target === "-" || /^\d+$/.test(target) || /[$`]/.test(target)) return null;
+  if (
+    !target
+    || target === "-"
+    || /^\d+$/.test(target)
+    || /[$`]/.test(target)
+    || containsShellGlob(target)
+  ) return null;
   return target;
 }
 
@@ -4162,7 +4167,6 @@ function SessionRow({
 export function ChatPanel({
   projectId,
   projectName,
-  paperId,
   railHeader,
   railOpen,
   onShowRail,
@@ -4189,8 +4193,6 @@ export function ChatPanel({
 }: {
   projectId: string;
   projectName: string;
-  /** arXiv id the project starts from — surfaces a /reproduce-paper shortcut. */
-  paperId?: string | null;
   /** Back-to-projects + project name block rendered at the top of the rail. */
   railHeader?: React.ReactNode;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
@@ -4361,7 +4363,7 @@ export function ChatPanel({
     }
     // The command replaces the `/query` token in place, so the chip lands where
     // it was typed and the rest of the message stays untouched.
-    const next = insertSlashCommand(draft, slashContext, skill.name);
+    const next = insertSlashCommand(draft, slashContext, skill.name, 2);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
@@ -4461,9 +4463,6 @@ export function ChatPanel({
   const commands = commandsForHarness(skills, opts?.planActivation);
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
-  const anchoredSlash = !!slashContext && isAnchoredSlashCommand(draft, slashContext);
-  // A lone `/` lists every command only where one can open the message — in the
-  // middle of a sentence it is far more often punctuation ("either / or").
   // Commands now live in the draft as text, so the menu also has to stay shut
   // when the caret merely lands in or behind a name the user already finished —
   // unless a longer command still extends it.
@@ -4474,9 +4473,7 @@ export function ChatPanel({
     slashContext?.end === composerCursor &&
     completions.some((command) => command.name !== slashToken);
   const skillMatches =
-    typingCommand && !skillMenuDismissed && (slashToken !== "" || anchoredSlash)
-      ? completions
-      : [];
+    typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
   const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
   useEffect(() => setSkillIdx(0), [slashToken]);
@@ -5023,18 +5020,6 @@ export function ChatPanel({
   // command in it is ever expanded, so none of it is chipped either.
   const knownCommand = (name: string) =>
     !pendingQuestion && commands.some((command) => command.name === name);
-  // A command typed with no args yet shows its arg hint as ghost text where the
-  // args go. Both paper skills default their args (linked paper, configured
-  // compute), so theirs states the defaults instead.
-  const bareCommand = /^\/(\S+) ?$/.exec(pendingQuestion ? "" : draft);
-  const armedCommand =
-    bareCommand && commands.find((command) => command.name === bareCommand[1].toLowerCase());
-  const commandHint = !armedCommand
-    ? null
-    : ["reproduce-paper", "paper-to-marimo"].includes(armedCommand.name) && paperId
-      ? `[optional — defaults to ${paperId} on your default compute]`
-      : armedCommand.argHint || null;
-
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -5152,9 +5137,9 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
-    // The draft is already the wire form: the chip is painted behind a plain
-    // `/name` token, so what was typed is what the harness and transcript see.
-    const originalText = normalizeLeadingCommand(draft.trim(), knownCommand);
+    // Slash tokens stay in the wire form: the server resolves every selected
+    // skill and supplies this exact message as their shared request context.
+    const originalText = draft.trim();
     const planCommand = !pendingQuestion
       ? parsePlanCommand(originalText, opts?.planActivation)
       : null;
@@ -6047,7 +6032,6 @@ export function ChatPanel({
             <SkillMenu
               skills={skillMatches}
               activeIndex={activeSkillIdx}
-              advisory={!anchoredSlash}
               onPick={pickSkill}
               onHover={setSkillIdx}
             />
@@ -6105,10 +6089,9 @@ export function ChatPanel({
           <div className="composer-input relative flex overflow-hidden [&_textarea]:flex-1">
             <textarea
               ref={composerRef}
-              // Stacked over the chips, which paint behind the text it renders.
+              // Native prose stays visible; the aligned mirror paints only skill tokens.
               className="relative z-1 bg-transparent"
               value={draft}
-              aria-describedby={commandHint ? "composer-command-hint" : undefined}
               placeholder={
                 // A pending question card owns typed text (see send()); say so.
                 // While a steerable turn runs, Enter goes to that turn, so name
@@ -6122,9 +6105,9 @@ export function ChatPanel({
                     ? `Steer ${HARNESS_LABELS[activeHarness.id]}… (${queueChord} to queue)`
                     : composerSelection
                       ? activeHarness?.agentReady
-                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for commands)`
+                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… (/ for commands and skills)`
                         : `${HARNESS_LABELS[composerSelection.harness]} is unavailable — open the model picker`
-                      : "Ask the research agent… ( / for commands)"
+                      : "Ask the research agent… (/ for commands and skills)"
               }
               rows={2}
               onPaste={onComposerPaste}
@@ -6153,6 +6136,22 @@ export function ChatPanel({
                   activatePlanCommand(v, completedCommand);
                   return;
                 }
+                const completedSkill = completedCommand
+                  ? commands.find(
+                      (command) =>
+                        command.source !== "command" &&
+                        command.name === completedCommand.query,
+                    )
+                  : undefined;
+                if (completedSkill && completedCommand) {
+                  const next = insertSlashCommand(v, completedCommand, completedSkill.name, 2);
+                  setDraft(next.text);
+                  window.requestAnimationFrame(() => {
+                    composerRef.current?.setSelectionRange(next.cursor, next.cursor);
+                    setComposerCursor(next.cursor);
+                  });
+                  return;
+                }
                 setDraft(v);
                 setSkillMenuDismissed(false);
               }}
@@ -6173,9 +6172,7 @@ export function ChatPanel({
                     );
                     return;
                   }
-                  // Tab accepts wherever the menu is open, Enter only where the
-                  // command opens the message — mid-sentence Enter still sends.
-                  if (e.key === "Tab" || (e.key === "Enter" && anchoredSlash)) {
+                  if (e.key === "Tab" || e.key === "Enter") {
                     e.preventDefault();
                     pickSkill(skillMatches[activeSkillIdx]);
                     return;
@@ -6199,17 +6196,13 @@ export function ChatPanel({
                 }
               }}
             />
-            {commandHint && (
-              <span id="composer-command-hint" className="sr-only">
-                {commandHint}
-              </span>
-            )}
             {/* After the textarea: its ref must be attached before the mirror
               * measures it. */}
             <ComposerSkillChips
               text={draft}
-              hint={commandHint}
               isCommand={knownCommand}
+              skills={commands}
+              projectId={projectId}
               textareaRef={composerRef}
             />
           </div>

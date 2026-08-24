@@ -37,12 +37,6 @@ example, ask it to reproduce a paper:
 /reproduce-paper <paper URL or title> on <compute>
 ```
 
-or turn one into an interactive marimo notebook:
-
-```
-/paper-to-marimo <paper URL or title> on <compute>
-```
-
 ## The dashboard
 
 `orx up` runs a single local process on `127.0.0.1` — an embedded web UI plus a

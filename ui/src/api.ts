@@ -1168,7 +1168,6 @@ export const getHarnesses = (refresh = false, retryRejected = false) => {
 export interface SkillInfo {
   name: string;
   description: string;
-  argHint: string;
   /** Built-in composer commands share the menu with harness/user skills. */
   source?: "builtin" | "user" | "command";
 }
@@ -1177,6 +1176,13 @@ export const getSkills = (projectId?: string) =>
   get<{ skills: SkillInfo[] }>(
     `/api/skills${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
   ).then((r) => r.skills);
+
+export const getSkillContent = (name: string, projectId?: string) =>
+  get<{ content: string }>(
+    `/api/skills/${encodeURIComponent(name)}${
+      projectId ? `?project=${encodeURIComponent(projectId)}` : ""
+    }`,
+  ).then((r) => r.content);
 
 /** Where an uploaded skill applies. */
 export type SkillScope = "global" | "project";

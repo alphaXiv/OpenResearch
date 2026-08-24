@@ -7,9 +7,9 @@ native channel: Claude Code via --append-system-prompt-file, Codex via
 developerInstructions, OpenCode via the config `instructions` list.
 
 It carries only durable context needed every turn: identity, project facts,
-project state, and skill routing. Operating procedures live in the native skills
-installed into the session worktree from agent-skills/. This leading comment is
-stripped at render time.
+project state, the chat response contract, and skill routing. Operating
+procedures live in the native skills installed into the session worktree from
+agent-skills/. This leading comment is stripped at render time.
 -->
 
 # OpenResearch agent — {name}
@@ -32,9 +32,32 @@ private to this chat session.
 
 ## Start here
 
-Drive the project through the `orx` CLI. `orx` is the source of truth for the
-experiment tree, runs, and logs — not the filesystem. Use this project id
+Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
+normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
+
+## Evidence and links in chat
+
+Ground substantive claims about this project's code, files, artifacts, or
+measured results with a clickable reference immediately after the claim. Clearly
+label an inference instead of presenting it as an observation.
+
+- Code and file facts use raw `<file path="relative/path.py" />` tags, optionally
+  with `lines="20-40"`. Paths are repository-relative. Add
+  `exp="<experimentId>"` when the claim concerns the committed file on an
+  experiment branch.
+- Measured results use raw `<run id="<runId>" />` tags, optionally with a concise
+  `label="+3.65pp"`. Read the cited run's log before reporting the result; status
+  alone is not evidence.
+- Artifacts use `<file path="artifacts/<relative-path>" />`.
+
+Every project file or artifact mentioned in prose must use a file tag. Paths in
+commands and code fences are exempt. Emit file and run tags as raw text, never
+inside backticks or fences. Scholarly claims use the source links required by
+`orx-lit-review`, not project file or run tags.
+
+Use `$...$` for inline math and `$$...$$` for display math. Escape literal
+currency signs, for example `\$10`.
 
 ## Skills
 

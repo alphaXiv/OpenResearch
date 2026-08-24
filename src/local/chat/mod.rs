@@ -1856,12 +1856,131 @@ fn transcript_parts(
     parts
 }
 
-/// Slash-skills: the transcript keeps the `/name` the user typed, the harness
-/// gets the expanded prompt.
+enum SelectedSlashSkill {
+    Builtin(&'static str),
+    User { instructions: String },
+}
+
+fn slash_skill_name(token: &str) -> Option<String> {
+    let name = token.strip_prefix('/')?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(name.to_ascii_lowercase())
+}
+
+/// Slash tokens select supplementary instructions. The transcript keeps the
+/// exact message, while every recognized selection shares that complete request.
 fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
-    crate::local::skills::expand(text, project.github_enabled())
-        .or_else(|| crate::local::user_skills::expand(text, &project.id))
-        .unwrap_or_else(|| text.to_string())
+    let mut seen = HashSet::new();
+    let mut selected = Vec::new();
+    for token in text.split_whitespace() {
+        let Some(name) = slash_skill_name(token) else {
+            continue;
+        };
+        if seen.contains(&name) {
+            continue;
+        }
+        if let Some(skill) = crate::local::skills::CATALOG
+            .iter()
+            .find(|skill| skill.name.eq_ignore_ascii_case(&name))
+        {
+            seen.insert(name);
+            selected.push(SelectedSlashSkill::Builtin(skill.name));
+        } else if let Some(instructions) =
+            crate::local::user_skills::instructions(&name, &project.id)
+        {
+            seen.insert(name);
+            selected.push(SelectedSlashSkill::User { instructions });
+        }
+    }
+    if selected.is_empty() {
+        return text.to_string();
+    }
+
+    let has_request = text
+        .split_whitespace()
+        .filter(|token| slash_skill_name(token).is_none())
+        .any(|token| token.chars().any(char::is_alphanumeric));
+    let mut sections = Vec::with_capacity(selected.len());
+    for skill in selected {
+        match skill {
+            SelectedSlashSkill::Builtin(name) => {
+                if let Some(instructions) =
+                    crate::local::skills::instructions(name, has_request, project.github_enabled())
+                {
+                    sections.push(instructions);
+                }
+            }
+            SelectedSlashSkill::User { instructions } => sections.push(instructions),
+        }
+    }
+
+    let mut expanded = format!(
+        "Follow every selected skill or workflow below. Slash tokens select instructions; all selected instructions share one user request.\n\n{}",
+        sections.join("\n\n")
+    );
+    if has_request {
+        expanded.push_str("\n\nUser request:\n\n");
+        expanded.push_str(text);
+    }
+    expanded
+}
+
+#[cfg(test)]
+mod slash_skill_tests {
+    use super::{expand_slash_skills, LocalProject};
+
+    fn project() -> LocalProject {
+        LocalProject {
+            id: "test-project".into(),
+            name: "Test".into(),
+            slug: "test".into(),
+            github_owner: "owner".into(),
+            github_repo: "repo".into(),
+            github_sync_enabled: true,
+            baseline_branch: "main".into(),
+            repo_path: "/tmp/test-repo".into(),
+            run_command: None,
+            paper_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn expands_multiple_inline_skills_with_one_shared_request() {
+        let text =
+            "Compare LoRA methods /LIT-REVIEW and draft the result /write-paper for an ML audience";
+        let expanded = expand_slash_skills(&project(), text);
+        assert!(expanded.contains("# Literature retrieval"));
+        assert!(expanded.contains("Load the `orx-paper` skill first"));
+        assert_eq!(expanded.matches("User request:").count(), 1);
+        assert!(expanded.ends_with(text));
+    }
+
+    #[test]
+    fn deduplicates_selected_skills_and_preserves_unknown_slashes() {
+        let text = "/lit-review compare /unknown against prior work /lit-review";
+        let expanded = expand_slash_skills(&project(), text);
+        assert_eq!(expanded.matches("# Literature retrieval").count(), 1);
+        assert!(expanded.ends_with(text));
+        assert_eq!(
+            expand_slash_skills(&project(), "plain /unknown text"),
+            "plain /unknown text"
+        );
+    }
+
+    #[test]
+    fn a_bare_selection_uses_the_workflows_empty_request_behavior() {
+        let expanded = expand_slash_skills(&project(), "/lit-review");
+        assert!(expanded.contains("ask the user what topic to review"));
+        assert!(!expanded.contains("User request:"));
+
+        let punctuation = expand_slash_skills(&project(), "/lit-review /unknown .");
+        assert!(punctuation.contains("ask the user what topic to review"));
+        assert!(!punctuation.contains("User request:"));
+    }
 }
 
 fn new_queued_id() -> String {
@@ -4221,9 +4340,8 @@ impl ChatHost {
         let saved_images = images.save()?;
         let display_text = transcript_text.as_deref().unwrap_or(&text);
         // The input auto-titling runs on — set only on the first message.
-        // Owned because `skills::expand` moves `text` below, ending the borrow
-        // `display_text` may hold on it; and it carries what the user typed,
-        // not the expanded harness prompt.
+        // Owned because the title carries what the user typed, not the expanded
+        // harness prompt built from its selected slash skills.
         let mut title_seed = None;
         if session.title.is_none() {
             // First *non-empty* line: a message that opens with a blank line

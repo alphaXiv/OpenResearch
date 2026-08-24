@@ -1,6 +1,6 @@
 ---
 name: orx-paper
-description: "Draft a paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use whenever the user asks for a paper, preprint, arXiv draft, submission, write-up of results, or a related-work section: create the file rather than outlining in chat."
+description: "Draft an academic paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use for a paper, preprint, manuscript, arXiv or submission draft, or a section of one; generic reports and result summaries belong to `orx-reports`."
 ---
 
 Write the paper as a real `.tex` file in the working tree. Do not answer a paper
@@ -11,9 +11,9 @@ is written beside it.
 ## Create the file on the first request
 
 Create `paper.tex` at the repo root (`<topic>.tex` when several papers coexist),
-write real content into it, then cite it as raw `<file path="paper.tex"/>`,
-never as a bare or backticked path — the citation is what lets the user open the
-rendered document. An outline in chat gives them nothing to render.
+write real content into it, then link it in chat using the session playbook's
+evidence-and-links contract so the user can open the rendered document. An
+outline in chat gives them nothing to render.
 
 ## Check for a template before writing a preamble
 
@@ -144,8 +144,9 @@ Pick the citation command by how the sentence reads:
 - Plain `\cite` under natbib behaves like `\citet`, so `GRPO~\cite{x}` comes out as
   *GRPO Shao et al. (2024)*, with no parentheses. Write `\citep` for an aside.
 
-Find real references with `orx lit` rather than writing plausible-looking ones —
-a fabricated citation is worse than no citation.
+Find real references with the `orx-lit-review` workflow: retrieve candidates
+with `orx discover`, then read selected sources with `orx paper`. A fabricated
+citation is worse than no citation.
 
 ## Results come from runs, not from memory
 

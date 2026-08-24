@@ -152,13 +152,13 @@ const S_REPORTS: AgentSkill = AgentSkill {
 };
 const S_PAPER: AgentSkill = AgentSkill {
     name: "orx-paper",
-    description: "Draft a paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use whenever the user asks for a paper, preprint, arXiv draft, submission, write-up of results, or a related-work section: create the file rather than outlining in chat.",
+    description: "Draft an academic paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use for a paper, preprint, manuscript, arXiv or submission draft, or a section of one; generic reports and result summaries belong to `orx-reports`.",
     content: PAPER,
     resources: &[],
 };
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
-    description: "Analyze and cite experiment evidence: read `orx logs`, design logged metrics, and format clickable file, run, and artifact references plus experiment summaries. Use after a run finishes, before making factual or quantitative claims, when mentioning project files or artifacts, or when reporting experiment progress.",
+    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
     content: EVIDENCE,
     resources: &[],
 };
@@ -452,16 +452,20 @@ mod tests {
     }
 
     #[test]
-    fn evidence_skill_links_written_artifacts() {
-        assert!(EVIDENCE.contains("Every file or artifact mentioned"));
-        assert!(EVIDENCE.contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(REPORTS.contains("using the `orx-evidence` skill"));
+    fn evidence_and_reports_have_distinct_ownership() {
+        assert!(EVIDENCE.contains("Validate before reporting"));
+        assert!(EVIDENCE.contains("Truncated output is not evidence of absence"));
+        assert!(!EVIDENCE.contains("<file path="));
+        assert!(REPORTS.contains("evidence-and-links contract"));
+        assert!(REPORTS.contains("Load `orx-evidence`"));
     }
 
     #[test]
     fn paper_skill_writes_a_compilable_tex_and_cites_it() {
         assert!(PAPER.contains("keep the `.tex` out of the artifacts"));
-        assert!(PAPER.contains("<file path=\"paper.tex\"/>"));
+        assert!(PAPER.contains("evidence-and-links contract"));
+        assert!(PAPER.contains("`orx-lit-review` workflow"));
+        assert!(PAPER.contains("`orx discover`"));
         // The trap that makes a draft fail to compile rather than look wrong.
         assert!(PAPER.contains("Every environment needs the package that defines it"));
         assert!(PAPER.contains("\\newtheorem"));

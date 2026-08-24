@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  containsShellGlob,
   orxArgsMatch,
   orxArgv,
   orxArgvFromTokens,
@@ -9,6 +10,13 @@ import {
   shellWrapperBody,
   unwrapShellBody,
 } from "../src/orxCommand.ts";
+
+test("shell glob patterns are not literal file targets", () => {
+  assert.equal(containsShellGlob(".openresearch/*.*"), true);
+  assert.equal(containsShellGlob("src/file?.ts"), true);
+  assert.equal(containsShellGlob("src/[ab].ts"), true);
+  assert.equal(containsShellGlob("src/file.ts"), false);
+});
 
 test("quoted Codex argv is tokenized as a normal command", () => {
   assert.deepEqual(shellWords('"orx" "projects"'), ["orx", "projects"]);

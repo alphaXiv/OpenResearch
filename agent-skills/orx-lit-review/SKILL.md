@@ -156,6 +156,11 @@ In the final answer, link every alphaXiv/arXiv paper title or paper ID to
 `arxiv.org` link for those papers. Link a DOI result to `https://doi.org/<doi>`
 and a bare OpenAlex `W…` id to `https://openalex.org/<id>`.
 
+For claim-level synthesis, place the supporting source link immediately after
+each substantive scholarly claim, and use a paper as claim-level support only
+after reading it. A discovery-only result list may link candidate titles, but
+must not imply that their methods or findings were verified from snippets alone.
+
 ## Reading selected papers
 
 `orx paper` auto-detects an arXiv id/URL, bioRxiv DOI, other DOI, or OpenAlex

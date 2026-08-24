@@ -1,6 +1,6 @@
 ---
 name: orx-evidence
-description: "Analyze and cite experiment evidence: read `orx logs`, design logged metrics, and format clickable file, run, and artifact references plus experiment summaries. Use after a run finishes, before making factual or quantitative claims, when mentioning project files or artifacts, or when reporting experiment progress."
+description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results."
 ---
 
 Run logs are the evidence channel. Make the run command print everything needed
@@ -32,24 +32,16 @@ configuration. If a run's result is not in its log, it cannot be inspected later
 - For a long run, print periodic one-line metrics so its trajectory remains
   visible through byte-range reads.
 
-## Cite evidence in chat
+## Validate before reporting
 
-Use `$...$` for inline math and `$$...$$` for display math. Escape literal
-currency signs, for example `\$10`.
+Never infer a result from run status or memory. Before accepting or reporting a
+run-derived claim, confirm that:
 
-Every substantive factual or quantitative claim needs a clickable evidence tag
-immediately after it. Emit tags as raw text, never inside backticks or fences:
+- the log identifies the variant and effective configuration;
+- the final metric and compact summary are present;
+- the relevant trajectory is recoverable for a long run; and
+- the returned byte window actually contains the supporting output.
 
-- File or code facts: use `<file path="relative/path.py" />`, with optional
-  `lines="20-40"`. Use repository-relative paths. For a file on an experiment
-  branch, add `exp="<experimentId>"` to open the committed version.
-- Metrics or results: use `<run id="<runId>" />`, optionally with a concise
-  `label="+3.65pp"`. Run ids come from `orx runs` and the cited run's logs must
-  support the claim.
-- Artifacts: use `<file path="artifacts/<relative-path>" />`.
-
-Every file or artifact mentioned in prose must use a file tag, not a bare or
-backticked path. Paths inside commands and code blocks are exempt.
-
-Wrong: Saved as `figures/result.png`.
-Right: Saved as <file path="artifacts/figures/result.png" />.
+Truncated output is not evidence of absence. Use `--head`, `--bytes`, or
+`--range` until the relevant portion has been read. Format the resulting chat
+response using the evidence-and-links contract in the session playbook.

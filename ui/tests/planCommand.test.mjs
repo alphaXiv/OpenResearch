@@ -3,17 +3,15 @@ import test from "node:test";
 import {
   commandsForHarness,
   effectiveCommandPlanMode,
-  isAnchoredSlashCommand,
   parsePlanCommand,
   insertSlashCommand,
-  normalizeLeadingCommand,
   removeSlashCommand,
   slashCommandContext,
   splitCommandTokens,
 } from "../src/planCommand.ts";
 
 test("Plan is the first command for every plan-capable harness", () => {
-  const skills = [{ name: "review", description: "Review", argHint: "", source: "user" }];
+  const skills = [{ name: "review", description: "Review", source: "user" }];
   assert.deepEqual(commandsForHarness(skills, "command").map((item) => item.name), [
     "plan",
     "review",
@@ -26,8 +24,8 @@ test("Plan is the first command for every plan-capable harness", () => {
 
 test("built-in Plan replaces legacy user-skill collisions", () => {
   const skills = [
-    { name: "PLAN", description: "Legacy collision", argHint: "", source: "user" },
-    { name: "review", description: "Review", argHint: "", source: "user" },
+    { name: "PLAN", description: "Legacy collision", source: "user" },
+    { name: "review", description: "Review", source: "user" },
   ];
   const commands = commandsForHarness(skills, "command");
   assert.deepEqual(commands.map((item) => item.name), ["plan", "review"]);
@@ -57,6 +55,11 @@ test("slash context follows the caret anywhere in the message", () => {
     start: 12,
     end: 15,
   });
+  assert.deepEqual(slashCommandContext("investigate / now", 13), {
+    query: "",
+    start: 12,
+    end: 13,
+  });
   assert.equal(slashCommandContext("investigate/path", 16), null);
   // Where onChange looks once the space that finished a command lands.
   assert.deepEqual(slashCommandContext("investigate /plan now", 17), {
@@ -64,23 +67,6 @@ test("slash context follows the caret anywhere in the message", () => {
     start: 12,
     end: 17,
   });
-});
-
-test("a command is anchored when it opens the draft or one of its lines", () => {
-  assert.equal(isAnchoredSlashCommand("/plan", { query: "plan", start: 0, end: 5 }), true);
-  assert.equal(isAnchoredSlashCommand("  /plan", { query: "plan", start: 2, end: 7 }), true);
-  assert.equal(
-    isAnchoredSlashCommand("ask this\n/plan", { query: "plan", start: 9, end: 14 }),
-    true,
-  );
-  assert.equal(
-    isAnchoredSlashCommand("copy it into /data", { query: "data", start: 13, end: 18 }),
-    false,
-  );
-  assert.equal(
-    isAnchoredSlashCommand("ask this\nnow /plan", { query: "plan", start: 13, end: 18 }),
-    false,
-  );
 });
 
 const isWrite = (name) => name === "write";
@@ -125,12 +111,6 @@ test("splitting a message loses nothing — the chips are painted by offset", ()
     );
 });
 
-test("only a leading command is lowercased for the wire — prose is left alone", () => {
-  assert.equal(normalizeLeadingCommand("/WRITE the notes", isWrite), "/write the notes");
-  assert.equal(normalizeLeadingCommand("Use the /Write skill", isWrite), "Use the /Write skill");
-  assert.equal(normalizeLeadingCommand("/Unknown Thing", isWrite), "/Unknown Thing");
-});
-
 test("picking a command replaces the token in place", () => {
   const text = "look at /wr now";
   // The caret lands in the args, past the space that already followed.
@@ -143,6 +123,19 @@ test("picking a command replaces the token in place", () => {
   assert.deepEqual(insertSlashCommand(tail, slashCommandContext(tail, 11), "write"), {
     text: "look at /write ",
     cursor: 15,
+  });
+});
+
+test("skill insertion can reserve its full hover margin", () => {
+  const text = "look at /wr now";
+  assert.deepEqual(insertSlashCommand(text, slashCommandContext(text, 11), "write", 2), {
+    text: "look at  /write  now",
+    cursor: 17,
+  });
+  const indented = "\t/wr now";
+  assert.deepEqual(insertSlashCommand(indented, slashCommandContext(indented, 4), "write", 2), {
+    text: "\t/write  now",
+    cursor: 9,
   });
 });
 

@@ -9,6 +9,10 @@ export type OrxLitCall =
       query?: string;
     };
 
+export function containsShellGlob(value: string): boolean {
+  return ["*", "?", "[", "]", "{", "}"].some((token) => value.includes(token));
+}
+
 function asSource(value: string | undefined): LitSource | undefined {
   return value === "alphaxiv" || value === "openalex" || value === "biorxiv"
     ? value

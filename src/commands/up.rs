@@ -422,6 +422,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/harnesses", get(list_harnesses))
         .route("/api/skills", get(list_skills))
+        .route("/api/skills/{name}", get(get_skill))
         .route(
             "/api/user-skills",
             get(list_user_skills)
@@ -693,7 +694,6 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
             json!({
                 "name": s.name,
                 "description": s.description,
-                "argHint": s.arg_hint,
                 "source": "builtin",
             })
         })
@@ -711,11 +711,30 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
         skills.push(json!({
             "name": s.name,
             "description": s.description,
-            "argHint": "",
             "source": "user",
         }));
     }
     Json(json!({ "skills": skills }))
+}
+
+async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiResult {
+    if !crate::local::user_skills::is_valid_slug(&name) {
+        return Err(bad_request("invalid skill name"));
+    }
+    let github_enabled = if let Some(project_id) = q.project.as_deref() {
+        Store::open()
+            .ok()
+            .and_then(|store| store.get_local_project(project_id).ok().flatten())
+            .is_some_and(|project| project.github_enabled())
+    } else {
+        false
+    };
+    if let Some(content) = crate::local::skills::instructions(&name, false, github_enabled) {
+        return Ok(Json(json!({ "name": name, "content": content })));
+    }
+    let content = crate::local::user_skills::content(&name, q.project.as_deref())
+        .ok_or_else(|| not_found("skill"))?;
+    Ok(Json(json!({ "name": name, "content": content })))
 }
 
 // --- user-uploaded skills -----------------------------------------------------

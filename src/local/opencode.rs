@@ -139,10 +139,14 @@ fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
     };
 
     if state.experiments == 0 && state.runs == 0 {
+        let fresh_run_command = if has_run_command {
+            "the fixed run command is configured."
+        } else {
+            "no fixed run command is configured."
+        };
         return format!(
-            "This is a fresh project: **0 experiments and 0 runs**. The experiment tree is empty. \
-             {run_command} Do not inspect the tree; load **`orx-experiment-tree`** for \
-             first-launch setup."
+            "This is a fresh project: **0 experiments and 0 runs**. The experiment tree is empty \
+             and {fresh_run_command}"
         );
     }
 
@@ -685,10 +689,15 @@ mod tests {
         let md = sample_playbook();
         assert!(md.contains("## Project state"));
         assert!(md.contains("fresh project: **0 experiments and 0 runs**"));
-        assert!(md.contains("experiment tree is empty"));
-        assert!(md.contains("No fixed run command is configured"));
-        assert!(md.contains("Do not inspect the tree"));
-        assert!(md.contains("orx-experiment-tree"));
+        assert!(md.contains("experiment tree is empty and no fixed run command is configured"));
+        assert!(!md.contains("Do not inspect the tree"));
+
+        let mut project = sample_project();
+        project.run_command = Some("python train.py".into());
+        let configured = playbook_md(&project, &ProjectState::default());
+        assert!(
+            configured.contains("experiment tree is empty and the fixed run command is configured")
+        );
     }
 
     #[test]
@@ -728,23 +737,21 @@ mod tests {
     }
 
     #[test]
-    fn evidence_skill_requires_clickable_references() {
+    fn playbook_owns_clickable_references() {
         let md = sample_playbook();
         let evidence = agent_skills::find("orx-evidence", SkillSet::Local).unwrap();
+        assert!(md.contains("## Evidence and links in chat"));
+        assert!(md.contains("<file path=\"relative/path.py\" />"));
+        assert!(md.contains("exp=\"<experimentId>\""));
+        assert!(md.contains("<run id=\"<runId>\" />"));
+        assert!(md.contains("<file path=\"artifacts/<relative-path>\" />"));
+        assert!(md.contains("Scholarly claims use the source links"));
+        assert!(md.contains("Use `$...$` for inline math"));
+        assert!(evidence.content.contains("Validate before reporting"));
         assert!(evidence
             .content
-            .contains("Every substantive factual or quantitative claim"));
-        assert!(evidence
-            .content
-            .contains("Every file or artifact mentioned"));
-        assert!(evidence.content.contains("repository-relative paths"));
-        assert!(evidence.content.contains("committed version"));
-        assert!(evidence.content.contains("Run ids come from `orx runs`"));
-        assert!(evidence
-            .content
-            .contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(evidence.content.contains("Wrong: Saved as"));
-        assert!(!md.contains("## Cite evidence in chat"));
+            .contains("Truncated output is not evidence of absence"));
+        assert!(!evidence.content.contains("<file path="));
     }
 
     #[test]

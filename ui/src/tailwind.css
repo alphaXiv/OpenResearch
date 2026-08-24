@@ -120,6 +120,9 @@
   --accent-teal-subtle: #e1f3f0;
   --accent-red-subtle: #fbe9ea;
   --accent-blue-subtle: #e5f0ff;
+  --skill-blue: #184f91;
+  --skill-blue-subtle: #d9e9fb;
+  --skill-blue-slash: #7fa6d2;
   --accent-purple-subtle: #f1e8ff;
 
   --dots-muted: #e3ded5;
@@ -196,6 +199,9 @@
   --accent-teal-subtle: #12332d;
   --accent-red-subtle: #331418;
   --accent-blue-subtle: #10233a;
+  --skill-blue: #79adf0;
+  --skill-blue-subtle: #183452;
+  --skill-blue-slash: #527ca8;
   --accent-purple-subtle: #251933;
 
   --dots-muted: #2a2523;
@@ -407,6 +413,7 @@ textarea::placeholder {
 .tool-target,
 .tool-target-more {
   color: inherit;
+  cursor: pointer;
   display: inline;
   font-weight: inherit;
   text-align: inherit;

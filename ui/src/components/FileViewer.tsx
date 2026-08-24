@@ -17,7 +17,7 @@ import {
   RotateCw,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   absoluteFileUrl,
   artifactUrl,
@@ -33,6 +33,11 @@ import {
   type ProjectFile,
 } from "../api";
 import { useLatexCompile } from "../useLatexCompile";
+import {
+  isExternalMarkdownTarget,
+  markdownTargetUrl,
+  resolveMarkdownTarget,
+} from "../markdownTarget";
 import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
@@ -180,6 +185,23 @@ export function FileViewer({
   // This file's parent dir: the artifact report folder for image resolution,
   // and the anchor for a relative link inside an abs file.
   const parentFolder = filePath.split("/").slice(0, -1).join("/");
+  const resolveMarkdownFilePath = useCallback(
+    (target: string) =>
+      resolveMarkdownTarget(parentFolder, target, isAbsolute)?.path ?? null,
+    [isAbsolute, parentFolder],
+  );
+  const resolveMarkdownImageSrc = useCallback(
+    (src: string) => {
+      if (isExternalMarkdownTarget(src)) return src;
+      const target = resolveMarkdownTarget(parentFolder, src, isAbsolute);
+      if (!target) return null;
+      const url = isAbsolute
+        ? absoluteFileUrl(target.path)
+        : projectFileUrl(projectId, target.path, { sessionId, ref: gitRef });
+      return markdownTargetUrl(url, target);
+    },
+    [gitRef, isAbsolute, parentFolder, projectId, sessionId],
+  );
   const mediaKind = mediaPreviewKind(data?.presentation);
   const viaArtifacts = loaded?.source === "artifact" && !isArtifacts;
   const viaCheckout = isArtifacts && loaded?.source === "checkout";
@@ -629,18 +651,12 @@ export function FileViewer({
             ) : (
               <Md
                 text={data.content}
+                resolveFilePath={resolveMarkdownFilePath}
+                resolveImageSrc={resolveMarkdownImageSrc}
                 onOpenFile={
                   onOpenFile &&
                   ((p, _line, _exp, _ref, intent) =>
-                    // A relative link inside an abs file names a sibling on disk,
-                    // not a repo-relative path — anchor it to this file's dir so
-                    // it re-enters the abs branch instead of hitting the clone.
-                    onOpenFile(
-                      isAbsolute && !p.startsWith("/") ? `${parentFolder}/${p}` : p,
-                      sessionId,
-                      gitRef,
-                      intent,
-                    ))
+                    onOpenFile(p, sessionId, gitRef, intent))
                 }
               />
             )}
