@@ -419,6 +419,7 @@ async fn spawn_agent(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    up_port: Option<u16>,
 ) -> Result<AgentChild> {
     let bin = find_opencode()?;
     // The clone/worktree setup inside can hit the network; keep it off the
@@ -468,7 +469,7 @@ async fn spawn_agent(
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, up_port);
     if let Some(config) = &config_override {
         // The repo tracks its own opencode.json; ours rides OPENCODE_CONFIG.
         // Project configs load after OPENCODE_CONFIG and would override our
@@ -509,6 +510,7 @@ pub struct AgentHost {
     /// clone or health poll must not block status reads or turn replies.
     spawn_lock: Mutex<()>,
     inner: Mutex<HashMap<String, AgentChild>>,
+    up_port: std::sync::OnceLock<u16>,
 }
 
 impl AgentHost {
@@ -517,7 +519,12 @@ impl AgentHost {
             model_override,
             spawn_lock: Mutex::new(()),
             inner: Mutex::new(HashMap::new()),
+            up_port: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn set_up_port(&self, port: u16) {
+        let _ = self.up_port.set(port);
     }
 
     /// Status of every live child; reaps children that died behind our back.
@@ -556,7 +563,13 @@ impl AgentHost {
         }
         // inner released: status()/port reads keep answering while the spawn
         // (clone/fetch + health poll) is in flight instead of hanging.
-        let agent = spawn_agent(project, self.model_override.as_deref(), session_id).await?;
+        let agent = spawn_agent(
+            project,
+            self.model_override.as_deref(),
+            session_id,
+            self.up_port.get().copied(),
+        )
+        .await?;
         let status = agent.status();
         self.inner
             .lock()

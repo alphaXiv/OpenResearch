@@ -253,64 +253,63 @@ impl LocalPlane {
         if args.backend.is_none() {
             args.backend = Some("local".to_string());
         }
-        if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
-            return Err(anyhow!("--manifest only applies with --backend k8s."));
-        }
-        if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
-            return Err(anyhow!("--host only applies with --backend ssh or slurm."));
-        }
-        if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
-            return Err(anyhow!("--org only applies with --backend openresearch."));
-        }
-        if args.disk.is_some() && args.backend.as_deref() != Some("openresearch") {
-            return Err(anyhow!("--disk only applies with --backend openresearch."));
-        }
-        if args.provider.is_some() && args.backend.as_deref() != Some("openresearch") {
-            return Err(anyhow!(
-                "--provider only applies with --backend openresearch."
-            ));
-        }
+        crate::compute::validate_run_args(&args)?;
         // Coarse backend label for analytics; the backend name is already an
         // enum, never user data. Recorded before the (borrowing) dispatch below.
         let backend_label = args.backend.clone();
-        let result = match args.backend.as_deref() {
-            Some("hf") => crate::local::hf::launch_local_hf(&args).await,
-            Some("modal") => crate::local::modal::launch_local_modal(&args).await,
-            Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
-            Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
-            Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
-            Some("ray") => crate::local::ray::launch_local_ray(&args).await,
-            Some("openresearch") => {
-                crate::local::openresearch::launch_local_openresearch(&args).await
+        let result = match crate::local::chat::trusted_up_port()? {
+            Some(port) => {
+                let summary = crate::commands::up::submit_run_via_up(port, &args).await?;
+                let backend = args.backend.as_deref().unwrap_or("local");
+                println!("\u{2713} {backend} run submitted by orx up.");
+                if let Some(job_id) = summary.job_id {
+                    let label = if backend == "local" { "dir" } else { "job" };
+                    println!("  {label}  {job_id}");
+                }
+                println!("  run  {}", summary.run_id);
+                println!(
+                    "{}",
+                    crate::invocation::follow_up(&summary.experiment_id, &summary.run_id)
+                );
+                Ok(())
             }
-            Some("local") => crate::local::localrun::launch_local_run(&args).await,
-            Some(other) => Err(anyhow!(
-                "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
-                 modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
-                 slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                 openresearch (an ephemeral OpenResearch box), local (this machine).",
-                other
-            )),
-            None => Err(anyhow!(
-                "No --backend given and no default compute target is set. \
-                 Configure a default compute target in OpenResearch, \
-                 or pass one per launch: \
-                 `--backend hf --flavor <flavor>` (e.g. --flavor a10g-small), \
-                 `--backend modal --flavor <flavor>` (e.g. --flavor a10g), \
-                 `--backend k8s` (runs the manifest committed on the branch — \
-                 default .orx/k8s.yaml, or --manifest <path>), \
-                 `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
-                 `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
-                 `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
-                 `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
-                 e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
-                 or `--backend local` (a detached process on this machine)."
-            )),
+            None => match args.backend.as_deref() {
+                Some("hf") => crate::local::hf::launch_local_hf(&args).await,
+                Some("modal") => crate::local::modal::launch_local_modal(&args).await,
+                Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
+                Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
+                Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
+                Some("ray") => crate::local::ray::launch_local_ray(&args).await,
+                Some("openresearch") => {
+                    crate::local::openresearch::launch_local_openresearch(&args).await
+                }
+                Some("local") => crate::local::localrun::launch_local_run(&args).await,
+                Some(other) => Err(anyhow!(
+                    "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
+                     modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
+                     slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                     openresearch (an ephemeral OpenResearch box), local (this machine).",
+                    other
+                )),
+                None => Err(anyhow!(
+                    "No --backend given and no default compute target is set. \
+                     Configure a default compute target in OpenResearch, \
+                     or pass one per launch: \
+                     `--backend hf --flavor <flavor>` (e.g. --flavor a10g-small), \
+                     `--backend modal --flavor <flavor>` (e.g. --flavor a10g), \
+                     `--backend k8s` (runs the manifest committed on the branch — \
+                     default .orx/k8s.yaml, or --manifest <path>), \
+                     `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
+                     `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
+                     `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
+                     `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
+                     e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
+                     or `--backend local` (a detached process on this machine)."
+                )),
+            },
         };
         // Key event, fired only on a successful launch. Coarse backend only.
-        // `backend_label` is always `Some(<known backend>)` here — every arm that
-        // yields `Ok` matched a `Some("hf"|"modal"|...)`; `None`/unknown arms
-        // return `Err`. The `"unknown"` fallback is unreachable defense.
+        // Validation above guarantees a known backend before either dispatch path.
         if result.is_ok() {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", Some(target));
@@ -329,8 +328,12 @@ impl LocalPlane {
         if in_flight.is_empty() {
             return Err(anyhow!("No run in flight for this experiment."));
         }
+        let trusted_port = crate::local::chat::trusted_up_port()?;
         for r in &in_flight {
-            crate::commands::exp::request_local_run_cancel(store, &r.id)?;
+            match trusted_port {
+                Some(port) => crate::commands::up::cancel_run_via_up(port, &r.id).await?,
+                None => crate::commands::exp::request_local_run_cancel(store, &r.id)?,
+            }
             println!("\u{2713} Cancel requested for run {}.", r.id);
         }
         Ok(())

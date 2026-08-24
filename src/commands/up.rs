@@ -505,7 +505,7 @@ type ApiResult = std::result::Result<Json<Value>, ApiError>;
 
 /// The Run entity the API serves: StoredRun with `backend_json` parsed into an
 /// object and cancellation intent exposed for pending UI state.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiRun {
     id: String,
@@ -1664,7 +1664,9 @@ async fn compute_backends() -> Json<Value> {
     Json(json!({ "backends": crate::compute::capabilities() }))
 }
 
-#[derive(Deserialize)]
+/// Dashboard requests omit `chat_session_id`; forwarded agent CLI requests use
+/// it only for run attribution and wakeups.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRunReq {
     experiment_id: String,
@@ -1679,6 +1681,102 @@ struct CreateRunReq {
     disk: Option<i64>,
     #[serde(default)]
     force: bool,
+    chat_session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateRunResponse {
+    run: ApiRun,
+}
+
+pub(crate) struct RunLaunchSummary {
+    pub run_id: String,
+    pub experiment_id: String,
+    pub job_id: Option<String>,
+}
+
+async fn decode_local_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    action: &str,
+) -> Result<T> {
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| anyhow!("orx up {action} response failed: {error}"))?;
+    if !status.is_success() {
+        let detail = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
+        if status.is_client_error() {
+            return Err(anyhow!("{detail}"));
+        }
+        return Err(anyhow!("orx up could not {action}: {detail}"));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|error| anyhow!("orx up returned an invalid {action} response: {error}"))
+}
+
+fn local_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
+}
+
+pub(crate) async fn submit_run_via_up(
+    port: u16,
+    args: &crate::ExpRunArgs,
+) -> Result<RunLaunchSummary> {
+    let request = CreateRunReq {
+        experiment_id: args.exp_id.clone(),
+        backend: args.backend.clone(),
+        flavor: args.flavor.clone(),
+        host: args.host.clone(),
+        manifest: args.manifest.clone(),
+        image: args.image.clone(),
+        timeout: args.timeout.clone(),
+        org: args.org.clone(),
+        provider: args.provider.clone(),
+        disk: args.disk,
+        force: args.force,
+        chat_session_id: args.launching_chat_session(),
+    };
+    let response = local_client()?
+        .post(format!("http://127.0.0.1:{port}/api/runs"))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let response: CreateRunResponse = decode_local_response(response, "start the run").await?;
+    let job_id = response
+        .run
+        .backend
+        .as_ref()
+        .and_then(|backend| backend.get("jobId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(RunLaunchSummary {
+        run_id: response.run.id,
+        experiment_id: args.exp_id.clone(),
+        job_id,
+    })
+}
+
+pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
+    let response = local_client()?
+        .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+        .send()
+        .await
+        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let _: Value = decode_local_response(response, "cancel the run").await?;
+    Ok(())
 }
 
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
@@ -1693,6 +1791,7 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let mut backend = req.backend;
     let mut flavor = req.flavor;
+    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
     local::apply_compute_default(&mut backend, &mut flavor);
     let args = crate::ExpRunArgs {
         exp_id: req.experiment_id,
@@ -1706,7 +1805,9 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         image: req.image,
         timeout: req.timeout,
         force: req.force,
+        chat_session_id: req.chat_session_id,
     };
+    crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
@@ -1765,12 +1866,13 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(Path(id): Path<String>) -> ApiResult {
+async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
     // A terminal run must not gain a stale cancel_requested flag.
     if is_terminal(&run.status) {
-        return Err(bad_request(format!("run already {}", run.status)));
+        return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
@@ -5662,6 +5764,33 @@ mod tests {
 
         let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
         assert_eq!(value["cancelRequested"], true);
+    }
+
+    #[test]
+    fn create_run_request_round_trips_agent_attribution_and_force() {
+        let request = CreateRunReq {
+            experiment_id: "experiment-1".into(),
+            backend: Some("local".into()),
+            flavor: None,
+            host: None,
+            manifest: None,
+            image: None,
+            timeout: None,
+            org: None,
+            provider: None,
+            disk: None,
+            force: true,
+            chat_session_id: Some("session-1".into()),
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["chatSessionId"], "session-1");
+        assert_eq!(value["force"], true);
+        assert_eq!(
+            serde_json::from_value::<CreateRunReq>(value).unwrap(),
+            request
+        );
     }
 
     #[test]

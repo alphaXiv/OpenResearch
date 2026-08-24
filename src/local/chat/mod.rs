@@ -2318,6 +2318,8 @@ impl ChatHost {
     /// hand it to the `orx mcp-gate` bridge.
     pub fn set_up_port(&self, port: u16) {
         let _ = self.up_port.set(port);
+        self.opencode.set_up_port(port);
+        self.codex.set_up_port(port);
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -7098,6 +7100,9 @@ pub const CHAT_SESSION_ENV: &str = "ORX_CHAT_SESSION_ID";
 /// attribution — presence of a session id alone no longer implies local.
 pub const LOCAL_SESSION_ENV: &str = "ORX_LOCAL_SESSION";
 
+/// Loopback port of the trusted `orx up` process that owns local agent runs.
+pub const UP_PORT_ENV: &str = "ORX_UP_PORT";
+
 fn shell_single_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -7165,9 +7170,22 @@ fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
 /// Stamp the launching session id onto a harness child's env. Call *after*
 /// `prepare_env` so a dashboard-synced value can't shadow it. Harness children
 /// are one-per-session, so this is unambiguous.
-pub fn set_chat_session_env(cmd: &mut tokio::process::Command, session_id: &str) {
+pub fn set_chat_session_env(
+    cmd: &mut tokio::process::Command,
+    session_id: &str,
+    up_port: Option<u16>,
+) {
     cmd.env(CHAT_SESSION_ENV, session_id);
     cmd.env(LOCAL_SESSION_ENV, "1");
+    // Never let a child inherit a port owned by some outer orx up process.
+    match up_port {
+        Some(port) => {
+            cmd.env(UP_PORT_ENV, port.to_string());
+        }
+        None => {
+            cmd.env_remove(UP_PORT_ENV);
+        }
+    }
     cmd.env_remove(CHAT_TARGET_FILE_ENV);
     cmd.env_remove(CHAT_TARGET_POINTER_ENV);
 
@@ -7227,6 +7245,25 @@ pub fn in_local_session() -> bool {
     std::env::var(LOCAL_SESSION_ENV).is_ok_and(|v| !v.is_empty())
 }
 
+/// Resolve the trusted local server for an agent subprocess. A marked local
+/// session must never silently fall back to launching workers from its sandbox.
+pub fn trusted_up_port() -> Result<Option<u16>> {
+    if !in_local_session() {
+        return Ok(None);
+    }
+    let raw = std::env::var(UP_PORT_ENV).map_err(|_| {
+        anyhow!("This agent session lost its link to the orx up server; restart `orx up`.")
+    })?;
+    let port = raw
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| {
+            anyhow!("This agent session has an invalid orx up link; restart `orx up`.")
+        })?;
+    Ok(Some(port))
+}
+
 /// Append-only stderr sink for a harness child (startup/debug diagnostics).
 pub fn harness_log(name: &str) -> Result<std::fs::File> {
     let path = crate::store::data_dir().join(format!("agent-{name}.log"));
@@ -7243,7 +7280,9 @@ pub fn harness_log(name: &str) -> Result<std::fs::File> {
 
 #[cfg(test)]
 mod session_env_tests {
-    use super::{in_local_session, CHAT_SESSION_ENV, LOCAL_SESSION_ENV};
+    use super::{
+        in_local_session, trusted_up_port, CHAT_SESSION_ENV, LOCAL_SESSION_ENV, UP_PORT_ENV,
+    };
     use std::sync::{Mutex, MutexGuard};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -7297,6 +7336,16 @@ mod session_env_tests {
         let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
         std::env::set_var(LOCAL_SESSION_ENV, "");
         assert!(!in_local_session());
+    }
+
+    #[test]
+    fn local_session_requires_a_valid_trusted_port() {
+        let _guard = EnvGuard::new(&[LOCAL_SESSION_ENV, UP_PORT_ENV]);
+        std::env::set_var(LOCAL_SESSION_ENV, "1");
+        assert!(trusted_up_port().is_err());
+
+        std::env::set_var(UP_PORT_ENV, "5203");
+        assert_eq!(trusted_up_port().unwrap(), Some(5203));
     }
 }
 

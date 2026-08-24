@@ -505,6 +505,17 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
+    /// Internal attribution forwarded through the local orx up API.
+    #[arg(skip)]
+    pub chat_session_id: Option<String>,
+}
+
+impl ExpRunArgs {
+    pub fn launching_chat_session(&self) -> Option<String> {
+        self.chat_session_id
+            .clone()
+            .or_else(crate::local::chat::launching_chat_session)
+    }
 }
 
 #[derive(Args, Debug)]
