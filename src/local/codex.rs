@@ -740,17 +740,32 @@ impl CodexHost {
         }
     }
 
-    /// Natively interrupt the session's in-flight turn (best-effort, bounded).
+    /// Interrupt and harvest the in-flight turn while its child is reachable,
+    /// then retire the child so a successor cannot race native cancellation.
     pub async fn interrupt_session(&self, session_id: &str) -> Option<Vec<Value>> {
-        if let Some(client) = self.client_for(session_id).await {
-            let thread_id = client.resumed_thread();
-            let turn_id = client.active_turn.lock().unwrap().clone();
-            client.interrupt_active_turn().await;
-            if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
-                return client.read_turn_items(&thread_id, &turn_id).await;
+        let client = self.client_for(session_id).await?;
+        let thread_id = client.resumed_thread();
+        let turn_id = client.active_turn.lock().unwrap().clone();
+        client.interrupt_active_turn().await;
+        let items = match (thread_id, turn_id) {
+            (Some(thread_id), Some(turn_id)) => client.read_turn_items(&thread_id, &turn_id).await,
+            _ => None,
+        };
+        let retired = {
+            let mut guard = self.inner.lock().await;
+            if guard
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &client))
+            {
+                guard.remove(session_id)
+            } else {
+                None
             }
+        };
+        if let Some(retired) = retired {
+            let _ = retired.child.lock().await.kill().await;
         }
-        None
+        items
     }
 
     /// Kill and reap one session's child (on session delete).
