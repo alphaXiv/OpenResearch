@@ -129,10 +129,11 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source (the static table is only the
-/// fallback), for the same reason opencode parses `models --verbose`: the
-/// installed CLI knows its catalog and we don't — a curated table here shipped
-/// missing three models and a wrong Luna tier before this existed.
+/// default. This is the primary model source for first-party accounts and for
+/// custom providers that declare an explicit model catalog (the static table is
+/// only the fallback), for the same reason opencode parses `models --verbose`:
+/// the installed CLI knows its catalog and we don't — a curated table here
+/// shipped missing three models and a wrong Luna tier before this existed.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
@@ -267,6 +268,12 @@ struct CodexConfig {
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
     /// preselected tier must too.
     model_reasoning_effort: Option<String>,
+    /// An explicit provider model catalog (`model_catalog_json`). When a custom
+    /// provider declares one, the app-server's `model/list` reflects it and the
+    /// picker can offer every model the provider exposes; without one the CLI
+    /// falls back to its bundled first-party catalog, which says nothing about
+    /// a custom endpoint.
+    model_catalog_json: Option<String>,
     #[serde(default)]
     model_providers: HashMap<String, CodexProvider>,
 }
@@ -276,6 +283,17 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
     toml::from_str::<CodexConfig>(raw)
         .ok()?
         .model_reasoning_effort
+}
+
+/// Whether `config.toml` declares an explicit model catalog. Only then is the
+/// app-server `model/list` catalog meaningful for a custom provider: with no
+/// `model_catalog_json`, codex falls back to its bundled first-party list,
+/// which says nothing about the models a custom endpoint actually serves.
+fn has_model_catalog(raw: &str) -> bool {
+    toml::from_str::<CodexConfig>(raw)
+        .ok()
+        .and_then(|cfg| cfg.model_catalog_json)
+        .is_some_and(|path| !path.trim().is_empty())
 }
 
 #[derive(Deserialize)]
@@ -485,22 +503,35 @@ impl Harness for Codex {
 
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            // The first-party catalog is meaningless for a custom provider, so
-            // offer only the model that provider is configured with (the
-            // picker's "Default model" entry covers the unset case).
-            //
-            // A custom provider's model gets no reasoning list of its own: the
-            // curated tiers below describe OpenAI's models, and we know nothing
-            // about what an arbitrary provider accepts. `ModelInfo::new` leaves
-            // `reasoning_levels` absent, so the composer falls back to the
-            // conservative harness-wide list rather than offering `ultra` to a
-            // provider that would reject it.
+            // A custom provider's models are its own — never the first-party
+            // catalog. When the config declares an explicit model catalog
+            // (`model_catalog_json`), ask the installed CLI which models it
+            // makes visible (the same live `model/list` the first-party path
+            // uses) so the picker can offer every model the provider serves,
+            // with the configured model as the "Default model" entry. Without a
+            // declared catalog the CLI falls back to its bundled first-party
+            // list, which is meaningless for a custom endpoint, so offer only
+            // the configured model then (or nothing when none is set).
+            let catalog_declared = config_raw.as_deref().is_some_and(has_model_catalog);
+            // Only a custom provider with an explicit catalog pays for the
+            // app-server probe; first-party accounts use their own branch below.
+            let custom_catalog = if custom_provider.is_some() {
+                match (info.bin_path.as_deref().map(Path::new), catalog_declared) {
+                    (Some(bin), true) => codex_model_list(bin, configured_effort.as_deref()).await,
+                    _ => None,
+                }
+            } else {
+                None
+            };
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
-                Some(Some(model)) => info = info.with_models(vec![ModelInfo::new(model)]),
-                Some(None) => info = info.with_models(Vec::new()),
+                Some(Some(model)) => {
+                    info = info
+                        .with_models(custom_catalog.unwrap_or_else(|| vec![ModelInfo::new(model)]))
+                }
+                Some(None) => info = info.with_models(custom_catalog.unwrap_or_default()),
                 None => {
                     // First-party account: ask the installed CLI for its own
                     // catalog (models + per-model efforts, the data codex's TUI
@@ -3664,6 +3695,41 @@ requires_openai_auth = false
         assert!(!provider.is_ready());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn model_catalog_gates_the_custom_provider_catalog_probe() {
+        // A declared catalog (the DeepSeek-style setup) means the app-server
+        // `model/list` reflects the provider's own models, so orx should probe
+        // it and offer every listed model.
+        assert!(has_model_catalog(
+            r#"
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+model_catalog_json = "~/.codex/models.json"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+        ));
+
+        // A bare gateway provider has no explicit catalog; the CLI would fall
+        // back to its bundled first-party list, so orx keeps offering only the
+        // configured model instead of a catalog that says nothing about the
+        // endpoint.
+        assert!(!has_model_catalog(
+            r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+        ));
     }
 
     #[test]
