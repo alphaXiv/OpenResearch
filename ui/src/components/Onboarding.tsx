@@ -316,7 +316,7 @@ export function Onboarding({
                 Choose a coding agent to continue.
               </p>
             )}
-            <div className="onb-cards flex flex-col gap-2.5">
+            <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
                 harnesses.map((h) => (
                   <AgentCard
@@ -567,7 +567,7 @@ function selectionFor(harness: Harness): AgentSelection {
 }
 
 function AgentLogo({ harness }: { harness: HarnessId }) {
-  return <HarnessLogo harness={harness} size={18} />;
+  return <HarnessLogo harness={harness} size={26} />;
 }
 
 function AgentCard({
@@ -582,11 +582,21 @@ function AgentCard({
   const badge = agentBadge(h);
   const visibleBadge = selected ? { cls: "st-done", label: "Selected" } : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
+  const meta = [
+    version,
+    h.models.length > 0 &&
+      `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
+        .slice(0, 3)
+        .map((m) => harnessModelLabel(m))
+        .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const head = (
     <div className="onb-card-head flex items-center justify-between gap-3">
-      <span className="onb-card-identity flex items-center gap-2.5 min-w-0">
+      <span className="onb-card-identity flex items-center gap-3 min-w-0">
         <AgentLogo harness={h.id} />
-        <span className="onb-card-name font-semibold text-base">{h.name}</span>
+        <span className="onb-card-name text-xl font-semibold tracking-[-0.01em]">{h.name}</span>
       </span>
       <span className={`${STATUS_BADGE_CLASS_NAME} ${visibleBadge.cls}`}>
         {h.agentReady ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
@@ -598,7 +608,7 @@ function AgentCard({
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
     return (
-      <div className="onb-card flex flex-col gap-[5px] bg-background border border-border rounded-lg py-4.5 px-5 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]">
+      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]">
         {head}
         <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
       </div>
@@ -607,7 +617,7 @@ function AgentCard({
   return (
     <button
       type="button"
-      className={`onb-card flex flex-col gap-[5px] bg-background border border-border rounded-lg py-4.5 px-5 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]${selected ? " selected" : ""}`}
+      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-left transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
@@ -616,17 +626,11 @@ function AgentCard({
         {h.account ?? "API key"}
         {h.plan ? ` · ${h.plan}` : ""}
       </div>
-      <div className={ONB_CARD_META_CLASS_NAME}>
-        {[
-          version,
-          h.models.length > 0 &&
-            `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
-              .slice(0, 3)
-              .map((m) => harnessModelLabel(m))
-              .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
-        ]
-          .filter(Boolean)
-          .join(" · ")}
+      <div
+        className={`${ONB_CARD_META_CLASS_NAME} w-full overflow-hidden text-ellipsis whitespace-nowrap`}
+        title={meta}
+      >
+        {meta}
       </div>
     </button>
   );

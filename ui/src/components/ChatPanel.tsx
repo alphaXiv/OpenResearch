@@ -2,7 +2,6 @@ import {
   ArrowUpRight,
   Blocks,
   BookOpen,
-  ChartSpline,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -12,7 +11,6 @@ import {
   FileText,
   FlaskConical,
   FolderOpen,
-  GitBranch,
   Globe,
   HelpCircle,
   Lightbulb,
@@ -4338,17 +4336,6 @@ export function ChatPanel({
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
 
-  /** Seed the composer from a button rather than a keystroke. The caret has to
-   * move with the text: it feeds the slash-menu, which would otherwise read a
-   * stale offset and open over a draft the user never typed. */
-  function armDraft(text: string) {
-    setDraft(text);
-    setComposerCursor(text.length);
-    composerRef.current?.focus();
-    window.requestAnimationFrame(() =>
-      composerRef.current?.setSelectionRange(text.length, text.length),
-    );
-  }
   // Refetch when navigating (esp. back to chat after a Skills-tab upload) so
   // freshly uploaded skills appear in the `/` menu without a reload.
   useEffect(() => {
@@ -5872,7 +5859,7 @@ export function ChatPanel({
           <span>Loading conversation…</span>
         </div>
       ) : !threadMounted ? (
-        <div className="chat-empty flex-1 flex flex-col items-center justify-center @container text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+        <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
           <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
             <BrandMark />
           </div>
@@ -5880,60 +5867,6 @@ export function ChatPanel({
           <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-semibold">
             <FolderOpen size={19} />
             <span>{projectName}</span>
-          </div>
-          <div className="chat-empty-starters grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2.5 w-[min(100%,_620px)] mt-19 [@container((min-width:_500px))]:grid-cols-[repeat(4,_minmax(0,_1fr))] [@container((min-width:_500px))]:w-[min(100%,_720px)]">
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange blue"
-              onClick={() =>
-                armDraft(
-                  "Explore this codebase and explain its architecture, key components, and open research questions.",
-                )
-              }
-            >
-              <BookOpen size={16} />
-              <span>Explore this codebase</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange purple"
-              onClick={() =>
-                // Both args are optional (the playbook injects the linked paper;
-                // compute defaults to the configured target) — arm the bare command.
-                armDraft(
-                  paperId
-                    ? "/reproduce-paper "
-                    : "Find and summarize the research most relevant to this project.",
-                )
-              }
-            >
-              <GitBranch size={16} />
-              <span>{paperId ? "Reproduce the linked paper" : "Review relevant literature"}</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange green"
-              onClick={() =>
-                armDraft(
-                  "Set up and run an experiment for this project, including a baseline and meaningful variants.",
-                )
-              }
-            >
-              <FlaskConical size={16} />
-              <span>Run an experiment</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange orange"
-              onClick={() =>
-                armDraft(
-                  "Analyze the latest experiment results and recommend the most useful next iteration.",
-                )
-              }
-            >
-              <ChartSpline size={16} />
-              <span>Analyze results</span>
-            </button>
           </div>
         </div>
       ) : (
