@@ -1,187 +1,109 @@
-# OpenResearch CLI (`orx`)
+<div align="center">
 
-> [!IMPORTANT]
-> If you are an OpenResearch user or someone who is interested in autoresearch,
-> we'd love to chat with you. Please email
-> [contact@alphaxiv.org](mailto:contact@alphaxiv.org) if interested.
+<h1><img src=".github/readme-assets/openresearch.svg" alt="" width="36" /> OpenResearch</h1>
 
-### Stay updated or use OpenResearch compute
+**The local-first workspace for research agents and autoresearch.**
 
-To receive email updates about the OpenResearch CLI or spin up compute from
-OpenResearch, create an account at [openresearch.sh](https://openresearch.sh).
+<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="18" /> Claude Code,
+<img src=".github/readme-assets/codex.svg" alt="" width="18" /> Codex, or
+<img src=".github/readme-assets/opencode.svg" alt="" width="18" /> OpenCode into research agents that can review
+literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
-### Run autoresearch on your machine
+[Download the desktop app](https://openresearch.sh/download) ·
+[Documentation](https://openresearch.sh/docs) ·
+[Releases](https://github.com/alphaXiv/openresearch-cli/releases)
 
-- **Run research agents in parallel**. Spins up agents in different worktrees
-  so you can investigate several different directions at once.
-- **Works with Claude Code, Codex, and OpenCode**
-- **Bring your own compute**. Works with SSH, Slurm, Kubernetes, Modal,
-  HuggingFace and more.
-- **Give it a goal**. Can run the entire autoresearch loop from literature
-  review to experiment analysis.
-- **Local and private**. Your code and your data stays on your machine.
+</div>
 
-https://github.com/user-attachments/assets/33b62182-0795-490d-9366-0fb0b4bd49fd
+## Get started
 
-## Quick start
+Download the local desktop app from
+[openresearch.sh/download](https://openresearch.sh/download), or install the
+CLI on macOS or Linux:
 
 ```sh
 curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
-The dashboard opens at `http://127.0.0.1:4791`. Give the agent a goal — for
-example, ask it to reproduce a paper:
+`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
-```
-/reproduce-paper <paper URL or title> on <compute>
-```
+Create an account at [openresearch.sh](https://openresearch.sh) to receive email
+updates and use managed OpenResearch compute.
 
-## The dashboard
+## Built for research agents
 
-`orx up` runs a single local process on `127.0.0.1` — an embedded web UI plus a
-JSON/SSE API over a local SQLite store. From there you get:
-
-- **Agent chat** — a research assistant with full project context, backed by
-  your locally installed harness: Claude Code, Codex, or OpenCode (pick the
-  harness and model in the UI). Ask it to analyze runs, dig into results, edit
-  code, and spin up new experiments.
-- **The experiment tree** — every experiment is a git branch: a runnable
-  snapshot of your code. The root is your baseline; children are variants
-  measured against it, so lineage stays explicit.
-- **Runs** — every backend receives the same immutable archive of the recorded
-  Git commit. Modal, Hugging Face Jobs, Kubernetes, Slurm, SSH, Ray,
-  OpenResearch, and local runs do not require publishing the repository.
-- **Autoresearch** — describe a goal and let the agent run autonomously toward
-  it: proposing, launching, and analyzing experiments.
-
-Everything binds to loopback only. Creating a local project and launching
-compute do not publish code; upstream repositories and paper search use the
-network only when you choose those import flows.
-
-### On a remote machine
-
-Develop from your laptop while the dashboard runs next to your GPUs:
-
-```sh
-orx up --remote user@host        # or an ~/.ssh/config alias; append :PORT for a custom SSH port
-```
-
-This starts `orx up` on the remote box over SSH, tunnels the port back, and
-opens your browser locally. Note the remote server is unauthenticated on that
-host's loopback, so other users on the same box can reach it.
-
-## Commands
-
-Run `orx --help` (or `orx <command> --help`) for full usage. The highlights:
-
-| Area | Commands |
+| | OpenResearch gives you |
 |---|---|
-| Dashboard | `up` |
-| Auth & organizations | `login`, `logout`, `orgs` |
-| Projects | `projects`, `project` |
-| Experiments | `create-experiment`, `exp status/run/cancel/wait/wake` |
-| Runs & evidence | `runs`, `logs` |
-| Compute | `compute`, `instance create` |
-| Literature | `discover keyword/embedding/openalex/biorxiv`, `paper` (cross-corpus retrieval and paper reading — no login required) |
-| Agent integration | `install-skills`, `skill` |
-| Maintenance | `version`, `update`, `telemetry`, `delete database/cli/all` |
+| **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
+| **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
+| **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
+| **Your choice of agent** | Use Claude Code, Codex, or OpenCode, with the harness and model selected per session. |
+| **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
+| **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
 
-`orx install-skills` drops the OpenResearch skill into your local coding agents
-(Claude Code, Codex, OpenCode, Cursor) so they can drive `orx` themselves —
-`orx login` offers this too.
+### Autoresearch
 
-## Installing
+OpenResearch can run the full loop autonomously: propose an idea, change the
+code, launch an experiment, inspect the evidence, and decide what to try next.
+Multiple agents can explore different directions in parallel while the
+experiment tree preserves their lineage.
 
-The install script above fetches the latest prebuilt release (macOS and Linux,
-x86_64 and arm64) and is the same as:
+## Run anywhere
 
-```sh
-curl -LsSf https://github.com/alphaXiv/openresearch-cli/releases/latest/download/openresearch-cli-installer.sh | sh
-```
+The same committed source snapshot can run locally, over SSH, or on Slurm,
+Kubernetes, Ray, Hugging Face Jobs, Modal, and managed OpenResearch compute.
+Publishing the repository is not required.
 
-### Staying up to date
-
-Script-installed CLIs and the macOS app both update themselves. When a check
-finds a newer release, a detached updater installs it in the background: the
-CLI's *next* invocation is on the new version, and the app picks it up on its
-next launch (the dashboard shows a "restart to finish updating" notice in the
-meantime). Nothing blocks the command you actually ran, and a failing update
-backs off rather than retrying on every invocation.
-
-The macOS app verifies each download's checksum *and* requires a notarized
-Developer ID signature from alphaXiv before replacing itself, so an unattended
-swap can't install anything we didn't publish.
-
-- `orx version --json` reports `channel` and whether `autoUpdate` is in effect.
-- `orx update` updates now; `--dry-run` only reports.
-- Settings → Updates shows the same state, with a toggle for automatic installs
-  and, in the macOS app, **Install the `orx` command** — it links the app's
-  binary onto your PATH so the CLI and the app are always the same build (also
-  `orx install-cli`).
-- Turn automatic installs off in Settings → Updates, or silence updates
-  entirely with `ORX_NO_UPDATE_CHECK=1`.
-
-Installs orx doesn't own — `cargo install`, Homebrew, Nix — are never modified.
-They still get the outdated notice, and `orx update` then names the command to
-run for that package manager.
-
-### From source
-
-Requires Rust (stable) via [rustup](https://rustup.rs). The prebuilt dashboard
-UI is committed at `ui/dist`, so a plain build works:
+Run the workspace next to remote GPUs while using the browser on your laptop:
 
 ```sh
-cargo build --release          # binary at target/release/orx
-cargo install --path .         # or install onto your PATH (~/.cargo/bin)
+orx up --remote user@host
 ```
 
-To hack on the dashboard UI itself (Vite + React, embedded into the binary at
-build time):
+SSH config aliases and custom ports are supported. The remote service binds to
+loopback and has no application-level authentication, so other users on that
+host can reach it.
+
+## CLI and agent integration
+
+Install the OpenResearch skill into supported coding agents:
 
 ```sh
-cd ui && pnpm install && pnpm build
+orx install-skills
 ```
 
-Run the tests with `cargo test`.
+Common commands:
 
-## Configuration
+```sh
+orx projects
+orx project view <project-id>
+orx runs <project-id>
+orx logs <run-id>
+orx exp run <experiment-id>
+orx discover keyword <query>
+orx paper <arxiv-id-or-doi>
+```
 
-- **OpenResearch service URL** — used only for login, organizations, managed
-  compute, sandboxes, and SSH keys. It defaults to production
-  (`https://api.openresearch.sh`); override it with `--api-url` or
-  `OPENRESEARCH_API_URL`.
-- **Credentials** — `orx login` opens your browser, mints a personal access
-  token, and stores it at `${XDG_CONFIG_HOME:-~/.config}/openresearch/credentials.json`
-  (mode `0600`). Local projects, experiments, runs, logs, and files never use
-  these credentials or sync to the service.
+Run `orx --help` or `orx <command> --help` for the complete interface.
+
+## Local by default
+
+OpenResearch runs on `127.0.0.1` with a local SQLite store. Creating a project
+or launching a run does not publish your code. An
+[openresearch.sh](https://openresearch.sh) account is only used for
+service-owned capabilities such as organizations and managed compute.
 
 ## Usage analytics
 
-`orx` sends usage analytics linked to a random installation ID—not an account—to
-help prioritize features. It's opt-out, and the `orx up` onboarding surfaces the
-choice on first run.
-
-- **Collected:** command name, a random per-install UUID, CLI version, OS/arch,
-  the official build channel, a CI flag, coarse install type, and coarse event
-  labels (e.g. onboarding completed, project created, chat session started, or
-  a run launched on `modal`). For the onboarding research profile, only selected
-  research-area categories and the number of linked papers are collected.
-- **Not automatically added:** code, prompts, file contents or paths, project or
-  experiment IDs/names, repo names, tokens, emails, or account identifiers.
-  Research-profile free text, paper IDs, and paper titles are not sent. The
-  random install UUID is not tied to your account.
+Official release builds send opt-out, coarse usage events tied to a random
+installation ID. They do not include code, prompts, file contents or paths,
+repository names, tokens, emails, or project and experiment identifiers.
 
 ```sh
-orx telemetry off        # persistent, per-machine
-orx telemetry status     # current state + the random install id
-orx <cmd> --no-telemetry # per-run
+orx telemetry off
+orx telemetry status
+orx <command> --no-telemetry
 ```
 
-Only official prebuilt release artifacts can send usage analytics. Source,
-worktree, `cargo install --path`, and cargo-dist PR/dry-run builds remain off and
-do not create an installation ID. `ORX_TELEMETRY_ENV=off` additionally disables
-analytics in an official binary; it cannot enable analytics in a source build.
-
-Events are fire-and-forget on a background task and never block a command.
-They are sent to OpenResearch's first-party API and stored in Postgres.
+Source and development builds do not send analytics.
