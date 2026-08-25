@@ -227,7 +227,7 @@ fn cancel_job_with_timeout(dir: &Path, wait: std::time::Duration) -> Result<()> 
 fn process_group_alive(pid: u32) -> bool {
     // A dropped Child can remain as a zombie, so group existence alone is insufficient.
     match std::process::Command::new("ps")
-        .args(["-axo", "pgid=,stat="])
+        .args(["-e", "-o", "pgid=", "-o", "stat="])
         .stderr(std::process::Stdio::null())
         .output()
     {
@@ -404,6 +404,7 @@ mod tests {
         assert!(process_table_has_live_group("  4012 Ss\n", 4012));
         assert!(!process_table_has_live_group(table, 9999));
         assert!(process_table_has_live_group("3059 Z\n3059 S\n", 3059));
+        assert!(!process_group_alive(u32::MAX));
     }
 
     fn wait_terminal(dir: &Path) -> JobState {
