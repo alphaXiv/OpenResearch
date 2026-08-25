@@ -251,7 +251,7 @@ fn process_table_has_live_group(table: &str, pid: u32) -> bool {
 
 fn signal_process_group(pid: u32, signal: &str) -> Result<()> {
     let group = std::process::Command::new("kill")
-        .args([&format!("-{signal}"), &format!("-{pid}")])
+        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
