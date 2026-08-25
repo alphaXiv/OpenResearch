@@ -206,8 +206,8 @@ pub(super) async fn bin_version(bin: &PathBuf) -> Option<String> {
 /// sources `prepare_env` actually hands the harness child. Detecting only the
 /// former would report a working setup as signed out.
 pub(super) fn api_key(key: &str) -> Option<String> {
-    crate::local::shell_env::var(key)
-        .and_then(|value| value.into_string().ok())
+    std::env::var(key)
+        .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .or_else(|| crate::config::synced_env_var(key))

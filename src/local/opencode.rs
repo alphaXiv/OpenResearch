@@ -362,8 +362,6 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    #[serde(skip)]
-    pub(crate) native_store: NativeStore,
 }
 
 struct AgentChild {
@@ -383,7 +381,6 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
-            native_store: self.native_store,
         }
     }
 }
@@ -548,17 +545,6 @@ impl AgentHost {
         let agent = guard.get_mut(session_id)?;
         if matches!(agent.child.try_wait(), Ok(None)) {
             Some(agent.port)
-        } else {
-            guard.remove(session_id);
-            None
-        }
-    }
-
-    pub async fn native_store_for(&self, session_id: &str) -> Option<NativeStore> {
-        let mut guard = self.inner.lock().await;
-        let agent = guard.get_mut(session_id)?;
-        if matches!(agent.child.try_wait(), Ok(None)) {
-            Some(agent.native_store)
         } else {
             guard.remove(session_id);
             None

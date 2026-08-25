@@ -118,13 +118,6 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
-    let Ok(home) = native_store::prepare_claude(NativeStore::Isolated) else {
-        return AuthProbe {
-            state: HarnessAuthState::Unknown,
-            method: None,
-        };
-    };
-    cmd.env("CLAUDE_CONFIG_DIR", home);
     match tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await {
         Ok(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
         _ => AuthProbe {
@@ -199,10 +192,6 @@ async fn claude_accepts_ultracode(bin: &Path) -> bool {
     cmd.args(["--effort", CLAUDE_ULTRACODE, "--version"])
         .stdin(Stdio::null());
     prepare_env(&mut cmd);
-    let Ok(home) = native_store::prepare_claude(NativeStore::Isolated) else {
-        return false;
-    };
-    cmd.env("CLAUDE_CONFIG_DIR", home);
     let fut = cmd.output();
     match tokio::time::timeout(Duration::from_secs(10), fut).await {
         Ok(Ok(out)) => {
@@ -239,10 +228,6 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
             "--verbose",
         ]);
         prepare_env(&mut cmd);
-        cmd.env(
-            "CLAUDE_CONFIG_DIR",
-            native_store::prepare_claude(NativeStore::Isolated).ok()?,
-        );
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -415,10 +400,6 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
     // cwd's CLAUDE.md / settings into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
-    cmd.env(
-        "CLAUDE_CONFIG_DIR",
-        native_store::prepare_claude(NativeStore::Isolated).ok()?,
-    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
@@ -1083,11 +1064,6 @@ struct TurnState {
     saw_prompt: bool,
     /// The turn ended with a genuine failure (drives the error path).
     turn_errored: bool,
-    /// A definitive `--resume` miss. The caller retries the untouched user
-    /// message against the legacy Claude home before surfacing this error.
-    missing_session: Option<String>,
-    /// The miss arrived before Claude echoed and accepted this turn's message.
-    missing_session_before_echo: bool,
     /// Claude's typed headless auth failure. Its synthetic assistant text is
     /// suppressed and the resident child is quarantined by the caller.
     auth_failed: bool,
@@ -1584,11 +1560,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                         .and_then(Value::as_str)
                         .unwrap_or(subtype)
                         .to_string();
-                    if let Some(missing) = claude_missing_session_error(event) {
-                        state.missing_session = Some(missing);
-                    } else {
-                        ctx.push_error(format!("claude: {detail}"));
-                    }
+                    ctx.push_error(format!("claude: {detail}"));
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
@@ -1604,28 +1576,6 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         _ => {}
     }
     false
-}
-
-fn claude_missing_session_error(event: &Value) -> Option<String> {
-    if event.get("type").and_then(Value::as_str) != Some("result")
-        || event.get("subtype").and_then(Value::as_str) != Some("error_during_execution")
-        || event
-            .get("num_turns")
-            .is_some_and(|turns| turns.as_u64() != Some(0))
-    {
-        return None;
-    }
-    event
-        .get("errors")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .find(|error| error.starts_with("No conversation found with session ID:"))
-        .map(str::to_string)
-}
-
-fn missing_session_is_safe_to_retry(state: &TurnState) -> bool {
-    state.missing_session_before_echo && !state.had_activity
 }
 
 /// Sum the four token buckets of a Claude `usage` object into the context-window
@@ -1694,25 +1644,21 @@ fn report_result_usage(ctx: &mut TurnCtx, event: &Value) -> Option<u64> {
 }
 
 fn commit_attempt_session(ctx: &mut TurnCtx, state: &TurnState) {
-    if should_commit_attempt_session(state) {
+    if !state.auth_failed || state.had_activity {
         if let Some(sid) = state.native_session_id.as_deref() {
             ctx.set_native_session_id(sid);
         }
     }
 }
 
-fn should_commit_attempt_session(state: &TurnState) -> bool {
-    (!state.auth_failed && state.missing_session.is_none()) || state.had_activity
-}
-
 /// The reasoning-level → `--effort` value the spawn config carries. Split out so
 /// the harness and the host agree on exactly what the child was launched with.
-fn spawn_config(ctx: &TurnCtx) -> SpawnConfig {
+fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
     SpawnConfig {
         permission_mode: ctx.permission_mode,
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
-        native_store: NativeStore::Isolated,
+        native_store,
         // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
         // port; whether the bridge was actually achieved is recorded on the
         // spawned child's config (a failed write leaves it false and the next
@@ -1873,14 +1819,6 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 }
                 if !belongs {
                     saw_event = true;
-                    if let Some(missing) = claude_missing_session_error(&value) {
-                        state.saw_result = true;
-                        state.turn_errored = true;
-                        state.missing_session = Some(missing);
-                        state.missing_session_before_echo = true;
-                        ctx.mark_delivery(DeliveryState::Rejected);
-                        break;
-                    }
                     if value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("init")
                     {
@@ -1966,47 +1904,28 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
 
     let resume = ctx.native_session_id.clone();
+    let native_store = match resume.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session_store(&id))
+            .await
+            .map_err(|error| anyhow!("Claude session lookup failed: {error}"))?,
+        None => NativeStore::Isolated,
+    };
     let base_spec = SpawnSpec {
         chat: ctx.host.clone(),
         session_id: ctx.session_id.clone(),
         repo,
         playbook,
         resume: resume.clone(),
-        config: spawn_config(ctx),
+        config: spawn_config(ctx, native_store),
     };
     let mut retry_count = 0;
-    let mut native_store = if resume.is_some() {
-        ctx.host
-            .claude
-            .native_store_for(&ctx.session_id)
-            .await
-            .unwrap_or(NativeStore::Isolated)
-    } else {
-        NativeStore::Isolated
-    };
     let mut state;
     loop {
         // Always resume from the last known-good session id. An auth-failed
         // process can emit a synthetic init id that has no persisted history.
         let mut spec = base_spec.clone();
         spec.resume = resume.clone();
-        spec.config.native_store = native_store;
         let (attempt, failed_generation) = run_attempt(ctx, spec).await?;
-        if let Some(detail) = attempt.missing_session.as_deref() {
-            if resume.is_some()
-                && missing_session_is_safe_to_retry(&attempt)
-                && native_store == NativeStore::Isolated
-                && native_store::claude_stores_are_distinct()
-            {
-                ctx.host.claude.kill_session(&ctx.session_id).await;
-                ctx.mark_delivery(DeliveryState::NotSent);
-                native_store = NativeStore::Legacy;
-                continue;
-            }
-            ctx.push_error(format!("claude: {detail}"));
-            state = attempt;
-            break;
-        }
         if !attempt.auth_failed {
             state = attempt;
             break;
@@ -2107,67 +2026,6 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
-
-    #[test]
-    fn missing_session_fallback_requires_the_exact_structured_error() {
-        let missing = serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "num_turns": 0,
-            "errors": ["No conversation found with session ID: 1234"]
-        });
-        assert_eq!(
-            claude_missing_session_error(&missing).as_deref(),
-            Some("No conversation found with session ID: 1234")
-        );
-        let missing_without_turn_count = serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "errors": ["No conversation found with session ID: 1234"]
-        });
-        assert!(claude_missing_session_error(&missing_without_turn_count).is_some());
-        let malformed_turn_count = serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "num_turns": "unknown",
-            "errors": ["No conversation found with session ID: 1234"]
-        });
-        assert!(claude_missing_session_error(&malformed_turn_count).is_none());
-
-        let auth = serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "num_turns": 0,
-            "errors": ["Authentication failed"]
-        });
-        assert!(claude_missing_session_error(&auth).is_none());
-        let active = serde_json::json!({
-            "type": "result",
-            "subtype": "error_during_execution",
-            "num_turns": 1,
-            "errors": ["No conversation found with session ID: 1234"]
-        });
-        assert!(claude_missing_session_error(&active).is_none());
-    }
-
-    #[test]
-    fn missing_session_retry_requires_a_pre_echo_inactive_attempt() {
-        let pre_echo = TurnState {
-            missing_session_before_echo: true,
-            ..TurnState::default()
-        };
-        assert!(missing_session_is_safe_to_retry(&pre_echo));
-        assert!(!missing_session_is_safe_to_retry(&TurnState {
-            missing_session_before_echo: true,
-            had_activity: true,
-            ..TurnState::default()
-        }));
-        assert!(!missing_session_is_safe_to_retry(&TurnState::default()));
-        assert!(!should_commit_attempt_session(&TurnState {
-            missing_session: Some("missing".into()),
-            ..TurnState::default()
-        }));
-    }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`

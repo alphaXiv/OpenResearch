@@ -150,14 +150,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let home = native_store::prepare_codex(NativeStore::Isolated).ok()?;
-        if let Some(override_arg) =
-            native_store::codex_sqlite_override(NativeStore::Isolated, &home)
-        {
-            cmd.args(["-c", &override_arg]);
-        }
         prepare_env(&mut cmd);
-        cmd.env("CODEX_HOME", home);
         let mut child = cmd.spawn().ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
@@ -407,14 +400,7 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             // Hermetic: run outside any repo so the child doesn't ingest the
             // server cwd's AGENTS.md into a request that only needs a title.
             .current_dir(std::env::temp_dir());
-        let home = native_store::prepare_codex(NativeStore::Isolated).ok()?;
-        if let Some(override_arg) =
-            native_store::codex_sqlite_override(NativeStore::Isolated, &home)
-        {
-            cmd.args(["-c", &override_arg]);
-        }
         prepare_env(&mut cmd);
-        cmd.env("CODEX_HOME", home);
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the title column.
         cmd.env("NO_COLOR", "1");
@@ -2023,8 +2009,8 @@ fn persisted_thread_was_rejected(error: &JsonRpcError) -> bool {
             "invalid",
             "does not exist",
         ]
-            .iter()
-            .any(|needle| message.contains(needle))
+        .iter()
+        .any(|needle| message.contains(needle))
 }
 
 const RECOVERY_SNAPSHOT_BYTES: usize = 32 * 1024;
@@ -2182,21 +2168,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
 
-    let preferred_store = if ctx.native_session_id.is_some() {
-        ctx.host
-            .codex
-            .client_for(&ctx.session_id)
-            .await
-            .map(|client| client.native_store())
-            .unwrap_or(NativeStore::Isolated)
-    } else {
-        NativeStore::Isolated
+    let preferred_store = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_store(id).await?,
+        None => NativeStore::Isolated,
     };
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
-    if ctx.native_session_id.is_none() && client.native_store() != NativeStore::Isolated {
-        ctx.host.codex.kill_session(&ctx.session_id).await;
-        client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
-    }
     let auto_review_supported =
         if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
             codex_auto_review_supported(&client, &repo).await
@@ -2227,31 +2203,8 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         Some(id) => {
             let mut params = thread_setup.clone();
             params["threadId"] = Value::String(id.clone());
-            let (resume_client, resumed) =
-                codex_resume_thread(ctx, client.clone(), params.clone()).await?;
+            let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
             client = resume_client;
-            let isolated_rejected = resumed.as_ref().is_err_and(persisted_thread_was_rejected)
-                && client.native_store() == NativeStore::Isolated
-                && native_store::codex_stores_are_distinct();
-            let legacy_has_rollout = if isolated_rejected {
-                let legacy = native_store::codex_home(NativeStore::Legacy);
-                let native_id = id.clone();
-                tokio::task::spawn_blocking(move || codex_rollout_exists(&legacy, &native_id))
-                    .await
-                    .map_err(|error| anyhow!("codex legacy rollout lookup failed: {error}"))?
-            } else {
-                false
-            };
-            let resumed = if isolated_rejected && legacy_has_rollout {
-                ctx.host.codex.kill_session(&ctx.session_id).await;
-                client = ensure_codex_pre_accept(ctx, NativeStore::Legacy).await?;
-                let (resume_client, resumed) =
-                    codex_resume_thread(ctx, client.clone(), params).await?;
-                client = resume_client;
-                resumed
-            } else {
-                resumed
-            };
             match resumed {
                 Ok(resumed) => {
                     // Capture the effective model codex reports (top-level
@@ -3336,25 +3289,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             .await
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
-    let native_store = if let Some(native_id) = ctx.native_session_id.as_deref() {
-        let native_id = native_id.to_string();
-        let isolated = native_store::codex_home(NativeStore::Isolated);
-        let legacy = native_store::codex_home(NativeStore::Legacy);
-        let distinct = native_store::codex_stores_are_distinct();
-        tokio::task::spawn_blocking(move || {
-            if distinct
-                && !codex_rollout_exists(&isolated, &native_id)
-                && codex_rollout_exists(&legacy, &native_id)
-            {
-                NativeStore::Legacy
-            } else {
-                NativeStore::Isolated
-            }
-        })
-        .await
-        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
-    } else {
-        NativeStore::Isolated
+    let native_store = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_store(id).await?,
+        None => NativeStore::Isolated,
     };
     let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
         .await
@@ -3639,32 +3576,11 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
-fn codex_rollout_exists(home: &Path, native_id: &str) -> bool {
-    [home.join("sessions"), home.join("archived_sessions")]
-        .into_iter()
-        .any(|root| tree_has_rollout(&root, native_id))
-}
-
-fn tree_has_rollout(root: &Path, native_id: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            if tree_has_rollout(&path, native_id) {
-                return true;
-            }
-        } else if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_suffix(".jsonl"))
-            .is_some_and(|name| name.ends_with(native_id))
-        {
-            return true;
-        }
-    }
-    false
+async fn codex_native_store(native_id: &str) -> Result<NativeStore> {
+    let native_id = native_id.to_string();
+    tokio::task::spawn_blocking(move || native_store::codex_session_store(&native_id))
+        .await
+        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))
 }
 
 fn legacy_exec_text(text: &str, plan_mode: bool) -> String {
@@ -3741,32 +3657,6 @@ mod tests {
         assert!(persisted_thread_was_rejected(&error));
     }
 
-    #[test]
-    fn legacy_exec_rollout_lookup_checks_active_and_archived_trees() {
-        let root =
-            std::env::temp_dir().join(format!("orx-codex-rollout-test-{}", uuid::Uuid::new_v4()));
-        let id = "019c1234-0000-7000-8000-000000000000";
-        let archived = root.join("archived_sessions/2026/08/24");
-        std::fs::create_dir_all(&archived).unwrap();
-        std::fs::write(archived.join(format!("rollout-test-{id}.jsonl")), "{}").unwrap();
-
-        assert!(codex_rollout_exists(&root, id));
-        assert!(!codex_rollout_exists(&root, "missing"));
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn legacy_exec_rollout_lookup_does_not_follow_directory_symlinks() {
-        let root =
-            std::env::temp_dir().join(format!("orx-codex-rollout-link-{}", uuid::Uuid::new_v4()));
-        let sessions = root.join("sessions");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::os::unix::fs::symlink(&sessions, sessions.join("loop")).unwrap();
-
-        assert!(!codex_rollout_exists(&root, "missing"));
-        std::fs::remove_dir_all(root).ok();
-    }
     use serde_json::json;
 
     fn model_ids(models: &[ModelInfo]) -> Vec<&str> {

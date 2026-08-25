@@ -1,13 +1,7 @@
 //! Provider-native state used by chats launched through OpenResearch.
-//!
-//! New sessions live below the ORX data directory. Account and configuration
-//! files remain owned by each provider's normal home and are linked into the
-//! isolated Claude/Codex homes before every spawn.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{anyhow, Result};
@@ -18,13 +12,7 @@ pub enum NativeStore {
     Legacy,
 }
 
-const MANIFEST: &str = ".openresearch-managed-links.json";
-static MANAGED_LINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-struct LinkManifest {
-    files: BTreeMap<String, String>,
-}
+static LINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn user_env_path(key: &str) -> Option<PathBuf> {
     crate::local::shell_env::var(key)
@@ -44,21 +32,18 @@ fn home_dir() -> PathBuf {
 
 pub fn opencode_db(store: NativeStore) -> PathBuf {
     match store {
-        NativeStore::Isolated => crate::store::data_dir()
-            .join("agents")
-            .join("opencode")
-            .join("opencode.db"),
+        NativeStore::Isolated => crate::store::data_dir().join("agents/opencode/opencode.db"),
         NativeStore::Legacy => user_env_path("OPENCODE_DB").unwrap_or_else(|| {
-            let data = user_env_path("XDG_DATA_HOME")
-                .unwrap_or_else(|| home_dir().join(".local").join("share"));
-            data.join("opencode").join("opencode.db")
+            user_env_path("XDG_DATA_HOME")
+                .unwrap_or_else(|| home_dir().join(".local/share"))
+                .join("opencode/opencode.db")
         }),
     }
 }
 
 pub fn claude_home(store: NativeStore) -> PathBuf {
     match store {
-        NativeStore::Isolated => crate::store::data_dir().join("agents").join("claude"),
+        NativeStore::Isolated => crate::store::data_dir().join("agents/claude"),
         NativeStore::Legacy => {
             user_env_path("CLAUDE_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".claude"))
         }
@@ -67,29 +52,86 @@ pub fn claude_home(store: NativeStore) -> PathBuf {
 
 pub fn codex_home(store: NativeStore) -> PathBuf {
     match store {
-        NativeStore::Isolated => crate::store::data_dir().join("agents").join("codex"),
+        NativeStore::Isolated => crate::store::data_dir().join("agents/codex"),
         NativeStore::Legacy => {
             user_env_path("CODEX_HOME").unwrap_or_else(|| home_dir().join(".codex"))
         }
     }
 }
 
-pub fn opencode_stores_are_distinct() -> bool {
-    opencode_db(NativeStore::Isolated) != opencode_db(NativeStore::Legacy)
+pub fn opencode_session_store(native_id: &str) -> NativeStore {
+    let isolated = opencode_db(NativeStore::Isolated);
+    let legacy = opencode_db(NativeStore::Legacy);
+    if isolated != legacy
+        && !opencode_has_session(&isolated, native_id)
+        && opencode_has_session(&legacy, native_id)
+    {
+        NativeStore::Legacy
+    } else {
+        NativeStore::Isolated
+    }
 }
 
-pub fn claude_stores_are_distinct() -> bool {
-    claude_home(NativeStore::Isolated) != claude_home(NativeStore::Legacy)
-}
-
-pub fn codex_stores_are_distinct() -> bool {
-    codex_home(NativeStore::Isolated) != codex_home(NativeStore::Legacy)
+fn opencode_has_session(db: &Path, native_id: &str) -> bool {
+    rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .and_then(|connection| {
+            connection.query_row("SELECT 1 FROM session WHERE id = ?1", [native_id], |_| {
+                Ok(())
+            })
+        })
+        .is_ok()
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
-    (store == NativeStore::Isolated).then(|| {
-        let path = toml_string(home);
-        format!("sqlite_home={path}")
+    (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
+}
+
+pub fn claude_session_store(native_id: &str) -> NativeStore {
+    session_store(claude_home, &["projects"], native_id)
+}
+
+pub fn codex_session_store(native_id: &str) -> NativeStore {
+    session_store(codex_home, &["sessions", "archived_sessions"], native_id)
+}
+
+fn session_store(
+    home: impl Fn(NativeStore) -> PathBuf,
+    trees: &[&str],
+    native_id: &str,
+) -> NativeStore {
+    let isolated = home(NativeStore::Isolated);
+    let legacy = home(NativeStore::Legacy);
+    let exists = |home: &Path| {
+        trees
+            .iter()
+            .any(|tree| tree_has_session(&home.join(tree), native_id))
+    };
+    if isolated != legacy && !exists(&isolated) && exists(&legacy) {
+        NativeStore::Legacy
+    } else {
+        NativeStore::Isolated
+    }
+}
+
+fn tree_has_session(root: &Path, native_id: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            tree_has_session(&path, native_id)
+        } else {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".jsonl"))
+                .is_some_and(|name| {
+                    name == native_id
+                        || name
+                            .strip_suffix(native_id)
+                            .is_some_and(|prefix| prefix.ends_with('-'))
+                })
+        }
     })
 }
 
@@ -110,313 +152,212 @@ pub fn prepare_opencode(store: NativeStore) -> Result<PathBuf> {
 
 pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
     let root = claude_home(store);
-    if store == NativeStore::Legacy || !claude_stores_are_distinct() {
-        std::fs::create_dir_all(&root)
-            .map_err(|error| anyhow!("could not create {}: {error}", root.display()))?;
+    let legacy = claude_home(NativeStore::Legacy);
+    if store == NativeStore::Legacy || root == legacy {
+        std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    let legacy = claude_home(NativeStore::Legacy);
-    let mut links = vec![
-        (legacy.join("settings.json"), PathBuf::from("settings.json")),
-        (
+    prepare_links(
+        &root,
+        &[
+            legacy.join("settings.json"),
             legacy.join("settings.local.json"),
-            PathBuf::from("settings.local.json"),
-        ),
-        (legacy.join("CLAUDE.md"), PathBuf::from("CLAUDE.md")),
-        (
+            legacy.join("CLAUDE.md"),
             legacy.join(".credentials.json"),
-            PathBuf::from(".credentials.json"),
-        ),
-        (legacy.join("plugins"), PathBuf::from("plugins")),
-        (legacy.join("skills"), PathBuf::from("skills")),
-    ];
-    links.push((
-        home_dir().join(".claude.json"),
-        PathBuf::from(".claude.json"),
-    ));
-    reconcile_links(&root, &links)?;
-    Ok(root.canonicalize().unwrap_or(root))
+            legacy.join("plugins"),
+            legacy.join("skills"),
+        ],
+    )?;
+    Ok(root)
 }
 
 pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     let root = codex_home(store);
-    if store == NativeStore::Legacy || !codex_stores_are_distinct() {
-        std::fs::create_dir_all(&root)
-            .map_err(|error| anyhow!("could not create {}: {error}", root.display()))?;
+    let legacy = codex_home(NativeStore::Legacy);
+    if store == NativeStore::Legacy || root == legacy {
+        std::fs::create_dir_all(&root)?;
         return Ok(root);
     }
-    let legacy = codex_home(NativeStore::Legacy);
-    let mut links = vec![
-        (legacy.join("auth.json"), PathBuf::from("auth.json")),
-        (legacy.join("config.toml"), PathBuf::from("config.toml")),
-        (legacy.join("AGENTS.md"), PathBuf::from("AGENTS.md")),
-        (legacy.join("plugins"), PathBuf::from("plugins")),
-        (legacy.join("skills"), PathBuf::from("skills")),
-        (legacy.join("prompts"), PathBuf::from("prompts")),
-        (legacy.join("packages"), PathBuf::from("packages")),
+    let mut sources = vec![
+        legacy.join("auth.json"),
+        legacy.join("config.toml"),
+        legacy.join("AGENTS.md"),
+        legacy.join("plugins"),
+        legacy.join("skills"),
+        legacy.join("prompts"),
+        legacy.join("packages"),
     ];
     if let Ok(entries) = std::fs::read_dir(&legacy) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name_text) = name.to_str() else {
-                continue;
-            };
-            if name_text.ends_with(".config.toml") {
-                links.push((entry.path(), PathBuf::from(name)));
-            }
-        }
+        sources.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".config.toml"))
+        }));
     }
-    reconcile_links(&root, &links)?;
-    Ok(root.canonicalize().unwrap_or(root))
+    prepare_links(&root, &sources)?;
+    Ok(root)
 }
 
-fn reconcile_links(root: &Path, links: &[(PathBuf, PathBuf)]) -> Result<()> {
-    let _guard = MANAGED_LINK_LOCK
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    std::fs::create_dir_all(root)
-        .map_err(|error| anyhow!("could not create {}: {error}", root.display()))?;
-    let lock_path = root.join(".openresearch-managed-links.lock");
-    let lock_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|error| anyhow!("could not open {}: {error}", lock_path.display()))?;
-    let mut process_lock = fd_lock::RwLock::new(lock_file);
-    let _process_guard = process_lock
-        .write()
-        .map_err(|error| anyhow!("could not lock {}: {error}", lock_path.display()))?;
-    let manifest_path = root.join(MANIFEST);
-    let mut manifest = match std::fs::read(&manifest_path) {
-        Ok(bytes) => match serde_json::from_slice::<LinkManifest>(&bytes) {
-            Ok(manifest) => manifest,
-            Err(error) => {
-                let preserved = preserve_conflict(&manifest_path)?;
-                eprintln!(
-                    "orx: preserved unreadable managed-link manifest at {}: {error}",
-                    preserved.display()
-                );
-                LinkManifest::default()
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => LinkManifest::default(),
-        Err(error) => {
-            return Err(anyhow!(
-                "could not read {}: {error}",
-                manifest_path.display()
-            ));
-        }
-    };
-    for (source, relative) in links {
-        reconcile_link(root, source, relative, &mut manifest)?;
+fn prepare_links(root: &Path, sources: &[PathBuf]) -> Result<()> {
+    let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    std::fs::create_dir_all(root)?;
+    let mut process_lock = sources
+        .iter()
+        .find(|source| source.exists())
+        .and_then(|source| source.parent())
+        .map(|parent| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(parent.join(".openresearch-native-links.lock"))
+                .map(fd_lock::RwLock::new)
+        })
+        .transpose()?;
+    let _process_guard = process_lock.as_mut().map(|lock| lock.write()).transpose()?;
+    for source in sources {
+        let Some(name) = source.file_name() else {
+            continue;
+        };
+        reconcile_link(source, &root.join(name))?;
     }
-    let bytes = serde_json::to_vec_pretty(&manifest)?;
-    atomic_write(&manifest_path, &bytes)?;
     Ok(())
 }
 
-fn reconcile_link(
-    root: &Path,
-    source: &Path,
-    relative: &Path,
-    manifest: &mut LinkManifest,
-) -> Result<()> {
-    let destination = root.join(relative);
-    if source == destination {
-        return Ok(());
-    }
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| anyhow!("could not create {}: {error}", parent.display()))?;
-    }
-    let key = relative.to_string_lossy().into_owned();
-    let source_hash = file_hash(source)?;
-    let source_exists = std::fs::symlink_metadata(source).is_ok();
-    match std::fs::symlink_metadata(&destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = std::fs::read_link(&destination).map_err(|error| {
-                anyhow!("could not read link {}: {error}", destination.display())
-            })?;
-            if target != source {
-                let preserved = preserve_conflict(&destination)?;
-                eprintln!(
-                    "orx: preserved unexpected config link {} at {}",
-                    destination.display(),
-                    preserved.display()
-                );
-            } else if !source_exists {
-                remove_path(&destination)?;
+fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
+    let name = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let marker = destination.with_file_name(format!("{name}.orx-managed-link"));
+    let source_metadata = match std::fs::symlink_metadata(source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::symlink_metadata(destination)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                && std::fs::read_link(destination).is_ok_and(|target| target == source)
+            {
+                remove_link(destination)?;
             }
+            if marker.is_file() {
+                std::fs::remove_file(marker)?;
+            }
+            return Ok(());
         }
-        Ok(metadata) if metadata.is_file() => {
-            let destination_hash = file_hash(&destination)?.unwrap_or_default();
-            match source_hash.as_deref() {
-                None => {
-                    manifest.files.remove(&key);
-                    return Ok(());
-                }
-                Some(source_hash) if source_hash == destination_hash => {
-                    remove_path(&destination)?;
-                }
-                Some(source_hash) => {
-                    let baseline = manifest.files.get(&key).map(String::as_str);
-                    if baseline == Some(source_hash) {
-                        atomic_replace_from(&destination, source)?;
-                        remove_path(&destination)?;
-                    } else if baseline == Some(destination_hash.as_str()) {
-                        remove_path(&destination)?;
-                    } else {
-                        let preserved = preserve_conflict(&destination)?;
-                        eprintln!(
-                            "orx: preserved conflicting config update at {}; using {}",
-                            preserved.display(),
-                            source.display()
-                        );
-                    }
-                }
+        Err(error) => return Err(error.into()),
+    };
+    match std::fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if std::fs::read_link(destination).is_ok_and(|target| target == source) {
+                write_marker(&marker, source)?;
+                return Ok(());
+            }
+            remove_link(destination)?;
+        }
+        Ok(metadata) if metadata.is_file() && source_metadata.is_file() && marker.is_file() => {
+            if std::fs::read_to_string(&marker).ok().as_deref() == file_hash(source)?.as_deref() {
+                adopt_managed_file(destination, source)?;
+            } else {
+                preserve_conflict(destination)?;
             }
         }
         Ok(_) => {
-            if !source_exists {
-                manifest.files.remove(&key);
-                return Ok(());
-            }
-            let preserved = preserve_conflict(&destination)?;
-            eprintln!(
-                "orx: preserved conflicting config path at {}; using {}",
-                preserved.display(),
-                source.display()
-            );
+            preserve_conflict(destination)?;
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(anyhow!(
-                "could not inspect {}: {error}",
-                destination.display()
-            ));
-        }
-    }
-    if source_exists && std::fs::symlink_metadata(&destination).is_err() {
-        create_symlink(source, &destination).map_err(|error| {
-            anyhow!(
-                "could not link {} to {}: {error}",
-                destination.display(),
-                source.display()
-            )
-        })?;
-    }
-    match file_hash(source)? {
-        Some(hash) => {
-            manifest.files.insert(key, hash);
-        }
-        None => {
-            manifest.files.remove(&key);
-        }
-    }
-    Ok(())
-}
-
-fn file_hash(path: &Path) -> Result<Option<String>> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() => return Ok(None),
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     }
-    match std::fs::read(path) {
-        Ok(bytes) => Ok(Some(format!("{:x}", Sha256::digest(bytes)))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
-    let temporary = parent.join(format!(
-        ".openresearch-managed-links-{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
-    if let Err(error) = std::fs::write(&temporary, bytes) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(anyhow!("could not write {}: {error}", path.display()));
-    }
-    if let Err(error) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(anyhow!("could not replace {}: {error}", path.display()));
-    }
+    create_symlink(source, destination).map_err(|error| {
+        anyhow!(
+            "could not link {} to {}: {error}",
+            destination.display(),
+            source.display()
+        )
+    })?;
+    write_marker(&marker, source)?;
     Ok(())
 }
 
-fn atomic_replace_from(new_content: &Path, target: &Path) -> Result<()> {
-    let parent = target
-        .parent()
-        .ok_or_else(|| anyhow!("{} has no parent directory", target.display()))?;
-    let temporary = parent.join(format!(
-        ".openresearch-managed-config-{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
-    if let Err(error) = std::fs::copy(new_content, &temporary) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(anyhow!(
-            "could not copy {} to {}: {error}",
-            new_content.display(),
-            target.display()
-        ));
+fn adopt_managed_file(from: &Path, to: &Path) -> Result<()> {
+    let name = to
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let id = uuid::Uuid::new_v4();
+    let backup = to.with_file_name(format!(".{name}.orx-backup"));
+    let staged = to.with_file_name(format!(".{name}.orx-staged-{id}"));
+    std::fs::copy(from, &staged)?;
+    if backup.exists() {
+        std::fs::remove_file(&backup)?;
     }
-    if let Err(error) = std::fs::rename(&temporary, target) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(anyhow!(
-            "could not replace {} from {}: {error}",
-            target.display(),
-            new_content.display()
-        ));
+    std::fs::rename(to, &backup)?;
+    if let Err(error) = std::fs::rename(&staged, to) {
+        std::fs::rename(&backup, to)?;
+        return Err(error.into());
     }
+    std::fs::remove_file(from)?;
     Ok(())
 }
 
-fn preserve_conflict(path: &Path) -> Result<PathBuf> {
+fn preserve_conflict(path: &Path) -> Result<()> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config");
-    let preserved = path.with_file_name(format!("{name}.orx-conflict-{}", uuid::Uuid::new_v4()));
-    std::fs::rename(path, &preserved).map_err(|error| {
-        anyhow!(
-            "could not preserve conflicting path {} as {}: {error}",
-            path.display(),
-            preserved.display()
-        )
-    })?;
-    Ok(preserved)
+    std::fs::rename(
+        path,
+        path.with_file_name(format!("{name}.orx-conflict-{}", uuid::Uuid::new_v4())),
+    )?;
+    Ok(())
+}
+
+fn file_hash(path: &Path) -> Result<Option<String>> {
+    if path.is_file() {
+        Ok(Some(format!("{:x}", Sha256::digest(std::fs::read(path)?))))
+    } else {
+        Ok(None)
+    }
+}
+
+fn write_marker(marker: &Path, source: &Path) -> Result<()> {
+    std::fs::write(marker, file_hash(source)?.unwrap_or_default())?;
+    Ok(())
 }
 
 #[cfg(not(windows))]
-fn remove_path(path: &Path) -> Result<()> {
+fn remove_link(path: &Path) -> std::io::Result<()> {
     std::fs::remove_file(path)
-        .map_err(|error| anyhow!("could not remove {}: {error}", path.display()))
 }
 
 #[cfg(windows)]
-fn remove_path(path: &Path) -> Result<()> {
+fn remove_link(path: &Path) -> std::io::Result<()> {
     use std::os::windows::fs::FileTypeExt;
 
-    let file_type = std::fs::symlink_metadata(path)
-        .map_err(|error| anyhow!("could not inspect {}: {error}", path.display()))?
-        .file_type();
-    let result = if file_type.is_symlink_dir() {
+    if std::fs::symlink_metadata(path)?
+        .file_type()
+        .is_symlink_dir()
+    {
         std::fs::remove_dir(path)
     } else {
         std::fs::remove_file(path)
-    };
-    result.map_err(|error| anyhow!("could not remove {}: {error}", path.display()))
+    }
 }
 
 #[cfg(unix)]
 fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(source, destination)
+}
+
+pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let target = std::fs::read_link(source)?;
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, destination);
+    #[cfg(windows)]
+    if source.metadata()?.is_dir() {
+        std::os::windows::fs::symlink_dir(target, destination)
+    } else {
+        std::os::windows::fs::symlink_file(target, destination)
+    }
 }
 
 #[cfg(windows)]
@@ -432,145 +373,60 @@ fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    fn temp_root(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("orx-native-store-{name}-{}", uuid::Uuid::new_v4()))
-    }
-
+    #[cfg(unix)]
     #[test]
-    fn isolated_provider_paths_share_the_orx_data_root() {
-        let root = crate::store::data_dir();
-        assert_eq!(
-            opencode_db(NativeStore::Isolated),
-            root.join("agents/opencode/opencode.db")
-        );
-        assert_eq!(
-            claude_home(NativeStore::Isolated),
-            root.join("agents/claude")
-        );
-        assert_eq!(codex_home(NativeStore::Isolated), root.join("agents/codex"));
-        assert!(
-            codex_sqlite_override(NativeStore::Isolated, &codex_home(NativeStore::Isolated))
-                .unwrap()
-                .contains("agents/codex")
-        );
-        assert!(
-            codex_sqlite_override(NativeStore::Legacy, &codex_home(NativeStore::Legacy)).is_none()
-        );
-    }
-
-    #[test]
-    fn managed_file_adopts_an_isolated_atomic_update() {
-        let root = temp_root("adopt");
+    fn native_store_smoke_test() {
+        let root = std::env::temp_dir().join(format!("orx-native-store-{}", uuid::Uuid::new_v4()));
         let source = root.join("legacy/config.toml");
         let isolated = root.join("isolated");
         std::fs::create_dir_all(source.parent().unwrap()).unwrap();
         std::fs::write(&source, "old").unwrap();
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
+        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
         std::fs::remove_file(isolated.join("config.toml")).unwrap();
         std::fs::write(isolated.join("config.toml"), "new").unwrap();
 
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
+        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
 
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "new");
+        assert!(source
+            .parent()
+            .unwrap()
+            .read_dir()
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().ends_with(".orx-backup")));
         assert!(std::fs::symlink_metadata(isolated.join("config.toml"))
             .unwrap()
             .file_type()
             .is_symlink());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn managed_directory_stays_shared() {
-        let root = temp_root("directory");
-        let source = root.join("legacy/plugins");
-        let isolated = root.join("isolated");
-        std::fs::create_dir_all(&source).unwrap();
-
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("plugins"))]).unwrap();
-        std::fs::write(isolated.join("plugins/example.txt"), "shared").unwrap();
-
-        assert_eq!(
-            std::fs::read_to_string(source.join("example.txt")).unwrap(),
-            "shared"
-        );
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn managed_file_preserves_two_divergent_updates() {
-        let root = temp_root("conflict");
-        let source = root.join("legacy/config.toml");
-        let isolated = root.join("isolated");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, "old").unwrap();
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
         std::fs::remove_file(isolated.join("config.toml")).unwrap();
-        std::fs::write(&source, "native change").unwrap();
         std::fs::write(isolated.join("config.toml"), "isolated change").unwrap();
-
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
-
-        assert_eq!(std::fs::read_to_string(&source).unwrap(), "native change");
-        assert!(std::fs::symlink_metadata(isolated.join("config.toml"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        std::fs::write(&source, "legacy change").unwrap();
+        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "legacy change");
+        let auth = root.join("legacy/auth.json");
+        std::fs::write(&auth, "legacy").unwrap();
+        std::fs::write(isolated.join("auth.json"), "isolated").unwrap();
+        prepare_links(&isolated, std::slice::from_ref(&auth)).unwrap();
+        assert_eq!(std::fs::read_to_string(&auth).unwrap(), "legacy");
         assert!(std::fs::read_dir(&isolated)
             .unwrap()
             .flatten()
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("config.toml.orx-conflict-")
-            }));
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn absent_legacy_file_stays_isolated_without_a_dangling_link() {
-        let root = temp_root("absent");
-        let source = root.join("legacy/config.toml");
-        let isolated = root.join("isolated");
-
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
-
-        assert!(!source.exists());
-        assert!(std::fs::symlink_metadata(isolated.join("config.toml")).is_err());
-        std::fs::write(isolated.join("config.toml"), "isolated").unwrap();
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("config.toml"))]).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(isolated.join("config.toml")).unwrap(),
-            "isolated"
-        );
-        assert!(!source.exists());
-        std::fs::remove_dir_all(root).ok();
-    }
-
-    #[test]
-    fn managed_directory_preserves_an_existing_isolated_directory() {
-        let root = temp_root("directory-conflict");
-        let source = root.join("legacy/plugins");
-        let isolated = root.join("isolated");
-        std::fs::create_dir_all(isolated.join("plugins")).unwrap();
-        std::fs::write(isolated.join("plugins/local.txt"), "isolated").unwrap();
-        std::fs::create_dir_all(&source).unwrap();
-
-        reconcile_links(&isolated, &[(source.clone(), PathBuf::from("plugins"))]).unwrap();
-
-        assert!(std::fs::symlink_metadata(isolated.join("plugins"))
-            .unwrap()
-            .file_type()
-            .is_symlink());
-        assert!(std::fs::read_dir(&isolated)
-            .unwrap()
-            .flatten()
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("plugins.orx-conflict-")
-            }));
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".orx-conflict-")));
+        let session = root.join("sessions/2026/08/25/rollout-session-id.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(session, "{}").unwrap();
+        assert!(tree_has_session(&root.join("sessions"), "session-id"));
+        assert!(!tree_has_session(&root.join("sessions"), "ession-id"));
+        let db = root.join("opencode.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch("CREATE TABLE session (id TEXT); INSERT INTO session VALUES ('id');")
+            .unwrap();
+        assert!(opencode_has_session(&db, "id"));
         std::fs::remove_dir_all(root).ok();
     }
 }

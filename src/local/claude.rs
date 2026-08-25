@@ -685,23 +685,6 @@ impl ClaudeHost {
         }
     }
 
-    pub async fn native_store_for(&self, session_id: &str) -> Option<NativeStore> {
-        let client = self.inner.lock().await.get(session_id).cloned()?;
-        if client.terminated.load(Ordering::Acquire)
-            || !matches!(client.child.lock().await.try_wait(), Ok(None))
-        {
-            let mut guard = self.inner.lock().await;
-            if guard
-                .get(session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &client))
-            {
-                guard.remove(session_id);
-            }
-            return None;
-        }
-        Some(client.config().native_store)
-    }
-
     pub fn start_reaper(self: &Arc<Self>) {
         let host = Arc::downgrade(self);
         let notify = self.reaper_notify.clone();
