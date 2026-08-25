@@ -39,6 +39,7 @@ use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
 
 pub struct OpenCode;
@@ -255,8 +256,12 @@ async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
 /// longer retitles parent sessions itself (only sub-agent child sessions get
 /// task-description titles), so the `session.updated` adoption path never
 /// fires for the session proper — this mirrors the claude/codex one-shot
-/// children instead. Any failure lands on `None` and keeps the placeholder.
+/// children instead. It uses a disposable database; any failure lands on
+/// `None` and keeps the placeholder.
 async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<String> {
+    let temp_store =
+        std::env::temp_dir().join(format!("orx-opencode-title-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_store).ok()?;
     let mut cmd = tokio::process::Command::new(bin);
     // The user's message is embedded in the prompt, so the child must not be
     // able to act on it: the built-in read-only `plan` agent denies writes,
@@ -279,13 +284,13 @@ async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<S
     // AGENTS.md into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("OPENCODE_DB", temp_store.join("opencode.db"));
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(super::title::TITLE_TIMEOUT, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let result = tokio::time::timeout(super::title::TITLE_TIMEOUT, cmd.output()).await;
+    std::fs::remove_dir_all(temp_store).ok();
+    let out = result.ok()?.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -299,6 +304,10 @@ async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env(
+        "OPENCODE_DB",
+        native_store::prepare_opencode(NativeStore::Isolated).ok()?,
+    );
     let fut = cmd.output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
         return None;
@@ -735,17 +744,58 @@ fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Respo
 }
 
 async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, reqwest::Response)> {
-    let status = ctx
+    let preferred_store = if ctx.native_session_id.is_some() {
+        ctx.host
+            .opencode
+            .native_store_for(&ctx.session_id)
+            .await
+            .unwrap_or(NativeStore::Isolated)
+    } else {
+        NativeStore::Isolated
+    };
+    let mut status = ctx
         .host
         .opencode
-        .ensure(&ctx.project, &ctx.session_id)
+        .ensure(&ctx.project, &ctx.session_id, preferred_store)
         .await?;
-    let port = status
-        .port
-        .ok_or(OpenCodeSetupProtocolError("opencode agent has no port"))?;
-    let base = format!("http://127.0.0.1:{port}");
+    if ctx.native_session_id.is_none() && status.native_store != NativeStore::Isolated {
+        ctx.host.opencode.kill_session(&ctx.session_id).await;
+        status = ctx
+            .host
+            .opencode
+            .ensure(&ctx.project, &ctx.session_id, NativeStore::Isolated)
+            .await?;
+    }
+    let mut base = opencode_base(&status)?;
     let native_id = match &ctx.native_session_id {
-        Some(id) => id.clone(),
+        Some(id) => {
+            let response = ctx
+                .http()
+                .get(format!("{base}/session/{id}"))
+                .send()
+                .await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND
+                && status.native_store == NativeStore::Isolated
+                && native_store::opencode_stores_are_distinct()
+            {
+                ctx.host.opencode.kill_session(&ctx.session_id).await;
+                status = ctx
+                    .host
+                    .opencode
+                    .ensure(&ctx.project, &ctx.session_id, NativeStore::Legacy)
+                    .await?;
+                base = opencode_base(&status)?;
+                let legacy = ctx
+                    .http()
+                    .get(format!("{base}/session/{id}"))
+                    .send()
+                    .await?;
+                opencode_setup_response(legacy)?;
+            } else {
+                opencode_setup_response(response)?;
+            }
+            id.clone()
+        }
         None => {
             let response = ctx
                 .http()
@@ -769,6 +819,13 @@ async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, re
     let events = ctx.http().get(format!("{base}/event")).send().await?;
     let events = opencode_setup_response(events)?;
     Ok((native_id, base, events))
+}
+
+fn opencode_base(status: &crate::local::opencode::AgentStatus) -> Result<String> {
+    let port = status
+        .port
+        .ok_or(OpenCodeSetupProtocolError("opencode agent has no port"))?;
+    Ok(format!("http://127.0.0.1:{port}"))
 }
 
 async fn opencode_pre_accept_setup(

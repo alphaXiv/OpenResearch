@@ -3408,28 +3408,84 @@ async fn validate_data_dir(Json(req): Json<DataDirReq>) -> ApiResult {
 /// permits a populated existing dir since nothing is copied.
 async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>) -> ApiResult {
     use crate::local::datadir::TargetIntent;
-    reject_if_moving(&state)?;
+    use std::sync::atomic::Ordering;
+
     ensure_not_env_forced()?;
+    reject_if_moving(&state)?;
     let path = req.path.trim().to_string();
     if path.is_empty() {
         return Err(bad_request("path is required"));
     }
-    // Validate before persisting so we never store a bad path.
-    let validate_path = path.clone();
-    tokio::task::spawn_blocking(move || {
-        crate::local::datadir::validate_target(
-            std::path::Path::new(&validate_path),
-            TargetIntent::Set,
-        )
-    })
-    .await
-    .map_err(|e| ApiError::from(anyhow!("validate task failed: {e}")))?
-    .map_err(bad_request)?;
-
-    tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
+    let _data_dir_guard = state.data_dir_gate.clone().lock_owned().await;
+    if state
+        .data_dir_move_in_progress
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A data-directory change is already in progress.".into(),
+        ));
+    }
+    let change_token = uuid::Uuid::new_v4().to_string();
+    let (change_store, _change_lock) = match Store::open().and_then(|store| {
+        let lock = store.acquire_data_dir_move_lock()?;
+        Ok((store, lock))
+    }) {
+        Ok(claim) => claim,
+        Err(_) => {
+            state
+                .data_dir_move_in_progress
+                .store(false, Ordering::SeqCst);
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Another dashboard is changing the data directory.".into(),
+            ));
+        }
+    };
+    if !change_store
+        .claim_data_dir_move(&change_token)
+        .unwrap_or(false)
+    {
+        state
+            .data_dir_move_in_progress
+            .store(false, Ordering::SeqCst);
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Can't change the data directory while another dashboard is using it.".into(),
+        ));
+    }
+    let result = async {
+        if !state.chat.busy_sessions().await.is_empty() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Can't change the data directory while a chat turn is active.".into(),
+            ));
+        }
+        // Validate before persisting so we never store a bad path.
+        let validate_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::local::datadir::validate_target(
+                std::path::Path::new(&validate_path),
+                TargetIntent::Set,
+            )
+        })
         .await
-        .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
-    Ok(Json(data_dir_json()))
+        .map_err(|e| ApiError::from(anyhow!("validate task failed: {e}")))?
+        .map_err(bad_request)?;
+
+        state.chat.shutdown_harnesses().await;
+        tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
+            .await
+            .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
+        Ok(Json(data_dir_json()))
+    }
+    .await;
+    let _ = change_store.release_data_dir_move(&change_token);
+    state
+        .data_dir_move_in_progress
+        .store(false, Ordering::SeqCst);
+    result
 }
 
 /// Relocate the data dir to `path`, streaming `datadir.move.*` progress events
@@ -3554,9 +3610,13 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         }
     }
 
+    let chat = state.chat.clone();
+    // Provider-native SQLite/session stores now live inside this directory.
+    // Close every idle harness child before the filesystem begins moving it.
+    chat.shutdown_harnesses().await;
+
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
-    let chat = state.chat.clone();
     let flag = state.data_dir_move_in_progress.clone();
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
@@ -3585,9 +3645,6 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
-                // Restart harness children so any that pinned the old data dir
-                // (Codex hard-pins $ORX_DATA_DIR at spawn) respawn on the new one.
-                chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
             }
             Ok(Err(e)) => chat.emit_event("datadir.move.error", json!({ "error": e.to_string() })),

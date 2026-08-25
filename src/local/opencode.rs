@@ -21,6 +21,7 @@ use tokio::sync::Mutex;
 use crate::error::{anyhow, Result};
 use crate::local::git;
 use crate::local::model::LocalProject;
+use crate::local::native_store::{self, NativeStore};
 use crate::store;
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -361,6 +362,8 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(skip)]
+    pub(crate) native_store: NativeStore,
 }
 
 struct AgentChild {
@@ -369,6 +372,7 @@ struct AgentChild {
     project_id: String,
     session_id: String,
     model: Option<String>,
+    native_store: NativeStore,
 }
 
 impl AgentChild {
@@ -379,6 +383,7 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
+            native_store: self.native_store,
         }
     }
 }
@@ -420,6 +425,7 @@ async fn spawn_agent(
     model: Option<&str>,
     session_id: &str,
     up_port: Option<u16>,
+    native_store: NativeStore,
 ) -> Result<AgentChild> {
     let bin = find_opencode()?;
     // The clone/worktree setup inside can hit the network; keep it off the
@@ -466,6 +472,7 @@ async fn spawn_agent(
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("OPENCODE_DB", native_store::prepare_opencode(native_store)?);
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
@@ -495,6 +502,7 @@ async fn spawn_agent(
         project_id: project.id.clone(),
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
+        native_store,
     })
 }
 
@@ -546,14 +554,33 @@ impl AgentHost {
         }
     }
 
+    pub async fn native_store_for(&self, session_id: &str) -> Option<NativeStore> {
+        let mut guard = self.inner.lock().await;
+        let agent = guard.get_mut(session_id)?;
+        if matches!(agent.child.try_wait(), Ok(None)) {
+            Some(agent.native_store)
+        } else {
+            guard.remove(session_id);
+            None
+        }
+    }
+
     /// Spawn (or reuse) the opencode server for this session. Idempotent when
     /// the session's server is already alive; a dead child is replaced.
-    pub async fn ensure(&self, project: &LocalProject, session_id: &str) -> Result<AgentStatus> {
+    pub async fn ensure(
+        &self,
+        project: &LocalProject,
+        session_id: &str,
+        native_store: NativeStore,
+    ) -> Result<AgentStatus> {
         let _spawning = self.spawn_lock.lock().await;
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
-                if agent.project_id == project.id && matches!(agent.child.try_wait(), Ok(None)) {
+                if agent.project_id == project.id
+                    && agent.native_store == native_store
+                    && matches!(agent.child.try_wait(), Ok(None))
+                {
                     return Ok(agent.status());
                 }
             }
@@ -568,6 +595,7 @@ impl AgentHost {
             self.model_override.as_deref(),
             session_id,
             self.up_port.get().copied(),
+            native_store,
         )
         .await?;
         let status = agent.status();

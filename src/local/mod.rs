@@ -25,6 +25,7 @@ pub mod latex_templates;
 pub mod localrun;
 pub mod modal;
 pub mod model;
+pub mod native_store;
 pub mod opencode;
 pub mod openresearch;
 pub mod projects;

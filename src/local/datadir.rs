@@ -1,5 +1,5 @@
-//! Relocating the orx data dir (`orx.db` + `run-logs/` + `files/` + legacy
-//! `memory/` + `chat-attachments/` + `agent-*.log`) to a user-chosen path.
+//! Relocating the orx data dir (`orx.db` + `agents/` + `run-logs/` + `files/` +
+//! legacy `memory/` + `chat-attachments/` + `agent-*.log`) to a user-chosen path.
 //!
 //! The whole dir is a self-contained, relocatable unit, so a move is: validate
 //! target → checkpoint the DB → copy the tree (streaming byte progress) → verify
@@ -205,10 +205,15 @@ pub fn move_data_dir(
     // pre-checkpoint total would mismatch the post-checkpoint copy and fail
     // verification (or mask a short copy).
     let total = dir_size(&source);
+    let total_links = symlink_count(&source);
 
-    // Same-filesystem + non-existent target → instant, atomic rename.
+    // Same-filesystem + non-existent target → instant, atomic rename, unless
+    // an absolute in-tree link needs retargeting by the copy path.
     let target_parent = target.parent().unwrap_or(&target);
-    if same_device(&source, target_parent) && !target.exists() {
+    if same_device(&source, target_parent)
+        && !target.exists()
+        && !has_internal_absolute_symlink(&source, &source)
+    {
         on_progress(MoveProgress {
             phase: MovePhase::Copying,
             copied_bytes: 0,
@@ -244,11 +249,14 @@ pub fn move_data_dir(
         total_bytes: total,
     });
     let copied_size = dir_size(&target);
-    if copied_size < total {
+    let copied_links = symlink_count(&target);
+    if copied_size < total || copied_links < total_links {
         return Err(anyhow!(
-            "Verification failed: copied {} but expected {}. Old data left untouched.",
+            "Verification failed: copied {} and {} links but expected {} and {} links. Old data left untouched.",
             human_bytes(copied_size),
-            human_bytes(total)
+            copied_links,
+            human_bytes(total),
+            total_links
         ));
     }
 
@@ -281,6 +289,18 @@ fn copy_tree(
     total: u64,
     on_progress: &impl Fn(MoveProgress),
 ) -> std::io::Result<()> {
+    copy_tree_inner(src, dst, src, dst, copied, total, on_progress)
+}
+
+fn copy_tree_inner(
+    src: &Path,
+    dst: &Path,
+    source_root: &Path,
+    target_root: &Path,
+    copied: &mut u64,
+    total: u64,
+    on_progress: &impl Fn(MoveProgress),
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
@@ -288,7 +308,15 @@ fn copy_tree(
         let ft = entry.file_type()?;
         if ft.is_dir() {
             std::fs::create_dir_all(&to)?;
-            copy_tree(&from, &to, copied, total, on_progress)?;
+            copy_tree_inner(
+                &from,
+                &to,
+                source_root,
+                target_root,
+                copied,
+                total,
+                on_progress,
+            )?;
         } else if ft.is_file() {
             let n = std::fs::copy(&from, &to)?;
             *copied += n;
@@ -297,10 +325,73 @@ fn copy_tree(
                 copied_bytes: *copied,
                 total_bytes: total,
             });
+        } else if ft.is_symlink() {
+            copy_symlink(&from, &to, source_root, target_root)?;
         }
-        // Symlinks and other special files are skipped — the data dir holds none.
+        // Other special files are runtime state and are not portable.
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(
+    from: &Path,
+    to: &Path,
+    source_root: &Path,
+    target_root: &Path,
+) -> std::io::Result<()> {
+    let target = relocated_link_target(std::fs::read_link(from)?, source_root, target_root);
+    std::os::unix::fs::symlink(target, to)
+}
+
+#[cfg(windows)]
+fn copy_symlink(
+    from: &Path,
+    to: &Path,
+    source_root: &Path,
+    target_root: &Path,
+) -> std::io::Result<()> {
+    use std::os::windows::fs::FileTypeExt;
+
+    let file_type = std::fs::symlink_metadata(from)?.file_type();
+    let target = relocated_link_target(std::fs::read_link(from)?, source_root, target_root);
+    if file_type.is_symlink_dir() {
+        std::os::windows::fs::symlink_dir(target, to)
+    } else {
+        std::os::windows::fs::symlink_file(target, to)
+    }
+}
+
+fn relocated_link_target(target: PathBuf, source_root: &Path, target_root: &Path) -> PathBuf {
+    if let Some(relative) = internal_link_relative(&target, source_root) {
+        return target_root.join(relative);
+    }
+    target
+}
+
+fn internal_link_relative(target: &Path, source_root: &Path) -> Option<PathBuf> {
+    if !target.is_absolute() {
+        return None;
+    }
+    if let Ok(relative) = target.strip_prefix(source_root) {
+        return Some(relative.to_path_buf());
+    }
+    let target = target.canonicalize().ok()?;
+    let source_root = source_root.canonicalize().ok()?;
+    target.strip_prefix(source_root).ok().map(Path::to_path_buf)
+}
+
+fn has_internal_absolute_symlink(dir: &Path, source_root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| match entry.file_type() {
+        Ok(kind) if kind.is_dir() => has_internal_absolute_symlink(&entry.path(), source_root),
+        Ok(kind) if kind.is_symlink() => std::fs::read_link(entry.path())
+            .ok()
+            .is_some_and(|target| internal_link_relative(&target, source_root).is_some()),
+        _ => false,
+    })
 }
 
 /// Recursive byte size of a directory tree (files only). Missing dir → 0.
@@ -318,6 +409,20 @@ fn dir_size(dir: &Path) -> u64 {
         }
     }
     total
+}
+
+fn symlink_count(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => symlink_count(&entry.path()),
+            Ok(kind) if kind.is_symlink() => 1,
+            _ => 0,
+        })
+        .sum()
 }
 
 /// Case/normalization-tolerant path equality after best-effort canonicalization.
@@ -432,6 +537,56 @@ mod tests {
         assert_eq!(
             std::fs::read(dst.join("run-logs/r.log")).unwrap(),
             b"log line\n"
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_preserves_managed_links() {
+        let base = tmp().join("copy-links");
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let dst = base.join("dst");
+        let shared = base.join("shared");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("auth.json"), "shared").unwrap();
+        std::os::unix::fs::symlink(shared.join("auth.json"), src.join("auth.json")).unwrap();
+
+        copy_tree(&src, &dst, &mut 0, 0, &|_| {}).unwrap();
+
+        assert!(std::fs::symlink_metadata(dst.join("auth.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(dst.join("auth.json")).unwrap(),
+            shared.join("auth.json")
+        );
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_tree_retargets_absolute_links_into_the_moved_tree() {
+        let base = tmp().join("copy-internal-links");
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let dst = base.join("dst");
+        std::fs::create_dir_all(src.join("files")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("files/data.txt"), "data").unwrap();
+        std::os::unix::fs::symlink(src.join("files/data.txt"), src.join("current")).unwrap();
+        assert!(has_internal_absolute_symlink(&src, &src));
+
+        let mut copied = 0;
+        copy_tree(&src, &dst, &mut copied, dir_size(&src), &|_| {}).unwrap();
+
+        assert_eq!(
+            std::fs::read_link(dst.join("current")).unwrap(),
+            dst.join("files/data.txt")
         );
         std::fs::remove_dir_all(&base).unwrap();
     }
