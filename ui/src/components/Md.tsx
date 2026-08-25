@@ -4,7 +4,7 @@
 // `<run id="..."/>` tags render as chips that open a run's logs — so the agent
 // can cite the code and the run behind a claim.
 
-import { Check, Copy, FileCode, ScrollText } from "lucide-react";
+import { Check, Copy, FileCode, PanelRight, ScrollText } from "lucide-react";
 import { memo, useMemo, useState, type ReactNode } from "react";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
 import { defaultUrlTransform } from "react-markdown";
@@ -214,7 +214,7 @@ function FileChip({
   return (
     <button
       className="file-chip"
-      title={`Open ${path}`}
+      title={onOpenFile ? `Open ${path} in the right pane` : path}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenFile?.(path, line, exp, undefined, intent),
       )}
@@ -222,6 +222,7 @@ function FileChip({
     >
       <FileCode size={12} />
       <span className="file-chip-label">{label}</span>
+      <PanelRight className="file-chip-open" size={12} aria-hidden="true" />
     </button>
   );
 }
@@ -241,12 +242,13 @@ function RunChip({
   return (
     <button
       className="file-chip run-chip"
-      title={`Open logs for run ${id}`}
+      title={onOpenRun ? `Open logs for run ${id} in the right pane` : `Run ${id}`}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun?.(id, intent))}
       disabled={!onOpenRun}
     >
       <ScrollText size={12} />
       <span className="file-chip-label">{label || "logs"}</span>
+      <PanelRight className="file-chip-open" size={12} aria-hidden="true" />
     </button>
   );
 }
