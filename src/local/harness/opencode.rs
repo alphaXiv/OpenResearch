@@ -739,13 +739,10 @@ fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Respo
     .into())
 }
 
-async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, reqwest::Response)> {
-    let store = match ctx.native_session_id.clone() {
-        Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session_store(&id))
-            .await
-            .map_err(|error| anyhow!("OpenCode session lookup failed: {error}"))?,
-        None => NativeStore::Isolated,
-    };
+async fn opencode_setup_attempt(
+    ctx: &mut TurnCtx,
+    store: NativeStore,
+) -> Result<(String, String, reqwest::Response)> {
     let status = ctx
         .host
         .opencode
@@ -784,10 +781,11 @@ async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, re
 
 async fn opencode_pre_accept_setup(
     ctx: &mut TurnCtx,
+    store: NativeStore,
 ) -> Result<(String, String, reqwest::Response)> {
     loop {
         let remaining = ctx.orx_retry_remaining();
-        let attempt = opencode_setup_attempt(ctx);
+        let attempt = opencode_setup_attempt(ctx, store);
         let result = match remaining {
             Some(remaining) => tokio::time::timeout(remaining, attempt)
                 .await
@@ -847,7 +845,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .resolve_stale_prompts(&ctx.session_id, true)
         .await?;
 
-    let (native_id, base, events) = opencode_pre_accept_setup(ctx).await?;
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session(&id))
+            .await
+            .map_err(|error| anyhow!("OpenCode session lookup failed: {error}"))??,
+        None => None,
+    };
+    let store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+        ctx.native_session_id = None;
+    }
+
+    let (native_id, base, events) = opencode_pre_accept_setup(ctx, store).await?;
     let mut stream = events.bytes_stream();
 
     let mut body = json!({

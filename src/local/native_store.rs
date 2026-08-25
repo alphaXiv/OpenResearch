@@ -12,6 +12,12 @@ pub enum NativeStore {
     Legacy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSessionLocation {
+    pub store: NativeStore,
+    pub path: PathBuf,
+}
+
 static LINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn user_env_path(key: &str) -> Option<PathBuf> {
@@ -59,80 +65,101 @@ pub fn codex_home(store: NativeStore) -> PathBuf {
     }
 }
 
-pub fn opencode_session_store(native_id: &str) -> NativeStore {
+pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
-    if isolated != legacy
-        && !opencode_has_session(&isolated, native_id)
-        && opencode_has_session(&legacy, native_id)
-    {
-        NativeStore::Legacy
-    } else {
-        NativeStore::Isolated
+    for (store, db) in [
+        (NativeStore::Isolated, isolated.clone()),
+        (NativeStore::Legacy, legacy),
+    ] {
+        if (store == NativeStore::Isolated || db != isolated)
+            && opencode_has_session(&db, native_id)?
+        {
+            return Ok(Some(NativeSessionLocation { store, path: db }));
+        }
     }
+    Ok(None)
 }
 
-fn opencode_has_session(db: &Path, native_id: &str) -> bool {
-    rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .and_then(|connection| {
-            connection.query_row("SELECT 1 FROM session WHERE id = ?1", [native_id], |_| {
-                Ok(())
-            })
-        })
-        .is_ok()
+fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
+    match std::fs::metadata(db) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    let connection =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    match connection.query_row("SELECT 1 FROM session WHERE id = ?1", [native_id], |_| {
+        Ok(())
+    }) {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
     (store == NativeStore::Isolated).then(|| format!("sqlite_home={}", toml_string(home)))
 }
 
-pub fn claude_session_store(native_id: &str) -> NativeStore {
-    session_store(claude_home, &["projects"], native_id)
+pub fn claude_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
+    session_location(claude_home, &["projects"], native_id)
 }
 
-pub fn codex_session_store(native_id: &str) -> NativeStore {
-    session_store(codex_home, &["sessions", "archived_sessions"], native_id)
+pub fn codex_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
+    session_location(codex_home, &["sessions", "archived_sessions"], native_id)
 }
 
-fn session_store(
+fn session_location(
     home: impl Fn(NativeStore) -> PathBuf,
     trees: &[&str],
     native_id: &str,
-) -> NativeStore {
+) -> Result<Option<NativeSessionLocation>> {
     let isolated = home(NativeStore::Isolated);
-    let legacy = home(NativeStore::Legacy);
-    let exists = |home: &Path| {
-        trees
-            .iter()
-            .any(|tree| tree_has_session(&home.join(tree), native_id))
-    };
-    if isolated != legacy && !exists(&isolated) && exists(&legacy) {
-        NativeStore::Legacy
-    } else {
-        NativeStore::Isolated
+    for (store, root) in [
+        (NativeStore::Isolated, isolated.clone()),
+        (NativeStore::Legacy, home(NativeStore::Legacy)),
+    ] {
+        if store == NativeStore::Legacy && root == isolated {
+            continue;
+        }
+        for tree in trees {
+            if let Some(path) = tree_session_path(&root.join(tree), native_id)? {
+                return Ok(Some(NativeSessionLocation { store, path }));
+            }
+        }
     }
+    Ok(None)
 }
 
-fn tree_has_session(root: &Path, native_id: &str) -> bool {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return false;
+fn tree_session_path(root: &Path, native_id: &str) -> Result<Option<PathBuf>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
     };
-    entries.flatten().any(|entry| {
+    for entry in entries {
+        let entry = entry?;
         let path = entry.path();
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            tree_has_session(&path, native_id)
-        } else {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.strip_suffix(".jsonl"))
-                .is_some_and(|name| {
-                    name == native_id
-                        || name
-                            .strip_suffix(native_id)
-                            .is_some_and(|prefix| prefix.ends_with('-'))
-                })
+        if entry.file_type()?.is_dir() {
+            if let Some(path) = tree_session_path(&path, native_id)? {
+                return Ok(Some(path));
+            }
+        } else if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".jsonl"))
+            .is_some_and(|name| {
+                name == native_id
+                    || name
+                        .strip_suffix(native_id)
+                        .is_some_and(|prefix| prefix.ends_with('-'))
+            })
+        {
+            return Ok(Some(path));
         }
-    })
+    }
+    Ok(None)
 }
 
 /// Quote a path for a TOML `-c` override; JSON escaping is compatible except for DEL.
@@ -419,14 +446,19 @@ mod tests {
         let session = root.join("sessions/2026/08/25/rollout-session-id.jsonl");
         std::fs::create_dir_all(session.parent().unwrap()).unwrap();
         std::fs::write(session, "{}").unwrap();
-        assert!(tree_has_session(&root.join("sessions"), "session-id"));
-        assert!(!tree_has_session(&root.join("sessions"), "ession-id"));
+        assert!(tree_session_path(&root.join("sessions"), "session-id")
+            .unwrap()
+            .is_some());
+        assert!(tree_session_path(&root.join("sessions"), "ession-id")
+            .unwrap()
+            .is_none());
         let db = root.join("opencode.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection
             .execute_batch("CREATE TABLE session (id TEXT); INSERT INTO session VALUES ('id');")
             .unwrap();
-        assert!(opencode_has_session(&db, "id"));
+        assert!(opencode_has_session(&db, "id").unwrap());
+        assert!(!opencode_has_session(&db, "missing").unwrap());
         std::fs::remove_dir_all(root).ok();
     }
 }

@@ -51,9 +51,9 @@ use super::{
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, prepare_env, set_chat_session_env, stored_to_wire, upsert_preserving_children,
-    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage,
-    WirePart, WirePrompt, WireQuestionOption, WireToolState,
+    find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
+    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage, WirePart,
+    WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
@@ -401,6 +401,10 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             // server cwd's AGENTS.md into a request that only needs a title.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
+        cmd.env(
+            "CODEX_HOME",
+            native_store::prepare_codex(NativeStore::Isolated).ok()?,
+        );
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the title column.
         cmd.env("NO_COLOR", "1");
@@ -1998,108 +2002,15 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn persisted_thread_was_rejected(error: &JsonRpcError) -> bool {
-    let message = error.message.to_ascii_lowercase();
-    // Unavailability is transient; only missing/invalid ids may discard recovery state.
-    message.contains("thread")
-        && [
-            "not found",
-            "no rollout found",
-            "unknown",
-            "invalid",
-            "does not exist",
-        ]
-        .iter()
-        .any(|needle| message.contains(needle))
-}
-
-const RECOVERY_SNAPSHOT_BYTES: usize = 32 * 1024;
-
-fn newest_utf8_tail(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut start = value.len() - max_bytes;
-    while !value.is_char_boundary(start) {
-        start += 1;
-    }
-    &value[start..]
-}
-
-fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
-    for part in parts {
-        match part.kind.as_str() {
-            "text" => {
-                if let Some(text) = part.text.as_deref().filter(|text| !text.trim().is_empty()) {
-                    lines.push(text.trim().to_string());
-                }
-            }
-            "tool" => {
-                let state = part.state.as_ref();
-                let label = state
-                    .and_then(|state| state.title.as_deref())
-                    .or(part.tool.as_deref())
-                    .unwrap_or("tool");
-                let status = state
-                    .map(|state| state.status.as_str())
-                    .unwrap_or("unknown");
-                lines.push(format!("[tool: {label} — {status}]"));
-            }
-            "prompt" => {
-                if let Some(prompt) = part.prompt.as_ref() {
-                    let outcome = if prompt.resolved {
-                        "resolved"
-                    } else {
-                        "unresolved"
-                    };
-                    lines.push(format!("[{} prompt — {outcome}]", prompt.kind));
-                }
-            }
-            _ => {}
-        }
-        recovery_part_lines(&part.children, lines);
-    }
-}
-
-fn codex_recovery_snapshot(session_id: &str, current_turn_id: &str) -> String {
-    let Ok(store) = Store::open() else {
-        return String::new();
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
+        return;
     };
-    let current_user_id = store
-        .get_chat_turn(session_id, current_turn_id)
-        .ok()
-        .flatten()
-        .and_then(|turn| turn.user_message_id);
-    let Ok(messages) = store.list_chat_messages(session_id) else {
-        return String::new();
-    };
-    let mut entries = Vec::new();
-    for message in messages {
-        if current_user_id.as_deref() == Some(message.id.as_str()) {
-            continue;
-        }
-        let wire = stored_to_wire(&message);
-        let mut lines = Vec::new();
-        recovery_part_lines(&wire.parts, &mut lines);
-        if !lines.is_empty() {
-            entries.push(format!("{}:\n{}", wire.role, lines.join("\n")));
-        }
-    }
-    let mut selected = Vec::new();
-    let mut bytes = 0;
-    for entry in entries.into_iter().rev() {
-        let cost = entry.len() + 2;
-        if bytes + cost > RECOVERY_SNAPSHOT_BYTES {
-            if selected.is_empty() {
-                selected.push(newest_utf8_tail(&entry, RECOVERY_SNAPSHOT_BYTES).to_string());
-            }
-            break;
-        }
-        bytes += cost;
-        selected.push(entry);
-    }
-    selected.reverse();
-    selected.join("\n\n")
+    let instructions = setup
+        .get("developerInstructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
 }
 
 async fn ensure_codex_pre_accept(
@@ -2168,10 +2079,14 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
 
-    let preferred_store = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_store(id).await?,
-        None => NativeStore::Isolated,
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
     };
+    let preferred_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
     let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
     let auto_review_supported =
         if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
@@ -2198,11 +2113,16 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
-    let thread_id = match ctx.native_session_id.clone() {
-        Some(id) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
-        Some(id) => {
+    let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
+        (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
+        (Some(_), None) => {
+            append_native_recovery_context(ctx, &mut thread_setup);
+            start_thread(ctx, &client, thread_setup).await?
+        }
+        (Some(id), Some(session)) => {
             let mut params = thread_setup.clone();
             params["threadId"] = Value::String(id.clone());
+            params["path"] = Value::String(session.path.to_string_lossy().into_owned());
             let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
             client = resume_client;
             match resumed {
@@ -2215,38 +2135,23 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     client.set_resumed_thread(&id);
                     id
                 }
-                // Codex *rejected* the id (e.g. minted by the old exec path,
-                // or the rollout is gone): start a fresh thread; prior context
-                // is lost either way. A transport failure, by contrast,
-                // propagates as the turn's error (the `?` above) — a resumable
-                // thread must never be discarded over a timeout/hiccup.
                 Err(err) => {
-                    if !persisted_thread_was_rejected(&err) {
+                    // Transport failures never reach this arm. Recover only if
+                    // the exact rollout disappeared after the initial lookup.
+                    if codex_native_session(&id).await?.is_some() {
                         ctx.mark_terminal_failure("json_rpc", err.to_string());
                         return Err(anyhow!("codex thread/resume failed: {err}"));
                     }
-                    eprintln!(
-                        "orx up: codex thread/resume rejected ({err}); starting a fresh thread"
-                    );
                     if client.native_store() != NativeStore::Isolated {
                         ctx.host.codex.kill_session(&ctx.session_id).await;
                         client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
-                    let snapshot = codex_recovery_snapshot(&ctx.session_id, &ctx.turn_id);
-                    if !snapshot.is_empty() {
-                        let instructions = thread_setup
-                            .get("developerInstructions")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        thread_setup["developerInstructions"] = Value::String(format!(
-                            "{instructions}\n\n<orx-recovery-context>\nThe persisted native Codex thread was unavailable. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{snapshot}\n</orx-recovery-context>"
-                        ));
-                    }
+                    append_native_recovery_context(ctx, &mut thread_setup);
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
         }
-        None => start_thread(ctx, &client, thread_setup).await?,
+        (None, _) => start_thread(ctx, &client, thread_setup).await?,
     };
 
     // Route events to this turn before starting it — nothing is missed.
@@ -3289,19 +3194,23 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             .await
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
-    let native_store = match ctx.native_session_id.as_deref() {
-        Some(id) => codex_native_store(id).await?,
-        None => NativeStore::Isolated,
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
     };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
     let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
         .await
         .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
-    match &ctx.native_session_id {
-        Some(native_id) => {
+    match (&ctx.native_session_id, &native_session) {
+        (Some(native_id), Some(_)) => {
             cmd.args(["exec", "resume", native_id]);
         }
-        None => {
+        _ => {
             cmd.arg("exec");
         }
     }
@@ -3392,8 +3301,13 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
         cmd.args(["-c", &override_arg]);
     }
-    let turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
-    let prompt = if ctx.native_session_id.is_none() {
+    let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+            turn_text = format!("{recovery}\n\n{turn_text}");
+        }
+    }
+    let prompt = if native_session.is_none() {
         let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
         format!(
             "<system-context>\n{playbook_md}\n</system-context>\n\n{}",
@@ -3576,11 +3490,13 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
-async fn codex_native_store(native_id: &str) -> Result<NativeStore> {
+async fn codex_native_session(
+    native_id: &str,
+) -> Result<Option<native_store::NativeSessionLocation>> {
     let native_id = native_id.to_string();
-    tokio::task::spawn_blocking(move || native_store::codex_session_store(&native_id))
+    tokio::task::spawn_blocking(move || native_store::codex_session(&native_id))
         .await
-        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))
+        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
 }
 
 fn legacy_exec_text(text: &str, plan_mode: bool) -> String {
@@ -3645,18 +3561,6 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
-
-    #[test]
-    fn missing_rollout_rejects_the_persisted_thread() {
-        let error = JsonRpcError {
-            code: -32600,
-            message: "no rollout found for thread id 019fac1e".to_string(),
-            data: None,
-        };
-
-        assert!(persisted_thread_was_rejected(&error));
-    }
-
     use serde_json::json;
 
     fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
@@ -5620,14 +5524,5 @@ requires_openai_auth = false
             )),
             None
         );
-    }
-
-    #[test]
-    fn recovery_snapshot_tail_respects_utf8_byte_limit() {
-        let value = format!("old{}new", "🦀".repeat(10));
-        let tail = newest_utf8_tail(&value, 12);
-        assert!(tail.len() <= 12);
-        assert!(tail.ends_with("new"));
-        assert!(value.ends_with(tail));
     }
 }

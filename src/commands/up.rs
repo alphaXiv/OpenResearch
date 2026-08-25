@@ -3880,6 +3880,8 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
+                // Close any child spawned while a cross-filesystem copy ran.
+                chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
             }
             Ok(Err(e)) => chat.emit_event("datadir.move.error", json!({ "error": e.to_string() })),

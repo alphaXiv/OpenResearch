@@ -400,6 +400,10 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
     // cwd's CLAUDE.md / settings into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude(NativeStore::Isolated).ok()?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
@@ -1903,13 +1907,25 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // cards are deliberately left alone — they resume via --resume.
     let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
 
-    let resume = ctx.native_session_id.clone();
-    let native_store = match resume.clone() {
-        Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session_store(&id))
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
             .await
-            .map_err(|error| anyhow!("Claude session lookup failed: {error}"))?,
-        None => NativeStore::Isolated,
+            .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??,
+        None => None,
     };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let resume = ctx
+        .native_session_id
+        .clone()
+        .filter(|_| native_session.is_some());
+    if ctx.native_session_id.is_some() && resume.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+    }
     let base_spec = SpawnSpec {
         chat: ctx.host.clone(),
         session_id: ctx.session_id.clone(),
