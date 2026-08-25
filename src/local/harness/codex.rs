@@ -285,15 +285,30 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
         .model_reasoning_effort
 }
 
-/// Whether `config.toml` declares an explicit model catalog. Only then is the
-/// app-server `model/list` catalog meaningful for a custom provider: with no
-/// `model_catalog_json`, codex falls back to its bundled first-party list,
-/// which says nothing about the models a custom endpoint actually serves.
-fn has_model_catalog(raw: &str) -> bool {
-    toml::from_str::<CodexConfig>(raw)
-        .ok()
-        .and_then(|cfg| cfg.model_catalog_json)
-        .is_some_and(|path| !path.trim().is_empty())
+/// Keep the configured model first without discarding catalog metadata.
+/// With either input absent, preserve the other as-is.
+fn custom_provider_models(
+    configured_model: Option<&str>,
+    catalog: Option<Vec<ModelInfo>>,
+) -> Vec<ModelInfo> {
+    let Some(configured_model) = configured_model else {
+        return catalog.unwrap_or_default();
+    };
+    let Some(mut models) = catalog else {
+        return vec![ModelInfo::new(configured_model)];
+    };
+    match models.iter().position(|model| model.id == configured_model) {
+        Some(0) => {}
+        Some(index) => {
+            let configured = models.remove(index);
+            models.insert(0, configured);
+        }
+        None => {
+            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
+            models.insert(0, ModelInfo::new(configured_model));
+        }
+    }
+    models
 }
 
 #[derive(Deserialize)]
@@ -306,6 +321,7 @@ struct CodexProvider {
 struct CustomProvider {
     model: Option<String>,
     env_key: Option<String>,
+    has_model_catalog: bool,
 }
 
 impl CustomProvider {
@@ -331,6 +347,9 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     Some(CustomProvider {
         model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
+        has_model_catalog: cfg
+            .model_catalog_json
+            .is_some_and(|path| !path.trim().is_empty()),
     })
 }
 
@@ -503,35 +522,25 @@ impl Harness for Codex {
 
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            // A custom provider's models are its own — never the first-party
-            // catalog. When the config declares an explicit model catalog
-            // (`model_catalog_json`), ask the installed CLI which models it
-            // makes visible (the same live `model/list` the first-party path
-            // uses) so the picker can offer every model the provider serves,
-            // with the configured model as the "Default model" entry. Without a
-            // declared catalog the CLI falls back to its bundled first-party
-            // list, which is meaningless for a custom endpoint, so offer only
-            // the configured model then (or nothing when none is set).
-            let catalog_declared = config_raw.as_deref().is_some_and(has_model_catalog);
-            // Only a custom provider with an explicit catalog pays for the
-            // app-server probe; first-party accounts use their own branch below.
-            let custom_catalog = if custom_provider.is_some() {
-                match (info.bin_path.as_deref().map(Path::new), catalog_declared) {
-                    (Some(bin), true) => codex_model_list(bin, configured_effort.as_deref()).await,
-                    _ => None,
+            // A custom provider's bundled first-party catalog is meaningless,
+            // so probe only when its config declares an explicit catalog.
+            let custom_catalog = match (
+                custom_provider.as_ref(),
+                info.bin_path.as_deref().map(Path::new),
+            ) {
+                (Some(provider), Some(bin)) if provider.has_model_catalog => {
+                    codex_model_list(bin, configured_effort.as_deref()).await
                 }
-            } else {
-                None
+                _ => None,
             };
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
-                Some(Some(model)) => {
-                    info = info
-                        .with_models(custom_catalog.unwrap_or_else(|| vec![ModelInfo::new(model)]))
+                Some(configured_model) => {
+                    info =
+                        info.with_models(custom_provider_models(configured_model, custom_catalog))
                 }
-                Some(None) => info = info.with_models(custom_catalog.unwrap_or_default()),
                 None => {
                     // First-party account: ask the installed CLI for its own
                     // catalog (models + per-model efforts, the data codex's TUI
@@ -3625,6 +3634,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
+
     #[test]
     fn custom_provider_uses_its_env_key_and_configured_model() {
         // The exact shape from the bug report: a gateway provider that opts out
@@ -3698,12 +3711,13 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn model_catalog_gates_the_custom_provider_catalog_probe() {
+    fn custom_provider_records_whether_a_model_catalog_is_declared() {
         // A declared catalog (the DeepSeek-style setup) means the app-server
         // `model/list` reflects the provider's own models, so orx should probe
         // it and offer every listed model.
-        assert!(has_model_catalog(
-            r#"
+        assert!(
+            parse_custom_provider(
+                r#"
 model = "deepseek-v4-flash"
 model_provider = "deepseek"
 model_catalog_json = "~/.codex/models.json"
@@ -3713,14 +3727,18 @@ base_url = "https://api.deepseek.com/"
 wire_api = "responses"
 requires_openai_auth = false
 "#,
-        ));
+            )
+            .unwrap()
+            .has_model_catalog
+        );
 
         // A bare gateway provider has no explicit catalog; the CLI would fall
         // back to its bundled first-party list, so orx keeps offering only the
         // configured model instead of a catalog that says nothing about the
         // endpoint.
-        assert!(!has_model_catalog(
-            r#"
+        assert!(
+            !parse_custom_provider(
+                r#"
 model = "gateway-model"
 model_provider = "custom"
 
@@ -3729,7 +3747,59 @@ base_url = "https://gateway.example/v1"
 wire_api = "responses"
 requires_openai_auth = false
 "#,
-        ));
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(
+            !parse_custom_provider(
+                r#"
+model_provider = "custom"
+model_catalog_json = "  "
+[model_providers.custom]
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(parse_custom_provider("not toml ===").is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_keep_the_configured_model_first() {
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![
+                ModelInfo::new("first"),
+                ModelInfo::new("configured").with_label(Some("Configured model"), None),
+                ModelInfo::new("last"),
+            ]),
+        );
+
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
+
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert!(models[0].reasoning_levels.is_none());
+        assert!(models[0].default_reasoning_level.is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_preserve_catalog_fallbacks() {
+        let models = custom_provider_models(Some("configured"), None);
+        assert_eq!(model_ids(&models), ["configured"]);
+
+        let models = custom_provider_models(
+            None,
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["first", "last"]);
+        assert!(custom_provider_models(None, None).is_empty());
     }
 
     #[test]
