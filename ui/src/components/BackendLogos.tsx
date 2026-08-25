@@ -29,6 +29,8 @@ function backendName(kind: string): string {
       return "OpenResearch";
     case "local_job":
       return "This machine";
+    case "tinker_job":
+      return "Tinker";
     default:
       return kind || "—";
   }

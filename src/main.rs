@@ -453,8 +453,9 @@ pub struct ExpRunArgs {
     /// (a batch job on your Slurm cluster, submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
-    /// `orx login`), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, and local are local
+    /// `orx login`), `tinker` (a local controller using remote Tinker model
+    /// compute), or `local` (a detached process on this machine). k8s,
+    /// ssh, slurm, ray, openresearch, tinker, and local are local
     /// experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.

@@ -435,6 +435,24 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    TinkerCompute,
+    "tinker",
+    "Tinker",
+    false,
+    false,
+    false,
+    "local controller, remote model compute",
+    false,
+    preflight | _args | {
+        crate::jobs::tinker::resolve_api_key()?;
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::localrun::submit_tinker_run_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
     HuggingFaceCompute,
     "hf",
     "Hugging Face Jobs",
@@ -609,6 +627,7 @@ backend_adapter!(
 pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
     match id {
         "local" => Ok(Box::new(LocalCompute)),
+        "tinker" => Ok(Box::new(TinkerCompute)),
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
@@ -646,13 +665,25 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
             "--provider only applies with --backend openresearch."
         ));
     }
+    if args.backend.as_deref() == Some("tinker") {
+        if args.flavor.is_some() {
+            return Err(anyhow!("--backend tinker does not take --flavor."));
+        }
+        if args.image.is_some() {
+            return Err(anyhow!("--image does not apply to --backend tinker."));
+        }
+        if args.timeout.is_some() {
+            return Err(anyhow!("--timeout does not apply to --backend tinker."));
+        }
+    }
     if let Some(backend) = args.backend.as_deref() {
         if !crate::local::BACKENDS.contains(&backend) {
             return Err(anyhow!(
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                  slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                 openresearch (an ephemeral OpenResearch box), local (this machine).",
+                 openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
+                 local (this machine).",
                 backend
             ));
         }
@@ -836,5 +867,53 @@ fn not_ready(detail: impl Into<String>) -> Preflight {
     Preflight {
         ready: false,
         detail: Some(detail.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tinker_args() -> crate::ExpRunArgs {
+        crate::ExpRunArgs {
+            exp_id: "exp".into(),
+            disk: None,
+            provider: None,
+            backend: Some("tinker".into()),
+            flavor: None,
+            org: None,
+            host: None,
+            manifest: None,
+            image: None,
+            timeout: None,
+            force: false,
+            chat_session_id: None,
+        }
+    }
+
+    #[test]
+    fn tinker_is_registered_as_a_local_controller_without_flavors() {
+        let capabilities = backend("tinker").unwrap().capabilities();
+        assert_eq!(capabilities.id, "tinker");
+        assert!(!capabilities.remote);
+        assert!(!capabilities.flavors);
+        assert_eq!(
+            capabilities.source_transport,
+            "local controller, remote model compute"
+        );
+    }
+
+    #[test]
+    fn tinker_rejects_provider_launch_options() {
+        let mut args = tinker_args();
+        assert!(validate_run_args(&args).is_ok());
+        args.flavor = Some("gpu".into());
+        assert!(validate_run_args(&args).is_err());
+        args.flavor = None;
+        args.image = Some("python:3.11".into());
+        assert!(validate_run_args(&args).is_err());
+        args.image = None;
+        args.timeout = Some("1h".into());
+        assert!(validate_run_args(&args).is_err());
     }
 }

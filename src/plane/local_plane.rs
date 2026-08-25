@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::{CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog};
 use crate::error::{anyhow, Result};
+use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::{log_path, Store};
 use crate::ExpRunArgs;
@@ -283,12 +284,14 @@ impl LocalPlane {
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
+                Some("tinker") => crate::local::localrun::launch_tinker_run(&args).await,
                 Some("local") => crate::local::localrun::launch_local_run(&args).await,
                 Some(other) => Err(anyhow!(
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                      slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                     openresearch (an ephemeral OpenResearch box), local (this machine).",
+                     openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
+                     local (this machine).",
                     other
                 )),
                 None => Err(anyhow!(
@@ -304,6 +307,7 @@ impl LocalPlane {
                      `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
                      `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
                      e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
+                     `--backend tinker` (a local controller using remote Tinker model compute), \
                      or `--backend local` (a detached process on this machine)."
                 )),
             },
@@ -335,6 +339,14 @@ impl LocalPlane {
                 None => crate::commands::exp::request_local_run_cancel(store, &r.id)?,
             }
             println!("\u{2713} Cancel requested for run {}.", r.id);
+            if BackendDescriptor::parse(&r.backend_json)
+                .is_ok_and(|descriptor| descriptor.kind == "tinker_job")
+            {
+                println!(
+                    "  Stopping the controller prevents new requests, but accepted Tinker operations may continue.\n  Review or stop remaining work at {}",
+                    crate::jobs::tinker::CONSOLE_URL
+                );
+            }
         }
         Ok(())
     }

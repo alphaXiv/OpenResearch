@@ -88,6 +88,10 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
         path: "references/local.md",
         content: include_str!("../../agent-skills/orx-compute/references/local.md"),
     },
+    AgentSkillResource {
+        path: "references/tinker.md",
+        content: include_str!("../../agent-skills/orx-compute/references/tinker.md"),
+    },
 ];
 const EXPERIMENT_TREE: &str = include_str!("../../agent-skills/orx-experiment-tree/SKILL.md");
 const GIT: &str = include_str!("../../agent-skills/orx-git/SKILL.md");
@@ -105,7 +109,7 @@ const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md"
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
-const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
+const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
 const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
@@ -420,6 +424,8 @@ mod tests {
         assert_eq!(hf.path, "references/hf.md");
         let (_, k8s) = find_resource("orx-compute/references/k8s.md", SkillSet::Local).unwrap();
         assert_eq!(k8s.path, "references/k8s.md");
+        let (_, tinker) = find_resource("compute/tinker", SkillSet::Local).unwrap();
+        assert_eq!(tinker.path, "references/tinker.md");
         assert!(find_resource("compute/unknown", SkillSet::Local).is_none());
     }
 
@@ -549,6 +555,10 @@ mod tests {
         let hf =
             std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/hf.md")).unwrap();
         assert!(hf.contains("Hugging Face Jobs"));
+        let tinker =
+            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/tinker.md"))
+                .unwrap();
+        assert!(tinker.contains("TINKER_API_KEY"));
         assert!(!tmp.join(rel).join("orx-compute-k8s").exists());
         let _ = std::fs::remove_dir_all(tmp);
     }

@@ -812,6 +812,7 @@ export const rayPreflight = (address?: string) =>
 
 export type ComputeTargetId =
   | "local"
+  | "tinker"
   | "hf"
   | "modal"
   | "k8s"

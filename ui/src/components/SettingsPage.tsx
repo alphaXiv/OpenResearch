@@ -1060,6 +1060,23 @@ function LocalSection() {
   );
 }
 
+function TinkerSection() {
+  return (
+    <>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+        <code>--backend tinker</code> runs the experiment controller as a supervised process on
+        this machine; the project&apos;s Tinker SDK sends model operations to Tinker. The
+        project must add and lock <code>tinker</code> or <code>tinker-cookbook</code>, and this
+        machine must stay awake while the controller runs.
+      </p>
+      <p className={SETTINGS_NOTE_CLASS_NAME}>
+        Stopping a run stops its local controller. Work already accepted by Tinker may continue;
+        orx opens the Tinker dashboard so you can review or stop remaining work there.
+      </p>
+    </>
+  );
+}
+
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection() {
@@ -1149,6 +1166,7 @@ function OpenResearchSection() {
 
 const TARGET_LABELS: Record<ComputeTargetId, string> = {
   local: "This machine",
+  tinker: "Tinker",
   hf: "HF Jobs",
   modal: "Modal",
   k8s: "Kubernetes",
@@ -1161,6 +1179,7 @@ const TARGET_LABELS: Record<ComputeTargetId, string> = {
 /** Kind strings from the runs table — reuses the instances-table logos. */
 const TARGET_KIND: Record<ComputeTargetId, string> = {
   local: "local_job",
+  tinker: "tinker_job",
   hf: "hf_job",
   modal: "modal_job",
   k8s: "k8s_job",
@@ -1371,6 +1390,7 @@ function TargetRow({
             <DefaultFlavorEditor target={target.id} flavor={defaultFlavor} projectId={projectId} onSaved={onSettings} />
           )}
           {target.id === "local" && <LocalSection />}
+          {target.id === "tinker" && <TinkerSection />}
           {target.id === "hf" && <HfSection />}
           {target.id === "modal" && <ModalSection />}
           {target.id === "k8s" && <K8sSection />}
@@ -1659,7 +1679,7 @@ function HfHintRow() {
 
 // Keys runs typically need (HF_TOKEN is also read by orx itself), always
 // shown as rows alongside custom variables.
-const RECOMMENDED_ENV_KEYS = ["HF_TOKEN", "WANDB_API_KEY"];
+const RECOMMENDED_ENV_KEYS = ["TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"];
 
 /** One variable row. Set: masked value + delete. Unset: inline value input. */
 function EnvRow({
@@ -1888,8 +1908,9 @@ function EnvVarsSection() {
       </div>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
         Stored in <code>~/.openresearch/env</code> and passed to runs and the research agent.{" "}
-        <code>HF_TOKEN</code> and <code>WANDB_API_KEY</code> are always listed since runs
-        typically need them. Variables set in orx's own environment win on conflicts.
+        <code>TINKER_API_KEY</code>, <code>HF_TOKEN</code>, and <code>WANDB_API_KEY</code> are
+        always listed since runs typically need them. Variables set in orx&apos;s own environment
+        win on conflicts.
       </p>
       {loadError ? (
         <div className="error">{loadError}</div>

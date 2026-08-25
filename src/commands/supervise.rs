@@ -93,7 +93,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     if descriptor.kind == "openresearch_job" {
         return run_openresearch(store, stored, descriptor, run_id).await;
     }
-    if descriptor.kind == "local_job" {
+    if matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
         return run_local(store, stored, descriptor, run_id).await;
     }
     let (namespace, job_id) = descriptor.hf_ref()?;
@@ -963,10 +963,10 @@ async fn run_local(
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status.clone();
             if cancel_requested && !cancel_sent {
-                cancel_local(&dir, &run_id, &mut cancel_sent);
+                cancel_local(dir.clone(), &run_id, &mut cancel_sent).await;
             }
         } else if !cancel_sent && local_cancel_requested(&store, &run_id) {
-            cancel_local(&dir, &run_id, &mut cancel_sent);
+            cancel_local(dir.clone(), &run_id, &mut cancel_sent).await;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -1013,11 +1013,13 @@ async fn tail_logs_local(
     }
 }
 
-fn cancel_local(dir: &std::path::Path, run_id: &str, cancel_sent: &mut bool) {
+async fn cancel_local(dir: std::path::PathBuf, run_id: &str, cancel_sent: &mut bool) {
     eprintln!("supervise {run_id}: cancel requested — killing local process group");
-    match localbox::cancel_job(dir) {
-        Ok(()) => *cancel_sent = true,
-        Err(err) => eprintln!("supervise {run_id}: local cancel failed (will retry): {err}"),
+    let result = tokio::task::spawn_blocking(move || localbox::cancel_job(&dir)).await;
+    match result {
+        Ok(Ok(())) => *cancel_sent = true,
+        Ok(Err(err)) => eprintln!("supervise {run_id}: local cancel failed (will retry): {err}"),
+        Err(err) => eprintln!("supervise {run_id}: local cancel task failed (will retry): {err}"),
     }
 }
 

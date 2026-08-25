@@ -32,6 +32,8 @@ pub struct LocalJobSpec {
     pub script: String,
     /// Exported inside run.sh (tokens, synced env) — written owner-only.
     pub env: HashMap<String, String>,
+    /// Inherited by the controller without being written into run.sh.
+    pub secret_env: HashMap<String, String>,
 }
 
 /// Submit the job: write run.sh, launch it detached in its own process group
@@ -70,6 +72,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 
     let mut cmd = std::process::Command::new("bash");
     cmd.arg("run.sh")
+        .envs(&spec.secret_env)
         .current_dir(&dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -186,32 +189,80 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
     Ok(seen)
 }
 
-/// Cancel = TERM the process group (pid == pgid under `process_group(0)`);
-/// fall back to the pid alone if the group kill is refused.
+/// Give cooperative cleanup a chance before forcibly terminating the process
+/// group. Success means the group is confirmed gone.
 pub fn cancel_job(dir: &Path) -> Result<()> {
-    let pid = std::fs::read_to_string(dir.join("pid"))
+    cancel_job_with_timeout(dir, std::time::Duration::from_secs(5))
+}
+
+fn cancel_job_with_timeout(dir: &Path, wait: std::time::Duration) -> Result<()> {
+    let raw = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
-    let pid = pid.trim().to_string();
-    let group = std::process::Command::new("kill")
-        .args(["-TERM", "--", &format!("-{pid}")])
+    let pid: u32 = raw
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("Invalid local process id: {}", raw.trim()))?;
+    if !process_group_alive(pid) {
+        return Ok(());
+    }
+    for signal in ["INT", "TERM"] {
+        signal_process_group(pid, signal)?;
+        if wait_until_gone(wait, || process_group_alive(pid)) {
+            return Ok(());
+        }
+    }
+    signal_process_group(pid, "KILL")?;
+    if wait_until_gone(wait, || process_group_alive(pid)) {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Could not confirm local process group {pid} exited after SIGKILL"
+        ))
+    }
+}
+
+fn process_group_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
+        .is_ok_and(|status| status.success())
+}
+
+fn signal_process_group(pid: u32, signal: &str) -> Result<()> {
+    let group = std::process::Command::new("kill")
+        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false);
-    if !group {
-        let process = std::process::Command::new("kill")
-            .args(["-TERM", &pid])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !process {
-            return Err(anyhow!("Could not terminate local process group {pid}"));
-        }
+    if group || !process_group_alive(pid) {
+        return Ok(());
     }
-    Ok(())
+    let process = std::process::Command::new("kill")
+        .args([&format!("-{signal}"), &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if process {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Could not send SIG{signal} to local process group {pid}"
+        ))
+    }
+}
+
+fn wait_until_gone(wait: std::time::Duration, mut alive: impl FnMut() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    while alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    !alive()
 }
 
 /// What "this machine" is, for the Compute settings card: the hardware a
@@ -352,8 +403,9 @@ mod tests {
 
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
-            script: "echo hello-$ORX_TEST_VAR".into(),
+            script: "[ -n \"$TINKER_API_KEY\" ] && echo hello-$ORX_TEST_VAR".into(),
             env: HashMap::from([("ORX_TEST_VAR".to_string(), "42".to_string())]),
+            secret_env: HashMap::from([("TINKER_API_KEY".to_string(), "s3cr3t-value".to_string())]),
         })
         .unwrap();
         let state = wait_terminal(&dir);
@@ -361,6 +413,7 @@ mod tests {
         // Python is defaulted to unbuffered so tailed-`log` output streams live.
         let run_sh = std::fs::read_to_string(dir.join("run.sh")).unwrap();
         assert!(run_sh.contains("export PYTHONUNBUFFERED='1'\n"));
+        assert!(!run_sh.contains("s3cr3t-value"));
 
         let mut lines = Vec::new();
         let seen = stream_logs(&dir, 0, &mut |l| lines.push(l.to_string())).unwrap();
@@ -373,6 +426,7 @@ mod tests {
             run_id: "failing".into(),
             script: "exit 3".into(),
             env: HashMap::new(),
+            secret_env: HashMap::new(),
         })
         .unwrap();
         let state = wait_terminal(&failed);
@@ -381,16 +435,36 @@ mod tests {
 
         let cancelled = run_job(&LocalJobSpec {
             run_id: "cancelled".into(),
-            script: "sleep 60".into(),
+            script: "trap 'exit 0' INT; while :; do sleep 1; done".into(),
             env: HashMap::new(),
+            secret_env: HashMap::new(),
         })
         .unwrap();
         assert_eq!(inspect_job(&cancelled).stage, "RUNNING");
         cancel_job(&cancelled).unwrap();
         let state = wait_terminal(&cancelled);
-        // TERM leaves either a dead pid with no exit_code, or a non-zero
-        // exit_code if run.sh got to write one — ERROR either way.
-        assert_eq!(state.stage, "ERROR");
+        assert_eq!(state.stage, "COMPLETED");
+
+        let forced = run_job(&LocalJobSpec {
+            run_id: "forced".into(),
+            script: "trap '' INT TERM; while :; do sleep 1; done".into(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+        })
+        .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let forced_pid: u32 = std::fs::read_to_string(forced.join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        cancel_job_with_timeout(&forced, std::time::Duration::from_millis(100)).unwrap();
+        assert!(!process_group_alive(forced_pid));
+
+        assert!(!wait_until_gone(
+            std::time::Duration::from_millis(20),
+            || true
+        ));
 
         std::env::remove_var("ORX_DATA_DIR");
         let _ = std::fs::remove_dir_all(&base);
