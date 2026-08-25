@@ -1,5 +1,5 @@
-//! Relocating the orx data dir (`orx.db` + `run-logs/` + `files/` + legacy
-//! `memory/` + `chat-attachments/` + `agent-*.log`) to a user-chosen path.
+//! Relocating the orx data dir (`orx.db` + `agents/` + `run-logs/` + `files/` +
+//! legacy `memory/` + `chat-attachments/` + `agent-*.log`) to a user-chosen path.
 //!
 //! The whole dir is a self-contained, relocatable unit, so a move is: validate
 //! target → checkpoint the DB → copy the tree (streaming byte progress) → verify
@@ -297,8 +297,10 @@ fn copy_tree(
                 copied_bytes: *copied,
                 total_bytes: total,
             });
+        } else if ft.is_symlink() {
+            super::native_store::copy_symlink(&from, &to)?;
         }
-        // Symlinks and other special files are skipped — the data dir holds none.
+        // Other special files are runtime state.
     }
     Ok(())
 }

@@ -10,8 +10,8 @@
 //! transcript in `harness/codex.rs` tests): notifications and server requests
 //! carry camelCase params; approval replies are `{"decision": "accept" |
 //! "acceptForSession" | "decline" | "cancel"}` (wrapped, not bare); thread ids
-//! are plain UUIDs persisted as rollout files under `~/.codex/sessions`, so
-//! `thread/resume {threadId}` survives an `orx up` restart.
+//! are plain UUIDs persisted as rollout files under the selected `CODEX_HOME`,
+//! so `thread/resume {threadId}` survives an `orx up` restart.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::error::{anyhow, Result};
 use crate::local::harness::codex::{ensure_orx_data_dir, find_codex_required};
+use crate::local::native_store::{self, NativeStore};
 
 /// Ceiling on a request's response wait — generous because `thread/start`
 /// blocks on the user's own MCP servers coming up.
@@ -200,6 +201,7 @@ pub struct CodexClient {
     /// non-plan turn must attach `default` to un-stick it. `None` on a fresh
     /// child (crash/restart replacement) — the DB signal covers that case.
     last_collab_mode: std::sync::Mutex<Option<&'static str>>,
+    native_store: NativeStore,
 }
 
 impl CodexClient {
@@ -378,6 +380,10 @@ impl CodexClient {
         *self.last_collab_mode.lock().unwrap() = Some(mode);
     }
 
+    pub fn native_store(&self) -> NativeStore {
+        self.native_store
+    }
+
     pub fn set_active_turn(&self, turn_id: &str) {
         *self.active_turn.lock().unwrap() = Some(turn_id.to_string());
     }
@@ -553,15 +559,28 @@ async fn read_loop(client: Arc<CodexClient>, stdout: tokio::process::ChildStdout
 /// Spawn `codex app-server` (no handshake yet — see `CodexHost::ensure`, which
 /// registers the client *before* the handshake so every kill path can reach
 /// the child even if the spawning turn task is aborted mid-handshake).
-async fn spawn_client(session_id: &str, up_port: Option<u16>) -> Result<Arc<CodexClient>> {
+async fn spawn_client(
+    session_id: &str,
+    up_port: Option<u16>,
+    native_store: NativeStore,
+) -> Result<Arc<CodexClient>> {
     let bin = find_codex_required()?;
+    let codex_home = tokio::task::spawn_blocking(move || {
+        crate::local::native_store::prepare_codex(native_store)
+    })
+    .await
+    .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
-    cmd.arg("app-server")
-        .stdin(Stdio::piped())
+    cmd.arg("app-server");
+    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+        cmd.args(["-c", &override_arg]);
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(crate::local::chat::harness_log("codex")?))
         .kill_on_drop(true);
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("CODEX_HOME", codex_home);
     // Stamp the launching session (one app-server child per orx session) so a
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
@@ -603,6 +622,7 @@ async fn spawn_client(session_id: &str, up_port: Option<u16>) -> Result<Arc<Code
         resumed_thread: std::sync::Mutex::new(None),
         thread_model: std::sync::Mutex::new(None),
         last_collab_mode: std::sync::Mutex::new(None),
+        native_store,
     });
     tokio::spawn(read_loop(client.clone(), stdout));
     Ok(client)
@@ -684,33 +704,46 @@ impl CodexHost {
     /// One consequence of registering before the handshake: a reuse hit may
     /// briefly hand out a still-mid-handshake client; its requests fail
     /// cleanly (server "not initialized" / closed) and the next turn recovers.
-    pub async fn ensure(self: &Arc<Self>, session_id: &str) -> Result<Arc<CodexClient>> {
+    pub async fn ensure(
+        self: &Arc<Self>,
+        session_id: &str,
+        native_store: NativeStore,
+    ) -> Result<Arc<CodexClient>> {
         let _spawning = self.spawn_lock.lock().await;
         {
             let mut guard = self.inner.lock().await;
             if let Some(client) = guard.get(session_id) {
-                if matches!(client.child.lock().await.try_wait(), Ok(None)) {
+                if client.native_store() == native_store
+                    && matches!(client.child.lock().await.try_wait(), Ok(None))
+                {
                     return Ok(client.clone());
                 }
-                guard.remove(session_id);
+            }
+            if let Some(stale) = guard.remove(session_id) {
+                let _ = stale.child.lock().await.kill().await;
             }
         }
         let host = self.clone();
         let session = session_id.to_string();
         tokio::spawn(async move {
-            let client = spawn_client(&session, host.up_port.get().copied()).await?;
+            let client = spawn_client(&session, host.up_port.get().copied(), native_store).await?;
             // Never displace a live entry: if an abandoned bring-up's insert
             // races a successor's (spawn_lock was released by the abort), the
             // loser kills its own child and defers to the live one.
             {
                 let mut guard = host.inner.lock().await;
                 if let Some(existing) = guard.get(&session) {
-                    if matches!(existing.child.lock().await.try_wait(), Ok(None)) {
+                    if existing.native_store() == native_store
+                        && matches!(existing.child.lock().await.try_wait(), Ok(None))
+                    {
                         let existing = existing.clone();
                         drop(guard);
                         let _ = client.child.lock().await.kill().await;
                         return Ok(existing);
                     }
+                }
+                if let Some(stale) = guard.remove(&session) {
+                    let _ = stale.child.lock().await.kill().await;
                 }
                 guard.insert(session.clone(), client.clone());
             }

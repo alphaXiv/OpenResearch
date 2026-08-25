@@ -1201,7 +1201,7 @@ async fn create_project(
     } else {
         (project, None)
     };
-    crate::telemetry::capture_project_created();
+    crate::telemetry::capture_project_created(true);
     Ok(Json(json!({
         "project": project_json(&project),
         "githubPublicationError": github_publication_error,
@@ -3732,9 +3732,11 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     .map_err(|e| ApiError::from(anyhow!("validate task failed: {e}")))?
     .map_err(bad_request)?;
 
+    state.chat.shutdown_harnesses().await;
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
         .await
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
+    state.chat.shutdown_harnesses().await;
     Ok(Json(data_dir_json()))
 }
 
@@ -3860,9 +3862,13 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         }
     }
 
+    let chat = state.chat.clone();
+    // Provider-native SQLite/session stores now live inside this directory.
+    // Close every idle harness child before the filesystem begins moving it.
+    chat.shutdown_harnesses().await;
+
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
-    let chat = state.chat.clone();
     let flag = state.data_dir_move_in_progress.clone();
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
@@ -3891,8 +3897,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
-                // Restart harness children so any that pinned the old data dir
-                // (Codex hard-pins $ORX_DATA_DIR at spawn) respawn on the new one.
+                // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
             }
