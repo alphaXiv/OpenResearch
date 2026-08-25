@@ -101,11 +101,14 @@ fn pid_alive(pid: &str) -> bool {
     {
         Ok(o) if o.status.success() => {
             let stat = String::from_utf8_lossy(&o.stdout);
-            let stat = stat.trim();
-            !stat.is_empty() && !stat.starts_with('Z')
+            live_process_state(stat.trim())
         }
         _ => false,
     }
+}
+
+fn live_process_state(state: &str) -> bool {
+    !state.is_empty() && !state.starts_with('Z')
 }
 
 /// The terminal state recorded in exit_code, if any. An empty file is run.sh
@@ -222,17 +225,33 @@ fn cancel_job_with_timeout(dir: &Path, wait: std::time::Duration) -> Result<()> 
 }
 
 fn process_group_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", "--", &format!("-{pid}")])
-        .stdout(std::process::Stdio::null())
+    // A dropped Child can remain as a zombie, so group existence alone is insufficient.
+    match std::process::Command::new("ps")
+        .args(["-axo", "pgid=,stat="])
         .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            process_table_has_live_group(&String::from_utf8_lossy(&output.stdout), pid)
+        }
+        // Without process states, fail closed and leave cancellation retryable.
+        _ => true,
+    }
+}
+
+fn process_table_has_live_group(table: &str, pid: u32) -> bool {
+    table.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let Some(pgid) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
+            return false;
+        };
+        pgid == pid && fields.next().is_some_and(live_process_state)
+    })
 }
 
 fn signal_process_group(pid: u32, signal: &str) -> Result<()> {
     let group = std::process::Command::new("kill")
-        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
+        .args([&format!("-{signal}"), &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -241,28 +260,22 @@ fn signal_process_group(pid: u32, signal: &str) -> Result<()> {
     if group || !process_group_alive(pid) {
         return Ok(());
     }
-    let process = std::process::Command::new("kill")
-        .args([&format!("-{signal}"), &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if process {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Could not send SIG{signal} to local process group {pid}"
-        ))
-    }
+    Err(anyhow!(
+        "Could not send SIG{signal} to local process group {pid}"
+    ))
 }
 
 fn wait_until_gone(wait: std::time::Duration, mut alive: impl FnMut() -> bool) -> bool {
     let deadline = std::time::Instant::now() + wait;
-    while alive() && std::time::Instant::now() < deadline {
+    loop {
+        if !alive() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    !alive()
 }
 
 /// What "this machine" is, for the Compute settings card: the hardware a
@@ -381,6 +394,16 @@ mod tests {
         assert_eq!(odd.len(), 1, "GPU kept even without a memory field");
         assert_eq!(odd[0].name, "Tesla T4");
         assert_eq!(odd[0].mem_mib, None);
+    }
+
+    #[test]
+    fn process_group_liveness_ignores_zombies_but_not_live_members() {
+        let table = "3059 Z\n3059 Z+\n4012 Ss\n";
+        assert!(!process_table_has_live_group(table, 3059));
+        assert!(process_table_has_live_group(table, 4012));
+        assert!(process_table_has_live_group("  4012 Ss\n", 4012));
+        assert!(!process_table_has_live_group(table, 9999));
+        assert!(process_table_has_live_group("3059 Z\n3059 S\n", 3059));
     }
 
     fn wait_terminal(dir: &Path) -> JobState {
