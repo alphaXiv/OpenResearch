@@ -2016,7 +2016,13 @@ fn persisted_thread_was_rejected(error: &JsonRpcError) -> bool {
     let message = error.message.to_ascii_lowercase();
     // Unavailability is transient; only missing/invalid ids may discard recovery state.
     message.contains("thread")
-        && ["not found", "unknown", "invalid", "does not exist"]
+        && [
+            "not found",
+            "no rollout found",
+            "unknown",
+            "invalid",
+            "does not exist",
+        ]
             .iter()
             .any(|needle| message.contains(needle))
 }
@@ -3723,6 +3729,17 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    #[test]
+    fn missing_rollout_rejects_the_persisted_thread() {
+        let error = JsonRpcError {
+            code: -32600,
+            message: "no rollout found for thread id 019fac1e".to_string(),
+            data: None,
+        };
+
+        assert!(persisted_thread_was_rejected(&error));
+    }
 
     #[test]
     fn legacy_exec_rollout_lookup_checks_active_and_archived_trees() {
