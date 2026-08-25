@@ -91,6 +91,26 @@ jobs:
           name: artifacts-plan-dist-manifest
           path: plan-dist-manifest.json
 
+  telemetry-contract:
+    needs: plan
+    if: ${{ github.repository == 'alphaXiv/openresearch-cli' && needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-22.04
+    env:
+      ORX_OFFICIAL_RELEASE_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify production telemetry accepts this release payload
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked telemetry::tests::production_contract_is_accepted -- --ignored --exact 2>&1 | tee /tmp/telemetry-contract.log
+          grep -q "1 passed; 0 failed" /tmp/telemetry-contract.log
+
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
@@ -235,8 +255,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - custom-verify-build-channel
+      - telemetry-contract
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.telemetry-contract.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"
