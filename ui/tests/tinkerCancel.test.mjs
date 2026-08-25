@@ -31,8 +31,12 @@ test("Tinker dialog keeps cancellation errors visible and implements accessible 
 });
 
 test("Tinker is always visible in compute and environment settings", async () => {
-  const settings = await source("../src/components/SettingsPage.tsx");
+  const [settings, logos] = await Promise.all([
+    source("../src/components/SettingsPage.tsx"),
+    source("../src/components/BackendLogos.tsx"),
+  ]);
   assert.match(settings, /tinker: "Tinker"/);
   assert.match(settings, /target\.id === "tinker"/);
   assert.match(settings, /"TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"/);
+  assert.match(logos, /case "tinker_job":\s+return <TinkerLogo/);
 });
