@@ -19,13 +19,17 @@ pub async fn run(args: crate::SkillArgs) -> Result<()> {
             println!("{}", skill.content.trim_end());
             return Ok(());
         }
+        if let Some((_, resource)) = agent_skills::find_resource(&path, current_skill_set()) {
+            println!("{}", resource.content.trim_end());
+            return Ok(());
+        }
         let available = agent_skills::skills(current_skill_set())
             .iter()
             .map(|skill| skill.name)
             .collect::<Vec<_>>()
             .join(", ");
         return Err(anyhow!(
-            "Unknown bundled skill {path:?}. Available skills: {available}"
+            "Unknown bundled skill or resource {path:?}. Available skills: {available}"
         ));
     }
 

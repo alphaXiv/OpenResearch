@@ -1,10 +1,10 @@
 //! Native modular agent skills for `orx`.
 //!
 //! The monolithic `orx skill` overview (repo-root `SKILL.md`) is factored into a
-//! handful of focused modules that live as **literal, complete skill files** in
-//! the repo `agent-skills/` directory (`agent-skills/<name>/SKILL.md`,
-//! frontmatter included — readable as-is on GitHub) and are embedded in the
-//! binary at compile time and installed verbatim. Two consumers use them:
+//! handful of focused modules that live as complete skill packages in the repo
+//! `agent-skills/` directory (`agent-skills/<name>/SKILL.md` plus optional
+//! resources), readable as-is on GitHub, embedded in the binary, and installed
+//! verbatim. Two consumers use them:
 //!
 //! * **Local `orx up` sessions** get the [`SkillSet::Local`] modules written as
 //!   native `SKILL.md` skill dirs *into the session worktree* — fresh on every
@@ -13,7 +13,8 @@
 //!   `.agents/skills`), so the session's own agent auto-discovers them and never
 //!   sees drift.
 //! * **`orx skill <name>`** resolves a bundled module (with or without the
-//!   `orx-` prefix) and prints it; the no-arg overview lists the same set.
+//!   `orx-` prefix) and prints it; `<name>/<resource>` prints one of its bundled
+//!   references. The no-arg overview lists the top-level set.
 //!   `orx install-skills --full` writes the Full set into an agent's global
 //!   skills dir.
 //!
@@ -25,35 +26,78 @@ use std::path::Path;
 
 use crate::error::{anyhow, Result};
 
-/// One embedded skill module: its public name (== skill dir name == the `name:`
-/// frontmatter field), a one-line description (mirrored in the file's
-/// frontmatter — a test enforces they agree), and the complete `SKILL.md`
-/// contents, installed and printed verbatim.
+/// One file bundled inside a skill package, relative to the skill directory.
+pub struct AgentSkillResource {
+    pub path: &'static str,
+    pub content: &'static str,
+}
+
+/// One embedded skill package: its public metadata, complete `SKILL.md`, and
+/// optional lazily loaded resources.
 pub struct AgentSkill {
     pub name: &'static str,
     pub description: &'static str,
     pub content: &'static str,
+    pub resources: &'static [AgentSkillResource],
 }
+
+pub const RETIRED_SKILL_NAMES: &[&str] = &["orx-lit", "orx-compute-k8s"];
 
 /// Which module set to serve. Both sets use the same canonical module bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkillSet {
     /// Skills installed into an active `orx up` project session.
     Local,
-    /// The complete set, including local project onboarding guidance.
+    /// The complete set, including project onboarding guidance.
     Full,
 }
 
 // --- Module files (embedded verbatim from the repo `agent-skills/` dir) ------
 
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
-const COMPUTE_K8S: &str = include_str!("../../agent-skills/orx-compute-k8s/SKILL.md");
+const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
+    AgentSkillResource {
+        path: "references/hf.md",
+        content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
+    },
+    AgentSkillResource {
+        path: "references/modal.md",
+        content: include_str!("../../agent-skills/orx-compute/references/modal.md"),
+    },
+    AgentSkillResource {
+        path: "references/k8s.md",
+        content: include_str!("../../agent-skills/orx-compute/references/k8s.md"),
+    },
+    AgentSkillResource {
+        path: "references/ssh.md",
+        content: include_str!("../../agent-skills/orx-compute/references/ssh.md"),
+    },
+    AgentSkillResource {
+        path: "references/slurm.md",
+        content: include_str!("../../agent-skills/orx-compute/references/slurm.md"),
+    },
+    AgentSkillResource {
+        path: "references/ray.md",
+        content: include_str!("../../agent-skills/orx-compute/references/ray.md"),
+    },
+    AgentSkillResource {
+        path: "references/openresearch.md",
+        content: include_str!("../../agent-skills/orx-compute/references/openresearch.md"),
+    },
+    AgentSkillResource {
+        path: "references/local.md",
+        content: include_str!("../../agent-skills/orx-compute/references/local.md"),
+    },
+];
 const EXPERIMENT_TREE: &str = include_str!("../../agent-skills/orx-experiment-tree/SKILL.md");
 const GIT: &str = include_str!("../../agent-skills/orx-git/SKILL.md");
-const LIT: &str = include_str!("../../agent-skills/orx-lit/SKILL.md");
+const AGENT_DELEGATION: &str = include_str!("../../agent-skills/orx-agent-delegation/SKILL.md");
+const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
 const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
+const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -61,48 +105,68 @@ const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
-const D_COMPUTE: &str = "Launch experiment runs with `orx exp run`: backends (hf, modal, k8s, ssh, slurm, ray, openresearch, local), flavors, timeouts, images, sizing, and choosing `orx exp wait` vs `orx exp wake`. Use before launching or re-launching any run, when choosing or switching a backend or GPU flavor, when a job OOMs, stalls, or times out, or when deciding GPU vs CPU.";
-const D_EXPERIMENT_TREE: &str = "The experiment-tree model and the auto-research loop: shape the tree (stacked bushes), branch/launch/wait/promote, and `orx exp desc` notes. Use before creating, planning, or reorganizing experiments, when deciding what to try next, when a round of runs finishes, or whenever you're unsure how work maps onto the tree.";
+const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
+const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
     name: "orx-compute",
     description: D_COMPUTE,
     content: COMPUTE,
-};
-const S_COMPUTE_K8S: AgentSkill = AgentSkill {
-    name: "orx-compute-k8s",
-    description: "Run an experiment on your own Kubernetes cluster (`orx exp run --backend k8s`): the single-pod committed-manifest contract orx enforces at submit. Use when the user names k8s, kubernetes, or a cluster, before writing or editing `.orx/k8s.yaml`, or when a k8s submit is rejected.",
-    content: COMPUTE_K8S,
+    resources: COMPUTE_RESOURCES,
 };
 const S_EXPERIMENT_TREE: AgentSkill = AgentSkill {
     name: "orx-experiment-tree",
     description: D_EXPERIMENT_TREE,
     content: EXPERIMENT_TREE,
+    resources: &[],
 };
 const S_GIT: AgentSkill = AgentSkill {
     name: "orx-git",
-    description: "Read, edit, commit, and diff experiment code with local Git. Use whenever you touch an experiment branch, compare nodes, prepare a run, or diagnose stale code.",
+    description: "Read, edit, commit, and diff experiment code; coordinate shared worktrees and preserve frozen branch history. Use before branch work, when starting work alongside other sessions, comparing nodes, preparing a run, repairing a provisional node, or diagnosing stale code.",
     content: GIT,
+    resources: &[],
+};
+const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
+    name: "orx-agent-delegation",
+    description: "Delegate independent work to helper agent sessions with `orx agent spawn`: task selection, self-contained briefs, branch ownership, compute authorization, wakeups, and nesting or concurrency constraints. Use before spawning a helper or interpreting its result; do not delegate the literature retrieval loop.",
+    content: AGENT_DELEGATION,
+    resources: &[],
 };
 const S_LIT: AgentSkill = AgentSkill {
-    name: "orx-lit",
-    description: "Search literature and read papers via alphaXiv, OpenAlex, and bioRxiv (`orx lit` / `orx paper`) — the preferred tool for literature search on any academic topic across CS/ML and biomed: a paper, author, blog post, or model release. Start here, not a web search: find related work, baselines, and code to seed from. Often the corpus answers outright and no web search is needed.",
+    name: "orx-lit-review",
+    description: "Search and read research papers. The main agent calls alphaXiv, OpenAlex, and bioRxiv discovery primitives, ranks the combined candidates, and chooses sources for focused follow-ups. Use for literature reviews, related work, prior art, papers, authors, methods, benchmarks, or research claims; never delegate the retrieval loop to a sub-agent.",
     content: LIT,
+    resources: &[],
 };
 const S_CREATE: AgentSkill = AgentSkill {
     name: "orx-create",
-    description: "Initialize a local project with `orx up` and add local experiment nodes with `orx create-experiment`. Use when starting a project or experiment, when the local tree is empty, or when choosing a baseline, parent, or run command.",
+    description: "Initialize a project with `orx up` and add experiment nodes with `orx create-experiment`. Use when starting a project or experiment, when the tree is empty, or when choosing a baseline, parent, or run command.",
     content: CREATE,
+    resources: &[],
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Write durable research outputs into the local project's artifacts directory. Use when a line of work concludes, when the user asks for a write-up, summary, comparison, figures, or exported data, or before ending a long task — findings not written down are lost.",
+    description: "Write durable outputs into the artifacts directory. Use when a line of work concludes or the user asks for a write-up, summary, comparison, figures, or exported data.",
     content: REPORTS,
+    resources: &[],
+};
+const S_PAPER: AgentSkill = AgentSkill {
+    name: "orx-paper",
+    description: "Draft an academic paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use for a paper, preprint, manuscript, arXiv or submission draft, or a section of one; generic reports and result summaries belong to `orx-reports`.",
+    content: PAPER,
+    resources: &[],
 };
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
-    description: "Analyze run results through `orx logs`. Use after any run reaches a terminal state, before declaring a run a success or failure, when metrics are missing from output, or when designing what a run command should print.",
+    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
     content: EVIDENCE,
+    resources: &[],
+};
+const S_INSTANCES: AgentSkill = AgentSkill {
+    name: "orx-instances",
+    description: "Create standalone OpenResearch compute instances with `orx instance create`. Use when the user wants a persistent machine for manual or ad-hoc work rather than an experiment run.",
+    content: INSTANCES,
+    resources: &[],
 };
 
 /// The modules for a given set, in a stable order. Full adds `create`; every
@@ -112,20 +176,24 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
         SkillSet::Local => vec![
             &S_EXPERIMENT_TREE,
             &S_GIT,
+            &S_AGENT_DELEGATION,
             &S_COMPUTE,
-            &S_COMPUTE_K8S,
+            &S_INSTANCES,
             &S_EVIDENCE,
             &S_REPORTS,
+            &S_PAPER,
             &S_LIT,
         ],
         SkillSet::Full => vec![
             &S_CREATE,
             &S_EXPERIMENT_TREE,
             &S_GIT,
+            &S_AGENT_DELEGATION,
             &S_COMPUTE,
-            &S_COMPUTE_K8S,
+            &S_INSTANCES,
             &S_EVIDENCE,
             &S_REPORTS,
+            &S_PAPER,
             &S_LIT,
         ],
     }
@@ -141,19 +209,60 @@ pub fn find(name: &str, set: SkillSet) -> Option<&'static AgentSkill> {
         .find(|s| s.name == want || s.name.strip_prefix("orx-") == Some(want))
 }
 
+/// Resolve a lazily loaded skill resource. `compute/hf` is shorthand for
+/// `compute/references/hf.md`; exact relative paths are also accepted.
+pub fn find_resource(
+    path: &str,
+    set: SkillSet,
+) -> Option<(&'static AgentSkill, &'static AgentSkillResource)> {
+    let (skill_name, requested) = path.trim().split_once('/')?;
+    let skill = find(skill_name, set)?;
+    let exact = requested.trim();
+    let shorthand = format!("references/{exact}.md");
+    skill
+        .resources
+        .iter()
+        .find(|resource| resource.path == exact || resource.path == shorthand)
+        .map(|resource| (skill, resource))
+}
+
 /// Write the [`SkillSet::Local`] modules as `<worktree>/<skills_dir_rel>/<name>/SKILL.md`,
 /// overwriting every file on every call (same freshness semantics as the
 /// playbook — zero drift). Returns `Err` on the first write failure; the caller
 /// treats it like a playbook-write error.
 pub fn ensure_session_skills(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
+    for name in RETIRED_SKILL_NAMES {
+        let dir = base.join(name);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(anyhow!("Could not remove {}: {}", dir.display(), error));
+            }
+        }
+    }
     for skill in skills(SkillSet::Local) {
         let dir = base.join(skill.name);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir)
+                .map_err(|e| anyhow!("Could not refresh {}: {}", dir.display(), e))?;
+        }
         std::fs::create_dir_all(&dir)
             .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
         let path = dir.join("SKILL.md");
         std::fs::write(&path, skill.content)
             .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
+        for resource in skill.resources {
+            let resource_path = dir.join(resource.path);
+            let parent = resource_path
+                .parent()
+                .ok_or_else(|| anyhow!("Invalid skill resource path {}", resource.path))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
+            std::fs::write(&resource_path, resource.content)
+                .map_err(|e| anyhow!("Could not write {}: {}", resource_path.display(), e))?;
+        }
     }
     Ok(())
 }
@@ -196,6 +305,22 @@ mod tests {
                     "{:?}: duplicate name {:?}",
                     set,
                     s.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn retired_names_are_prefixed_and_not_current() {
+        for name in RETIRED_SKILL_NAMES {
+            assert!(
+                name.starts_with("orx-"),
+                "unsafe retired skill name: {name}"
+            );
+            for set in [SkillSet::Local, SkillSet::Full] {
+                assert!(
+                    skills(set).iter().all(|skill| skill.name != *name),
+                    "{name} is both retired and current"
                 );
             }
         }
@@ -290,22 +415,67 @@ mod tests {
             Some("orx-create")
         );
         assert!(find("orx-create", SkillSet::Local).is_none());
+        assert!(find("orx-compute-k8s", SkillSet::Full).is_none());
+        let (_, hf) = find_resource("compute/hf", SkillSet::Local).unwrap();
+        assert_eq!(hf.path, "references/hf.md");
+        let (_, k8s) = find_resource("orx-compute/references/k8s.md", SkillSet::Local).unwrap();
+        assert_eq!(k8s.path, "references/k8s.md");
+        assert!(find_resource("compute/unknown", SkillSet::Local).is_none());
     }
 
     #[test]
     fn shared_skills_use_one_canonical_body() {
-        for name in ["experiment-tree", "git", "compute", "evidence", "reports"] {
+        for name in [
+            "experiment-tree",
+            "git",
+            "agent-delegation",
+            "compute",
+            "instances",
+            "evidence",
+            "reports",
+        ] {
             let local = find(name, SkillSet::Local).expect("local skill");
             let full = find(name, SkillSet::Full).expect("full skill");
             assert_eq!(local.content, full.content, "{name} body");
+            let local_resources: Vec<_> = local
+                .resources
+                .iter()
+                .map(|resource| (resource.path, resource.content))
+                .collect();
+            let full_resources: Vec<_> = full
+                .resources
+                .iter()
+                .map(|resource| (resource.path, resource.content))
+                .collect();
+            assert_eq!(local_resources, full_resources, "{name} resources");
         }
     }
 
     #[test]
-    fn reports_skill_links_written_artifacts() {
-        assert!(REPORTS.contains("cite every relevant output as raw"));
-        assert!(REPORTS.contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(REPORTS.contains("never as a bare or backticked path"));
+    fn evidence_and_reports_have_distinct_ownership() {
+        assert!(EVIDENCE.contains("Validate before reporting"));
+        assert!(EVIDENCE.contains("Truncated output is not evidence of absence"));
+        assert!(!EVIDENCE.contains("<file path="));
+        assert!(REPORTS.contains("evidence-and-links contract"));
+        assert!(REPORTS.contains("Load `orx-evidence`"));
+    }
+
+    #[test]
+    fn paper_skill_writes_a_compilable_tex_and_cites_it() {
+        assert!(PAPER.contains("keep the `.tex` out of the artifacts"));
+        assert!(PAPER.contains("evidence-and-links contract"));
+        assert!(PAPER.contains("`orx-lit-review` workflow"));
+        assert!(PAPER.contains("`orx discover`"));
+        // The trap that makes a draft fail to compile rather than look wrong.
+        assert!(PAPER.contains("Every environment needs the package that defines it"));
+        assert!(PAPER.contains("\\newtheorem"));
+        // \citet without natbib is a hard build failure the preview never shows.
+        assert!(PAPER.contains("natbib"));
+        // The engine a document needs travels in the file, not in a setting.
+        assert!(PAPER.contains("% !TeX program"));
+        for set in [SkillSet::Local, SkillSet::Full] {
+            assert_eq!(find("paper", set).map(|s| s.name), Some("orx-paper"));
+        }
     }
 
     #[test]
@@ -316,7 +486,18 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         let rel = ".claude/skills";
+        for name in RETIRED_SKILL_NAMES {
+            let retired = tmp.join(rel).join(name);
+            std::fs::create_dir_all(&retired).unwrap();
+            std::fs::write(retired.join("SKILL.md"), "stale").unwrap();
+        }
         ensure_session_skills(&tmp, rel).unwrap();
+        for name in RETIRED_SKILL_NAMES {
+            assert!(
+                !tmp.join(rel).join(name).exists(),
+                "retired bundled skill was pruned"
+            );
+        }
 
         let base = tmp.join(rel);
         let expected: HashSet<&str> = skills(SkillSet::Local).iter().map(|s| s.name).collect();
@@ -331,6 +512,15 @@ mod tests {
             let path = base.join(s.name).join("SKILL.md");
             let content = std::fs::read_to_string(&path).unwrap();
             assert_eq!(content, s.content, "{} SKILL.md content", s.name);
+            for resource in s.resources {
+                let content =
+                    std::fs::read_to_string(base.join(s.name).join(resource.path)).unwrap();
+                assert_eq!(
+                    content, resource.content,
+                    "{} {} content",
+                    s.name, resource.path
+                );
+            }
         }
 
         // Idempotent: a second call overwrites in place and changes nothing.
@@ -355,8 +545,11 @@ mod tests {
         assert!(git.contains("do not push merely to launch compute"));
         let compute = std::fs::read_to_string(tmp.join(rel).join("orx-compute/SKILL.md")).unwrap();
         assert!(compute.contains("immutable source snapshot"));
-        assert!(compute.contains("Hugging Face Jobs"));
-        assert!(tmp.join(rel).join("orx-compute-k8s").exists());
+        assert!(compute.contains("references/hf.md"));
+        let hf =
+            std::fs::read_to_string(tmp.join(rel).join("orx-compute/references/hf.md")).unwrap();
+        assert!(hf.contains("Hugging Face Jobs"));
+        assert!(!tmp.join(rel).join("orx-compute-k8s").exists());
         let _ = std::fs::remove_dir_all(tmp);
     }
 
@@ -366,6 +559,12 @@ mod tests {
             for skill in skills(set) {
                 crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.content);
                 crate::local::assert_agent_guidance_is_ui_agnostic(skill.name, skill.description);
+                for resource in skill.resources {
+                    crate::local::assert_agent_guidance_is_ui_agnostic(
+                        resource.path,
+                        resource.content,
+                    );
+                }
             }
         }
     }

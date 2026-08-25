@@ -30,10 +30,14 @@ export function MediaPreview({
   kind,
   url,
   name,
+  downloadBar = true,
 }: {
   kind: MediaPreviewKind;
   url: string;
   name: string;
+  /** The footer download strip. Off where the surrounding view offers its own
+   * download control and the preview should fill the pane. */
+  downloadBar?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
 
@@ -91,9 +95,11 @@ export function MediaPreview({
   return (
     <div className="flex h-full min-h-0 flex-col">
       {preview}
-      <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-right text-xs">
-        <a href={url} download={name}>Download {name}</a>
-      </div>
+      {downloadBar && (
+        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-right text-xs">
+          <a href={url} download={name}>Download {name}</a>
+        </div>
+      )}
     </div>
   );
 }

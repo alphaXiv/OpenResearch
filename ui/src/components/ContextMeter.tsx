@@ -1,4 +1,8 @@
 import { fmtTokens, type ContextUsage } from "../api";
+import {
+  COMPOSER_CONTROL_CLASS_NAME,
+  COMPOSER_ICON_CONTROL_CLASS_NAME,
+} from "../styleClasses";
 import { usePopover } from "./ModelPicker";
 import { ProgressBar } from "./ProgressBar";
 
@@ -34,7 +38,7 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
     <div className="option-picker relative inline-flex shrink-0" ref={ref}>
       <button
         type="button"
-        className="composer-bare inline-flex items-center gap-[3px] text-md text-text py-[5px] px-1 rounded-sm transition-[background] duration-150 ease-standard [&:hover]:bg-surface [&.context-ring]:inline-flex [&.context-ring]:items-center [&.context-ring]:mr-2 context-ring"
+        className={`${pct === null ? `${COMPOSER_CONTROL_CLASS_NAME} px-1` : COMPOSER_ICON_CONTROL_CLASS_NAME} composer-bare context-ring text-md text-text`}
         title="Context window used"
         onClick={() => setOpen((v) => !v)}
       >

@@ -35,7 +35,7 @@ pub fn alphaxiv_web_url() -> String {
 }
 
 /// Base URL for the OpenAlex REST API (scholarly works search). Public, no
-/// token. Backs `orx lit --source openalex|biorxiv`. Override with `OPENALEX_API_URL`.
+/// token. Backs OpenAlex and bioRxiv discovery. Override with `OPENALEX_API_URL`.
 pub fn openalex_api_url() -> String {
     std::env::var("OPENALEX_API_URL").unwrap_or_else(|_| "https://api.openalex.org".to_string())
 }
@@ -126,6 +126,52 @@ pub async fn clear_credentials() -> Result<()> {
     }
 }
 
+/// Where the Overleaf Git authentication token lives. Deliberately *not*
+/// `~/.openresearch/env`: `list_synced_env` fans that file out to every compute
+/// backend and into the agent's environment, and nothing off this machine
+/// pushes to Overleaf.
+fn overleaf_token_path() -> PathBuf {
+    config_dir().join("overleaf.json")
+}
+
+#[derive(Serialize, Deserialize)]
+struct OverleafToken {
+    token: String,
+}
+
+pub fn overleaf_token() -> Option<String> {
+    let raw = std::fs::read_to_string(overleaf_token_path()).ok()?;
+    let stored: OverleafToken = serde_json::from_str(&raw).ok()?;
+    let token = stored.token.trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+/// Writes the token owner-only, like `save_credentials` beside it.
+pub fn set_overleaf_token(token: &str) -> Result<()> {
+    let path = overleaf_token_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(&OverleafToken {
+        token: token.to_string(),
+    })?;
+    std::fs::write(&path, format!("{body}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn clear_overleaf_token() -> Result<()> {
+    match std::fs::remove_file(overleaf_token_path()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// The user-chosen data dir, if one is persisted and non-empty. Consumed by
 /// `store::data_dir()` between the `$ORX_DATA_DIR` override and the XDG default.
 ///
@@ -163,8 +209,8 @@ pub fn set_compute_default(backend: Option<String>, flavor: Option<String>) -> R
 }
 
 /// Literature sources the user disabled in Settings (their `LitSource::as_str()`
-/// names). Lives in the telemetry-owned `settings.json`; enforced by `orx lit`
-/// and `orx paper`. Empty = all enabled.
+/// names). Lives in the telemetry-owned `settings.json`; enforced by discovery,
+/// `orx discover`, and `orx paper`. Empty = all enabled.
 pub fn disabled_lit_sources() -> Vec<String> {
     crate::telemetry::disabled_lit_sources()
 }

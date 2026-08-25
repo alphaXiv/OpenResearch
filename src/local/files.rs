@@ -2,8 +2,7 @@
 //! (`<data dir>/files/<project slug>/`). The filesystem is the source of
 //! truth: no registry, no upload step. The dashboard's Artifacts tab is an
 //! explorer over this folder. Files may live directly at the root or in any
-//! user-chosen nested layout. Root-level `PROJECT.md` is reserved for the
-//! lightweight project brief that OpenResearch keeps visible in Artifacts.
+//! user-chosen nested layout; no user-facing filename receives special handling.
 //!
 //! Serving is contained to the artifacts dir: requested paths are relative
 //! (`is_safe_rel_path`) and must still resolve inside it once symlinks are
@@ -12,7 +11,6 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -24,15 +22,6 @@ use super::model::LocalProject;
 
 /// Files surfaced by the OS that aren't the user's or the agent's.
 const IGNORED: &[&str] = &[".DS_Store", "Thumbs.db"];
-
-pub const PROJECT_BRIEF_NAME: &str = "PROJECT.md";
-pub const MAX_PROJECT_BRIEF_BYTES: usize = 256 * 1024;
-
-pub fn is_project_brief_path(path: &str) -> bool {
-    path.eq_ignore_ascii_case(PROJECT_BRIEF_NAME)
-}
-
-const PROJECT_BRIEF_TEMPLATE: &str = "# Objective\n\nNot defined yet.\n\n# Current Project Summary\n\nNo project summary yet.\n\n# Important Highlights\n\n- None yet.\n\n# Future Experiments\n\n- None proposed yet.\n";
 
 /// Listing cap — a runaway directory shouldn't stall the 2Hz event loop.
 const MAX_ENTRIES: usize = 2000;
@@ -74,74 +63,6 @@ pub fn ensure_dir(project: &LocalProject) -> Result<PathBuf> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
     Ok(dir)
-}
-
-pub(crate) fn ensure_project_brief_contents_at(dir: &Path, contents: &str) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
-    let path = dir.join(PROJECT_BRIEF_NAME);
-    match std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            if let Err(error) = file.write_all(contents.as_bytes()) {
-                drop(file);
-                let _ = std::fs::remove_file(&path);
-                return Err(anyhow!("Could not write {}: {}", path.display(), error));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(anyhow!("Could not create {}: {}", path.display(), error));
-        }
-    }
-    Ok(path)
-}
-
-fn ensure_project_brief_at(dir: &Path) -> Result<PathBuf> {
-    ensure_project_brief_contents_at(dir, PROJECT_BRIEF_TEMPLATE)
-}
-
-pub fn ensure_project_brief(project: &LocalProject) -> Result<PathBuf> {
-    ensure_project_brief_at(&files_dir(project))
-}
-
-fn read_project_brief_at(dir: &Path) -> Result<String> {
-    let path = dir.join(PROJECT_BRIEF_NAME);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => Ok(content),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PROJECT_BRIEF_TEMPLATE.to_string())
-        }
-        Err(error) => Err(anyhow!("Could not read {}: {}", path.display(), error)),
-    }
-}
-
-pub fn read_project_brief(project: &LocalProject) -> Result<String> {
-    read_project_brief_at(&files_dir(project))
-}
-
-fn write_project_brief_at(dir: &Path, content: &str) -> Result<PathBuf> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
-    let path = dir.join(PROJECT_BRIEF_NAME);
-    let temporary = dir.join(format!(
-        ".{PROJECT_BRIEF_NAME}.{}.tmp",
-        uuid::Uuid::new_v4()
-    ));
-    if let Err(error) =
-        std::fs::write(&temporary, content).and_then(|()| std::fs::rename(&temporary, &path))
-    {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(anyhow!("Could not write {}: {}", path.display(), error));
-    }
-    Ok(path)
-}
-
-pub fn write_project_brief(project: &LocalProject, content: &str) -> Result<PathBuf> {
-    write_project_brief_at(&files_dir(project), content)
 }
 
 /// Relative, no `..`/`.` segments, no backslashes — a requested path can't
@@ -408,12 +329,6 @@ fn is_ignored(name: &str) -> bool {
     name.starts_with('.') || IGNORED.contains(&name)
 }
 
-#[cfg(unix)]
-fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-    left.dev() == right.dev() && left.ino() == right.ino()
-}
-
 /// Recursively build the tree under `dir`, counting nodes against
 /// `MAX_ENTRIES`. Returns (children, hit_cap). Symlinks resolving outside
 /// `canonical_base` are skipped — the serve endpoints would refuse them.
@@ -425,27 +340,6 @@ fn collect_tree(
 ) -> (Vec<ArtifactEntry>, bool) {
     let mut out = Vec::new();
     let mut truncated = false;
-    let mut root_brief_metadata = None;
-    if rel_prefix.is_empty() {
-        let brief = dir.join(PROJECT_BRIEF_NAME);
-        if resolves_inside(canonical_base, &brief) {
-            if let Ok(md) = std::fs::metadata(&brief) {
-                if md.is_file() {
-                    *seen += 1;
-                    out.push(ArtifactEntry {
-                        name: PROJECT_BRIEF_NAME.to_string(),
-                        path: PROJECT_BRIEF_NAME.to_string(),
-                        is_dir: false,
-                        size: md.len(),
-                        modified_at: mtime_ms(&md),
-                        presentation: Some(presentation_for_path(PROJECT_BRIEF_NAME)),
-                        children: Vec::new(),
-                    });
-                    root_brief_metadata = Some(md);
-                }
-            }
-        }
-    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return (out, false);
     };
@@ -454,16 +348,6 @@ fn collect_tree(
             return (out, true);
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if rel_prefix.is_empty() && is_project_brief_path(&name) {
-            if let (Some(brief), Ok(candidate)) = (
-                root_brief_metadata.as_ref(),
-                std::fs::metadata(entry.path()),
-            ) {
-                if same_file(brief, &candidate) {
-                    continue;
-                }
-            }
-        }
         if is_ignored(&name) {
             continue;
         }
@@ -501,25 +385,13 @@ fn collect_tree(
             });
         }
     }
-    // PROJECT.md is the durable project overview, so pin it above the ordinary
-    // directory-first alphabetical tree at the artifacts root.
-    out.sort_by(|a, b| {
-        if rel_prefix.is_empty() {
-            let a_brief = is_project_brief_path(&a.path);
-            let b_brief = is_project_brief_path(&b.path);
-            if a_brief != b_brief {
-                return b_brief.cmp(&a_brief);
-            }
-        }
-        b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name))
-    });
+    out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
     (out, truncated)
 }
 
 /// Scan the artifacts dir (creating it if missing) into a plain file tree.
 pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
     let dir = ensure_dir(project)?;
-    ensure_project_brief_at(&dir)?;
     let canonical = dir
         .canonicalize()
         .map_err(|e| anyhow!("Could not resolve {}: {}", dir.display(), e))?;
@@ -543,11 +415,6 @@ pub fn file_path(project: &LocalProject, rel_path: &str) -> Result<PathBuf> {
 /// followed — but every parent segment must resolve inside the artifacts dir, or
 /// `a/b` with `a -> /elsewhere` would delete outside it.
 pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
-    if is_project_brief_path(rel_path) {
-        return Err(anyhow!(
-            "{PROJECT_BRIEF_NAME} is part of the project and cannot be deleted"
-        ));
-    }
     if !is_safe_rel_path(rel_path) {
         return Err(anyhow!("invalid file path: {rel_path}"));
     }
@@ -698,104 +565,6 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["baseline", "notes", "project", "summary.md"]);
         assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn project_brief_is_pinned_above_directories() {
-        let (root, base, _) = scratch();
-        std::fs::create_dir(base.join("experiment")).unwrap();
-        std::fs::write(base.join(PROJECT_BRIEF_NAME), "# Objective\n").unwrap();
-        std::fs::write(base.join("notes.md"), "# Notes\n").unwrap();
-        let canonical = base.canonicalize().unwrap();
-        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, [PROJECT_BRIEF_NAME, "experiment", "notes.md"]);
-        assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn project_brief_is_listed_even_when_the_entry_cap_is_already_reached() {
-        let (root, base, _) = scratch();
-        std::fs::write(base.join(PROJECT_BRIEF_NAME), "# Objective\n").unwrap();
-        std::fs::write(base.join("notes.md"), "# Notes\n").unwrap();
-        let canonical = base.canonicalize().unwrap();
-        let mut seen = MAX_ENTRIES;
-        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut seen);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, [PROJECT_BRIEF_NAME]);
-        assert!(truncated);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn case_variant_is_not_hidden_or_duplicated() {
-        let (root, base, _) = scratch();
-        std::fs::write(base.join("project.md"), "# Lowercase\n").unwrap();
-        let expected_name = if base.join(PROJECT_BRIEF_NAME).exists() {
-            PROJECT_BRIEF_NAME
-        } else {
-            "project.md"
-        };
-        let canonical = base.canonicalize().unwrap();
-        let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
-        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, [expected_name]);
-        assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn project_brief_creation_preserves_existing_content() {
-        let (root, base, _) = scratch();
-        let path = ensure_project_brief_at(&base).unwrap();
-        let initial = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(initial, PROJECT_BRIEF_TEMPLATE);
-
-        std::fs::write(&path, "# My custom brief\n").unwrap();
-        ensure_project_brief_at(&base).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "# My custom brief\n"
-        );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn reading_a_missing_brief_is_pure() {
-        let (root, base, _) = scratch();
-        assert_eq!(
-            read_project_brief_at(&base).unwrap(),
-            PROJECT_BRIEF_TEMPLATE
-        );
-        assert!(!base.join(PROJECT_BRIEF_NAME).exists());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn project_brief_deletion_guard_is_case_insensitive() {
-        assert!(is_project_brief_path(PROJECT_BRIEF_NAME));
-        assert!(is_project_brief_path("project.md"));
-        assert!(!is_project_brief_path("notes/PROJECT.md"));
-    }
-
-    #[test]
-    fn project_brief_writes_replace_the_complete_file() {
-        let (root, base, _) = scratch();
-        ensure_project_brief_at(&base).unwrap();
-        let path = write_project_brief_at(&base, "# Updated\n\nCurrent state.\n").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            "# Updated\n\nCurrent state.\n"
-        );
-        assert_eq!(
-            std::fs::read_dir(&base)
-                .unwrap()
-                .filter_map(std::result::Result::ok)
-                .count(),
-            1
-        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

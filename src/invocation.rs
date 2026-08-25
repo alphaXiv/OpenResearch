@@ -43,12 +43,7 @@ pub fn no_run_command(project_id: &str) -> String {
 }
 
 fn resolves_on_path(bin: &str) -> bool {
-    let Some(paths) = crate::local::shell_env::search_path() else {
-        return false;
-    };
-    std::env::split_paths(&paths)
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .any(|dir| dir.join(bin).is_file())
+    crate::local::shell_env::find_on_path(bin).is_some()
 }
 
 fn quote_for_shell(path: &str) -> String {

@@ -14,6 +14,7 @@ import { BranchChanges } from "./BranchChanges";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
+import type { TabOpenIntent } from "../tabPreview";
 
 export type CodeView = CodeBrowserView;
 
@@ -38,7 +39,12 @@ export function CodeTab({
   onViewChange: (view: CodeView) => void;
   onToggledChange: (toggled: ReadonlySet<string>) => void;
   /** Open a file in the right pane's FileViewer, keyed to this source. */
-  onOpenFile: (path: string, sessionId?: string, ref?: string) => void;
+  onOpenFile: (
+    path: string,
+    sessionId: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
 }) {
   const branch = experiment.branchName;
   const sourceKey = `${projectId}:${branch}`;
@@ -169,10 +175,10 @@ export function CodeTab({
                   depth={0}
                   toggled={toggled}
                   onToggle={toggle}
-                  onOpenFile={(path) =>
+                  onOpenFile={(path, intent) =>
                     editSessionId
-                      ? onOpenFile(path, editSessionId)
-                      : onOpenFile(path, undefined, branch)
+                      ? onOpenFile(path, editSessionId, undefined, intent)
+                      : onOpenFile(path, undefined, branch, intent)
                   }
                 />
               </div>

@@ -3,6 +3,7 @@ import { getChatMessages, type ChatMessage, type ChatPart } from "../api";
 import { onChatEvent } from "../events";
 import { findPartById, SubagentTranscript } from "./ChatPanel";
 import { TAB_BODY_CLASS_NAME } from "../styleClasses";
+import type { TabOpenIntent } from "../tabPreview";
 
 const PANE_CONTENT_CLASS_NAME = [
   "pane-content flex-1 min-h-0 relative subagent-tab-content overflow-y-auto",
@@ -28,12 +29,22 @@ export function SubagentTab({
 }: {
   sessionId: string;
   spawnPartId: string;
-  onOpenFile?: (path: string) => void;
-  onOpenRun?: (runId: string) => void;
+  onOpenFile?: (
+    path: string,
+    line: number | undefined,
+    exp: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
+  onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: (experimentId: string, intent: TabOpenIntent) => void;
   experimentName?: (experimentId: string) => string;
-  onOpenSubagent?: (spawnPartId: string, label?: string) => void;
+  onOpenSubagent?: (
+    spawnPartId: string,
+    label: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
 }) {
   const [messages, setMessages] = useState<ChatMessage[] | null>(null);
   // Same stick-to-bottom contract as the main transcript: pinned on mount,

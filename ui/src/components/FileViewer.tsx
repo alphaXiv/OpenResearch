@@ -5,8 +5,20 @@
 // refractor-highlighted, opened as a right-pane tab from chat tool rows or
 // the code browser.
 
-import { Code, ExternalLink, FileText, GitBranch, RotateCw } from "lucide-react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  CloudUpload,
+  Code,
+  Copy,
+  Download,
+  ExternalLink,
+  FileOutput,
+  FileText,
+  GitBranch,
+  RotateCw,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   absoluteFileUrl,
   artifactUrl,
@@ -21,13 +33,22 @@ import {
   type CheckoutRoot,
   type ProjectFile,
 } from "../api";
+import { useLatexCompile } from "../useLatexCompile";
+import { useOverleafSync } from "../useOverleafSync";
+import {
+  isExternalMarkdownTarget,
+  markdownTargetUrl,
+  resolveMarkdownTarget,
+} from "../markdownTarget";
 import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
-import { isMarkdownFile } from "./FileTypeIcon";
+import type { TabOpenIntent } from "../tabPreview";
+import { isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { OverleafPanel } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
-import { ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import { BUTTON_CLASS_NAME, ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
 
 type ArtifactPreviewFile = Omit<ProjectFile, "root">;
 type LoadedFile =
@@ -38,6 +59,60 @@ type LoadedFile =
 export interface FileScrollPosition {
   top: number;
   left: number;
+}
+
+/** An install command with a one-click copy — the point of showing it is that
+ * the user runs it in a terminal. */
+function CopyableCommand({ command }: { command: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "select">("idle");
+  const codeRef = useRef<HTMLElement>(null);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setState("copied");
+      setTimeout(() => setState("idle"), 1500);
+    } catch {
+      // Blocked (permissions, an unfocused document, an old browser). Select
+      // the text so the user can still take it — silently doing nothing on a
+      // button whose whole job is copying is the one unacceptable outcome.
+      const node = codeRef.current;
+      if (node) {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const selection = window.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      }
+      setState("select");
+      setTimeout(() => setState("idle"), 4000);
+    }
+  };
+
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <code
+        ref={codeRef}
+        className="font-mono text-xs text-text bg-panel border border-border-variant rounded-xs py-1 px-2"
+      >
+        {command}
+      </code>
+      <button
+        className={ICON_BUTTON_CLASS_NAME}
+        data-tip={
+          state === "copied"
+            ? "Copied"
+            : state === "select"
+              ? "Selected — press ⌘C"
+              : "Copy command"
+        }
+        aria-label="Copy install command"
+        onClick={() => void copy()}
+      >
+        {state === "copied" ? <Check size={13} /> : <Copy size={13} />}
+      </button>
+    </div>
+  );
 }
 
 export function FileViewer({
@@ -73,7 +148,12 @@ export function FileViewer({
    * baseline) — shown in the header so a code tab always names its branch. */
   branchLabel?: string;
   /** Open a linked file as another tab (rendered-markdown links). */
-  onOpenFile?: (path: string, sessionId?: string, ref?: string) => void;
+  onOpenFile?: (
+    path: string,
+    sessionId: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
   scrollPosition?: FileScrollPosition;
   onScrollPositionChange?: (position: FileScrollPosition) => void;
   lineScrollRequest?: number;
@@ -90,9 +170,9 @@ export function FileViewer({
   const isAbsolute = source === "abs";
   // Markdown renders by default; the header toggle shows the raw source.
   const isMarkdown = isMarkdownFile(path);
-  // This file's parent dir: the artifact report folder for image resolution,
-  // and the anchor for a relative link inside an abs file.
-  const parentFolder = path.split("/").slice(0, -1).join("/");
+  // .tex behaves like markdown — rendered by default, source behind the toggle —
+  // and adds the real compiler on top.
+  const isLatex = isLatexFile(path);
   const [showSource, setShowSource] = useState(false);
   // Live edit buffer for the code file. It IS the view for editable files (no
   // edit mode); it tracks the loaded content and diverges as the user types.
@@ -105,6 +185,26 @@ export function FileViewer({
   // A cited `artifacts/…` file can answer from either name in the checkout, so
   // writes, the editor, and raw bytes must target the path that answered.
   const filePath = loaded?.source === "checkout" ? loaded.file.path : path;
+  // This file's parent dir: the artifact report folder for image resolution,
+  // and the anchor for a relative link inside an abs file.
+  const parentFolder = filePath.split("/").slice(0, -1).join("/");
+  const resolveMarkdownFilePath = useCallback(
+    (target: string) =>
+      resolveMarkdownTarget(parentFolder, target, isAbsolute)?.path ?? null,
+    [isAbsolute, parentFolder],
+  );
+  const resolveMarkdownImageSrc = useCallback(
+    (src: string) => {
+      if (isExternalMarkdownTarget(src)) return src;
+      const target = resolveMarkdownTarget(parentFolder, src, isAbsolute);
+      if (!target) return null;
+      const url = isAbsolute
+        ? absoluteFileUrl(target.path)
+        : projectFileUrl(projectId, target.path, { sessionId, ref: gitRef });
+      return markdownTargetUrl(url, target);
+    },
+    [gitRef, isAbsolute, parentFolder, projectId, sessionId],
+  );
   const mediaKind = mediaPreviewKind(data?.presentation);
   const viaArtifacts = loaded?.source === "artifact" && !isArtifacts;
   const viaCheckout = isArtifacts && loaded?.source === "checkout";
@@ -116,16 +216,19 @@ export function FileViewer({
   // Editable = a live checkout text file. A session read that fell back to the
   // clone isn't the worktree it names, so it stays read-only rather than
   // silently editing another checkout.
+  // A session read that fell back to the clone isn't the worktree it names: the
+  // write and compile endpoints both refuse it, so nothing may act on it.
+  const viaPrunedWorktree =
+    sessionId != null && loaded?.source === "checkout" && loaded.file.root === "clone";
   const editable =
     onDisk &&
     data != null &&
     !data.binary &&
     !data.truncated &&
     !mediaKind &&
-    !(sessionId != null && loaded?.source === "checkout" && loaded.file.root === "clone");
+    !viaPrunedWorktree;
   // The editor replaces the read-only view for editable files — except markdown,
   // which stays rendered until its source toggle is on.
-  const showingEditor = editable && !(isMarkdown && !showSource);
   // A <textarea> normalizes line endings to LF, so track the buffer in LF and
   // re-apply the file's original EOL on write (else a CRLF file's every line flips).
   const baseline = useMemo(() => (data?.content ?? "").replace(/\r\n/g, "\n"), [data?.content]);
@@ -144,8 +247,8 @@ export function FileViewer({
     setSaveError(null);
   }, [data?.content, path]);
 
-  const save = async () => {
-    if (!editable || data == null || !dirty || saving) return;
+  const save = async (): Promise<boolean> => {
+    if (!editable || data == null || !dirty || saving) return !dirty;
     const content = data.content.includes("\r\n") ? draft.replace(/\n/g, "\r\n") : draft;
     setSaving(true);
     setSaveError(null);
@@ -159,11 +262,97 @@ export function FileViewer({
           ? { source: "checkout", file: { ...prev.file, content } }
           : prev,
       );
+      return true;
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  // A .tex the compiler and the sync can both reach: the live checkout, which
+  // is the same condition that makes the file editable in the first place.
+  const liveTex = isLatex && onDisk && !viaPrunedWorktree;
+  const latex = useLatexCompile({
+    projectId,
+    filePath,
+    sessionId,
+    enabled: liveTex,
+    ready: data != null && !data.notFound,
+    source: editable ? draft : (data?.content ?? ""),
+  });
+
+  // Not gated on a local engine: a machine with no TeX install can still send
+  // the paper, and Overleaf compiles it there.
+  const overleaf = useOverleafSync({
+    projectId,
+    filePath,
+    sessionId,
+    enabled: liveTex,
+    savedSource: baseline,
+    dirty,
+    // A pull rewrote the file underneath this view; refetch so the editor shows
+    // what is now on disk rather than the copy it loaded.
+    onPulled: useCallback(
+      (paths: string[]) => {
+        if (paths.includes(filePath)) setNonce((n) => n + 1);
+      },
+      [filePath],
+    ),
+  });
+  const [showOverleaf, setShowOverleaf] = useState(false);
+  const overleafConflicts = overleaf.last?.conflicts.length ?? 0;
+  // A conflict is the one outcome the user has to act on, and an automatic sync
+  // can produce it with the panel closed.
+  useEffect(() => {
+    if (overleafConflicts > 0) setShowOverleaf(true);
+  }, [overleafConflicts]);
+  const overleafTip = overleaf.error
+    ? "Overleaf sync failed"
+    : overleafConflicts > 0
+      ? "Changed here and on Overleaf — choose which copy to keep"
+      : overleaf.blocked
+        ? "Save this file to sync it with Overleaf"
+        : overleaf.link
+          ? "In step with Overleaf"
+          : "Send this paper to Overleaf";
+  const overleafColor =
+    overleaf.error || overleafConflicts > 0
+      ? "text-accent-red"
+      : overleaf.link
+        ? "text-accent-green"
+        : undefined;
+
+  // A .tex shows its compiled PDF or its source — nothing in between.
+  const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
+  const showingEditor = editable && !(isMarkdown && !showSource) && !showingPdf;
+
+  // `#toolbar=0` asks the browser's PDF viewer to drop its own chrome, so the
+  // pane shows the document and this view's header owns the controls.
+  const compiledPdfUrl = latex.compiled
+    ? `${projectFileUrl(projectId, latex.compiled.path, { sessionId })}&v=${latex.compiled.version}`
+    : null;
+  // The viewer is re-created on every show, so the URL must differ each time —
+  // same URL, new element leaves Chrome's PDF viewer blank.
+  const pdfPaneUrl = compiledPdfUrl
+    ? `${compiledPdfUrl}&view=${latex.viewNonce}#toolbar=0&navpanes=0&statusbar=0`
+    : null;
+  const compiledPdfName = latex.compiled
+    ? (latex.compiled.path.split("/").pop() ?? latex.compiled.path)
+    : null;
+
+  // The compiler reads the file on disk, so anything that triggers a compile
+  // flushes the buffer first. A failed save must not compile: the PDF would be
+  // of the previous content while `stale` compared against the new draft.
+  const compileFromDisk = async () => {
+    if (dirty && !(await save())) return;
+    if (isLatex && latex.engine) latex.compile();
+  };
+  // Blur and ⌘S only rebuild when there was an edit to save.
+  const saveAndCompile = async () => {
+    if (!dirty) return;
+    await compileFromDisk();
   };
 
   const [openingEditor, setOpeningEditor] = useState(false);
@@ -311,6 +500,71 @@ export function FileViewer({
             )}
           </span>
         )}
+        {isLatex && latex.compiled && (
+          <button
+            className={`${ICON_BUTTON_CLASS_NAME} ${!latex.showPdf ? "active" : ""}`}
+            data-tip={
+              latex.stale && latex.showPdf
+                ? "Compiled PDF is out of date"
+                : latex.showPdf
+                  ? "View source"
+                  : "Show compiled PDF"
+            }
+            data-tip-align="end"
+            aria-label={latex.showPdf ? "View source" : "Show compiled PDF"}
+            onClick={() => latex.setShowPdf(!latex.showPdf)}
+          >
+            {latex.showPdf ? (
+              <Code size={13} />
+            ) : (
+              <FileText size={13} className={latex.stale ? "text-accent-amber" : undefined} />
+            )}
+          </button>
+        )}
+        {isLatex && compiledPdfUrl && compiledPdfName && (
+          <a
+            className={ICON_BUTTON_CLASS_NAME}
+            data-tip={
+              latex.stale
+                ? `Download ${compiledPdfName} (out of date — recompile first)`
+                : `Download ${compiledPdfName}`
+            }
+            data-tip-align="end"
+            aria-label={`Download ${compiledPdfName}`}
+            href={compiledPdfUrl}
+            download={compiledPdfName}
+          >
+            <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
+          </a>
+        )}
+        {liveTex && (
+          <button
+            className={`${ICON_BUTTON_CLASS_NAME} ${showOverleaf ? "active" : ""}`}
+            data-tip={overleafTip}
+            data-tip-align="end"
+            aria-label={`Overleaf — ${overleafTip.toLowerCase()}`}
+            aria-expanded={showOverleaf}
+            onClick={() => setShowOverleaf((open) => !open)}
+          >
+            {overleaf.syncing ? (
+              <span className={SPINNER_CLASS_NAME} />
+            ) : (
+              <CloudUpload size={13} className={overleafColor} />
+            )}
+          </button>
+        )}
+        {isLatex && onDisk && (
+          <button
+            className={ICON_BUTTON_CLASS_NAME}
+            data-tip={latex.compiled ? "Recompile PDF" : "Compile PDF"}
+            data-tip-align="end"
+            aria-label={latex.compiled ? "Recompile PDF" : "Compile PDF"}
+            disabled={latex.compiling || !latex.engine}
+            onClick={() => void compileFromDisk()}
+          >
+            {latex.compiling ? <span className={SPINNER_CLASS_NAME} /> : <FileOutput size={13} />}
+          </button>
+        )}
         {isMarkdown && (
           <button
             className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
@@ -350,6 +604,90 @@ export function FileViewer({
         <div className="file-view-note py-2.5 px-4 text-sm text-muted border-b border-b-border-variant shrink-0">
           Not in the project&apos;s artifacts — showing the copy from the{" "}
           {loaded.file.root === "worktree" ? "session's worktree" : "project clone"}.
+        </div>
+      )}
+      {(latex.error || latex.log) && (
+        <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4">
+          <div className="flex items-start gap-2">
+            <span
+              className={`flex-1 min-w-0 text-sm ${
+                latex.builtWithErrors ? "text-subtext" : "text-accent-red"
+              }`}
+            >
+              {latex.error ??
+                (latex.builtWithErrors
+                  ? "Compiled, but the engine reported errors — check the output below."
+                  : "Compile failed")}
+            </span>
+            <button
+              className={ICON_BUTTON_CLASS_NAME}
+              data-tip="Dismiss"
+              data-tip-align="end"
+              aria-label="Dismiss compile message"
+              onClick={latex.dismiss}
+            >
+              <X size={13} />
+            </button>
+          </div>
+          {latex.log && (
+            <pre className="mt-1.5 mb-0 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere">
+              {latex.log}
+            </pre>
+          )}
+        </div>
+      )}
+      {liveTex && overleaf.staleOnDisk && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 flex items-center flex-wrap gap-2 text-sm text-accent-amber">
+          <span className="flex-1 min-w-0">
+            Overleaf&apos;s copy of this file was pulled while you had unsaved edits, so what you
+            see is no longer what is on disk. Saving now sends this draft to Overleaf instead.
+          </span>
+          <button
+            className={BUTTON_CLASS_NAME}
+            onClick={() => {
+              overleaf.reloaded();
+              setNonce((n) => n + 1);
+            }}
+          >
+            Discard my edits and reload
+          </button>
+        </div>
+      )}
+      {liveTex && overleaf.error && (
+        <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4 flex items-start gap-2">
+          <span className="flex-1 min-w-0 text-sm text-accent-red whitespace-pre-wrap">
+            {overleaf.error}
+          </span>
+          <button
+            className={ICON_BUTTON_CLASS_NAME}
+            data-tip="Dismiss"
+            data-tip-align="end"
+            aria-label="Dismiss Overleaf message"
+            onClick={overleaf.dismiss}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+      {liveTex && showOverleaf && overleaf.loaded && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4">
+          <OverleafPanel overleaf={overleaf} />
+        </div>
+      )}
+      {isLatex && onDisk && latex.engine === null && latex.installHint && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-subtext">
+          {latex.installHint}
+          {latex.installCommand && <CopyableCommand command={latex.installCommand} />}
+        </div>
+      )}
+      {latex.note && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-accent-amber">
+          {latex.note}
+        </div>
+      )}
+      {showingPdf && latex.stale && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-subtext">
+          This PDF was compiled from an earlier version of the source — recompile to update it.
         </div>
       )}
       <div
@@ -393,6 +731,14 @@ export function FileViewer({
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             Binary file — no inline preview. <a href={rawUrl} download={path.split("/").pop() ?? path}>Download</a>
           </div>
+        ) : showingPdf && pdfPaneUrl && compiledPdfName ? (
+          <MediaPreview
+            key={pdfPaneUrl}
+            kind="pdf"
+            url={pdfPaneUrl}
+            name={compiledPdfName}
+            downloadBar={false}
+          />
         ) : isMarkdown && !showSource ? (
           <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-[1.5em] [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-[1.25em] [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-[1.1em]">
             {artifactsMode ? (
@@ -404,17 +750,12 @@ export function FileViewer({
             ) : (
               <Md
                 text={data.content}
+                resolveFilePath={resolveMarkdownFilePath}
+                resolveImageSrc={resolveMarkdownImageSrc}
                 onOpenFile={
                   onOpenFile &&
-                  ((p) =>
-                    // A relative link inside an abs file names a sibling on disk,
-                    // not a repo-relative path — anchor it to this file's dir so
-                    // it re-enters the abs branch instead of hitting the clone.
-                    onOpenFile(
-                      isAbsolute && !p.startsWith("/") ? `${parentFolder}/${p}` : p,
-                      sessionId,
-                      gitRef,
-                    ))
+                  ((p, _line, _exp, _ref, intent) =>
+                    onOpenFile(p, sessionId, gitRef, intent))
                 }
               />
             )}
@@ -428,8 +769,8 @@ export function FileViewer({
               onEdit?.();
               if (saveError) setSaveError(null);
             }}
-            onSave={() => void save()}
-            onBlur={() => void save()}
+            onSave={() => void saveAndCompile()}
+            onBlur={() => void saveAndCompile()}
             path={path}
             highlightLine={line}
             scrollRequest={lineScrollRequest}

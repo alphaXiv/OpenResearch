@@ -20,6 +20,7 @@ import {
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
   DEMO_MAIN_SESSION_ID,
+  DEMO_OVERVIEW_ARTIFACT,
   getArtifacts,
   getChatMessages,
   getUiState,
@@ -28,7 +29,6 @@ import {
   listProjects,
   listRuns,
   openProject,
-  PROJECT_BRIEF_NAME,
   updateUiState,
   type AgentSelection,
   type Experiment,
@@ -59,7 +59,17 @@ import { DemoWelcomeModal } from "./components/Tour";
 import { clearReadDemoSessions } from "./demoSessionState";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
-import { CODE_TAB_BODY_CLASS_NAME, ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, TAB_BODY_CLASS_NAME } from "./styleClasses";
+import {
+  CODE_TAB_BODY_CLASS_NAME,
+  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
+  ICON_BUTTON_BASE_CLASS_NAME,
+  ICON_BUTTON_CLASS_NAME,
+  MODEL_ITEM_CLASS_NAME,
+  PRIMARY_BUTTON_CLASS_NAME,
+  SPINNER_CLASS_NAME,
+  TAB_BODY_CLASS_NAME,
+} from "./styleClasses";
+import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -176,6 +186,8 @@ type RightTab =
   | SubagentViewDef
   | CodeTabDef;
 
+type ContentTab = Exclude<RightTab, string>;
+
 function rightTabKey(tab: RightTab): string {
   if (typeof tab === "string") return `home:${tab}`;
   if ("code" in tab) return `code:${tab.branch}`;
@@ -193,6 +205,10 @@ function withoutTab<T extends RightTab>(tabs: T[], key: string): T[] {
   return next.length === tabs.length ? tabs : next;
 }
 
+function isPresent<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}
+
 interface RightPaneSessionState {
   rightTab: RightTab;
   tabHistory: RightTab[];
@@ -204,7 +220,9 @@ interface RightPaneSessionState {
   planTabs: PlanViewDef[];
   subagentTabs: SubagentViewDef[];
   codeTabs: CodeTabDef[];
-  /** The tab open in preview mode, replaced by the next chat chip click. */
+  /** Stable strip order for content tabs; home tabs keep their fixed leading slots. */
+  contentTabOrder: string[];
+  /** The reusable preview tab, replaced by the next preview open. */
   previewTab: RightTab | null;
   filesView: WorktreeView;
   filesToggled: ReadonlySet<string>;
@@ -216,7 +234,7 @@ interface RightPaneSessionState {
 
 function initialRightPaneSessionState(
   sessionId?: string,
-  openDemoBrief = false,
+  openDemoOverview = false,
 ): RightPaneSessionState {
   const initial: RightPaneSessionState = {
     rightTab: "experiments",
@@ -229,6 +247,7 @@ function initialRightPaneSessionState(
     planTabs: [],
     subagentTabs: [],
     codeTabs: [],
+    contentTabOrder: [],
     previewTab: null,
     filesView: "files",
     filesToggled: new Set(),
@@ -237,16 +256,17 @@ function initialRightPaneSessionState(
     panelOpen: false,
     panelMax: false,
   };
-  if (sessionId === DEMO_MAIN_SESSION_ID && openDemoBrief) {
-    const projectBriefTab: FileViewDef = {
-      path: PROJECT_BRIEF_NAME,
+  if (sessionId === DEMO_MAIN_SESSION_ID && openDemoOverview) {
+    const demoOverviewTab: FileViewDef = {
+      path: DEMO_OVERVIEW_ARTIFACT,
       source: "artifacts",
     };
     return {
       ...initial,
-      rightTab: projectBriefTab,
-      tabHistory: [projectBriefTab],
-      fileTabs: [projectBriefTab],
+      rightTab: demoOverviewTab,
+      tabHistory: [demoOverviewTab],
+      fileTabs: [demoOverviewTab],
+      contentTabOrder: [rightTabKey(demoOverviewTab)],
       panelOpen: true,
     };
   }
@@ -262,6 +282,7 @@ function initialRightPaneSessionState(
       rightTab: fileTabs[0],
       tabHistory: [...fileTabs.slice(1), fileTabs[0]],
       fileTabs,
+      contentTabOrder: fileTabs.map(rightTabKey),
       panelOpen: true,
     };
   }
@@ -274,6 +295,7 @@ function initialRightPaneSessionState(
       rightTab: fileTabs[0],
       tabHistory: [fileTabs[0]],
       fileTabs,
+      contentTabOrder: fileTabs.map(rightTabKey),
       panelOpen: true,
     };
   }
@@ -433,7 +455,7 @@ export default function App() {
   const [uiState, setUiState] = useState<UiState | null>(null);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
-  const demoBriefSeededRef = useRef(false);
+  const demoOverviewSeededRef = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const persistedPreferredAgent = useRef<AgentSelection | null>(null);
   const [projectId, setProjectId] = useState<string | null>(null);
@@ -463,7 +485,7 @@ export default function App() {
   const { open: scopeMenuOpen, setOpen: setScopeMenuOpen, ref: scopeMenuRef } =
     usePopover(scopeTriggerRef);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
-  const [demoBriefLeading, setDemoBriefLeading] = useState(false);
+  const [demoOverviewLeading, setDemoOverviewLeading] = useState(false);
   const allExperimentsAttributed = experiments.every((experiment) => experiment.chatSessionId);
   const effectiveScope = activeSessionId && allExperimentsAttributed ? scope : "project";
   const scopedExperiments = useMemo(() => {
@@ -498,6 +520,7 @@ export default function App() {
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
+  const [contentTabOrder, setContentTabOrderState] = useState<string[]>([]);
   const [previewTab, setPreviewTabState] = useState<RightTab | null>(null);
   const [filesView, setFilesView] = useState<WorktreeView>("files");
   const [filesToggled, setFilesToggled] = useState<ReadonlySet<string>>(new Set());
@@ -521,23 +544,32 @@ export default function App() {
   const pendingExperimentsAutoOpenRef = useRef(false);
   const tabHistoryRef = useRef(tabHistory);
   tabHistoryRef.current = tabHistory;
+  const contentTabOrderRef = useRef(contentTabOrder);
+  contentTabOrderRef.current = contentTabOrder;
   const previewTabRef = useRef<RightTab | null>(null);
+
+  const setContentTabOrder = useCallback((order: readonly string[]) => {
+    const next = [...order];
+    contentTabOrderRef.current = next;
+    setContentTabOrderState(next);
+  }, []);
 
   const setPreviewTab = useCallback((tab: RightTab | null) => {
     previewTabRef.current = tab;
     setPreviewTabState(tab);
   }, []);
 
-  // Retire the outgoing preview tab: it leaves the strip and the history, but
-  // never the active slot — the caller selects its replacement right after.
-  const dropRightTab = useCallback((tab: RightTab) => {
+  // Retire content replaced out of the reusable preview slot. The caller owns
+  // the slot order because the replacement must land at this exact position.
+  const retireRightTab = useCallback((tab: ContentTab) => {
     const key = rightTabKey(tab);
     setExpTabs((prev) => withoutTab(prev, key));
     setFileTabs((prev) => withoutTab(prev, key));
     setPlanTabs((prev) => withoutTab(prev, key));
     setSubagentTabs((prev) => withoutTab(prev, key));
+    setCodeTabs((prev) => withoutTab(prev, key));
     const project = projectIdRef.current;
-    if (project && typeof tab === "object" && "path" in tab) {
+    if (project && "path" in tab) {
       fileScrollPositionsRef.current.delete(
         fileScrollKey(project, activeSessionIdRef.current, tab),
       );
@@ -547,17 +579,9 @@ export default function App() {
     setTabHistory(next);
   }, []);
 
-  const selectRightTab = useCallback((tab: RightTab, preview = false) => {
+  const selectRightTab = useCallback((tab: RightTab) => {
     pendingExperimentsAutoOpenRef.current = false;
     const key = rightTabKey(tab);
-    // A chip click on an already-open tab just focuses it, leaving both that
-    // tab's mode and the current preview tab alone.
-    const alreadyOpen = tabHistoryRef.current.some((item) => rightTabKey(item) === key);
-    if (preview && !alreadyOpen) {
-      const outgoing = previewTabRef.current;
-      if (outgoing && rightTabKey(outgoing) !== key) dropRightTab(outgoing);
-      setPreviewTab(persistentRightTab(tab));
-    }
     const next = [
       ...tabHistoryRef.current.filter((item) => rightTabKey(item) !== key),
       persistentRightTab(tab),
@@ -565,29 +589,119 @@ export default function App() {
     tabHistoryRef.current = next;
     setTabHistory(next);
     setRightTab(tab);
-  }, [dropRightTab, setPreviewTab]);
+  }, []);
+
+  const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent) => {
+    pendingExperimentsAutoOpenRef.current = false;
+    const key = rightTabKey(tab);
+    const outgoing = previewTabRef.current;
+    const transition = openTab(
+      {
+        order: contentTabOrderRef.current,
+        previewKey: outgoing ? rightTabKey(outgoing) : null,
+      },
+      key,
+      intent,
+    );
+    if (
+      transition.replacedKey &&
+      outgoing &&
+      typeof outgoing !== "string" &&
+      rightTabKey(outgoing) === transition.replacedKey
+    ) {
+      retireRightTab(outgoing);
+    }
+    setContentTabOrder(transition.order);
+    if (transition.previewKey === null) setPreviewTab(null);
+    else if (transition.previewKey === key) setPreviewTab(persistentRightTab(tab));
+
+    const next = [
+      ...tabHistoryRef.current.filter((item) => rightTabKey(item) !== key),
+      persistentRightTab(tab),
+    ];
+    tabHistoryRef.current = next;
+    setTabHistory(next);
+    setRightTab(tab);
+  }, [retireRightTab, setContentTabOrder, setPreviewTab]);
 
   const promoteRightTab = useCallback((tab: RightTab) => {
     const current = previewTabRef.current;
     if (current && rightTabKey(current) === rightTabKey(tab)) setPreviewTab(null);
   }, [setPreviewTab]);
 
+  useEffect(() => {
+    let waitingForEnter = false;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const preview = previewTabRef.current;
+      const target = event.target;
+      const editing =
+        target instanceof Element &&
+        target.closest("input, textarea, [contenteditable='true']") !== null;
+      if (editing) {
+        waitingForEnter = false;
+        return;
+      }
+      if (
+        preview &&
+        rightTabKey(preview) === rightTabKey(currentRightPaneStateRef.current.rightTab) &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === "k"
+      ) {
+        event.preventDefault();
+        waitingForEnter = true;
+        return;
+      }
+      if (waitingForEnter && event.key === "Enter") {
+        event.preventDefault();
+        waitingForEnter = false;
+        const activePreview = previewTabRef.current;
+        if (activePreview) promoteRightTab(activePreview);
+        return;
+      }
+      waitingForEnter = false;
+    };
+    const resetChord = () => {
+      waitingForEnter = false;
+    };
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("blur", resetChord);
+    window.addEventListener("pointerdown", resetChord);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("blur", resetChord);
+      window.removeEventListener("pointerdown", resetChord);
+    };
+  }, [promoteRightTab]);
+
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
     pendingExperimentsAutoOpenRef.current = false;
     const key = rightTabKey(tab);
     const preview = previewTabRef.current;
     if (preview && rightTabKey(preview) === key) setPreviewTab(null);
+    const contentState = closeTab(
+      {
+        order: contentTabOrderRef.current,
+        previewKey: preview ? rightTabKey(preview) : null,
+      },
+      key,
+      tabHistoryRef.current.map(rightTabKey),
+    );
+    setContentTabOrder(contentState.order);
     const next = tabHistoryRef.current.filter((item) => rightTabKey(item) !== key);
     tabHistoryRef.current = next;
     setTabHistory(next);
     if (!selectFallback) return;
-    const fallback = next[next.length - 1];
+    const fallback = contentState.fallbackKey
+      ? next.find((item) => rightTabKey(item) === contentState.fallbackKey)
+      : undefined;
     if (fallback) setRightTab(fallback);
     else {
       setPanelOpen(false);
       setPanelMax(false);
     }
-  }, [setPreviewTab]);
+  }, [setContentTabOrder, setPreviewTab]);
 
   const selectMainView = useCallback((view: "chat" | "skills" | SettingsTab) => {
     if (view !== "chat") pendingExperimentsAutoOpenRef.current = false;
@@ -605,7 +719,8 @@ export default function App() {
     planTabs,
     subagentTabs,
     codeTabs,
-    previewTab,
+    contentTabOrder: contentTabOrderRef.current,
+    previewTab: previewTabRef.current,
     filesView,
     filesToggled,
     selectedRunId,
@@ -621,15 +736,15 @@ export default function App() {
     }
     let nextState = nextSessionId ? rightPaneStatesRef.current.get(nextSessionId) : undefined;
     if (!nextState) {
-      const openDemoBrief =
+      const openDemoOverview =
         nextSessionId === DEMO_MAIN_SESSION_ID &&
         tourCompletedRef.current === false &&
-        !demoBriefSeededRef.current;
-      if (openDemoBrief) {
-        demoBriefSeededRef.current = true;
-        setDemoBriefLeading(true);
+        !demoOverviewSeededRef.current;
+      if (openDemoOverview) {
+        demoOverviewSeededRef.current = true;
+        setDemoOverviewLeading(true);
       }
-      nextState = initialRightPaneSessionState(nextSessionId ?? undefined, openDemoBrief);
+      nextState = initialRightPaneSessionState(nextSessionId ?? undefined, openDemoOverview);
     }
     if (nextSessionId && pendingExperimentsAutoOpenRef.current) {
       pendingExperimentsAutoOpenRef.current = false;
@@ -658,6 +773,7 @@ export default function App() {
     setPlanTabs(nextState.planTabs);
     setSubagentTabs(nextState.subagentTabs);
     setCodeTabs(nextState.codeTabs);
+    setContentTabOrder(nextState.contentTabOrder);
     setPreviewTab(nextState.previewTab);
     setFilesView(nextState.filesView);
     setFilesToggled(nextState.filesToggled);
@@ -667,7 +783,7 @@ export default function App() {
     setPanelMax(nextState.panelMax);
     activeSessionIdRef.current = nextSessionId;
     setActiveSessionId(nextSessionId);
-  }, [setPreviewTab]);
+  }, [setContentTabOrder, setPreviewTab]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
@@ -824,8 +940,7 @@ export default function App() {
     observedRunsProjectRef.current = projectId;
     observedRunsRef.current.clear();
     liveRunIdsRef.current.clear();
-    // Record the visit; the resulting project.updated SSE event refreshes the
-    // list's recency order.
+    // Record the visit for persisted project-level UI recency.
     openProject(projectId).catch(() => {});
     setExperiments([]);
     setRuns([]);
@@ -833,10 +948,11 @@ export default function App() {
     setSelectedRunId(null);
     setExpTabs([]);
     setFileTabs([]);
-    setDemoBriefLeading(false);
+    setDemoOverviewLeading(false);
     setPlanTabs([]);
     setSubagentTabs([]);
     setCodeTabs([]);
+    setContentTabOrder([]);
     setPreviewTab(null);
     setFilesView("files");
     setFilesToggled(new Set());
@@ -854,7 +970,7 @@ export default function App() {
     listExperiments(projectId).then(setExperiments).catch(() => {});
     loadRunsBaseline(projectId);
     getArtifacts(projectId).then(setArtifacts).catch(() => {});
-  }, [loadRunsBaseline, projectId, setPreviewTab]);
+  }, [loadRunsBaseline, projectId, setContentTabOrder, setPreviewTab]);
 
   // Refetch artifacts on open and whenever the directory changes.
   const refreshArtifacts = useCallback(() => {
@@ -918,23 +1034,27 @@ export default function App() {
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
-  const openExperimentTab = useCallback((id: string, view: ExperimentView = "overview", preview = false) => {
+  const openExperimentTab = useCallback((
+    id: string,
+    view: ExperimentView = "overview",
+    intent: TabOpenIntent = "preview",
+  ) => {
     const tab = { id, view };
     setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    selectRightTab(tab, preview);
+    openRightTab(tab, intent);
     setPanelOpen(true);
-  }, [selectRightTab]);
+  }, [openRightTab]);
 
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
   // channel for a metric. Run ids are globally unique, so resolve the run to its
   // experiment and open the terminal view focused on it.
   const openRunLogs = useCallback(
-    (runId: string) => {
+    (runId: string, intent: TabOpenIntent = "preview") => {
       const matches = runsRef.current.filter((run) => run.id === runId || run.id.startsWith(runId));
       const run = matches.length === 1 ? matches[0] : null;
       if (!run) return;
       setSelectedRunId(run.id);
-      openExperimentTab(run.experimentId, "terminal", true);
+      openExperimentTab(run.experimentId, "terminal", intent);
     },
     [openExperimentTab],
   );
@@ -967,11 +1087,14 @@ export default function App() {
     return matches.length === 1 ? matches[0][1] : "";
   }, [experimentNames]);
 
-  const openExperimentNotes = useCallback((experimentId: string) => {
+  const openExperimentNotes = useCallback((
+    experimentId: string,
+    intent: TabOpenIntent = "preview",
+  ) => {
     const matches = experimentsRef.current.filter(
       (experiment) => experiment.id === experimentId || experiment.id.startsWith(experimentId),
     );
-    if (matches.length === 1) openExperimentTab(matches[0].id, "overview", true);
+    if (matches.length === 1) openExperimentTab(matches[0].id, "overview", intent);
   }, [openExperimentTab]);
 
   const closeExperimentTab = useCallback(
@@ -985,7 +1108,7 @@ export default function App() {
   );
 
   const openResolvedFileTab = useCallback(
-    (tab: FileViewDef, preview = false) => {
+    (tab: FileViewDef, intent: TabOpenIntent = "preview") => {
       const persistentTab = persistentFileTab(tab);
       setFileTabs((prev) => {
         const idx = prev.findIndex((item) => sameFileTab(item, tab));
@@ -994,10 +1117,10 @@ export default function App() {
         next[idx] = persistentTab;
         return next;
       });
-      selectRightTab(tab, preview);
+      openRightTab(tab, intent);
       setPanelOpen(true);
     },
-    [selectRightTab],
+    [openRightTab],
   );
 
   // Resolve a reported path to a file tab. `contextSessionId` is the chat
@@ -1057,31 +1180,38 @@ export default function App() {
       line?: number,
       exp?: string,
       displayBranch?: string,
+      intent: TabOpenIntent = "preview",
     ) => {
       const tab = resolveFileTab(rawPath, contextSessionId, ref, line, exp, displayBranch);
-      if (tab) openResolvedFileTab(tab);
+      if (tab) openResolvedFileTab(tab, intent);
     },
     [openResolvedFileTab, resolveFileTab],
   );
 
   const openArtifactFileTab = useCallback(
-    (path: string) => openResolvedFileTab({ path, source: "artifacts" }),
+    (path: string) => openResolvedFileTab({ path, source: "artifacts" }, "keepOpen"),
     [openResolvedFileTab],
   );
 
   // Chat file chips may carry a target line, cited experiment, or an exact Git
-  // ref from a `git show ref:path` tool call. Chips preview; markdown links in
-  // a plan or file tab commit, since following a link is navigation.
+  // ref from a `git show ref:path` tool call.
   const openChatFile = useCallback(
-    (path: string, sessionId?: string, line?: number, exp?: string, ref?: string) => {
+    (
+      path: string,
+      sessionId?: string,
+      line?: number,
+      exp?: string,
+      ref?: string,
+      intent: TabOpenIntent = "preview",
+    ) => {
       const tab = resolveFileTab(path, sessionId, ref, line, exp);
-      if (tab) openResolvedFileTab(tab, true);
+      if (tab) openResolvedFileTab(tab, intent);
     },
     [openResolvedFileTab, resolveFileTab],
   );
 
-  // Following a chip or link out of a tab commits it, so the transcript or file
-  // the user navigated from isn't what the next preview replaces.
+  // Following a chip or link out of a preview keeps the source open before the
+  // destination uses its own preview/keep-open intent.
   const openFromRightTab = useCallback(
     (host: RightTab, open: () => void) => {
       promoteRightTab(host);
@@ -1100,9 +1230,9 @@ export default function App() {
       }
       if (
         activeSessionId === DEMO_MAIN_SESSION_ID &&
-        sameFileTab(tab, { path: PROJECT_BRIEF_NAME, source: "artifacts" })
+        sameFileTab(tab, { path: DEMO_OVERVIEW_ARTIFACT, source: "artifacts" })
       ) {
-        setDemoBriefLeading(false);
+        setDemoOverviewLeading(false);
       }
       forgetRightTab(tab, rightTabKey(rightTab) === rightTabKey(tab));
     },
@@ -1125,7 +1255,12 @@ export default function App() {
   // Open a proposed plan as a right-panel tab (the chat plan strip's "View
   // plan"). One tab per plan card; re-opening the same card refreshes its
   // text (a revised plan re-uses the strip but is a new promptId → new tab).
-  const openPlanTab = useCallback((plan: string, sessionId: string, promptId: string) => {
+  const openPlanTab = useCallback((
+    plan: string,
+    sessionId: string,
+    promptId: string,
+    intent: TabOpenIntent = "preview",
+  ) => {
     const tab: PlanViewDef = { kind: "plan", sessionId, promptId, plan };
     setPlanTabs((prev) => {
       const idx = prev.findIndex((t) => t.promptId === promptId);
@@ -1134,9 +1269,9 @@ export default function App() {
       next[idx] = tab;
       return next;
     });
-    selectRightTab(tab, true);
+    openRightTab(tab, intent);
     setPanelOpen(true);
-  }, [selectRightTab]);
+  }, [openRightTab]);
 
   const closePlanTab = useCallback(
     (tab: PlanViewDef) => {
@@ -1151,14 +1286,19 @@ export default function App() {
   // Open a sub-agent's transcript as a right-panel tab (a chat spawn row's
   // "view"). One tab per spawn part; its parts stream live off the chat message,
   // so the tab body just reads the current part and needs no fetch.
-  const openSubagentTab = useCallback((sessionId: string, spawnPartId: string, label?: string) => {
+  const openSubagentTab = useCallback((
+    sessionId: string,
+    spawnPartId: string,
+    label?: string,
+    intent: TabOpenIntent = "preview",
+  ) => {
     const tab: SubagentViewDef = { kind: "subagent", sessionId, spawnPartId, label };
     setSubagentTabs((prev) =>
       prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
     );
-    selectRightTab(tab, true);
+    openRightTab(tab, intent);
     setPanelOpen(true);
-  }, [selectRightTab]);
+  }, [openRightTab]);
 
   const closeSubagentTab = useCallback(
     (tab: SubagentViewDef) => {
@@ -1244,7 +1384,12 @@ export default function App() {
   // One Git-backed code tab per branch. Reopening the same branch focuses it
   // at the requested subview; another branch gets its own tab.
   const openCodeTabForExperiment = useCallback(
-    (experimentId: string, branch: string, view: CodeView = "files") => {
+    (
+      experimentId: string,
+      branch: string,
+      view: CodeView = "files",
+      intent: TabOpenIntent = "preview",
+    ) => {
       const opened: CodeTabDef = {
         code: true,
         experimentId,
@@ -1259,10 +1404,10 @@ export default function App() {
             )
           : [...prev, opened],
       );
-      selectRightTab(opened);
+      openRightTab(opened, intent);
       setPanelOpen(true);
     },
-    [selectRightTab],
+    [openRightTab],
   );
 
   const updateCodeTab = useCallback(
@@ -1379,21 +1524,19 @@ export default function App() {
   const expTab =
     typeof rightTab === "object" && "id" in rightTab ? rightTab : null;
   const fileTab = typeof rightTab === "object" && "path" in rightTab ? rightTab : null;
-  const onboardingProjectBriefTab =
-    activeSessionId === DEMO_MAIN_SESSION_ID && demoBriefLeading
+  const onboardingOverviewTab =
+    activeSessionId === DEMO_MAIN_SESSION_ID && demoOverviewLeading
       ? fileTabs.find(
           (tab) =>
             sameFileTab(tab, {
-              path: PROJECT_BRIEF_NAME,
+              path: DEMO_OVERVIEW_ARTIFACT,
               source: "artifacts",
             }),
         )
       : undefined;
-  // The demo brief leads the home tabs; every other file keeps the normal slot.
-  const leadingFileTabs = onboardingProjectBriefTab ? [onboardingProjectBriefTab] : [];
-  const trailingFileTabs = onboardingProjectBriefTab
-    ? fileTabs.filter((tab) => !sameFileTab(tab, onboardingProjectBriefTab))
-    : fileTabs;
+  // The demo overview leads the home tabs; every other content tab follows the
+  // stable order in which it was opened (or reused as the preview slot).
+  const leadingFileTabs = onboardingOverviewTab ? [onboardingOverviewTab] : [];
   // PlanViewDef and SubagentViewDef both carry `kind`; discriminate on its value.
   const planTab =
     typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "plan"
@@ -1408,6 +1551,17 @@ export default function App() {
   const codeTab = requestedCodeTab
     ? (codeTabs.find((tab) => sameCodeTab(tab, requestedCodeTab)) ?? null)
     : null;
+  const contentTabByKey = new Map<string, ContentTab>();
+  for (const tab of [...expTabs, ...fileTabs, ...planTabs, ...subagentTabs, ...codeTabs]) {
+    contentTabByKey.set(rightTabKey(tab), tab);
+  }
+  const leadingContentKey = onboardingOverviewTab
+    ? rightTabKey(onboardingOverviewTab)
+    : null;
+  const orderedContentTabs = contentTabOrder
+    .filter((key) => key !== leadingContentKey)
+    .map((key) => contentTabByKey.get(key))
+    .filter(isPresent);
   const isPreviewTab = (tab: RightTab) =>
     previewTab !== null && rightTabKey(previewTab) === rightTabKey(tab);
   const renderFileTab = (tab: FileViewDef) => (
@@ -1427,6 +1581,72 @@ export default function App() {
   const codeExperiment = codeTab
     ? (experiments.find((experiment) => experiment.id === codeTab.experimentId) ?? null)
     : null;
+  const renderContentTab = (tab: ContentTab) => {
+    if ("path" in tab) return renderFileTab(tab);
+    if ("id" in tab) {
+      const experiment = experiments.find((item) => item.id === tab.id);
+      return (
+        <ClosableTab
+          key={rightTabKey(tab)}
+          active={expTab !== null && sameExpTab(expTab, tab)}
+          label={experiment ? experiment.title || experiment.slug : "…"}
+          icon={
+            tab.view === "overview" ? (
+              <ChartSpline size={12} style={{ flexShrink: 0 }} />
+            ) : (
+              <Terminal size={12} style={{ flexShrink: 0 }} />
+            )
+          }
+          preview={isPreviewTab(tab)}
+          onSelect={() => selectRightTab(tab)}
+          onPromote={() => promoteRightTab(tab)}
+          onClose={() => closeExperimentTab(tab)}
+        />
+      );
+    }
+    if ("kind" in tab && tab.kind === "plan") {
+      return (
+        <ClosableTab
+          key={rightTabKey(tab)}
+          active={planTab !== null && planTab.promptId === tab.promptId}
+          label="Plan"
+          icon={<ScrollText size={12} style={{ flexShrink: 0 }} />}
+          preview={isPreviewTab(tab)}
+          onSelect={() => selectRightTab(tab)}
+          onPromote={() => promoteRightTab(tab)}
+          onClose={() => closePlanTab(tab)}
+        />
+      );
+    }
+    if ("kind" in tab) {
+      return (
+        <ClosableTab
+          key={rightTabKey(tab)}
+          active={subagentTab !== null && subagentTab.spawnPartId === tab.spawnPartId}
+          label={spawnMeta[tab.spawnPartId]?.label ?? tab.label ?? "Sub-agent"}
+          shimmer={spawnMeta[tab.spawnPartId]?.running ?? false}
+          icon={<Users size={12} style={{ flexShrink: 0 }} />}
+          preview={isPreviewTab(tab)}
+          onSelect={() => selectRightTab(tab)}
+          onPromote={() => promoteRightTab(tab)}
+          onClose={() => closeSubagentTab(tab)}
+        />
+      );
+    }
+    const experiment = experiments.find((item) => item.id === tab.experimentId);
+    return (
+      <ClosableTab
+        key={rightTabKey(tab)}
+        active={codeTab !== null && sameCodeTab(codeTab, tab)}
+        label={experiment?.slug ?? tab.branch}
+        icon={<FolderOpen size={12} style={{ flexShrink: 0 }} />}
+        preview={isPreviewTab(tab)}
+        onSelect={() => selectRightTab(tab)}
+        onPromote={() => promoteRightTab(tab)}
+        onClose={() => closeCodeTab(tab)}
+      />
+    );
+  };
 
   if (startupError) {
     return (
@@ -1509,7 +1729,6 @@ export default function App() {
           <ChatPanel
             projectId={projectId}
             projectName={activeProject?.name ?? ""}
-            paperId={projects.find((p) => p.id === projectId)?.paperId}
             railHeader={railHeader}
             railOpen={railOpen}
             onShowRail={() => setRailOpen(true)}
@@ -1559,7 +1778,7 @@ export default function App() {
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-2.5 mr-0 mb-2.5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-hidden ${panelMax ? "max" : ""}`}
+          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 mr-0 mb-5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg overflow-hidden ${ELEVATED_SURFACE_SHADOW_CLASS_NAME} ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
@@ -1598,66 +1817,7 @@ export default function App() {
                   onClose={() => closeHomeTab("experiments")}
                 />
               )}
-              {expTabs.map((t) => {
-                const exp = experiments.find((e) => e.id === t.id);
-                return (
-                  <ClosableTab
-                    key={`${t.id}:${t.view}`}
-                    active={expTab !== null && sameExpTab(expTab, t)}
-                    label={exp ? exp.title || exp.slug : "…"}
-                    icon={
-                      t.view === "overview" ? (
-                        <ChartSpline size={12} style={{ flexShrink: 0 }} />
-                      ) : (
-                        <Terminal size={12} style={{ flexShrink: 0 }} />
-                      )
-                    }
-                    preview={isPreviewTab(t)}
-                    onSelect={() => selectRightTab(t)}
-                    onPromote={() => promoteRightTab(t)}
-                    onClose={() => closeExperimentTab(t)}
-                  />
-                );
-              })}
-              {trailingFileTabs.map(renderFileTab)}
-              {planTabs.map((t) => (
-                <ClosableTab
-                  key={`plan:${t.promptId}`}
-                  active={planTab !== null && planTab.promptId === t.promptId}
-                  label="Plan"
-                  icon={<ScrollText size={12} style={{ flexShrink: 0 }} />}
-                  preview={isPreviewTab(t)}
-                  onSelect={() => selectRightTab(t)}
-                  onPromote={() => promoteRightTab(t)}
-                  onClose={() => closePlanTab(t)}
-                />
-              ))}
-              {subagentTabs.map((t) => (
-                <ClosableTab
-                  key={`subagent:${t.spawnPartId}`}
-                  active={subagentTab !== null && subagentTab.spawnPartId === t.spawnPartId}
-                  label={spawnMeta[t.spawnPartId]?.label ?? t.label ?? "Sub-agent"}
-                  shimmer={spawnMeta[t.spawnPartId]?.running ?? false}
-                  icon={<Users size={12} style={{ flexShrink: 0 }} />}
-                  preview={isPreviewTab(t)}
-                  onSelect={() => selectRightTab(t)}
-                  onPromote={() => promoteRightTab(t)}
-                  onClose={() => closeSubagentTab(t)}
-                />
-              ))}
-              {codeTabs.map((tab) => {
-                const experiment = experiments.find((item) => item.id === tab.experimentId);
-                return (
-                  <ClosableTab
-                    key={`code:${tab.branch}`}
-                    active={codeTab !== null && sameCodeTab(codeTab, tab)}
-                    label={experiment?.slug ?? tab.branch}
-                    icon={<FolderOpen size={12} style={{ flexShrink: 0 }} />}
-                    onSelect={() => selectRightTab(tab)}
-                    onClose={() => closeCodeTab(tab)}
-                  />
-                );
-              })}
+              {orderedContentTabs.map(renderContentTab)}
             </div>
             <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
               <button
@@ -1790,17 +1950,22 @@ export default function App() {
                         : undefined
                     }
                     experiments={scopedExperiments}
-                    onOpen={(experiment) => {
-                      openExperimentTab(experiment.id, "overview");
+                    onOpen={(experiment, intent) => {
+                      openExperimentTab(experiment.id, "overview", intent);
                     }}
-                    onOpenLogs={(experimentId, runId) => {
+                    onOpenLogs={(experimentId, runId, intent) => {
                       setSelectedRunId(runId);
-                      openExperimentTab(experimentId, "terminal");
+                      openExperimentTab(experimentId, "terminal", intent);
                     }}
-                    onOpenCode={(experimentId) => {
+                    onOpenCode={(experimentId, intent) => {
                       const experiment = experiments.find((item) => item.id === experimentId);
                       if (experiment)
-                        openCodeTabForExperiment(experiment.id, experiment.branchName, "files");
+                        openCodeTabForExperiment(
+                          experiment.id,
+                          experiment.branchName,
+                          "files",
+                          intent,
+                        );
                     }}
                     onCancel={cancelRun}
                   />
@@ -1818,7 +1983,17 @@ export default function App() {
                   toggled={filesToggled}
                   onViewChange={setFilesView}
                   onToggledChange={setFilesToggled}
-                  onOpenFile={openFileTab}
+                  onOpenFile={(path, sessionId, ref, intent) =>
+                    openFileTab(
+                      path,
+                      sessionId,
+                      ref,
+                      undefined,
+                      undefined,
+                      undefined,
+                      intent,
+                    )
+                  }
                 />
               ) : (
                 <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
@@ -1848,8 +2023,18 @@ export default function App() {
                   gitRef={fileTab.ref}
                   line={fileTab.line}
                   branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
-                  onOpenFile={(path, sessionId, ref) =>
-                    openFromRightTab(fileTab, () => openFileTab(path, sessionId, ref))
+                  onOpenFile={(path, sessionId, ref, intent) =>
+                    openFromRightTab(fileTab, () =>
+                      openFileTab(
+                        path,
+                        sessionId,
+                        ref,
+                        undefined,
+                        undefined,
+                        undefined,
+                        intent,
+                      ),
+                    )
                   }
                   scrollPosition={fileScrollPositionsRef.current.get(
                     fileScrollKey(projectId, activeSessionId, fileTab),
@@ -1873,8 +2058,18 @@ export default function App() {
               <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
                 <Md
                   text={planTab.plan}
-                  onOpenFile={(path) =>
-                    openFromRightTab(planTab, () => openFileTab(path, planTab.sessionId))
+                  onOpenFile={(path, line, exp, ref, intent) =>
+                    openFromRightTab(planTab, () =>
+                      openFileTab(
+                        path,
+                        planTab.sessionId,
+                        ref,
+                        line,
+                        exp,
+                        undefined,
+                        intent,
+                      ),
+                    )
                   }
                 />
               </div>
@@ -1885,18 +2080,22 @@ export default function App() {
               key={subagentTab.spawnPartId}
               sessionId={subagentTab.sessionId}
               spawnPartId={subagentTab.spawnPartId}
-              onOpenFile={(path) =>
-                openFromRightTab(subagentTab, () => openChatFile(path, subagentTab.sessionId))
+              onOpenFile={(path, line, exp, ref, intent) =>
+                openFromRightTab(subagentTab, () =>
+                  openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
+                )
               }
-              onOpenRun={(runId) => openFromRightTab(subagentTab, () => openRunLogs(runId))}
+              onOpenRun={(runId, intent) =>
+                openFromRightTab(subagentTab, () => openRunLogs(runId, intent))
+              }
               runExperimentName={runExperimentName}
-              onOpenExperiment={(experimentId) =>
-                openFromRightTab(subagentTab, () => openExperimentNotes(experimentId))
+              onOpenExperiment={(experimentId, intent) =>
+                openFromRightTab(subagentTab, () => openExperimentNotes(experimentId, intent))
               }
               experimentName={experimentName}
-              onOpenSubagent={(pid, label) =>
+              onOpenSubagent={(pid, label, intent) =>
                 openFromRightTab(subagentTab, () =>
-                  openSubagentTab(subagentTab.sessionId, pid, label),
+                  openSubagentTab(subagentTab.sessionId, pid, label, intent),
                 )
               }
             />
@@ -1912,8 +2111,18 @@ export default function App() {
                   toggled={codeTab.toggled}
                   onViewChange={(view) => updateCodeTab(codeTab, { view })}
                   onToggledChange={(toggled) => updateCodeTab(codeTab, { toggled })}
-                  onOpenFile={(path, sessionId, ref) =>
-                    openFileTab(path, sessionId, ref, undefined, undefined, codeExperiment.branchName)
+                  onOpenFile={(path, sessionId, ref, intent) =>
+                    openFromRightTab(codeTab, () =>
+                      openFileTab(
+                        path,
+                        sessionId,
+                        ref,
+                        undefined,
+                        undefined,
+                        codeExperiment.branchName,
+                        intent,
+                      ),
+                    )
                   }
                 />
               )}
@@ -1934,15 +2143,20 @@ export default function App() {
                       (experiment) => experiment.id === tabExperiment.parentExperimentId,
                     ) ?? null
                   }
-                  onOpenView={(view, runId) => {
+                  onOpenView={(view, runId, intent) => {
                     if (runId) setSelectedRunId(runId);
-                    openExperimentTab(tabExperiment.id, view);
+                    openFromRightTab(expTab, () =>
+                      openExperimentTab(tabExperiment.id, view, intent),
+                    );
                   }}
-                  onOpenCode={(view) =>
-                    openCodeTabForExperiment(
-                      tabExperiment.id,
-                      tabExperiment.branchName,
-                      view,
+                  onOpenCode={(view, intent) =>
+                    openFromRightTab(expTab, () =>
+                      openCodeTabForExperiment(
+                        tabExperiment.id,
+                        tabExperiment.branchName,
+                        view,
+                        intent,
+                      ),
                     )
                   }
                 />

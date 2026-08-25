@@ -21,7 +21,7 @@ use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use futures::Stream;
@@ -47,6 +47,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
+        local::chat::reconcile_unfinished_turns(&store)?;
         for run in store.list_active_runs()? {
             if store.get_local_experiment(&run.experiment_id)?.is_some() {
                 if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
@@ -75,6 +76,29 @@ pub async fn run(args: UpArgs) -> Result<()> {
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(port);
+    state.chat.resume_persisted_queues();
+    {
+        let chat = state.chat.clone();
+        let moving = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::spawn(async move {
+            let interval =
+                Duration::from_millis((crate::store::CHAT_TURN_LEASE_TTL_MS + 1_000) as u64);
+            loop {
+                tokio::time::sleep(interval).await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let _gate = gate.lock().await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                if let Err(err) = chat.reconcile_expired_turn_leases() {
+                    eprintln!("orx up: could not reconcile expired chat turns: {err}");
+                }
+            }
+        });
+    }
 
     spawn_agent_preflight();
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
@@ -271,6 +295,7 @@ fn router(state: AppState) -> Router {
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/projects/activity", get(list_project_activity))
         .route(
             "/api/projects/{id}",
             get(get_project)
@@ -318,6 +343,28 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
+        .route("/api/projects/{id}/file/latex", post(compile_project_latex))
+        .route("/api/latex/engine", get(latex_engine))
+        .route(
+            "/api/projects/{id}/file/overleaf",
+            get(overleaf_link)
+                .post(link_overleaf)
+                .delete(unlink_overleaf),
+        )
+        .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
+        .route(
+            "/api/projects/{id}/file/overleaf/status",
+            get(overleaf_status),
+        )
+        .route(
+            "/api/projects/{id}/file/overleaf/upload",
+            get(overleaf_upload),
+        )
+        .route("/api/overleaf/settings", get(overleaf_settings))
+        .route(
+            "/api/overleaf/token",
+            post(set_overleaf_token).delete(delete_overleaf_token),
+        )
         .route("/api/files/abs", get(absolute_file))
         .route("/api/files/abs/raw", get(absolute_raw_file))
         .route(
@@ -325,12 +372,6 @@ fn router(state: AppState) -> Router {
             get(list_artifacts).delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
-        .route(
-            "/api/projects/{id}/brief",
-            put(write_project_brief).layer(DefaultBodyLimit::max(
-                local::files::MAX_PROJECT_BRIEF_BYTES * 6 + 1024,
-            )),
-        )
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
@@ -401,6 +442,7 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/harnesses", get(list_harnesses))
         .route("/api/skills", get(list_skills))
+        .route("/api/skills/{name}", get(get_skill))
         .route(
             "/api/user-skills",
             get(list_user_skills)
@@ -409,6 +451,12 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/user-skills/import", post(import_user_skill))
         .route("/api/harness-skills", get(list_harness_skills))
+        .route(
+            "/api/latex-templates",
+            get(list_latex_templates)
+                .post(upload_latex_template)
+                .delete(delete_latex_template),
+        )
         .route(
             "/api/chat/sessions",
             get(list_chat_sessions).post(create_chat_session),
@@ -420,12 +468,16 @@ fn router(state: AppState) -> Router {
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+        .route(
+            "/api/chat/sessions/{id}/turns/{turnId}/recover",
+            post(recover_chat_turn),
+        )
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
         .route("/api/chat/sessions/{id}/interrupt", post(interrupt_chat))
         .route(
             "/api/chat/sessions/{id}/queue/{itemId}",
-            axum::routing::delete(cancel_queued_chat),
+            axum::routing::delete(cancel_queued_chat).post(retry_queued_chat),
         )
         .route("/api/chat/sessions/{id}/respond", post(respond_chat))
         // Internal: the `orx mcp-gate` permission bridge's long-poll (plan
@@ -473,7 +525,7 @@ type ApiResult = std::result::Result<Json<Value>, ApiError>;
 
 /// The Run entity the API serves: StoredRun with `backend_json` parsed into an
 /// object and cancellation intent exposed for pending UI state.
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ApiRun {
     id: String,
@@ -662,7 +714,6 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
             json!({
                 "name": s.name,
                 "description": s.description,
-                "argHint": s.arg_hint,
                 "source": "builtin",
             })
         })
@@ -680,11 +731,30 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
         skills.push(json!({
             "name": s.name,
             "description": s.description,
-            "argHint": "",
             "source": "user",
         }));
     }
     Json(json!({ "skills": skills }))
+}
+
+async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiResult {
+    if !crate::local::user_skills::is_valid_slug(&name) {
+        return Err(bad_request("invalid skill name"));
+    }
+    let github_enabled = if let Some(project_id) = q.project.as_deref() {
+        Store::open()
+            .ok()
+            .and_then(|store| store.get_local_project(project_id).ok().flatten())
+            .is_some_and(|project| project.github_enabled())
+    } else {
+        false
+    };
+    if let Some(content) = crate::local::skills::instructions(&name, false, github_enabled) {
+        return Ok(Json(json!({ "name": name, "content": content })));
+    }
+    let content = crate::local::user_skills::content(&name, q.project.as_deref())
+        .ok_or_else(|| not_found("skill"))?;
+    Ok(Json(json!({ "name": name, "content": content })))
 }
 
 // --- user-uploaded skills -----------------------------------------------------
@@ -731,7 +801,7 @@ struct UserSkillsListQ {
     project: Option<String>,
 }
 
-/// Both scopes for the Skills tab: globals plus the project's own.
+/// Both scopes for the Customize tab: globals plus the project's own.
 async fn list_user_skills(Query(q): Query<UserSkillsListQ>) -> ApiResult {
     let skills: Vec<Value> = crate::local::user_skills::list_for_project(q.project.as_deref())
         .iter()
@@ -784,6 +854,51 @@ async fn delete_user_skill(Query(q): Query<DeleteSkillQ>) -> ApiResult {
     let scope = parse_scope(&q.scope)?;
     let project = resolve_skill_scope(scope, q.project.as_deref())?;
     crate::local::user_skills::delete(&q.name, scope, project.as_deref()).map_err(bad_request)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
+    json!({
+        "name": t.name,
+        "scope": t.scope,
+        "entry": t.entry,
+        "supportFiles": t.support_files,
+        "bytes": t.bytes,
+        "updatedAt": t.updated_at,
+    })
+}
+
+/// Both scopes for the Customize tab's templates card.
+async fn list_latex_templates(Query(q): Query<UserSkillsListQ>) -> ApiResult {
+    let templates: Vec<Value> =
+        crate::local::latex_templates::list_for_project(q.project.as_deref())
+            .iter()
+            .map(latex_template_json)
+            .collect();
+    Ok(Json(json!({ "templates": templates })))
+}
+
+async fn upload_latex_template(Json(req): Json<UploadSkillReq>) -> ApiResult {
+    let scope = parse_scope(&req.scope)?;
+    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.content_base64.trim())
+        .map_err(|e| bad_request(format!("invalid file data: {e}")))?;
+    let saved = crate::local::latex_templates::save_upload(
+        &req.filename,
+        &bytes,
+        scope,
+        project.as_deref(),
+    )
+    .map_err(bad_request)?;
+    Ok(Json(json!({ "template": latex_template_json(&saved) })))
+}
+
+async fn delete_latex_template(Query(q): Query<DeleteSkillQ>) -> ApiResult {
+    let scope = parse_scope(&q.scope)?;
+    let project = resolve_skill_scope(scope, q.project.as_deref())?;
+    crate::local::latex_templates::delete(&q.name, scope, project.as_deref())
+        .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -857,6 +972,38 @@ async fn list_projects() -> ApiResult {
     let projects = Store::open()?.list_local_projects()?;
     let projects: Vec<Value> = projects.iter().map(project_json).collect();
     Ok(Json(json!({ "projects": projects })))
+}
+
+async fn list_project_activity(State(state): State<AppState>) -> ApiResult {
+    let busy: HashSet<String> = state.chat.busy_sessions().await.into_iter().collect();
+    tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
+        let store = Store::open()?;
+        let mut active_agents = HashMap::<String, usize>::new();
+        for (session_id, project_id) in store.list_chat_session_project_ids()? {
+            if busy.contains(&session_id) {
+                *active_agents.entry(project_id).or_default() += 1;
+            }
+        }
+        let activity = store
+            .list_project_activity_summaries()?
+            .into_iter()
+            .map(|summary| {
+                let active_agents = active_agents.get(&summary.project_id).copied().unwrap_or(0);
+                json!({
+                    "projectId": summary.project_id,
+                    "activeAgents": active_agents,
+                    "totalAgents": summary.total_agents,
+                    "runningExperiments": summary.running_experiments,
+                    "totalExperiments": summary.total_experiments,
+                    "lastMessageAt": summary.last_message_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(Json(json!({ "activity": activity })))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("project activity task failed: {error}")))?
+    .map_err(ApiError::from)
 }
 
 #[derive(Deserialize)]
@@ -964,6 +1111,8 @@ struct CreateProjectReq {
     #[serde(default)]
     create_folder: bool,
     #[serde(default)]
+    require_new_folder: bool,
+    #[serde(default)]
     initialize_git: bool,
     github_sync_enabled: Option<bool>,
 }
@@ -984,14 +1133,23 @@ async fn create_project(
     }
     let path = req.path;
     let create_folder = req.create_folder;
+    let require_new_folder = req.require_new_folder;
     let initialize_git = req.initialize_git;
     let clone_url = req.clone_url.filter(|url| !url.trim().is_empty());
-    let paper_id = req.paper_id.filter(|paper_id| !paper_id.trim().is_empty());
-    if paper_id.is_some() && clone_url.is_none() {
-        return Err(bad_request(
-            "A paper project requires a linked public code repository.",
-        ));
-    }
+    let paper_id = req
+        .paper_id
+        .map(|paper_id| paper_id.trim().to_string())
+        .filter(|paper_id| !paper_id.is_empty());
+    // A paper with no linked repository starts blank, seeded with its PDF — the
+    // only content such a project has, so a failed download fails the request.
+    let paper_pdf = match (paper_id.as_deref(), clone_url.as_deref()) {
+        (Some(id), None) => Some(
+            crate::client::fetch_paper_pdf(id)
+                .await
+                .map_err(bad_request)?,
+        ),
+        _ => None,
+    };
     let github_sync_enabled = req
         .github_sync_enabled
         .unwrap_or_else(crate::config::github_for_new_projects);
@@ -1010,17 +1168,15 @@ async fn create_project(
             &path,
             local::projects::CreateProjectOptions {
                 create_folder,
+                require_new_folder,
                 initialize_git,
                 clone_url,
                 shallow_clone,
                 run_command,
                 paper_id,
+                paper_pdf,
             },
         )?;
-        if let Err(error) = local::files::ensure_project_brief(&project) {
-            store.delete_local_project(&project.id)?;
-            return Err(error);
-        }
         Ok(project)
     })
     .await
@@ -1488,7 +1644,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         );
     }
     for session in &sessions {
-        state.chat.clear_queue(&session.id);
+        state.chat.clear_queue(&session.id)?;
         let _ = state.chat.interrupt(&session.id).await;
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
@@ -1528,7 +1684,9 @@ async fn compute_backends() -> Json<Value> {
     Json(json!({ "backends": crate::compute::capabilities() }))
 }
 
-#[derive(Deserialize)]
+/// Dashboard requests omit `chat_session_id`; forwarded agent CLI requests use
+/// it only for run attribution and wakeups.
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateRunReq {
     experiment_id: String,
@@ -1543,6 +1701,102 @@ struct CreateRunReq {
     disk: Option<i64>,
     #[serde(default)]
     force: bool,
+    chat_session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateRunResponse {
+    run: ApiRun,
+}
+
+pub(crate) struct RunLaunchSummary {
+    pub run_id: String,
+    pub experiment_id: String,
+    pub job_id: Option<String>,
+}
+
+async fn decode_local_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    action: &str,
+) -> Result<T> {
+    let status = response.status();
+    let body = response
+        .bytes()
+        .await
+        .map_err(|error| anyhow!("orx up {action} response failed: {error}"))?;
+    if !status.is_success() {
+        let detail = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| String::from_utf8_lossy(&body).trim().to_string());
+        if status.is_client_error() {
+            return Err(anyhow!("{detail}"));
+        }
+        return Err(anyhow!("orx up could not {action}: {detail}"));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|error| anyhow!("orx up returned an invalid {action} response: {error}"))
+}
+
+fn local_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(3))
+        .build()
+        .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
+}
+
+pub(crate) async fn submit_run_via_up(
+    port: u16,
+    args: &crate::ExpRunArgs,
+) -> Result<RunLaunchSummary> {
+    let request = CreateRunReq {
+        experiment_id: args.exp_id.clone(),
+        backend: args.backend.clone(),
+        flavor: args.flavor.clone(),
+        host: args.host.clone(),
+        manifest: args.manifest.clone(),
+        image: args.image.clone(),
+        timeout: args.timeout.clone(),
+        org: args.org.clone(),
+        provider: args.provider.clone(),
+        disk: args.disk,
+        force: args.force,
+        chat_session_id: args.launching_chat_session(),
+    };
+    let response = local_client()?
+        .post(format!("http://127.0.0.1:{port}/api/runs"))
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let response: CreateRunResponse = decode_local_response(response, "start the run").await?;
+    let job_id = response
+        .run
+        .backend
+        .as_ref()
+        .and_then(|backend| backend.get("jobId"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    Ok(RunLaunchSummary {
+        run_id: response.run.id,
+        experiment_id: args.exp_id.clone(),
+        job_id,
+    })
+}
+
+pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
+    let response = local_client()?
+        .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
+        .send()
+        .await
+        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let _: Value = decode_local_response(response, "cancel the run").await?;
+    Ok(())
 }
 
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
@@ -1557,6 +1811,7 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     let mut backend = req.backend;
     let mut flavor = req.flavor;
+    // Dashboard callers may omit these; forwarded CLI requests arrive resolved.
     local::apply_compute_default(&mut backend, &mut flavor);
     let args = crate::ExpRunArgs {
         exp_id: req.experiment_id,
@@ -1570,7 +1825,9 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         image: req.image,
         timeout: req.timeout,
         force: req.force,
+        chat_session_id: req.chat_session_id,
     };
+    crate::compute::validate_run_args(&args).map_err(bad_request)?;
     let run = crate::compute::submit(&args).await.map_err(bad_request)?;
     Ok(Json(json!({ "run": ApiRun::from(&run) })))
 }
@@ -1629,12 +1886,13 @@ async fn list_instances() -> ApiResult {
     Ok(Json(json!({ "instances": instances })))
 }
 
-async fn cancel_run(Path(id): Path<String>) -> ApiResult {
+async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
     let store = Store::open()?;
     let run = local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
     // A terminal run must not gain a stale cancel_requested flag.
     if is_terminal(&run.status) {
-        return Err(bad_request(format!("run already {}", run.status)));
+        return Ok(Json(json!({ "ok": true, "alreadyTerminal": true })));
     }
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
@@ -2367,6 +2625,363 @@ async fn open_project_file(
     .await
 }
 
+/// Whether this machine can compile at all, so the dashboard can render a real
+/// document by default and fall back to its approximate preview when it cannot.
+async fn latex_engine() -> ApiResult {
+    blocking_api(move || {
+        let engine = local::latex::find_engine();
+        Ok(Json(json!({
+            "engine": engine,
+            "hint": engine.is_none().then(local::latex::install_hint),
+            "installCommand": engine.is_none().then(local::latex::install_command).flatten(),
+        })))
+    })
+    .await
+}
+
+// --- overleaf ------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverleafFileQ {
+    path: String,
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverleafFileReq {
+    path: String,
+    session_id: Option<String>,
+    /// Only on link: the project URL the user pasted.
+    #[serde(default)]
+    project: Option<String>,
+    /// Only on sync: how the user settled files both sides changed, keyed by
+    /// the checkout-relative path the panel showed them.
+    #[serde(default)]
+    resolve: std::collections::BTreeMap<String, String>,
+}
+
+fn overleaf_link_json(link: Option<&crate::store::OverleafLink>) -> Value {
+    let Some(link) = link else {
+        return Value::Null;
+    };
+    let project = local::overleaf::Project {
+        id: link.overleaf_project_id.clone(),
+        host: link.host.clone(),
+    };
+    json!({
+        "projectId": project.id,
+        "url": project.web_url(),
+    })
+}
+
+fn overleaf_state_json(link: Option<&crate::store::OverleafLink>) -> Value {
+    json!({
+        "hasToken": local::overleaf::token().is_some(),
+        "link": overleaf_link_json(link),
+    })
+}
+
+async fn overleaf_settings() -> ApiResult {
+    blocking_api(move || {
+        Ok(Json(
+            json!({ "hasToken": local::overleaf::token().is_some() }),
+        ))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SetOverleafTokenReq {
+    token: String,
+}
+
+/// Stored as given: the bridge is the only thing that can say whether a token
+/// works, and it needs a project to say it about. `link_overleaf` is where a
+/// bad token surfaces.
+async fn set_overleaf_token(Json(req): Json<SetOverleafTokenReq>) -> ApiResult {
+    blocking_api(move || {
+        let token = req.token.trim().to_string();
+        if token.is_empty() {
+            return Err(bad_request("token is required"));
+        }
+        // A newline would add a second field to the credential line the helper
+        // feeds git.
+        if token
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || !c.is_ascii())
+        {
+            return Err(bad_request(
+                "That does not look like an Overleaf token — it has spaces, line breaks, or characters a token does not contain. Copy it again from Overleaf's Account Settings.",
+            ));
+        }
+        local::overleaf::set_token(&token)?;
+        Ok(Json(json!({ "hasToken": true })))
+    })
+    .await
+}
+
+async fn delete_overleaf_token() -> ApiResult {
+    blocking_api(move || {
+        local::overleaf::clear_token()?;
+        Ok(Json(json!({ "hasToken": false })))
+    })
+    .await
+}
+
+async fn overleaf_link(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
+        let store = Store::open()?;
+        let link = store.overleaf_link(&id, &rel)?;
+        Ok(Json(overleaf_state_json(link.as_ref())))
+    })
+    .await
+}
+
+/// Link this `.tex` to an Overleaf project, proving the account can reach it
+/// before the link is stored — so a plan without Git integration is reported
+/// here, once, rather than on every later push.
+async fn link_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        let token = local::overleaf::token()
+            .ok_or_else(|| bad_request("Add an Overleaf Git authentication token first."))?;
+        let raw = req.project.unwrap_or_default();
+        let project = local::overleaf::parse_project(&raw).map_err(bad_request)?;
+        local::overleaf::probe(&project, &token).map_err(|e| bad_request(e.to_string()))?;
+        let store = Store::open()?;
+        let link = crate::store::OverleafLink {
+            overleaf_project_id: project.id,
+            host: project.host,
+            head: String::new(),
+            baseline: Default::default(),
+            root: String::new(),
+        };
+        store.set_overleaf_link(&id, &rel, &link)?;
+        Ok(Json(overleaf_state_json(Some(&link))))
+    })
+    .await
+}
+
+/// Validates the path but does not resolve it: unlinking a paper that has since
+/// been deleted or renamed must still work, or the link would outlive any way
+/// to remove it.
+async fn unlink_overleaf(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, _) = validated_project_file_path(&q.path)?;
+        let store = Store::open()?;
+        store.clear_overleaf_link(&id, &rel)?;
+        Ok(Json(overleaf_state_json(None)))
+    })
+    .await
+}
+
+/// Bring the paper and the linked Overleaf project into step, both ways. Like a
+/// failed compile, a refusal is the answer the user came for, so it comes back
+/// as a 400 carrying Overleaf's own words.
+async fn sync_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, root, full) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        let (token, link) = linked(&id, &rel)?;
+        let root = root.to_string_lossy().to_string();
+        // An agreement reached against another checkout says nothing about this
+        // one: starting from none makes every difference a conflict, which is
+        // the safe direction when we cannot tell who moved.
+        let baseline = if link.root == root {
+            link.baseline.clone()
+        } else {
+            Default::default()
+        };
+        let project = local::overleaf::Project {
+            id: link.overleaf_project_id.clone(),
+            host: link.host.clone(),
+        };
+        let payload = local::overleaf::collect(&full)?;
+        let folder = local::overleaf::folder_of(&rel);
+        let mut resolutions = std::collections::BTreeMap::new();
+        for (path, how) in &req.resolve {
+            let how = match how.as_str() {
+                "take-overleaf" => local::overleaf::Resolution::TakeOverleaf,
+                "keep-local" => local::overleaf::Resolution::KeepLocal,
+                other => return Err(bad_request(format!("unknown resolution {other:?}"))),
+            };
+            if let Some(path) = local::overleaf::from_checkout(folder.as_deref(), path) {
+                resolutions.insert(path, how);
+            }
+        }
+        let outcome = local::overleaf::sync(&payload, &project, &token, &baseline, &resolutions)
+            .map_err(|e| bad_request(e.to_string()))?;
+        let store = Store::open()?;
+        store.set_overleaf_link(
+            &id,
+            &rel,
+            &crate::store::OverleafLink {
+                head: outcome.head.clone(),
+                baseline: outcome.baseline.clone(),
+                root,
+                ..link
+            },
+        )?;
+        Ok(Json(json!({
+            "ok": true,
+            "pulled": local::overleaf::to_checkout(folder.as_deref(), &outcome.pulled),
+            "pushed": local::overleaf::to_checkout(folder.as_deref(), &outcome.pushed),
+            "conflicts": local::overleaf::to_checkout(folder.as_deref(), &outcome.conflicts),
+            "note": outcome.note,
+        })))
+    })
+    .await
+}
+
+/// Whether Overleaf has moved since the last sync — one `ls-remote`, no clone,
+/// so a linked paper can be watched while its tab is open without a transfer
+/// every time.
+async fn overleaf_status(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
+        let (token, link) = linked(&id, &rel)?;
+        let project = local::overleaf::Project {
+            id: link.overleaf_project_id,
+            host: link.host,
+        };
+        let head = local::overleaf::remote_head(&project, &token)
+            .map_err(|e| bad_request(e.to_string()))?;
+        Ok(Json(json!({ "remoteChanged": head != link.head })))
+    })
+    .await
+}
+
+/// The token and link a sync needs, or the 400 that says which is missing.
+fn linked(
+    id: &str,
+    path: &str,
+) -> std::result::Result<(String, crate::store::OverleafLink), ApiError> {
+    let token = local::overleaf::token()
+        .ok_or_else(|| bad_request("Add an Overleaf Git authentication token first."))?;
+    let link = Store::open()?
+        .overleaf_link(id, path)?
+        .ok_or_else(|| bad_request("This paper is not linked to an Overleaf project yet."))?;
+    Ok((token, link))
+}
+
+/// The no-plan path: a page that posts the paper straight into a new Overleaf
+/// project. Served rather than built in the browser because the files it
+/// carries are read from the checkout, and returned as HTML because Overleaf
+/// takes them as a form POST.
+async fn overleaf_upload(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> Response {
+    let built = tokio::task::spawn_blocking(move || {
+        let (_, _, full) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())
+            .map_err(|e| anyhow!("{}", e.1))?;
+        let payload = local::overleaf::collect(&full)?;
+        local::overleaf::upload_form_html(&payload)
+    })
+    .await;
+    match built {
+        Ok(Ok(html)) => Html(html).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Html(format!(
+                "<!doctype html><meta charset=\"utf-8\"><p>{}</p>",
+                local::overleaf::escape(&e.to_string())
+            )),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<!doctype html><meta charset=\"utf-8\"><p>{e}</p>")),
+        )
+            .into_response(),
+    }
+}
+
+/// Resolve a checkout `.tex` to (normalized repo-relative path, checkout root,
+/// canonical file). Confines the path exactly like `open_project_file`, and
+/// refuses a session whose worktree is gone for the same reason
+/// `write_project_file` does: both compiling and syncing act on the file the
+/// user is actually editing.
+fn resolve_project_tex(
+    id: &str,
+    path: &str,
+    session_id: Option<&str>,
+) -> std::result::Result<(String, std::path::PathBuf, std::path::PathBuf), ApiError> {
+    let (rel, rel_path) = validated_project_file_path(path)?;
+    if touches_git_dir(&rel_path) {
+        return Err(bad_request("cannot read files under .git"));
+    }
+    if !rel.to_ascii_lowercase().ends_with(".tex") {
+        return Err(bad_request("not a .tex file"));
+    }
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(id)?
+        .ok_or_else(|| not_found("project"))?;
+    let (root, root_kind) = resolve_checkout_root(&store, &project, session_id)?;
+    if session_id.is_some() && root_kind == "clone" {
+        return Err(bad_request(
+            "this session's worktree is no longer available — reload the file",
+        ));
+    }
+    let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+        Err(e) => return Err(ApiError::from(anyhow!("could not read the file: {e}"))),
+    };
+    if !full.starts_with(&root) {
+        return Err(bad_request("path escapes repository"));
+    }
+    if full.is_dir() {
+        return Err(bad_request("path is a directory"));
+    }
+    Ok((rel, root, full))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CompileLatexReq {
+    path: String,
+    session_id: Option<String>,
+}
+
+/// Compile a checkout `.tex` file to a PDF beside it with the machine's own
+/// LaTeX engine, so the dashboard's approximate preview has an exact
+/// counterpart. Resolves and confines the path exactly like `open_project_file`;
+/// a compile failure is a 200 carrying the log, not an error — the log is the
+/// answer the user came for.
+async fn compile_project_latex(
+    Path(id): Path<String>,
+    Json(req): Json<CompileLatexReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let (_, root, full) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        // Asked here rather than inside `compile` so a machine that cannot build
+        // *this* document gets a 400 with the install hint instead of a 500.
+        if let Some(hint) = local::latex::missing_toolchain(&full) {
+            return Err(bad_request(hint));
+        }
+        let result = local::latex::compile(&full)?;
+        let pdf_path = match result.pdf.as_deref() {
+            Some(pdf) => Some(
+                pdf.strip_prefix(&root)
+                    .map_err(|_| anyhow!("compiled PDF landed outside the checkout"))?
+                    .to_string_lossy()
+                    .replace('\\', "/"),
+            ),
+            None => None,
+        };
+        Ok(Json(json!({
+            "ok": pdf_path.is_some(),
+            "pdfPath": pdf_path,
+            "engine": result.engine,
+            "note": result.note,
+            "hadErrors": result.had_errors,
+            "log": result.log,
+        })))
+    })
+    .await
+}
+
 enum RawProjectFileSource {
     Disk(std::fs::File),
     Git {
@@ -2631,11 +3246,6 @@ async fn delete_artifact(
     Query(q): Query<ArtifactPathQuery>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    if local::files::is_project_brief_path(&q.path) {
-        return Err(bad_request(
-            "PROJECT.md is part of the project and cannot be deleted",
-        ));
-    }
     blocking_api(move || {
         let store = Store::open()?;
         let project = store
@@ -2643,36 +3253,6 @@ async fn delete_artifact(
             .ok_or_else(|| not_found("project"))?;
         local::files::delete_entry(&project, &q.path)?;
         Ok(Json(json!({ "ok": true })))
-    })
-    .await
-}
-
-#[derive(Deserialize)]
-struct ProjectBriefWriteReq {
-    content: String,
-}
-
-async fn write_project_brief(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<ProjectBriefWriteReq>,
-) -> ApiResult {
-    reject_if_moving(&state)?;
-    if req.content.len() > local::files::MAX_PROJECT_BRIEF_BYTES {
-        return Err(bad_request(
-            "PROJECT.md is too large; keep the project brief under 256 KiB",
-        ));
-    }
-    blocking_api(move || {
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        local::files::write_project_brief(&project, &req.content)?;
-        Ok(Json(json!({
-            "ok": true,
-            "bytesWritten": req.content.len(),
-        })))
     })
     .await
 }
@@ -4575,6 +5155,7 @@ async fn create_chat_session(
         context_usage_json: None,
         bootstrap_context: None,
         active_leaf_id: None,
+        parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -4650,8 +5231,8 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
     let session = Store::open()?
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
-    // Parked messages are in-memory, so a reload mid-turn recovers them here
-    // rather than from the store.
+    // The host restores its durable queue at startup; return the live snapshot
+    // so dispatch progress and cancellation are reflected immediately.
     let queued = state.chat.queued_items(&id);
     Ok(Json(json!({
         "messages": messages,
@@ -4664,6 +5245,7 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
 #[serde(rename_all = "camelCase")]
 struct SendChatReq {
     text: String,
+    client_turn_id: Option<String>,
     model: Option<String>,
     permission_mode: Option<String>,
     plan_mode: Option<bool>,
@@ -4707,21 +5289,98 @@ async fn send_chat_message(
         reasoning_level: req.reasoning_level,
     };
     // The turn runs in the background; progress streams over /api/events.
-    let sent = if matches!(req.mode, Some(SendMode::Steer)) {
-        state
+    let response = if matches!(req.mode, Some(SendMode::Steer)) {
+        let result = state
             .chat
-            .steer_message(&id, text, overrides, req.images, annotations)
+            .steer_message(
+                &id,
+                text,
+                overrides,
+                req.images,
+                annotations,
+                req.client_turn_id,
+            )
             .await
+            .map_err(|error| {
+                if local::chat::is_client_turn_conflict(&error) {
+                    ApiError(StatusCode::CONFLICT, error.to_string())
+                } else {
+                    bad_request(error)
+                }
+            })?;
+        match result {
+            Some(turn) => json!({ "ok": true, "turn": turn }),
+            None => json!({ "ok": true, "steered": true }),
+        }
     } else {
-        state
+        let result = state
             .chat
-            .send_message(&id, text, overrides, req.images, annotations)
+            .send_message(
+                &id,
+                text,
+                overrides,
+                req.images,
+                annotations,
+                req.client_turn_id,
+            )
             .await
+            .map_err(|error| {
+                if local::chat::is_client_turn_conflict(&error) {
+                    ApiError(StatusCode::CONFLICT, error.to_string())
+                } else {
+                    bad_request(error)
+                }
+            })?;
+        json!({ "ok": true, "turn": result })
     };
-    sent.map_err(bad_request)?;
-    // A steered message is still a message the user sent.
     crate::telemetry::capture_chat_message_sent();
-    Ok(Json(json!({ "ok": true })))
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverChatReq {
+    action: String,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    model: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    permission_mode: Option<Option<String>>,
+    plan_mode: Option<bool>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    reasoning_level: Option<Option<String>>,
+}
+
+fn present_nullable_string<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+async fn recover_chat_turn(
+    State(state): State<AppState>,
+    Path((id, turn_id)): Path<(String, String)>,
+    Json(req): Json<RecoverChatReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let result = state
+        .chat
+        .recover_turn(
+            &id,
+            &turn_id,
+            &req.action,
+            local::chat::RecoveryOverrides {
+                model: req.model,
+                permission_mode: req.permission_mode,
+                plan_mode: req.plan_mode,
+                reasoning_level: req.reasoning_level,
+            },
+        )
+        .await
+        .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+    Ok(Json(json!({ "ok": true, "turn": result })))
 }
 
 #[derive(Deserialize)]
@@ -4827,8 +5486,24 @@ async fn cancel_queued_chat(
     State(state): State<AppState>,
     Path((id, item_id)): Path<(String, String)>,
 ) -> ApiResult {
-    let removed = state.chat.cancel_queued(&id, &item_id);
+    let removed = state.chat.cancel_queued(&id, &item_id)?;
     Ok(Json(json!({ "ok": true, "removed": removed })))
+}
+
+/// Retry one queued message after its safe delivery budget was exhausted.
+async fn retry_queued_chat(
+    State(state): State<AppState>,
+    Path((id, item_id)): Path<(String, String)>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let retried = state.chat.retry_queued(&id, &item_id)?;
+    if !retried {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "queued message is no longer available for retry".into(),
+        ));
+    }
+    Ok(Json(json!({ "ok": true, "retried": retried })))
 }
 
 #[derive(Deserialize)]
@@ -5378,6 +6053,33 @@ mod tests {
 
         let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
         assert_eq!(value["cancelRequested"], true);
+    }
+
+    #[test]
+    fn create_run_request_round_trips_agent_attribution_and_force() {
+        let request = CreateRunReq {
+            experiment_id: "experiment-1".into(),
+            backend: Some("local".into()),
+            flavor: None,
+            host: None,
+            manifest: None,
+            image: None,
+            timeout: None,
+            org: None,
+            provider: None,
+            disk: None,
+            force: true,
+            chat_session_id: Some("session-1".into()),
+        };
+
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(value["experimentId"], "experiment-1");
+        assert_eq!(value["chatSessionId"], "session-1");
+        assert_eq!(value["force"], true);
+        assert_eq!(
+            serde_json::from_value::<CreateRunReq>(value).unwrap(),
+            request
+        );
     }
 
     #[test]

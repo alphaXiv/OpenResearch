@@ -1,6 +1,6 @@
 ---
 name: orx-reports
-description: "Write durable research outputs into the local project's artifacts directory. Use when a line of work concludes, when the user asks for a write-up, summary, comparison, figures, or exported data, or before ending a long task — findings not written down are lost."
+description: "Write durable outputs into the artifacts directory. Use when a line of work concludes or the user asks for a write-up, summary, comparison, figures, or exported data."
 ---
 
 Write reports, figures, CSVs, PDFs, and other outputs directly into the artifacts
@@ -16,5 +16,6 @@ output without relying on its directory, for example:
 
 Write at the artifacts root unless a folder is useful. Markdown may reference
 nearby images by relative path; no name such as `project/`, an experiment slug,
-or `report.md` is reserved. In chat, cite every relevant output as raw
-<file path="artifacts/<relative-path>" />, never as a bare or backticked path.
+or `report.md` is reserved. In the chat handoff, link every finished output using
+the session playbook's evidence-and-links contract. Load `orx-evidence` when the
+report makes claims derived from run results.

@@ -91,24 +91,28 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
 | `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
-| `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org. |
+| `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
 | `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
+| `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
 
-### Literature & papers — alphaXiv / OpenAlex / bioRxiv (no login required) — module `orx-lit`
+### Literature & papers — alphaXiv / OpenAlex / bioRxiv (no login required) — module `orx-lit-review`
 Use before any web search for academic/research queries (paper, author, blog, model release).
 | Command | What it does |
 |---|---|
-| `orx lit "<query>" [--source alphaxiv\|openalex\|biorxiv] [--limit <n>] [--json]` | Full-text search; `--source` picks the corpus (default alphaxiv; openalex = all fields, biorxiv = biology preprints). |
-| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report/`--full` text, or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
+| `orx discover keyword "<query>"` | Call the alphaXiv full-text retrieval primitive with match snippets. |
+| `orx discover embedding "<query>"` | Call the alphaXiv semantic retrieval primitive. The main agent ranks candidates and decides focused follow-ups; see `orx-lit-review`. |
+| `orx discover openalex "<query>"` | Search the cross-disciplinary OpenAlex scholarly graph. |
+| `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
+| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
 
 ### Meta
 | Command | What it does |
 |---|---|
-| `orx skill [name]` | Print this overview + the bundled module index (no args), or print one bundled module by name. |
+| `orx skill [name[/resource]]` | Print this overview, one bundled module, or a lazily loaded module resource such as `compute/hf`. |
 
 ## Modules
 
@@ -117,11 +121,14 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 
 - **orx-experiment-tree** — the experiment-tree model, the auto-research loop, and `orx exp desc`.
 - **orx-create** — initialize a local project and add local experiment nodes.
-- **orx-compute** / **orx-compute-k8s** — launch runs on compute; the k8s manifest contract.
+- **orx-compute** — launch and monitor runs; after resolving the backend, read its bundled reference.
+- **orx-instances** — create persistent standalone machines for manual work.
 - **orx-git** — read, edit, and diff a node's code with plain git.
+- **orx-agent-delegation** — delegate independent work to helper sessions safely.
 - **orx-evidence** — capture and inspect experiment results through run logs.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
-- **orx-lit** — literature search and paper content; the preferred starting point for academic/research queries (not web search).
+- **orx-paper** — draft a paper or preprint as LaTeX that renders and compiles to PDF.
+- **orx-lit-review** — main-agent cross-corpus retrieval, source-selective follow-up policy, and paper content; the preferred starting point for academic/research queries.
 
 ## Typical workflow
 

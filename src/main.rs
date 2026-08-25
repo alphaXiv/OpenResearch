@@ -73,6 +73,9 @@ enum Command {
     /// Operate on one local project.
     Project(ProjectArgs),
 
+    /// Delegate a task to a second agent session.
+    Agent(AgentArgs),
+
     /// List a project's runs.
     Runs(RunsArgs),
 
@@ -103,9 +106,8 @@ enum Command {
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
-    /// Search literature by full-text query across alphaXiv, OpenAlex, or
-    /// bioRxiv (`--source`; no login required).
-    Lit(LitArgs),
+    /// Call one paper-retrieval primitive; the caller owns the search loop.
+    Discover(DiscoverArgs),
 
     /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv metadata.
     /// The source is auto-detected from the id (override with `--source`).
@@ -206,25 +208,6 @@ pub enum ProjectCommand {
         /// New experiments inherit it; pass '' to clear.
         #[arg(long = "run-command")]
         run_command: Option<String>,
-    },
-
-    /// Read or update the local project's user-facing PROJECT.md.
-    Brief {
-        #[command(subcommand)]
-        command: ProjectBriefCommand,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ProjectBriefCommand {
-    /// Print the current project brief, or the default template if missing.
-    Show { project_id: String },
-
-    /// Replace the project brief with Markdown read from stdin.
-    Update {
-        project_id: String,
-        #[arg(long, required = true)]
-        stdin: bool,
     },
 }
 
@@ -371,6 +354,37 @@ pub struct InstanceDeleteArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// Hand a task to a helper agent running in its own top-level session.
+    Spawn {
+        /// What the helper agent should do. Write it as a self-contained brief:
+        /// the helper starts with an empty transcript and cannot see this chat.
+        task: Option<String>,
+        /// Read the task from stdin instead, for long multi-paragraph briefs.
+        #[arg(long)]
+        stdin: bool,
+        /// Name the session in the sidebar. Defaults to an auto-generated title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Harness for the helper (defaults to this session's).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Model for the helper (defaults to this session's).
+        #[arg(long)]
+        model: Option<String>,
+        /// Do not resume this chat when the helper finishes.
+        #[arg(long)]
+        no_wake: bool,
+    },
+}
+
+#[derive(Args, Debug)]
 pub struct ExpArgs {
     #[command(subcommand)]
     pub command: ExpCommand,
@@ -491,6 +505,17 @@ pub struct ExpRunArgs {
     /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
+    /// Internal attribution forwarded through the local orx up API.
+    #[arg(skip)]
+    pub chat_session_id: Option<String>,
+}
+
+impl ExpRunArgs {
+    pub fn launching_chat_session(&self) -> Option<String> {
+        self.chat_session_id
+            .clone()
+            .or_else(crate::local::chat::launching_chat_session)
+    }
 }
 
 #[derive(Args, Debug)]
@@ -567,7 +592,7 @@ pub enum TelemetryCommand {
     Off,
 }
 
-/// Which corpus `orx lit` searches / `orx paper` reads from.
+/// Which corpus a literature command searches or reads from.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum LitSource {
@@ -599,26 +624,63 @@ impl LitSource {
             LitSource::Biorxiv => "bioRxiv",
         }
     }
-
-    /// All sources, in preference order (used to pick a default when `--source`
-    /// is omitted).
-    pub const ALL: [LitSource; 3] = [LitSource::Alphaxiv, LitSource::Openalex, LitSource::Biorxiv];
 }
 
 #[derive(Args, Debug)]
-pub struct LitArgs {
-    /// Full-text search query.
+pub struct DiscoverArgs {
+    #[command(subcommand)]
+    pub command: DiscoverCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DiscoverCommand {
+    /// alphaXiv full-text BM25 retrieval with match snippets.
+    Keyword(DiscoverySearchArgs),
+    /// alphaXiv semantic title/abstract retrieval with similarity/popularity reranking.
+    Embedding(DiscoverySearchArgs),
+    /// OpenAlex scholarly-graph search across disciplines.
+    Openalex(DiscoverySearchArgs),
+    /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
+    Biorxiv(DiscoverySearchArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct DiscoverySearchArgs {
+    /// Exact keyword query or semantic description, depending on the strategy.
     pub query: String,
-    /// Max results (default 5).
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Corpus to search. Omitted = the first source enabled in Settings
-    /// (alphaxiv unless it's disabled).
-    #[arg(long, value_enum)]
-    pub source: Option<LitSource>,
-    /// Emit raw JSON instead of the formatted list.
-    #[arg(long)]
-    pub json: bool,
+    /// Include papers first published on or after this date (YYYY-MM-DD).
+    #[arg(long = "published-after")]
+    pub published_after: Option<String>,
+    /// Include papers first published on or before this date (YYYY-MM-DD). Older
+    /// or narrow embedding windows can return a thin candidate set.
+    #[arg(long = "published-before")]
+    pub published_before: Option<String>,
+    /// Ranking policy after topical relevance is accounted for.
+    #[arg(long, value_enum, default_value = "default")]
+    pub prioritize: DiscoveryPriority,
+    /// Maximum results to emit (default 15). alphaXiv uses its fixed server-side candidate pool.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u32).range(1..=200))]
+    pub limit: u32,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum DiscoveryPriority {
+    Historical,
+    Default,
+    Recency,
+    Popular,
+}
+
+impl DiscoveryPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Historical => "historical",
+            Self::Default => "default",
+            Self::Recency => "recency",
+            Self::Popular => "popular",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -785,6 +847,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Projects(_) => "projects",
         Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
+        Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
         Command::CreateExperiment(_) => "create-experiment",
@@ -794,7 +857,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Exp(_) => "exp",
         Command::Skill(_) => "skill",
         Command::InstallSkills(_) => "install-skills",
-        Command::Lit(_) => "lit",
+        Command::Discover(_) => "discover",
         Command::Paper(_) => "paper",
         Command::Version(_) => "version",
         Command::Update(_) => "update",
@@ -825,6 +888,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Projects(args) => commands::projects::run(args).await,
         Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
+        Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
@@ -837,7 +901,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::Exp(args) => commands::exp::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
-        Command::Lit(args) => commands::lit::run(args).await,
+        Command::Discover(args) => commands::discover::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,
         Command::Version(args) => commands::version::run(args).await,
         Command::Update(args) => commands::update::run(args).await,
@@ -863,7 +927,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
         Command::Login(_)
             | Command::Logout
             | Command::InstallSkills(_)
-            | Command::Lit(_)
+            | Command::Discover(_)
             | Command::Paper(_)
             | Command::Version(_)
             | Command::Delete(_)
@@ -877,6 +941,57 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn discover_parses_independent_retrieval_options() {
+        let cli = Cli::try_parse_from([
+            "orx",
+            "discover",
+            "embedding",
+            "test-time compute",
+            "--published-after",
+            "2024-01-01",
+            "--published-before",
+            "2025-12-31",
+            "--prioritize",
+            "historical",
+            "--limit",
+            "9",
+        ])
+        .expect("discover embedding should parse");
+
+        let Some(Command::Discover(DiscoverArgs {
+            command: DiscoverCommand::Embedding(args),
+        })) = cli.command
+        else {
+            panic!("expected discover embedding command");
+        };
+        assert_eq!(args.query, "test-time compute");
+        assert_eq!(args.published_after.as_deref(), Some("2024-01-01"));
+        assert_eq!(args.published_before.as_deref(), Some("2025-12-31"));
+        assert_eq!(args.prioritize, DiscoveryPriority::Historical);
+        assert_eq!(args.limit, 9);
+    }
+
+    #[test]
+    fn discover_parses_openalex_and_biorxiv_primitives() {
+        for (source, expected) in [
+            ("openalex", LitSource::Openalex),
+            ("biorxiv", LitSource::Biorxiv),
+        ] {
+            let cli = Cli::try_parse_from(["orx", "discover", source, "protein folding"])
+                .expect("source discovery should parse");
+            let Some(Command::Discover(DiscoverArgs { command })) = cli.command else {
+                panic!("expected discover command");
+            };
+            let actual = match command {
+                DiscoverCommand::Openalex(_) => LitSource::Openalex,
+                DiscoverCommand::Biorxiv(_) => LitSource::Biorxiv,
+                _ => panic!("expected non-alphaXiv discovery source"),
+            };
+            assert_eq!(actual, expected);
+        }
+    }
 
     #[test]
     fn run_accepts_only_supervised_backend_flags() {

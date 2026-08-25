@@ -148,7 +148,7 @@ pub(crate) struct Settings {
     pub github_default_prompt_seen: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
-    /// source added later defaults to enabled. Enforced by `orx lit`/`orx paper`.
+    /// source added later defaults to enabled. Enforced by discovery and paper reading.
     #[serde(default)]
     pub disabled_lit_sources: Vec<String>,
     /// Whether orx may install updates on its own (Settings → Updates). Absent =
@@ -249,7 +249,7 @@ pub(crate) fn set_profile(profile: ResearchProfile) -> std::io::Result<()> {
 }
 
 /// Literature sources the user has disabled (their `LitSource::as_str()` names).
-/// Read by `orx lit`/`orx paper`; `crate::config` re-exports this as
+/// Read by discovery and paper reading; `crate::config` re-exports this as
 /// `disabled_lit_sources`.
 pub(crate) fn disabled_lit_sources() -> Vec<String> {
     load_settings()
@@ -699,7 +699,7 @@ fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
 /// line) by up to the flush duration. Safe to call unconditionally — no-ops when
 /// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
 /// await.
-fn capture(event: impl Into<String>, extra: serde_json::Value) {
+pub(crate) fn capture(event: impl Into<String>, extra: serde_json::Value) {
     if let Some(handle) = spawn_event(event, extra) {
         if let Ok(mut handles) = pending().lock() {
             handles.retain(|pending| !pending.is_finished());

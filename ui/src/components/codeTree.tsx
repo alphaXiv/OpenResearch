@@ -7,6 +7,7 @@
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { FileTypeIcon } from "./FileTypeIcon";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const FILE_TREE_ROW_CLASS_NAME = [
   "file-tree-row flex items-center gap-1.5 w-full py-[3px] px-2.5 border-0",
@@ -75,7 +76,7 @@ function DirRow({
   depth: number;
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, intent: TabOpenIntent) => void;
 }) {
   const defaultOpen = depth === 0;
   const isOpen = toggled.has(path) ? !defaultOpen : defaultOpen;
@@ -122,7 +123,7 @@ export function TreeLevel({
   depth: number;
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, intent: TabOpenIntent) => void;
 }) {
   const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
   const fileNames = [...node.files].sort((a, b) => a.localeCompare(b));
@@ -151,8 +152,10 @@ export function TreeLevel({
             type="button"
             className={FILE_TREE_ROW_CLASS_NAME}
             style={{ paddingLeft: 8 + depth * 14 }}
-            onClick={() => onOpenFile(path)}
-            title={path}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenFile(path, intent),
+            )}
+            title={`${path} — double-click or Enter to keep open`}
           >
             <FileTypeIcon name={name} />
             <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>

@@ -1,12 +1,12 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
 export const DEMO_PROJECT_ID = "demo_nanochat_v1";
-export const PROJECT_BRIEF_NAME = "PROJECT.md";
 // Bundled demo snapshots reserve this prefix so future demos inherit demo-only UI.
 export const isDemoProjectId = (id: string) => id.startsWith("demo_");
 export const DEMO_MAIN_SESSION_ID = "chat_demo_nanochat_v1";
 export const DEMO_FIGURE_SESSION_ID = "chat_demo_nanochat_figures_v1";
 export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
+export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
 
 export interface Project {
   id: string;
@@ -109,6 +109,19 @@ const put = <T>(url: string, body: unknown) =>
 export const listProjects = () =>
   get<{ projects: Project[] }>("/api/projects").then((r) => r.projects);
 
+export interface ProjectActivity {
+  projectId: string;
+  activeAgents: number;
+  /** Lifetime sessions for this project, including archived agents. */
+  totalAgents: number;
+  runningExperiments: number;
+  totalExperiments: number;
+  lastMessageAt: number | null;
+}
+
+export const listProjectActivity = () =>
+  get<{ activity: ProjectActivity[] }>("/api/projects/activity").then((r) => r.activity);
+
 export interface OnboardingSelection {
   harness: HarnessId;
   model: string | null;
@@ -164,6 +177,7 @@ export interface NewProject {
   paperId?: string;
   cloneUrl?: string;
   createFolder?: boolean;
+  requireNewFolder?: boolean;
   initializeGit?: boolean;
   githubSyncEnabled?: boolean;
 }
@@ -217,7 +231,7 @@ export const resolvePaper = (id: string) =>
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
-/** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
+/** Record a visit so the backend can persist project-level UI recency. */
 export const openProject = (projectId: string) =>
   post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
@@ -353,6 +367,145 @@ export const openFileInEditor = (
     path,
     sessionId: opts.sessionId,
   });
+
+export interface LatexEngine {
+  /** The engine that will run, or null when the machine has none. */
+  engine: string | null;
+  /** Install guidance, present only when `engine` is null. */
+  hint: string | null;
+  /** A paste-ready install command, where this platform has one. */
+  installCommand: string | null;
+}
+
+/** Whether the machine running `orx up` can compile LaTeX. */
+export const getLatexEngine = () => get<LatexEngine>("/api/latex/engine");
+
+export interface LatexCompileResult {
+  ok: boolean;
+  /** Checkout-relative path of the produced PDF, null when the run failed. */
+  pdfPath: string | null;
+  /** What ran: `latexmk (xelatex)`, `tectonic`, `pdflatex`. */
+  engine: string;
+  /** Set when the toolchain could not honour the document's `% !TeX program`. */
+  note: string | null;
+  /** The engine reported errors. With `ok` true the PDF exists anyway — TeX
+   * recovers from most of them — but the log is worth showing. */
+  hadErrors: boolean;
+  /** Tail of the engine's output — the only useful thing on a failure. */
+  log: string;
+}
+
+/** Compile a checkout `.tex` file to a PDF beside it, using whichever LaTeX
+ * engine is installed on the machine running `orx up`. Rejects with a message
+ * naming the install options when none is. */
+export const compileLatex = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  post<LatexCompileResult>(`/api/projects/${projectId}/file/latex`, {
+    path,
+    sessionId: opts.sessionId,
+  });
+
+/** The Overleaf project a `.tex` pushes to. */
+export interface OverleafLink {
+  projectId: string;
+  /** The project on overleaf.com, for opening it. */
+  url: string;
+}
+
+export interface OverleafState {
+  /** A Git authentication token is stored on this machine. */
+  hasToken: boolean;
+  /** Null until this paper is pointed at a project. */
+  link: OverleafLink | null;
+}
+
+/** Whether a Git authentication token is stored — the machine-wide half of the
+ * Overleaf state, for Settings. */
+export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+
+/** Store an Overleaf Git authentication token. Not validated here: only the Git
+ * bridge can judge a token, and it needs a project to judge it against, so a
+ * bad token surfaces from `linkOverleaf`. */
+export const saveOverleafToken = (token: string) =>
+  post<{ hasToken: boolean }>("/api/overleaf/token", { token });
+
+export const deleteOverleafToken = () =>
+  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+export const getOverleafState = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+
+/** Point this `.tex` at an Overleaf project. The server proves the account can
+ * reach it before storing the link, so this is where a plan without Git
+ * integration — or a bad token — is reported. */
+export const linkOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { project: string; sessionId?: string },
+) =>
+  post<OverleafState>(`/api/projects/${projectId}/file/overleaf`, {
+    path,
+    project: opts.project,
+    sessionId: opts.sessionId,
+  });
+
+export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafState>(r));
+
+/** How the user settled a file both sides changed, keyed by checkout-relative path. */
+export type OverleafResolution = "keep-local" | "take-overleaf";
+
+export interface OverleafSyncResult {
+  ok: boolean;
+  /** Files Overleaf changed alone, now written into the checkout. */
+  pulled: string[];
+  /** Files we changed alone, now committed to Overleaf. */
+  pushed: string[];
+  /** Files both sides changed since the last sync. Left untouched on both
+   * sides until the user says which copy to keep. */
+  conflicts: string[];
+  /** Main-document mismatch, or files left behind. */
+  note: string | null;
+}
+
+/** Bring the paper and the linked Overleaf project into step, both ways. */
+export const syncOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; resolve?: Record<string, OverleafResolution> } = {},
+) =>
+  post<OverleafSyncResult>(`/api/projects/${projectId}/file/overleaf/sync`, {
+    path,
+    sessionId: opts.sessionId,
+    resolve: opts.resolve,
+  });
+
+/** Whether Overleaf has moved since the last sync. One request and no transfer,
+ * so a linked paper can be watched while its tab is open. */
+export const getOverleafStatus = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  get<{ remoteChanged: boolean }>(
+    `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+  );
+
+/** Page that posts the paper to Overleaf as a new project — the path for an
+ * account whose plan has no Git integration. Opened in a tab, not fetched. */
+export const overleafUploadUrl = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => `/api/projects/${projectId}/file/overleaf/upload?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
 
 export interface CodeTree {
   root: CheckoutRoot;
@@ -816,9 +969,6 @@ export const getArtifactFileText = (
   });
 };
 
-export const saveProjectBrief = (projectId: string, content: string) =>
-  put<{ ok: boolean; bytesWritten: number }>(`/api/projects/${projectId}/brief`, { content });
-
 const isFilePresentation = (value: string | null): value is FilePresentation =>
   value === "image" || value === "audio" || value === "video" || value === "pdf" ||
   value === "text" || value === "unknown" || value === "download";
@@ -881,7 +1031,7 @@ export const getProfile = () => get<Profile>("/api/settings/profile");
 
 export const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
-/** Which literature sources `orx lit`/`orx paper` may use (settings.json). */
+/** Which literature sources discovery and paper reading may use (settings.json). */
 export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
@@ -1117,7 +1267,6 @@ export const getHarnesses = (refresh = false, retryRejected = false) => {
 export interface SkillInfo {
   name: string;
   description: string;
-  argHint: string;
   /** Built-in composer commands share the menu with harness/user skills. */
   source?: "builtin" | "user" | "command";
 }
@@ -1127,10 +1276,54 @@ export const getSkills = (projectId?: string) =>
     `/api/skills${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
   ).then((r) => r.skills);
 
+export const getSkillContent = (name: string, projectId?: string) =>
+  get<{ content: string }>(
+    `/api/skills/${encodeURIComponent(name)}${
+      projectId ? `?project=${encodeURIComponent(projectId)}` : ""
+    }`,
+  ).then((r) => r.content);
+
 /** Where an uploaded skill applies. */
 export type SkillScope = "global" | "project";
 
-/** A user-uploaded agent skill (a SKILL.md folder), managed in the Skills tab. */
+/** A user-uploaded LaTeX template the paper skill follows, managed in the
+ * Customize tab. Global, or scoped to one project (which shadows a global). */
+export interface LatexTemplate {
+  name: string;
+  scope: SkillScope;
+  /** Relative path of the .tex the agent starts from. */
+  entry: string;
+  /** Class/style files shipped alongside it. */
+  supportFiles: string[];
+  bytes: number;
+  updatedAt: number;
+}
+
+export const listLatexTemplates = (projectId?: string) =>
+  get<{ templates: LatexTemplate[] }>(
+    `/api/latex-templates${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
+  ).then((r) => r.templates);
+
+export const uploadLatexTemplate = (body: {
+  scope: SkillScope;
+  projectId?: string;
+  filename: string;
+  contentBase64: string;
+}) => post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
+
+export const deleteLatexTemplate = (req: {
+  scope: SkillScope;
+  name: string;
+  projectId?: string;
+}) => {
+  const params = new URLSearchParams({ scope: req.scope, name: req.name });
+  if (req.projectId) params.set("project", req.projectId);
+  return fetch(`/api/latex-templates?${params.toString()}`, { method: "DELETE" }).then((r) =>
+    json<{ ok: boolean }>(r),
+  );
+};
+
+/** A user-uploaded agent skill (a SKILL.md folder), managed in the Customize tab. */
 export interface UserSkill {
   name: string;
   description: string;
@@ -1204,7 +1397,20 @@ export function modelLabel(id: string): string {
 
 export interface ChatToolState {
   status: "running" | "completed" | "error";
-  input?: { command?: string; filePath?: string; description?: string; [k: string]: unknown };
+  input?: {
+    command?: string;
+    commandArgv?: string[];
+    filePath?: string;
+    description?: string;
+    retryOwner?: "native" | "orx";
+    attempt?: number;
+    maximum?: number | null;
+    nextRetryAt?: number | null;
+    turnId?: string;
+    errorKind?: string;
+    recoveryAction?: "retry" | "continue";
+    [k: string]: unknown;
+  };
   output?: string;
   error?: string;
   title?: string;
@@ -1277,7 +1483,8 @@ export interface ChatSession {
   harness: HarnessId;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-   * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
+   * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
+   * `orx agent spawn --title`). Null on legacy sessions. */
   titleSource?: string | null;
   model: string | null;
   permissionMode: string | null;
@@ -1286,6 +1493,9 @@ export interface ChatSession {
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
+  /** Session whose agent spawned this one with `orx agent spawn`; null for
+   * sessions the user started themselves. */
+  parentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -1347,6 +1557,9 @@ export interface QueuedMessage {
   id: string;
   text: string;
   planMode?: boolean;
+  dispatchState?: "queued" | "retrying" | "blocked";
+  nextRetryAt?: number | null;
+  error?: string | null;
 }
 
 export const getChatMessages = (sessionId: string) =>
@@ -1358,11 +1571,17 @@ export const getChatMessages = (sessionId: string) =>
     activeLeafId: r.activeLeafId ?? null,
   }));
 
-/** Cancel a still-parked message (the ✕ on a queued chip). */
+/** Remove a still-parked message. */
 export const cancelQueuedMessage = (sessionId: string, itemId: string) =>
   fetch(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean; removed: boolean }>(r));
+
+/** Retry the same parked message after safe queue delivery was exhausted. */
+export const retryQueuedMessage = (sessionId: string, itemId: string) =>
+  post<{ ok: boolean; retried: boolean }>(
+    `/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`,
+  );
 
 /** A pasted image or uploaded file riding a chat message. */
 export interface ChatImageAttachment {
@@ -1387,18 +1606,39 @@ export const sendChatMessage = (
   opts: TurnOptions = {},
   images?: ChatImageAttachment[],
   annotations?: ChatTextAnnotation[],
+  clientTurnId?: string,
   mode?: "steer",
 ) =>
-  post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/message`, {
+  post<{ ok: boolean; turn?: ChatTurnResult; steered?: boolean }>(
+    `/api/chat/sessions/${sessionId}/message`, {
     text,
+    clientTurnId,
     model: opts.model,
     permissionMode: opts.permissionMode,
     planMode: opts.planMode,
     reasoningLevel: opts.reasoningLevel,
     images,
     annotations,
-    mode,
-  });
+      mode,
+    },
+  );
+
+export interface ChatTurnResult {
+  turnId: string;
+  queued: boolean;
+  existing: boolean;
+}
+
+export const recoverChatTurn = (
+  sessionId: string,
+  turnId: string,
+  action: "retry" | "continue",
+  opts: TurnOptions = {},
+) =>
+  post<{ ok: boolean; turn: ChatTurnResult }>(
+    `/api/chat/sessions/${sessionId}/turns/${turnId}/recover`,
+    { action, ...opts },
+  );
 
 /** Pass `text` to re-ask an edited version of a user message; omit it to retry a
  * response. Returns immediately; the new turn streams over /api/events. */

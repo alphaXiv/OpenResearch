@@ -29,6 +29,7 @@ import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
 import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
+import type { TabOpenIntent } from "../tabPreview";
 
 /** Poll cadence while the session's agent is working. */
 const POLL_MS = 5000;
@@ -54,7 +55,12 @@ export function WorktreeTab({
   onViewChange: (view: WorktreeView) => void;
   onToggledChange: (toggled: ReadonlySet<string>) => void;
   /** Open a file in the right pane's FileViewer, keyed to this worktree. */
-  onOpenFile: (path: string, sessionId?: string, ref?: string) => void;
+  onOpenFile: (
+    path: string,
+    sessionId: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
 }) {
   const projectId = project.id;
   const [wt, setWt] = useState<SessionWorktree | null>(null);
@@ -239,10 +245,10 @@ export function WorktreeTab({
                 depth={0}
                 toggled={toggled}
                 onToggle={toggle}
-                onOpenFile={(path) =>
+                onOpenFile={(path, intent) =>
                   liveWorktree
-                    ? onOpenFile(path, sessionId)
-                    : onOpenFile(path, undefined, project.baselineBranch)
+                    ? onOpenFile(path, sessionId, undefined, intent)
+                    : onOpenFile(path, undefined, project.baselineBranch, intent)
                 }
               />
             </div>

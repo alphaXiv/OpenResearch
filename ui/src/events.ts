@@ -69,6 +69,19 @@ function emitChat(ev: ChatEvent) {
   chatListeners.forEach((fn) => fn(ev));
 }
 
+const projectActivityListeners = new Set<() => void>();
+
+export function onProjectActivityEvent(fn: () => void): () => void {
+  projectActivityListeners.add(fn);
+  return () => {
+    projectActivityListeners.delete(fn);
+  };
+}
+
+function emitProjectActivityEvent() {
+  projectActivityListeners.forEach((fn) => fn());
+}
+
 export interface HarnessAuthEvent {
   harness: string;
   authState: string;
@@ -153,6 +166,7 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     es.onopen = () => {
       if (needsRepair) {
         emitChat({ type: "reconnected" });
+        emitProjectActivityEvent();
         emitHarnessAuth({ harness: "*", authState: "unknown" });
         ref.current.onReconnect?.();
       }
@@ -168,15 +182,24 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     };
     es.addEventListener("run.updated", (e) => {
       const d = parse<{ run: Run }>(e as MessageEvent);
-      if (d?.run) ref.current.onRun(d.run);
+      if (d?.run) {
+        emitProjectActivityEvent();
+        ref.current.onRun(d.run);
+      }
     });
     es.addEventListener("experiment.updated", (e) => {
       const d = parse<{ experiment: Experiment }>(e as MessageEvent);
-      if (d?.experiment) ref.current.onExperiment(d.experiment);
+      if (d?.experiment) {
+        emitProjectActivityEvent();
+        ref.current.onExperiment(d.experiment);
+      }
     });
     es.addEventListener("project.updated", (e) => {
       const d = parse<{ project: Project }>(e as MessageEvent);
-      if (d?.project) ref.current.onProject(d.project);
+      if (d?.project) {
+        emitProjectActivityEvent();
+        ref.current.onProject(d.project);
+      }
     });
     es.addEventListener("files.updated", (e) => {
       const d = parse<{ projectId: string }>(e as MessageEvent);
@@ -188,19 +211,31 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     });
     es.addEventListener("chat.session", (e) => {
       const d = parse<{ session: ChatSession }>(e as MessageEvent);
-      if (d?.session) emitChat({ type: "session", session: d.session });
+      if (d?.session) {
+        emitProjectActivityEvent();
+        emitChat({ type: "session", session: d.session });
+      }
     });
     es.addEventListener("chat.session.deleted", (e) => {
       const d = parse<{ sessionId: string }>(e as MessageEvent);
-      if (d?.sessionId) emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
+      if (d?.sessionId) {
+        emitProjectActivityEvent();
+        emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
+      }
     });
     es.addEventListener("chat.message", (e) => {
       const d = parse<{ sessionId: string; message: ChatMessage }>(e as MessageEvent);
-      if (d?.message) emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
+      if (d?.message) {
+        emitProjectActivityEvent();
+        emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
+      }
     });
     es.addEventListener("chat.busy", (e) => {
       const d = parse<{ sessionId: string; busy: boolean }>(e as MessageEvent);
-      if (d?.sessionId) emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
+      if (d?.sessionId) {
+        emitProjectActivityEvent();
+        emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
+      }
     });
     es.addEventListener("chat.usage", (e) => {
       const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);

@@ -33,11 +33,11 @@ use super::detect::{bin_version, read_json, HarnessInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
-use super::{Harness, ResumeAction};
+use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption,
-    WireToolState,
+    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
+    WireQuestionOption, WireToolState,
 };
 use crate::local::opencode::find_opencode;
 
@@ -122,8 +122,11 @@ impl Harness for OpenCode {
         Some(info)
     }
 
-    async fn run_turn(&self, ctx: &mut TurnCtx) -> Result<()> {
-        run_turn(ctx).await
+    async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
+        run_turn(ctx)
+            .await
+            .map(|()| TurnOutcome::Completed)
+            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
     fn options(&self) -> HarnessOptions {
@@ -689,15 +692,49 @@ fn plan_exit_transition(prompt: &WirePrompt, answer: &PromptAnswer) -> Option<bo
     })
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
-    // Native permission and question requests die with their turn. Clear any
-    // crash/restart leftovers before a new live request can be surfaced.
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
+#[derive(Debug)]
+struct OpenCodeSetupHttpError {
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+}
 
-    // Lazy bring-up: spawns serve in this session's worktree or reuses the
-    // session's live child.
+impl std::fmt::Display for OpenCodeSetupHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OpenCode setup returned HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for OpenCodeSetupHttpError {}
+
+#[derive(Debug)]
+struct OpenCodeSetupProtocolError(&'static str);
+
+impl std::fmt::Display for OpenCodeSetupProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for OpenCodeSetupProtocolError {}
+
+fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    Err(OpenCodeSetupHttpError {
+        status: response.status(),
+        retry_after,
+    }
+    .into())
+}
+
+async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, reqwest::Response)> {
     let status = ctx
         .host
         .opencode
@@ -705,39 +742,101 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .await?;
     let port = status
         .port
-        .ok_or_else(|| anyhow!("opencode agent has no port"))?;
+        .ok_or(OpenCodeSetupProtocolError("opencode agent has no port"))?;
     let base = format!("http://127.0.0.1:{port}");
-
     let native_id = match &ctx.native_session_id {
         Some(id) => id.clone(),
         None => {
-            let session: Value = ctx
+            let response = ctx
                 .http()
                 .post(format!("{base}/session"))
                 .header("content-type", "application/json")
                 .body("{}")
                 .send()
-                .await?
-                .error_for_status()?
-                .json()
                 .await?;
+            let session: Value = opencode_setup_response(response)?.json().await?;
             let id = session
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("opencode session response had no id"))?
+                .ok_or(OpenCodeSetupProtocolError(
+                    "opencode session response had no id",
+                ))?
                 .to_string();
             ctx.set_native_session_id(&id);
             id
         }
     };
+    let events = ctx.http().get(format!("{base}/event")).send().await?;
+    let events = opencode_setup_response(events)?;
+    Ok((native_id, base, events))
+}
 
-    // Subscribe before sending so no early part events are missed.
-    let events = ctx
-        .http()
-        .get(format!("{base}/event"))
-        .send()
-        .await?
-        .error_for_status()?;
+async fn opencode_pre_accept_setup(
+    ctx: &mut TurnCtx,
+) -> Result<(String, String, reqwest::Response)> {
+    loop {
+        let remaining = ctx.orx_retry_remaining();
+        let attempt = opencode_setup_attempt(ctx);
+        let result = match remaining {
+            Some(remaining) => tokio::time::timeout(remaining, attempt)
+                .await
+                .map_err(|_| anyhow!("OpenCode setup exceeded the ORX retry budget"))?,
+            None => attempt.await,
+        };
+        match result {
+            Ok(setup) => {
+                ctx.clear_retry_status();
+                return Ok(setup);
+            }
+            Err(error) => {
+                let (retryable, explicit) =
+                    if let Some(http) = error.downcast_ref::<OpenCodeSetupHttpError>() {
+                        (
+                            http.status.as_u16() == 408
+                                || http.status.as_u16() == 429
+                                || http.status.is_server_error(),
+                            http.retry_after,
+                        )
+                    } else if let Some(request) = error.downcast_ref::<reqwest::Error>() {
+                        (
+                            request.is_connect() || request.is_timeout() || request.is_request(),
+                            None,
+                        )
+                    } else {
+                        (
+                            error.downcast_ref::<OpenCodeSetupProtocolError>().is_none(),
+                            None,
+                        )
+                    };
+                let retry = retryable
+                    .then(|| ctx.schedule_orx_retry(explicit))
+                    .flatten();
+                let Some((retry_number, delay)) = retry else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("opencode_setup", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Reconnecting to OpenCode",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    // Native permission and question requests die with their turn. Clear any
+    // crash/restart leftovers before a new live request can be surfaced.
+    ctx.host
+        .resolve_stale_prompts(&ctx.session_id, true)
+        .await?;
+
+    let (native_id, base, events) = opencode_pre_accept_setup(ctx).await?;
     let mut stream = events.bytes_stream();
 
     let mut body = json!({
@@ -764,6 +863,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .post(format!("{base}/session/{native_id}/message"))
         .json(&body)
         .send();
+    ctx.persist_delivery(DeliveryState::Unknown)?;
     tokio::pin!(send);
 
     // Parts are attributed via message.updated role info; a part arriving
@@ -824,6 +924,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 // Turn done — the response body is the final assistant message;
                 // merge its parts as the authoritative versions.
                 let resp = resp?.error_for_status()?;
+                ctx.mark_delivery(DeliveryState::Accepted);
+                ctx.clear_retry_status();
                 if let Ok(message) = resp.json::<Value>().await {
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
@@ -875,6 +977,49 @@ fn handle_event(
 ) {
     let props = event.get("properties").unwrap_or(&Value::Null);
     match event.get("type").and_then(Value::as_str) {
+        Some("session.status") => {
+            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
+                return;
+            }
+            let status = props.get("status").unwrap_or(&Value::Null);
+            let status_type = status.get("type").and_then(Value::as_str);
+            if status_type == Some("retry") {
+                ctx.mark_delivery(DeliveryState::Accepted);
+                let attempt = status.get("attempt").and_then(Value::as_i64).unwrap_or(1) + 1;
+                let next = status.get("next").and_then(Value::as_i64).map(|next| {
+                    if next > 1_000_000_000_000 {
+                        next
+                    } else {
+                        crate::store::now_ms() + next
+                    }
+                });
+                let message = status
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("OpenCode is retrying");
+                ctx.show_retry_status("native", message, attempt, None, next);
+            } else {
+                if status_type == Some("busy") {
+                    ctx.mark_delivery(DeliveryState::Accepted);
+                }
+                ctx.clear_retry_status();
+            }
+        }
+        Some("session.error") => {
+            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
+                return;
+            }
+            let error = props.get("error").unwrap_or(props);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("OpenCode reported an error")
+                .to_string();
+            ctx.mark_native_retry_exhausted();
+            ctx.mark_delivery(DeliveryState::Accepted);
+            ctx.mark_terminal_failure("opencode_terminal", message.clone());
+            ctx.push_error(message);
+        }
         // A `task` tool spawns a sub-agent in a child session; opencode announces
         // it with `session.created` carrying the child's `parentID` = our
         // session. Link that child session to the spawning `task` tool row so its
@@ -893,6 +1038,11 @@ fn handle_event(
             let info = props.get("info").unwrap_or(&Value::Null);
             let session = info.get("sessionID").and_then(Value::as_str);
             let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            if session == Some(native_id)
+                && info.get("role").and_then(Value::as_str) == Some("user")
+            {
+                ctx.mark_delivery(DeliveryState::Accepted);
+            }
             // Record assistant message ids for the main session AND registered
             // sub-sessions, so a session's user parts (e.g. the task prompt echo)
             // can be filtered out — for both the transcript and sub-agent nesting.
@@ -1454,6 +1604,30 @@ opencode/glm-5
         assert!(!is_opencode_seed_title("Fix the login redirect"));
         assert!(!is_opencode_seed_title("New session handling in the store"));
         assert!(!is_opencode_seed_title(""));
+    }
+
+    #[test]
+    fn only_active_session_statuses_confirm_turn_acceptance() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.mark_delivery(DeliveryState::Unknown);
+        let mut messages = HashSet::new();
+        let mut sessions = HashMap::new();
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &json!({"type":"session.status","properties":{"sessionID":"ses_x","status":{"type":"idle"}}}),
+            &mut messages,
+            &mut sessions,
+        );
+        assert_eq!(ctx.delivery_state(), DeliveryState::Unknown);
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &json!({"type":"session.status","properties":{"sessionID":"ses_x","status":{"type":"retry","attempt":1}}}),
+            &mut messages,
+            &mut sessions,
+        );
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
     }
 
     /// A `task` tool spawns a child session (announced via `session.created` with

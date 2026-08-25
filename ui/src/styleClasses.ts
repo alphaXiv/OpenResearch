@@ -1,3 +1,6 @@
+export const ELEVATED_SURFACE_SHADOW_CLASS_NAME =
+  "shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)]";
+
 export const ICON_BUTTON_BASE_CLASS_NAME = [
   "icon-btn relative inline-flex items-center justify-center",
   "text-subtext [&:hover]:text-text [&:hover]:bg-surface",
@@ -8,6 +11,16 @@ export const ICON_BUTTON_BASE_CLASS_NAME = [
 export const ICON_BUTTON_CLASS_NAME = [
   ICON_BUTTON_BASE_CLASS_NAME,
   "w-7 h-7",
+].join(" ");
+
+export const COMPOSER_CONTROL_CLASS_NAME = [
+  "inline-flex h-8 items-center rounded-md",
+  "transition-[background,color] duration-150 ease-standard hover:bg-surface",
+].join(" ");
+
+export const COMPOSER_ICON_CONTROL_CLASS_NAME = [
+  COMPOSER_CONTROL_CLASS_NAME,
+  "w-8 shrink-0 justify-center text-text",
 ].join(" ");
 
 export const MODEL_ITEM_CLASS_NAME = [
@@ -71,7 +84,6 @@ export const BUTTON_CLASS_NAME = [
 export const SMALL_BUTTON_CLASS_NAME = `${BUTTON_CLASS_NAME} sm`;
 export const PRIMARY_BUTTON_CLASS_NAME = `${BUTTON_CLASS_NAME} primary`;
 export const GHOST_BUTTON_CLASS_NAME = `${BUTTON_CLASS_NAME} ghost`;
-export const SMALL_PRIMARY_BUTTON_CLASS_NAME = `${SMALL_BUTTON_CLASS_NAME} primary`;
 
 export const BADGE_CLASS_NAME = [
   "badge inline-flex items-center font-sans text-xs",

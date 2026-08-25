@@ -3,17 +3,13 @@ import type { SkillInfo } from "./api";
 export const PLAN_COMMAND: SkillInfo = {
   name: "plan",
   description: "Toggle Plan mode for this chat",
-  argHint: "",
   source: "command",
 };
-
-const INLINE_COMMAND_NAMES = new Set([PLAN_COMMAND.name]);
 
 export interface SlashCommandContext {
   query: string;
   start: number;
   end: number;
-  inline: boolean;
 }
 
 export function slashCommandContext(
@@ -28,24 +24,67 @@ export function slashCommandContext(
   while (end < text.length && !/\s/.test(text[end])) end += 1;
   const query = text.slice(start + 1, end);
   if (query.includes("/")) return null;
-  return {
-    query: query.toLowerCase(),
-    start,
-    end,
-    inline: text.slice(0, start).trim().length > 0,
-  };
+  return { query: query.toLowerCase(), start, end };
 }
 
-export function commandsForSlashContext(
-  commands: SkillInfo[],
-  inline: boolean,
-): SkillInfo[] {
-  return inline
-    ? commands.filter(
-        (command) =>
-          command.source === "command" && INLINE_COMMAND_NAMES.has(command.name.toLowerCase()),
-      )
-    : commands;
+interface CommandSegment {
+  text: string;
+  command: boolean;
+}
+
+/** Split a message into plain runs and whole `/name` tokens naming a known
+ * command, so both the composer and the transcript can chip them in place. */
+export function splitCommandTokens(
+  text: string,
+  isCommand: (name: string) => boolean,
+): CommandSegment[] {
+  const segments: CommandSegment[] = [];
+  let plain = "";
+  for (const run of text.split(/(\s+)/)) {
+    const match = /^\/([^\s/]+)$/.exec(run);
+    if (match && isCommand(match[1].toLowerCase())) {
+      if (plain) segments.push({ text: plain, command: false });
+      plain = "";
+      segments.push({ text: run, command: true });
+    } else {
+      plain += run;
+    }
+  }
+  if (plain) segments.push({ text: plain, command: false });
+  return segments;
+}
+
+/** Replace the `/query` token under the caret with the chosen command, leaving
+ * the rest of the message where it was. */
+export function insertSlashCommand(
+  text: string,
+  context: SlashCommandContext,
+  name: string,
+  marginSpaces = 1,
+): { text: string; cursor: number } {
+  const margin = " ".repeat(marginSpaces);
+  let before = text.slice(0, context.start);
+  if (marginSpaces > 1 && /[ \t]$/.test(before)) {
+    before = before.replace(/[ \t]+$/, (spaces) => {
+      if (spaces.includes("\t")) return spaces;
+      return spaces.length >= marginSpaces ? spaces : margin;
+    });
+  }
+  let after = text.slice(context.end);
+  if (!after) {
+    after = margin;
+  } else if (!after.startsWith("\n")) {
+    const leading = /^[ \t]+/.exec(after)?.[0];
+    after = leading
+      ? `${leading.length >= marginSpaces ? leading : margin}${after.slice(leading.length)}`
+      : margin + after;
+  }
+  // The caret lands past the reserved inline margin, where surrounding prose continues.
+  const gap = /^[ \t]+/.exec(after)?.[0].length ?? 0;
+  return {
+    text: `${before}/${name}${after}`,
+    cursor: before.length + name.length + 1 + gap,
+  };
 }
 
 export function removeSlashCommand(

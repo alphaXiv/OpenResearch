@@ -17,6 +17,7 @@ import { unified } from "unified";
 import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 // Chat blocks are short; cap tokenizing well below the file viewer's limit.
 const HIGHLIGHT_MAX_BYTES = 100_000;
@@ -198,7 +199,13 @@ function FileChip({
   lines?: string;
   /** Experiment id this file was cited from, if any (`<file exp=…>`). */
   exp?: string;
-  onOpenFile?: (path: string, line?: number, exp?: string) => void;
+  onOpenFile?: (
+    path: string,
+    line: number | undefined,
+    exp: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
 }) {
   const name = path.split("/").pop() || path;
   // `lines` may be a single line or a range ("20-40"); show the first.
@@ -208,7 +215,9 @@ function FileChip({
     <button
       className="file-chip"
       title={`Open ${path}`}
-      onClick={() => onOpenFile?.(path, line, exp)}
+      {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+        onOpenFile?.(path, line, exp, undefined, intent),
+      )}
       disabled={!onOpenFile}
     >
       <FileCode size={12} />
@@ -227,13 +236,13 @@ function RunChip({
 }: {
   id: string;
   label?: string;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
 }) {
   return (
     <button
       className="file-chip run-chip"
       title={`Open logs for run ${id}`}
-      onClick={() => onOpenRun?.(id)}
+      {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenRun?.(id, intent))}
       disabled={!onOpenRun}
     >
       <ScrollText size={12} />
@@ -291,11 +300,21 @@ export const Md = memo(function Md({
   text,
   onOpenFile,
   onOpenRun,
+  resolveFilePath,
+  resolveImageSrc,
   predict = false,
 }: {
   text: string;
-  onOpenFile?: (path: string, line?: number, exp?: string) => void;
-  onOpenRun?: (runId: string) => void;
+  onOpenFile?: (
+    path: string,
+    line: number | undefined,
+    exp: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
+  onOpenRun?: (runId: string, intent: TabOpenIntent) => void;
+  resolveFilePath?: (path: string) => string | null;
+  resolveImageSrc?: (src: string) => string | null;
   predict?: boolean;
 }) {
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
@@ -309,7 +328,14 @@ export const Md = memo(function Md({
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
       if (href && isFileHref(href) && onOpenFile) {
-        return <FileChip path={decodeURI(href)} onOpenFile={onOpenFile} />;
+        let decoded: string;
+        try {
+          decoded = decodeURI(href);
+        } catch {
+          return <span>{children}</span>;
+        }
+        const path = resolveFilePath ? resolveFilePath(decoded) : decoded;
+        return path ? <FileChip path={path} onOpenFile={onOpenFile} /> : <span>{children}</span>;
       }
       return (
         <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>
@@ -317,8 +343,22 @@ export const Md = memo(function Md({
         </a>
       );
     },
+    img: ({ node: _node, src, alt, className, ...rest }) => {
+      if (!src || typeof src !== "string") return null;
+      const resolved = resolveImageSrc ? resolveImageSrc(src) : src;
+      if (!resolved) return null;
+      return (
+        <img
+          {...rest}
+          src={resolved}
+          alt={alt ?? ""}
+          loading="lazy"
+          className={`block max-w-full h-auto my-3 rounded-sm border border-border ${className ?? ""}`}
+        />
+      );
+    },
     ...mdCodeComponents,
-  }), [onOpenFile, onOpenRun]);
+  }), [onOpenFile, onOpenRun, resolveFilePath, resolveImageSrc]);
 
   return (
     <div data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-[color-mix(in_oklab,_var(--border)_50%,_transparent)] [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-[0.9em] [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-[1.05em] [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-[1.05em] [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-[1.05em] [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-[1.05em] [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:pl-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:pl-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-md [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-left [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-left [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pr-0 [&_blockquote]:pb-0.5 [&_blockquote]:pl-2.5 [&_blockquote]:border-l-[3px] [&_blockquote]:border-l-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">

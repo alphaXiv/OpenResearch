@@ -14,6 +14,7 @@ import {
   type Project,
   type Run,
 } from "../api";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
@@ -65,8 +66,8 @@ export function ExperimentOverview({
   parentExperiment: Experiment | null;
   project: Project;
   runs: Run[];
-  onOpenLogs: (runId: string) => void;
-  onOpenCode: () => void;
+  onOpenLogs: (runId: string, intent: TabOpenIntent) => void;
+  onOpenCode: (intent: TabOpenIntent) => void;
 }) {
   const latestRun = runs[0] ?? null;
   const hasLiveRun = runs.some(
@@ -96,13 +97,18 @@ export function ExperimentOverview({
           {latestRun && (
             <button
               className={EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME}
-              onClick={() => onOpenLogs(latestRun.id)}
+              {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                onOpenLogs(latestRun.id, intent),
+              )}
             >
               <Terminal size={15} />
               Logs
             </button>
           )}
-          <button className={EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME} onClick={onOpenCode}>
+          <button
+            className={EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME}
+            {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
+          >
             <FolderTree size={15} />
             Code
           </button>
@@ -183,7 +189,12 @@ export function ExperimentOverview({
             <h2>Run history</h2>
             <div className="experiment-run-history border-t border-t-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-left [&_button]:text-sm [&_button:hover]:bg-surface [@media((max-width:_720px))]:[&_button]:grid-cols-[65px_1fr_60px_16px] [@media((max-width:_720px))]:[&_button_>_:nth-child(3)]:hidden">
               {runs.map((run, index) => (
-                <button key={run.id} onClick={() => onOpenLogs(run.id)}>
+                <button
+                  key={run.id}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpenLogs(run.id, intent),
+                  )}
+                >
                   <span className="experiment-run-number font-mono text-xs font-semibold">Run {runs.length - index}</span>
                   <StatusBadge status={runDisplayStatus(run)} />
                   <span>{timeAgo(run.createdAt)}</span>

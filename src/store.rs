@@ -222,6 +222,15 @@ pub struct StoredRun {
 }
 
 #[derive(Debug, Clone)]
+pub struct ProjectActivitySummary {
+    pub project_id: String,
+    pub total_agents: usize,
+    pub running_experiments: usize,
+    pub total_experiments: usize,
+    pub last_message_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunWakeup {
     pub run: StoredRun,
     pub chat_session_id: String,
@@ -235,8 +244,56 @@ pub enum RunWakeupRegistration {
     AlreadyDelivered,
 }
 
+/// A helper session an agent created with `orx agent spawn`, and the task it
+/// was spawned to do. The CLI only writes the row; the resident `orx up`
+/// watcher is what starts the child's first turn and reports back.
+#[derive(Debug, Clone)]
+pub struct ChatSpawn {
+    pub session_id: String,
+    pub parent_session_id: String,
+    pub prompt: String,
+    /// Whether the parent gets a wake-up once the helper finishes.
+    pub wake_parent: bool,
+    /// Failed attempts to start the helper's first turn.
+    pub attempts: i64,
+    /// Set by `finish_turn` when the helper's turn ends. Absent on a row whose
+    /// turn is still running — or whose `orx up` died mid-turn, which is how a
+    /// crash is told from a completion.
+    pub finished_at: Option<i64>,
+}
+
+/// Lifecycle of a [`ChatSpawn`]: `Pending → Starting → Running → Waking →
+/// Done`. The two `-ing` states are claims — one watcher owns the transition
+/// and holds a token, so a crash mid-step is reclaimable rather than lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatSpawnState {
+    /// Row written; the child's first turn has not been delivered yet.
+    Pending,
+    /// Claimed for delivery of the brief to the helper.
+    Starting,
+    /// The helper is working on its task.
+    Running,
+    /// Claimed for delivery of the wake-up to the parent.
+    Waking,
+    /// Terminal: the parent has been told, or never asked to be.
+    Done,
+}
+
+impl ChatSpawnState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Waking => "waking",
+            Self::Done => "done",
+        }
+    }
+}
+
 const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
-const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
+pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
+const CHAT_SPAWN_CLAIM_TTL_MS: i64 = 60 * 1000;
 
 pub struct Store {
     conn: Connection,
@@ -323,6 +380,7 @@ impl Store {
                 archived          INTEGER NOT NULL DEFAULT 0,
                 context_usage_json TEXT,
                 bootstrap_context TEXT,
+                parent_session_id TEXT,
                 created_at        INTEGER NOT NULL,
                 updated_at        INTEGER NOT NULL
             );
@@ -338,6 +396,40 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_messages_session
                 ON chat_messages(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS chat_turns (
+                id                   TEXT PRIMARY KEY,
+                session_id           TEXT NOT NULL,
+                user_message_id      TEXT,
+                assistant_message_id TEXT NOT NULL,
+                client_turn_id       TEXT NOT NULL,
+                request_hash         TEXT NOT NULL,
+                prepared_input       TEXT NOT NULL,
+                settings_json        TEXT NOT NULL,
+                state                TEXT NOT NULL,
+                delivery_state       TEXT NOT NULL,
+                attempt_count        INTEGER NOT NULL DEFAULT 0,
+                next_retry_at        INTEGER,
+                error_kind           TEXT,
+                error_message        TEXT,
+                recovery_action      TEXT,
+                recovered_by_turn_id TEXT,
+                created_at           INTEGER NOT NULL,
+                updated_at           INTEGER NOT NULL,
+                UNIQUE(session_id, client_turn_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_turns_session
+                ON chat_turns(session_id, created_at);
+            CREATE TABLE IF NOT EXISTS chat_queued_messages (
+                id             TEXT PRIMARY KEY,
+                session_id     TEXT NOT NULL,
+                client_turn_id TEXT NOT NULL,
+                request_hash   TEXT NOT NULL,
+                payload_json   TEXT NOT NULL,
+                created_at     INTEGER NOT NULL,
+                UNIQUE(session_id, client_turn_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_queued_messages_session
+                ON chat_queued_messages(session_id, created_at);
             CREATE TABLE IF NOT EXISTS chat_run_wakeups (
                 run_id          TEXT NOT NULL,
                 chat_session_id TEXT NOT NULL,
@@ -350,6 +442,20 @@ impl Store {
             );
             CREATE INDEX IF NOT EXISTS idx_chat_run_wakeups_requested
                 ON chat_run_wakeups(requested_at);
+            CREATE TABLE IF NOT EXISTS chat_spawns (
+                session_id        TEXT PRIMARY KEY,
+                parent_session_id TEXT NOT NULL,
+                prompt            TEXT NOT NULL,
+                wake_parent       INTEGER NOT NULL DEFAULT 1,
+                state             TEXT NOT NULL DEFAULT 'pending',
+                requested_at      INTEGER NOT NULL,
+                claim_token       TEXT,
+                claimed_at        INTEGER,
+                attempts          INTEGER NOT NULL DEFAULT 0,
+                finished_at       INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_chat_spawns_state
+                ON chat_spawns(state, requested_at);
             CREATE TABLE IF NOT EXISTS chat_turn_leases (
                 chat_session_id TEXT PRIMARY KEY,
                 claim_token     TEXT NOT NULL,
@@ -367,6 +473,16 @@ impl Store {
                 tools_found INTEGER NOT NULL DEFAULT 0,
                 error     TEXT,
                 tested_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS overleaf_links (
+                project_id TEXT NOT NULL,
+                tex_path   TEXT NOT NULL,
+                overleaf_project_id TEXT NOT NULL,
+                host       TEXT NOT NULL,
+                head       TEXT NOT NULL DEFAULT '',
+                baseline   TEXT NOT NULL DEFAULT '{}',
+                root       TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (project_id, tex_path)
             );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
@@ -405,6 +521,10 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -935,6 +1055,150 @@ impl Store {
         Ok(delivered == 1)
     }
 
+    pub fn create_chat_spawn(&self, spawn: &ChatSpawn) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO chat_spawns
+                 (session_id, parent_session_id, prompt, wake_parent, state, requested_at)
+             VALUES (?1, ?2, ?3, ?4, 'pending', ?5)",
+            params![
+                spawn.session_id,
+                spawn.parent_session_id,
+                spawn.prompt,
+                spawn.wake_parent,
+                now_ms(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Return abandoned claims to their prior state and drop rows whose child
+    /// session is gone. A missing *parent* is not pruned here: the child keeps
+    /// working, and the wake step retires the row on its own.
+    pub fn prune_chat_spawns(&self) -> Result<()> {
+        self.clear_stale_data_dir_move_lease()?;
+        let stale = now_ms() - CHAT_SPAWN_CLAIM_TTL_MS;
+        self.conn.execute(
+            "UPDATE chat_spawns
+             SET state = CASE state WHEN 'starting' THEN 'pending' ELSE 'running' END,
+                 attempts = attempts + CASE state WHEN 'starting' THEN 1 ELSE 0 END,
+                 claim_token = NULL, claimed_at = NULL
+             WHERE state IN ('starting', 'waking') AND claimed_at < ?1
+               AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
+            params![stale],
+        )?;
+        self.conn.execute(
+            "DELETE FROM chat_spawns
+             WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
+               AND NOT EXISTS (
+                   SELECT 1 FROM chat_sessions WHERE chat_sessions.id = chat_spawns.session_id
+               )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Spawns sitting in one state, oldest request first.
+    pub fn list_chat_spawns(&self, state: ChatSpawnState) -> Result<Vec<ChatSpawn>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, parent_session_id, prompt, wake_parent, attempts, finished_at
+             FROM chat_spawns WHERE state = ?1 ORDER BY requested_at, session_id",
+        )?;
+        let rows = stmt.query_map(params![state.as_str()], row_to_chat_spawn)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_chat_spawn(&self, session_id: &str) -> Result<Option<ChatSpawn>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id, parent_session_id, prompt, wake_parent, attempts, finished_at
+             FROM chat_spawns WHERE session_id = ?1",
+        )?;
+        let mut rows = stmt.query_map(params![session_id], row_to_chat_spawn)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Take ownership of a spawn's next step, moving it into the claimed state
+    /// and returning the token that proves the claim. `None` means another
+    /// watcher got there first.
+    pub fn claim_chat_spawn(
+        &self,
+        session_id: &str,
+        from: ChatSpawnState,
+        to: ChatSpawnState,
+    ) -> Result<Option<String>> {
+        let token = uuid::Uuid::new_v4().to_string();
+        let claimed = self.conn.execute(
+            "UPDATE chat_spawns SET state = ?3, claim_token = ?4, claimed_at = ?5
+             WHERE session_id = ?1 AND state = ?2",
+            params![session_id, from.as_str(), to.as_str(), token, now_ms()],
+        )?;
+        Ok((claimed == 1).then_some(token))
+    }
+
+    /// Finish (or hand back) a claimed step. `false` means the claim expired
+    /// and someone else reclaimed the row, so the caller's work is NOT recorded
+    /// and must not be treated as done.
+    pub fn settle_chat_spawn(
+        &self,
+        session_id: &str,
+        token: &str,
+        to: ChatSpawnState,
+    ) -> Result<bool> {
+        let settled = self.conn.execute(
+            "UPDATE chat_spawns SET state = ?3, claim_token = NULL, claimed_at = NULL
+             WHERE session_id = ?1 AND claim_token = ?2",
+            params![session_id, token, to.as_str()],
+        )?;
+        Ok(settled == 1)
+    }
+
+    /// Whether any `orx up` currently holds a turn lease on this session.
+    ///
+    /// The durable counterpart to `ChatHost::is_busy`, which reads a map this
+    /// process owns: a helper started by a different `orx up` — or by one that
+    /// has since restarted — is busy without this process knowing it.
+    pub fn chat_turn_leased(&self, chat_session_id: &str) -> Result<bool> {
+        let leased = self.conn.query_row(
+            "SELECT 1 FROM chat_turn_leases WHERE chat_session_id = ?1 AND heartbeat_at >= ?2",
+            params![chat_session_id, now_ms() - CHAT_TURN_LEASE_TTL_MS],
+            |_| Ok(()),
+        );
+        Ok(matches!(leased, Ok(())))
+    }
+
+    /// Record that a spawned helper's turn ended. An unstamped row whose lease
+    /// has lapsed is how the watcher recognizes an `orx up` that died mid-turn,
+    /// so the parent hears "interrupted" rather than a false completion.
+    pub fn mark_chat_spawn_finished(&self, chat_session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_spawns SET finished_at = ?2
+             WHERE session_id = ?1 AND finished_at IS NULL",
+            params![chat_session_id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_chat_spawn_attempt(&self, chat_session_id: &str) -> Result<i64> {
+        self.conn.execute(
+            "UPDATE chat_spawns SET attempts = attempts + 1 WHERE session_id = ?1",
+            params![chat_session_id],
+        )?;
+        Ok(self.conn.query_row(
+            "SELECT attempts FROM chat_spawns WHERE session_id = ?1",
+            params![chat_session_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Helpers this parent has in flight, for the fan-out cap.
+    pub fn count_live_chat_spawns(&self, parent_session_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT count(*) FROM chat_spawns
+             WHERE parent_session_id = ?1 AND state != 'done'",
+            params![parent_session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn claim_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
         self.conn.execute(
@@ -1227,12 +1491,31 @@ impl Store {
     /// experiments) in one transaction. GitHub repo and cache clone are kept.
     pub fn delete_local_project(&self, id: &str) -> Result<()> {
         let tx = self.begin()?;
-        self.conn.execute(
+        tx.execute(
+            "DELETE FROM overleaf_links WHERE project_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM chat_queued_messages WHERE session_id IN
+               (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM chat_turns WHERE session_id IN
+               (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM chat_spawns WHERE session_id IN
+               (SELECT id FROM chat_sessions WHERE project_id = ?1)",
+            params![id],
+        )?;
+        tx.execute(
             "DELETE FROM chat_messages WHERE session_id IN
                (SELECT id FROM chat_sessions WHERE project_id = ?1)",
             params![id],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
         )?;
@@ -1339,8 +1622,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
-                                        active_leaf_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                                        active_leaf_id, parent_session_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 s.id,
                 s.project_id,
@@ -1356,6 +1639,7 @@ impl Store {
                 s.archived,
                 s.bootstrap_context,
                 s.active_leaf_id,
+                s.parent_session_id,
                 s.created_at,
                 s.updated_at,
             ],
@@ -1383,13 +1667,82 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    pub fn list_chat_session_project_ids(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, project_id FROM chat_sessions")?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Project totals include archived sessions so the agent count reflects
+    /// every agent that has worked on the project, not only the visible rail.
+    pub fn list_project_activity_summaries(&self) -> Result<Vec<ProjectActivitySummary>> {
+        let mut stmt = self.conn.prepare(
+            "WITH agent_counts AS (
+                 SELECT project_id, COUNT(*) AS total_agents
+                 FROM chat_sessions
+                 GROUP BY project_id
+             ),
+             experiment_counts AS (
+                 SELECT project_id, COUNT(*) AS total_experiments
+                 FROM local_experiments
+                 GROUP BY project_id
+             ),
+             running_experiment_counts AS (
+                 SELECT runs.project_id, COUNT(DISTINCT runs.experiment_id) AS running_experiments
+                 FROM runs
+                 JOIN local_experiments
+                   ON local_experiments.id = runs.experiment_id
+                  AND local_experiments.project_id = runs.project_id
+                 WHERE runs.status IN ('starting', 'running')
+                 GROUP BY runs.project_id
+             ),
+             latest_messages AS (
+                 SELECT chat_sessions.project_id, MAX(chat_messages.created_at) AS last_message_at
+                 FROM chat_messages
+                 JOIN chat_sessions ON chat_sessions.id = chat_messages.session_id
+                 WHERE chat_messages.role IN ('user', 'assistant')
+                 GROUP BY chat_sessions.project_id
+             )
+             SELECT local_projects.id,
+                    COALESCE(agent_counts.total_agents, 0),
+                    COALESCE(running_experiment_counts.running_experiments, 0),
+                    COALESCE(experiment_counts.total_experiments, 0),
+                    latest_messages.last_message_at
+             FROM local_projects
+             LEFT JOIN agent_counts ON agent_counts.project_id = local_projects.id
+             LEFT JOIN experiment_counts ON experiment_counts.project_id = local_projects.id
+             LEFT JOIN running_experiment_counts
+               ON running_experiment_counts.project_id = local_projects.id
+             LEFT JOIN latest_messages ON latest_messages.project_id = local_projects.id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(ProjectActivitySummary {
+                project_id: row.get(0)?,
+                total_agents: row.get::<_, i64>(1)? as usize,
+                running_experiments: row.get::<_, i64>(2)? as usize,
+                total_experiments: row.get::<_, i64>(3)? as usize,
+                last_message_at: row.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn delete_chat_session(&self, id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.begin()?;
+        tx.execute(
+            "DELETE FROM chat_queued_messages WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.execute("DELETE FROM chat_turns WHERE session_id = ?1", params![id])?;
+        tx.execute(
             "DELETE FROM chat_messages WHERE session_id = ?1",
             params![id],
         )?;
-        self.conn
-            .execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM chat_spawns WHERE session_id = ?1", params![id])?;
+        tx.execute("DELETE FROM chat_sessions WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1414,6 +1767,10 @@ impl Store {
     }
 
     pub fn set_chat_session_model(&self, id: &str, model: &str) -> Result<()> {
+        self.set_chat_session_model_value(id, Some(model))
+    }
+
+    pub fn set_chat_session_model_value(&self, id: &str, model: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET model = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, model, now_ms()],
@@ -1434,6 +1791,14 @@ impl Store {
     }
 
     pub fn set_chat_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
+        self.set_chat_session_permission_mode_value(id, Some(mode))
+    }
+
+    pub fn set_chat_session_permission_mode_value(
+        &self,
+        id: &str,
+        mode: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET permission_mode = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, mode, now_ms()],
@@ -1465,6 +1830,14 @@ impl Store {
     }
 
     pub fn set_chat_session_reasoning_level(&self, id: &str, level: &str) -> Result<()> {
+        self.set_chat_session_reasoning_level_value(id, Some(level))
+    }
+
+    pub fn set_chat_session_reasoning_level_value(
+        &self,
+        id: &str,
+        level: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
             "UPDATE chat_sessions SET reasoning_level = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, level, now_ms()],
@@ -1566,6 +1939,479 @@ impl Store {
         Ok(parent)
     }
 
+    pub fn upsert_chat_recovery_message_if_actionable(
+        &self,
+        turn_id: &str,
+        message: &StoredChatMessage,
+    ) -> Result<bool> {
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let actionable = transaction.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM chat_turns
+               WHERE id = ?1 AND state = 'failed' AND recovery_action IS NOT NULL
+                 AND recovered_by_turn_id IS NULL
+             )",
+            params![turn_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if actionable {
+            let exists = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id = ?1)",
+                params![message.id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            upsert_chat_message_with(&transaction, message)?;
+            if !exists {
+                transaction.execute(
+                    "UPDATE chat_sessions SET active_leaf_id = ?2 WHERE id = ?1",
+                    params![message.session_id, message.id],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(actionable)
+    }
+
+    /// Admit one user turn and its transcript bubble as one durable operation.
+    /// The `(session_id, client_turn_id)` pair is the browser-to-server
+    /// idempotency key. A duplicate with the same request hash returns the
+    /// existing row; a different payload is rejected without changing either
+    /// the transcript or the turn.
+    pub fn admit_chat_turn(
+        &self,
+        user_message: Option<&StoredChatMessage>,
+        turn: &StoredChatTurn,
+    ) -> Result<ChatTurnAdmission> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let session_exists = tx
+            .query_row(
+                "SELECT 1 FROM chat_sessions WHERE id = ?1",
+                params![turn.session_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !session_exists {
+            return Err(anyhow!("chat session not found"));
+        }
+        let existing = tx
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns
+                     WHERE session_id = ?1 AND client_turn_id = ?2"
+                ),
+                params![turn.session_id, turn.client_turn_id],
+                row_to_chat_turn,
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            tx.commit()?;
+            return Ok(if existing.request_hash == turn.request_hash {
+                ChatTurnAdmission::Existing(Box::new(existing))
+            } else {
+                ChatTurnAdmission::Conflict
+            });
+        }
+        if let Some(message) = user_message {
+            tx.execute(
+                "INSERT INTO chat_messages
+                 (id, session_id, role, parts_json, created_at, parent_id,
+                  base_native_session_id, result_native_session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    message.id,
+                    message.session_id,
+                    message.role,
+                    message.parts_json,
+                    message.created_at,
+                    message.parent_id,
+                    message.base_native_session_id,
+                    message.result_native_session_id,
+                ],
+            )?;
+            tx.execute(
+                "UPDATE chat_sessions SET active_leaf_id = ?2 WHERE id = ?1",
+                params![message.session_id, message.id],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO chat_turns
+             (id, session_id, user_message_id, assistant_message_id, client_turn_id,
+              request_hash, prepared_input, settings_json, state, delivery_state,
+              attempt_count, next_retry_at, error_kind, error_message, recovery_action,
+              recovered_by_turn_id, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                     ?14, ?15, ?16, ?17, ?18)",
+            params![
+                turn.id,
+                turn.session_id,
+                turn.user_message_id,
+                turn.assistant_message_id,
+                turn.client_turn_id,
+                turn.request_hash,
+                turn.prepared_input,
+                turn.settings_json,
+                turn.state,
+                turn.delivery_state,
+                turn.attempt_count,
+                turn.next_retry_at,
+                turn.error_kind,
+                turn.error_message,
+                turn.recovery_action,
+                turn.recovered_by_turn_id,
+                turn.created_at,
+                turn.updated_at,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(ChatTurnAdmission::Inserted)
+    }
+
+    pub fn get_chat_turn(&self, session_id: &str, turn_id: &str) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns WHERE id = ?1 AND session_id = ?2"
+                ),
+                params![turn_id, session_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
+    pub fn get_chat_turn_by_client_id(
+        &self,
+        session_id: &str,
+        client_turn_id: &str,
+    ) -> Result<Option<StoredChatTurn>> {
+        Ok(self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {CHAT_TURN_COLS} FROM chat_turns
+                     WHERE session_id = ?1 AND client_turn_id = ?2"
+                ),
+                params![session_id, client_turn_id],
+                row_to_chat_turn,
+            )
+            .optional()?)
+    }
+
+    pub fn insert_queued_chat_message(&self, message: &StoredQueuedChatMessage) -> Result<()> {
+        let changed = self.conn.execute(
+            "INSERT INTO chat_queued_messages
+             (id, session_id, client_turn_id, request_hash, payload_json, created_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+             WHERE EXISTS (SELECT 1 FROM chat_sessions WHERE id = ?2)",
+            params![
+                message.id,
+                message.session_id,
+                message.client_turn_id,
+                message.request_hash,
+                message.payload_json,
+                message.created_at,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(anyhow!("chat session not found"));
+        }
+        Ok(())
+    }
+
+    pub fn update_queued_chat_message(&self, id: &str, payload_json: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_queued_messages SET payload_json = ?2 WHERE id = ?1",
+            params![id, payload_json],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_queued_chat_message(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chat_queued_messages WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_queued_chat_messages_for_session(&self, session_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM chat_queued_messages WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_queued_chat_messages(&self) -> Result<Vec<StoredQueuedChatMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, client_turn_id, request_hash, payload_json, created_at
+             FROM chat_queued_messages ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredQueuedChatMessage {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                client_turn_id: row.get(2)?,
+                request_hash: row.get(3)?,
+                payload_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn list_queued_chat_messages_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<StoredQueuedChatMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, client_turn_id, request_hash, payload_json, created_at
+             FROM chat_queued_messages WHERE session_id = ?1
+             ORDER BY created_at ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |row| {
+            Ok(StoredQueuedChatMessage {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                client_turn_id: row.get(2)?,
+                request_hash: row.get(3)?,
+                payload_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    pub fn update_chat_turn_progress(
+        &self,
+        id: &str,
+        state: &str,
+        delivery_state: &str,
+        attempt_count: i64,
+        next_retry_at: Option<i64>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_turns SET state = ?2, delivery_state = ?3, attempt_count = ?4,
+                 next_retry_at = ?5, updated_at = ?6
+             WHERE id = ?1 AND state IN ('preparing', 'retrying', 'running')",
+            params![
+                id,
+                state,
+                delivery_state,
+                attempt_count,
+                next_retry_at,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_chat_turn(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET state = 'completed', next_retry_at = NULL,
+                 error_kind = NULL, error_message = NULL, recovery_action = NULL,
+                 updated_at = ?2 WHERE id = ?1
+                   AND state IN ('preparing', 'retrying', 'running')",
+            params![id, now_ms()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn fail_chat_turn(
+        &self,
+        id: &str,
+        delivery_state: &str,
+        error_kind: &str,
+        error_message: &str,
+        recovery_action: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET state = 'failed', delivery_state = ?2,
+                 next_retry_at = NULL, error_kind = ?3, error_message = ?4,
+                 recovery_action = ?5, updated_at = ?6 WHERE id = ?1
+                   AND state IN ('preparing', 'retrying', 'running')",
+            params![
+                id,
+                delivery_state,
+                error_kind,
+                error_message,
+                recovery_action,
+                now_ms(),
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn interrupt_chat_turn(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_turns SET state = 'interrupted', next_retry_at = NULL,
+                 recovery_action = NULL, error_kind = 'cancelled', updated_at = ?2
+             WHERE id = ?1 AND state IN ('preparing', 'retrying', 'running', 'failed')
+               AND recovered_by_turn_id IS NULL",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Claim a terminal recovery action exactly once. `Retry` reuses this row;
+    /// `Continue` records the newly-created recovery turn after admission.
+    pub fn mark_chat_turn_recovered(&self, id: &str, recovered_by: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET recovered_by_turn_id = ?2, recovery_action = NULL,
+                 updated_at = ?3
+             WHERE id = ?1 AND recovered_by_turn_id IS NULL AND state = 'failed'",
+            params![id, recovered_by, now_ms()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn mark_chat_turn_recovered_with_message(
+        &self,
+        id: &str,
+        recovered_by: &str,
+        message: &StoredChatMessage,
+    ) -> Result<bool> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
+            "UPDATE chat_turns SET recovered_by_turn_id = ?2, recovery_action = NULL,
+                 updated_at = ?3
+             WHERE id = ?1 AND recovered_by_turn_id IS NULL AND state = 'failed'",
+            params![id, recovered_by, now_ms()],
+        )?;
+        if changed > 0 {
+            upsert_chat_message_with(&transaction, message)?;
+        }
+        transaction.commit()?;
+        Ok(changed > 0)
+    }
+
+    pub fn reset_chat_turn_for_retry(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET state = 'preparing', delivery_state = 'not_sent',
+                 attempt_count = 0, next_retry_at = NULL, error_kind = NULL,
+                 error_message = NULL, recovery_action = NULL, updated_at = ?2
+             WHERE id = ?1 AND state = 'failed' AND recovery_action = 'retry'
+                   AND recovered_by_turn_id IS NULL",
+            params![id, now_ms()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn set_chat_turn_settings(&self, id: &str, settings_json: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_turns SET settings_json = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, settings_json, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_recovery_settings(
+        &self,
+        id: &str,
+        model: Option<&str>,
+        permission_mode: Option<&str>,
+        plan_state: Option<(bool, bool)>,
+        reasoning_level: Option<&str>,
+    ) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let (plan_mode, plan_reset_pending) = plan_state
+            .map(|(mode, reset)| (Some(mode), Some(reset)))
+            .unwrap_or((None, None));
+        transaction.execute(
+            "UPDATE chat_sessions
+             SET model = ?2, permission_mode = ?3,
+                 plan_mode = COALESCE(?4, plan_mode),
+                 plan_reset_pending = COALESCE(?5, plan_reset_pending),
+                 reasoning_level = ?6, updated_at = ?7
+             WHERE id = ?1",
+            params![
+                id,
+                model,
+                permission_mode,
+                plan_mode,
+                plan_reset_pending,
+                reasoning_level,
+                now_ms()
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// On server startup no in-flight task survives. Convert unfinished rows
+    /// into explicit, user-recoverable terminal states without replaying them.
+    pub fn reconcile_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
+        self.reconcile_unfinished_chat_turns_inner(true)
+    }
+
+    pub fn reconcile_expired_unfinished_chat_turns(&self) -> Result<Vec<StoredChatTurn>> {
+        self.reconcile_unfinished_chat_turns_inner(false)
+    }
+
+    fn reconcile_unfinished_chat_turns_inner(
+        &self,
+        include_existing_failures: bool,
+    ) -> Result<Vec<StoredChatTurn>> {
+        let now = now_ms();
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
+            params![now - CHAT_TURN_LEASE_TTL_MS],
+        )?;
+        let newly_reconciled = {
+            let mut statement = transaction.prepare(
+                "SELECT id FROM chat_turns
+                 WHERE state IN ('preparing', 'retrying', 'running')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM chat_turn_leases
+                     WHERE chat_turn_leases.chat_session_id = chat_turns.session_id
+                   )",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<std::collections::HashSet<_>, _>>()?
+        };
+        transaction.execute(
+            "UPDATE chat_turns
+             SET state = 'failed', error_kind = 'server_restarted',
+                 error_message = 'ORX restarted before this turn finished',
+                 recovery_action = CASE
+                   WHEN delivery_state IN ('not_sent', 'rejected') THEN 'retry'
+                   ELSE 'continue'
+                 END,
+                 next_retry_at = NULL, updated_at = ?1
+             WHERE state IN ('preparing', 'retrying', 'running')
+               AND NOT EXISTS (
+                 SELECT 1 FROM chat_turn_leases
+                 WHERE chat_turn_leases.chat_session_id = chat_turns.session_id
+               )",
+            params![now],
+        )?;
+        transaction.commit()?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_TURN_COLS} FROM chat_turns
+             WHERE state = 'failed' AND recovery_action IS NOT NULL
+               AND recovered_by_turn_id IS NULL
+             ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], row_to_chat_turn)?;
+        let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        if include_existing_failures {
+            Ok(rows)
+        } else {
+            Ok(rows
+                .into_iter()
+                .filter(|turn| newly_reconciled.contains(&turn.id))
+                .collect())
+        }
+    }
+
     pub fn list_chat_messages(&self, session_id: &str) -> Result<Vec<StoredChatMessage>> {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
@@ -1623,6 +2469,69 @@ impl Store {
             .optional()?)
     }
 
+    /// The Overleaf project a `.tex` in this project pushes to, if one is linked.
+    pub fn overleaf_link(&self, project_id: &str, tex_path: &str) -> Result<Option<OverleafLink>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT overleaf_project_id, host, head, baseline, root FROM overleaf_links
+                 WHERE project_id = ?1 AND tex_path = ?2",
+                params![project_id, tex_path],
+                |row| {
+                    let baseline: String = row.get(3)?;
+                    Ok(OverleafLink {
+                        overleaf_project_id: row.get(0)?,
+                        host: row.get(1)?,
+                        head: row.get(2)?,
+                        root: row.get(4)?,
+                        // A baseline that will not parse is one we cannot trust
+                        // to say who changed what; empty makes the next sync
+                        // treat every difference as a conflict rather than
+                        // guess a direction.
+                        baseline: serde_json::from_str(&baseline).unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_overleaf_link(
+        &self,
+        project_id: &str,
+        tex_path: &str,
+        link: &OverleafLink,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO overleaf_links
+               (project_id, tex_path, overleaf_project_id, host, head, baseline, root)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(project_id, tex_path) DO UPDATE SET
+               overleaf_project_id = excluded.overleaf_project_id,
+               host = excluded.host,
+               head = excluded.head,
+               baseline = excluded.baseline,
+               root = excluded.root",
+            params![
+                project_id,
+                tex_path,
+                link.overleaf_project_id,
+                link.host,
+                link.head,
+                serde_json::to_string(&link.baseline)?,
+                link.root
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_overleaf_link(&self, project_id: &str, tex_path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM overleaf_links WHERE project_id = ?1 AND tex_path = ?2",
+            params![project_id, tex_path],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_ssh_host_test(&self, t: &SshHostTest) -> Result<()> {
         self.conn.execute(
             "INSERT INTO ssh_host_tests (host, reachable, git_found, tools_found, error, tested_at)
@@ -1654,6 +2563,26 @@ impl Store {
     }
 }
 
+/// The Overleaf project one `.tex` file pushes to. Per file, not per project:
+/// a checkout can hold a paper and a rebuttal, and they are different Overleaf
+/// projects.
+#[derive(Debug, Clone)]
+pub struct OverleafLink {
+    pub overleaf_project_id: String,
+    /// `www.overleaf.com`, or a Server Pro site.
+    pub host: String,
+    /// Overleaf's HEAD at the last sync. A poll that sees the same sha knows
+    /// nothing moved there, and can skip the clone.
+    pub head: String,
+    /// What both sides agreed on at the last sync (path to content hash) — the
+    /// only thing that gives a later difference a direction.
+    pub baseline: std::collections::BTreeMap<String, String>,
+    /// The checkout the baseline was taken from. A session worktree and the hub
+    /// clone hold different copies of the same path, and an agreement made
+    /// against one says nothing about the other.
+    pub root: String,
+}
+
 /// Most recent preflight result per ssh host alias (Settings → Compute → SSH).
 /// Serializes to the wire shape the UI's `SshPreflight` type expects; `host`
 /// is the row key only (the API embeds results under their host entry).
@@ -1679,8 +2608,10 @@ pub struct StoredChatSession {
     pub native_session_id: Option<String>,
     pub title: Option<String>,
     /// Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-    /// (harness auto-title), `"user"` (Rename). NULL on legacy rows, which the
-    /// conditional setter treats as "unknown, don't overwrite".
+    /// (harness auto-title), `"user"` (explicitly chosen — a rename, or an
+    /// agent's `orx agent spawn --title`, neither of which auto-titling may
+    /// overwrite). NULL on legacy rows, which the conditional setter treats as
+    /// "unknown, don't overwrite".
     pub title_source: Option<String>,
     pub model: Option<String>,
     /// Permission-mode wire id (`"auto"` / `"plan"` / …); None = harness default.
@@ -1703,6 +2634,9 @@ pub struct StoredChatSession {
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
+    /// Session that spawned this one with `orx agent spawn`. `None` for
+    /// sessions the user started from the dashboard.
+    pub parent_session_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -1773,9 +2707,90 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredChatTurn {
+    pub id: String,
+    pub session_id: String,
+    pub user_message_id: Option<String>,
+    pub assistant_message_id: String,
+    pub client_turn_id: String,
+    pub request_hash: String,
+    pub prepared_input: String,
+    pub settings_json: String,
+    pub state: String,
+    pub delivery_state: String,
+    pub attempt_count: i64,
+    pub next_retry_at: Option<i64>,
+    pub error_kind: Option<String>,
+    pub error_message: Option<String>,
+    pub recovery_action: Option<String>,
+    pub recovered_by_turn_id: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredQueuedChatMessage {
+    pub id: String,
+    pub session_id: String,
+    pub client_turn_id: String,
+    pub request_hash: String,
+    pub payload_json: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatTurnAdmission {
+    Inserted,
+    Existing(Box<StoredChatTurn>),
+    Conflict,
+}
+
+const CHAT_TURN_COLS: &str = "id, session_id, user_message_id, assistant_message_id, \
+    client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, \
+    attempt_count, next_retry_at, error_kind, error_message, recovery_action, \
+    recovered_by_turn_id, created_at, updated_at";
+
+fn row_to_chat_turn(
+    row: &rusqlite::Row<'_>,
+) -> std::result::Result<StoredChatTurn, rusqlite::Error> {
+    Ok(StoredChatTurn {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        user_message_id: row.get(2)?,
+        assistant_message_id: row.get(3)?,
+        client_turn_id: row.get(4)?,
+        request_hash: row.get(5)?,
+        prepared_input: row.get(6)?,
+        settings_json: row.get(7)?,
+        state: row.get(8)?,
+        delivery_state: row.get(9)?,
+        attempt_count: row.get(10)?,
+        next_retry_at: row.get(11)?,
+        error_kind: row.get(12)?,
+        error_message: row.get(13)?,
+        recovery_action: row.get(14)?,
+        recovered_by_turn_id: row.get(15)?,
+        created_at: row.get(16)?,
+        updated_at: row.get(17)?,
+    })
+}
+
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
-     created_at, updated_at, title_source, bootstrap_context, active_leaf_id";
+     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id";
+
+fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
+    Ok(ChatSpawn {
+        session_id: row.get(0)?,
+        parent_session_id: row.get(1)?,
+        prompt: row.get(2)?,
+        wake_parent: row.get(3)?,
+        attempts: row.get(4)?,
+        finished_at: row.get(5)?,
+    })
+}
 
 fn row_to_chat_session(
     row: &rusqlite::Row<'_>,
@@ -1798,6 +2813,7 @@ fn row_to_chat_session(
         title_source: row.get(14)?,
         bootstrap_context: row.get(15)?,
         active_leaf_id: row.get(16)?,
+        parent_session_id: row.get(17)?,
     })
 }
 
@@ -2055,6 +3071,173 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn chat_turn_fixture(id: &str, client_turn_id: &str) -> StoredChatTurn {
+        StoredChatTurn {
+            id: id.into(),
+            session_id: "chat_1".into(),
+            user_message_id: Some(format!("msg_{id}")),
+            assistant_message_id: format!("assistant_{id}"),
+            client_turn_id: client_turn_id.into(),
+            request_hash: "hash-a".into(),
+            prepared_input: "prepared".into(),
+            settings_json: "{}".into(),
+            state: "preparing".into(),
+            delivery_state: "not_sent".into(),
+            attempt_count: 0,
+            next_retry_at: None,
+            error_kind: None,
+            error_message: None,
+            recovery_action: None,
+            recovered_by_turn_id: None,
+            created_at: 2,
+            updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn chat_turn_admission_is_atomic_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!("orx-store-turns-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let turn = chat_turn_fixture("one", "client-1");
+        let user = StoredChatMessage {
+            id: turn.user_message_id.clone().unwrap(),
+            session_id: "chat_1".into(),
+            role: "user".into(),
+            parts_json: "[]".into(),
+            created_at: 2,
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        assert_eq!(
+            store.admit_chat_turn(Some(&user), &turn).unwrap(),
+            ChatTurnAdmission::Inserted
+        );
+        assert!(matches!(
+            store.admit_chat_turn(Some(&user), &turn).unwrap(),
+            ChatTurnAdmission::Existing(existing) if existing.id == turn.id
+        ));
+        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .get_chat_session("chat_1")
+                .unwrap()
+                .unwrap()
+                .active_leaf_id
+                .as_deref(),
+            Some(user.id.as_str())
+        );
+
+        let mut conflict = turn.clone();
+        conflict.id = "two".into();
+        conflict.request_hash = "hash-b".into();
+        assert_eq!(
+            store.admit_chat_turn(None, &conflict).unwrap(),
+            ChatTurnAdmission::Conflict
+        );
+        assert_eq!(
+            store
+                .get_chat_turn_by_client_id("chat_1", "client-1")
+                .unwrap()
+                .unwrap()
+                .id,
+            "one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unfinished_turns_reconcile_by_delivery_certainty() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-reconcile-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let retry = chat_turn_fixture("retry", "client-retry");
+        store.admit_chat_turn(None, &retry).unwrap();
+        let mut keep_going = chat_turn_fixture("continue", "client-continue");
+        keep_going.delivery_state = "unknown".into();
+        keep_going.state = "running".into();
+        store.admit_chat_turn(None, &keep_going).unwrap();
+
+        let reconciled = store.reconcile_unfinished_chat_turns().unwrap();
+        assert_eq!(reconciled.len(), 2);
+        assert_eq!(
+            store
+                .get_chat_turn("chat_1", "retry")
+                .unwrap()
+                .unwrap()
+                .recovery_action
+                .as_deref(),
+            Some("retry")
+        );
+        assert_eq!(
+            store
+                .get_chat_turn("chat_1", "continue")
+                .unwrap()
+                .unwrap()
+                .recovery_action
+                .as_deref(),
+            Some("continue")
+        );
+        assert!(store
+            .mark_chat_turn_recovered("continue", "recovery-turn")
+            .unwrap());
+        let reconciled_again = store.reconcile_unfinished_chat_turns().unwrap();
+        assert!(reconciled_again.iter().all(|turn| turn.id != "continue"));
+        store.delete_chat_session("chat_1").unwrap();
+        assert!(store.get_chat_turn("chat_1", "retry").unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unfinished_turn_reconciliation_respects_live_leases() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-live-turn-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("running", "client-running");
+        turn.state = "running".into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert!(store.claim_chat_turn("chat_1", "owner").unwrap());
+
+        assert!(store.reconcile_unfinished_chat_turns().unwrap().is_empty());
+        assert_eq!(
+            store
+                .get_chat_turn("chat_1", "running")
+                .unwrap()
+                .unwrap()
+                .state,
+            "running"
+        );
+
+        store
+            .conn
+            .execute(
+                "UPDATE chat_turn_leases SET heartbeat_at = ?1 WHERE chat_session_id = 'chat_1'",
+                params![now_ms() - CHAT_TURN_LEASE_TTL_MS - 1],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reconcile_expired_unfinished_chat_turns()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .reconcile_expired_unfinished_chat_turns()
+            .unwrap()
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn migration_chains_a_legacy_transcript_into_one_branch() {
         let dir = std::env::temp_dir().join(format!("orx-store-tree-{}", uuid::Uuid::new_v4()));
@@ -2121,7 +3304,239 @@ mod tests {
                 .result_native_session_id,
             None
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    #[test]
+    fn retry_reuses_the_turn_without_duplicating_the_user_message() {
+        let dir = std::env::temp_dir().join(format!("orx-store-retry-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let turn = chat_turn_fixture("turn_1", "client_1");
+        let user = StoredChatMessage {
+            id: turn.user_message_id.clone().unwrap(),
+            session_id: "chat_1".into(),
+            role: "user".into(),
+            parts_json: "[]".into(),
+            created_at: 1,
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        store.admit_chat_turn(Some(&user), &turn).unwrap();
+        assert!(store
+            .fail_chat_turn("turn_1", "not_sent", "setup", "failed", Some("retry"))
+            .unwrap());
+        assert!(store.reset_chat_turn_for_retry("turn_1").unwrap());
+        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 1);
+        assert_eq!(
+            store
+                .get_chat_turn("chat_1", "turn_1")
+                .unwrap()
+                .unwrap()
+                .state,
+            "preparing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn explicit_interrupt_clears_a_racing_terminal_recovery() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-interrupt-recovery-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let turn = chat_turn_fixture("turn_1", "client_1");
+        store.admit_chat_turn(None, &turn).unwrap();
+        assert!(store
+            .fail_chat_turn("turn_1", "not_sent", "setup", "failed", Some("retry"))
+            .unwrap());
+
+        store.interrupt_chat_turn("turn_1").unwrap();
+
+        let interrupted = store.get_chat_turn("chat_1", "turn_1").unwrap().unwrap();
+        assert_eq!(interrupted.state, "interrupted");
+        assert!(interrupted.recovery_action.is_none());
+        assert!(!store.reset_chat_turn_for_retry("turn_1").unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn continue_recovery_claim_and_message_cleanup_are_idempotent() {
+        let dir = std::env::temp_dir().join(format!("orx-store-continue-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("turn_1", "client_1");
+        turn.state = "failed".into();
+        turn.delivery_state = "unknown".into();
+        turn.recovery_action = Some("continue".into());
+        store.admit_chat_turn(None, &turn).unwrap();
+        let assistant = StoredChatMessage {
+            id: turn.assistant_message_id.clone(),
+            session_id: "chat_1".into(),
+            role: "assistant".into(),
+            parts_json: "[]".into(),
+            created_at: 1,
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        assert!(store
+            .mark_chat_turn_recovered_with_message("turn_1", "recovery_1", &assistant)
+            .unwrap());
+        assert!(!store
+            .mark_chat_turn_recovered_with_message("turn_1", "recovery_2", &assistant)
+            .unwrap());
+        let recovered = store.get_chat_turn("chat_1", "turn_1").unwrap().unwrap();
+        assert_eq!(
+            recovered.recovered_by_turn_id.as_deref(),
+            Some("recovery_1")
+        );
+        assert!(recovered.recovery_action.is_none());
+        assert_eq!(
+            store
+                .get_chat_message(&assistant.id)
+                .unwrap()
+                .unwrap()
+                .parts_json,
+            "[]"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_recovery_message_stays_on_the_failed_turn_branch() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-recovery-branch-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("turn_1", "client_1");
+        turn.state = "failed".into();
+        turn.recovery_action = Some("retry".into());
+        let user = StoredChatMessage {
+            id: turn.user_message_id.clone().unwrap(),
+            session_id: "chat_1".into(),
+            role: "user".into(),
+            parts_json: "[]".into(),
+            created_at: 1,
+            parent_id: None,
+            base_native_session_id: Some("native_1".into()),
+            result_native_session_id: None,
+        };
+        store.admit_chat_turn(Some(&user), &turn).unwrap();
+        let recovery = StoredChatMessage {
+            id: turn.assistant_message_id.clone(),
+            session_id: "chat_1".into(),
+            role: "assistant".into(),
+            parts_json: "[]".into(),
+            created_at: 2,
+            parent_id: Some(user.id.clone()),
+            base_native_session_id: Some("native_1".into()),
+            result_native_session_id: None,
+        };
+        assert!(store
+            .upsert_chat_recovery_message_if_actionable(&turn.id, &recovery)
+            .unwrap());
+        assert_eq!(
+            store
+                .get_chat_message(&recovery.id)
+                .unwrap()
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(user.id.as_str())
+        );
+        assert_eq!(
+            store
+                .get_chat_session("chat_1")
+                .unwrap()
+                .unwrap()
+                .active_leaf_id
+                .as_deref(),
+            Some(recovery.id.as_str())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recovery_settings_replace_nullable_axes_atomically() {
+        let dir = std::env::temp_dir().join(format!("orx-store-settings-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut session = chat_session_fixture("chat_1");
+        session.model = Some("old-model".into());
+        session.permission_mode = Some("ask".into());
+        session.reasoning_level = Some("high".into());
+        store.create_chat_session(&session).unwrap();
+
+        store
+            .set_chat_session_recovery_settings(
+                "chat_1",
+                None,
+                None,
+                Some((true, false)),
+                Some("low"),
+            )
+            .unwrap();
+        let recovered = store.get_chat_session("chat_1").unwrap().unwrap();
+        assert!(recovered.model.is_none());
+        assert!(recovered.permission_mode.is_none());
+        assert!(recovered.plan_mode);
+        assert_eq!(recovered.reasoning_level.as_deref(), Some("low"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queued_chat_messages_survive_reopen_and_delete_with_session() {
+        let dir = std::env::temp_dir().join(format!("orx-store-queue-{}", uuid::Uuid::new_v4()));
+        {
+            let store = Store::open_at(dir.clone()).unwrap();
+            store
+                .create_chat_session(&chat_session_fixture("chat_1"))
+                .unwrap();
+            store
+                .insert_queued_chat_message(&StoredQueuedChatMessage {
+                    id: "queue-1".into(),
+                    session_id: "chat_1".into(),
+                    client_turn_id: "client-1".into(),
+                    request_hash: "hash-1".into(),
+                    payload_json: "{\"text\":\"hello\"}".into(),
+                    created_at: 1,
+                })
+                .unwrap();
+            store
+                .insert_queued_chat_message(&StoredQueuedChatMessage {
+                    id: "queue-2".into(),
+                    session_id: "chat_1".into(),
+                    client_turn_id: "client-2".into(),
+                    request_hash: "hash-2".into(),
+                    payload_json: "{\"text\":\"world\"}".into(),
+                    created_at: 1,
+                })
+                .unwrap();
+        }
+        let store = Store::open_at(dir.clone()).unwrap();
+        let queued = store.list_queued_chat_messages().unwrap();
+        assert_eq!(
+            queued
+                .iter()
+                .map(|message| message.client_turn_id.as_str())
+                .collect::<Vec<_>>(),
+            ["client-1", "client-2"]
+        );
+        store.delete_chat_session("chat_1").unwrap();
+        assert!(store.list_queued_chat_messages().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2174,7 +3589,6 @@ mod tests {
                 .as_deref(),
             Some("m2")
         );
-
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2195,9 +3609,148 @@ mod tests {
             context_usage_json: None,
             bootstrap_context: None,
             active_leaf_id: None,
+            parent_session_id: None,
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    fn chat_spawn_fixture(session_id: &str, parent: &str) -> ChatSpawn {
+        ChatSpawn {
+            session_id: session_id.into(),
+            parent_session_id: parent.into(),
+            prompt: "Sweep the literature for LoRA rank ablations".into(),
+            wake_parent: true,
+            attempts: 0,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn spawned_sessions_record_their_parent() {
+        let dir = std::env::temp_dir().join(format!("orx-store-spawnrow-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        store
+            .create_chat_session(&chat_session_fixture("chat_parent"))
+            .unwrap();
+        let mut child = chat_session_fixture("chat_child");
+        child.parent_session_id = Some("chat_parent".into());
+        store.create_chat_session(&child).unwrap();
+
+        assert!(store
+            .get_chat_session("chat_parent")
+            .unwrap()
+            .unwrap()
+            .parent_session_id
+            .is_none());
+        assert_eq!(
+            store
+                .get_chat_session("chat_child")
+                .unwrap()
+                .unwrap()
+                .parent_session_id
+                .as_deref(),
+            Some("chat_parent")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_one_claimant_advances_a_spawn() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-spawnclaim-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_child"))
+            .unwrap();
+        store
+            .create_chat_spawn(&chat_spawn_fixture("chat_child", "chat_parent"))
+            .unwrap();
+
+        let pending = store.list_chat_spawns(ChatSpawnState::Pending).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].parent_session_id, "chat_parent");
+        assert!(pending[0].wake_parent);
+
+        let token = store
+            .claim_chat_spawn(
+                "chat_child",
+                ChatSpawnState::Pending,
+                ChatSpawnState::Starting,
+            )
+            .unwrap()
+            .expect("first claim wins");
+        assert!(store
+            .claim_chat_spawn(
+                "chat_child",
+                ChatSpawnState::Pending,
+                ChatSpawnState::Starting
+            )
+            .unwrap()
+            .is_none());
+        // A settle under the wrong token must not move the row.
+        assert!(!store
+            .settle_chat_spawn("chat_child", "not-the-token", ChatSpawnState::Running)
+            .unwrap());
+        assert!(store
+            .settle_chat_spawn("chat_child", &token, ChatSpawnState::Running)
+            .unwrap());
+        assert_eq!(
+            store
+                .list_chat_spawns(ChatSpawnState::Running)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pruning_reclaims_stale_spawns_and_drops_deleted_sessions() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-spawnprune-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["chat_stuck", "chat_gone"] {
+            store
+                .create_chat_session(&chat_session_fixture(id))
+                .unwrap();
+            store
+                .create_chat_spawn(&chat_spawn_fixture(id, "chat_parent"))
+                .unwrap();
+        }
+
+        // A watcher that claimed the start and then died.
+        store
+            .claim_chat_spawn(
+                "chat_stuck",
+                ChatSpawnState::Pending,
+                ChatSpawnState::Starting,
+            )
+            .unwrap()
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE chat_spawns SET claimed_at = ?1 WHERE session_id = 'chat_stuck'",
+                params![now_ms() - CHAT_SPAWN_CLAIM_TTL_MS - 1],
+            )
+            .unwrap();
+        // A session removed WITHOUT its spawn row (the `delete_local_project`
+        // path) is what prune's orphan sweep is actually for.
+        store
+            .conn
+            .execute("DELETE FROM chat_sessions WHERE id = 'chat_gone'", [])
+            .unwrap();
+
+        store.prune_chat_spawns().unwrap();
+        let pending = store.list_chat_spawns(ChatSpawnState::Pending).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id, "chat_stuck");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2639,6 +4192,85 @@ mod tests {
             updated_at: 1,
             chat_session_id: chat_session_id.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn project_activity_summaries_aggregate_lifetime_work() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-project-activity-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_project(&LocalProject {
+                id: "proj_1".into(),
+                name: "Project".into(),
+                slug: "project".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: dir.join("project").to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        let mut archived = chat_session_fixture("archived");
+        archived.archived = true;
+        store.create_chat_session(&archived).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("current"))
+            .unwrap();
+        for (id, role, created_at) in [
+            ("user", "user", 10),
+            ("assistant", "assistant", 20),
+            ("system", "system", 30),
+        ] {
+            store
+                .upsert_chat_message(&StoredChatMessage {
+                    id: id.into(),
+                    session_id: "current".into(),
+                    role: role.into(),
+                    parts_json: "[]".into(),
+                    created_at,
+                    parent_id: None,
+                    base_native_session_id: None,
+                    result_native_session_id: None,
+                })
+                .unwrap();
+        }
+
+        store
+            .create_local_experiment(&experiment_fixture("exp_1", None))
+            .unwrap();
+        store
+            .create_local_experiment(&experiment_fixture("exp_2", None))
+            .unwrap();
+        for (id, experiment_id, status) in [
+            ("run_1", "exp_1", "starting"),
+            ("run_2", "exp_2", "running"),
+            ("run_done", "exp_1", "done"),
+            ("run_orphan", "missing", "running"),
+        ] {
+            let mut run = run_fixture(id, status, None);
+            run.experiment_id = experiment_id.into();
+            store.upsert_run(&run).unwrap();
+        }
+
+        let summaries = store.list_project_activity_summaries().unwrap();
+        assert_eq!(summaries.len(), 1);
+        let summary = &summaries[0];
+        assert_eq!(summary.project_id, "proj_1");
+        assert_eq!(summary.total_agents, 2);
+        assert_eq!(summary.running_experiments, 2);
+        assert_eq!(summary.total_experiments, 2);
+        assert_eq!(summary.last_message_at, Some(20));
+        assert_eq!(store.list_chat_session_project_ids().unwrap().len(), 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

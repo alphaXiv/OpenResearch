@@ -120,6 +120,9 @@
   --accent-teal-subtle: #e1f3f0;
   --accent-red-subtle: #fbe9ea;
   --accent-blue-subtle: #e5f0ff;
+  --skill-blue: #184f91;
+  --skill-blue-subtle: #d9e9fb;
+  --skill-blue-slash: #7fa6d2;
   --accent-purple-subtle: #f1e8ff;
 
   --dots-muted: #e3ded5;
@@ -196,6 +199,9 @@
   --accent-teal-subtle: #12332d;
   --accent-red-subtle: #331418;
   --accent-blue-subtle: #10233a;
+  --skill-blue: #79adf0;
+  --skill-blue-subtle: #183452;
+  --skill-blue-slash: #527ca8;
   --accent-purple-subtle: #251933;
 
   --dots-muted: #2a2523;
@@ -244,6 +250,12 @@ body {
 
 ::highlight(chat-annotations) {
   background: var(--chat-annotation-highlight);
+}
+
+/* The editor stacks a transparent textarea over the highlighted code, so an
+   opaque selection would paint out the tokens underneath it. */
+.file-view-editarea::selection {
+  background: color-mix(in oklab, var(--primary) 22%, transparent);
 }
 
 button {
@@ -401,7 +413,10 @@ textarea::placeholder {
 .tool-target,
 .tool-target-more {
   color: inherit;
+  cursor: pointer;
+  display: inline;
   font-weight: inherit;
+  text-align: inherit;
   text-decoration-line: underline;
   text-decoration-thickness: 0.6px;
   text-underline-offset: 3px;
@@ -434,6 +449,12 @@ textarea::placeholder {
   margin-inline: auto;
 }
 
+/* Inline flex otherwise inherits paragraph leading and outgrows code chips. */
+.md .file-chip {
+  line-height: 1.3;
+  padding-block: 0.5px;
+}
+
 .msg-assistant .md img {
   display: block;
   max-width: 100%;
@@ -453,6 +474,22 @@ textarea::placeholder {
   text-decoration-color: transparent;
 }
 
+.project-row:hover .project-row-title {
+  text-decoration-line: underline;
+  text-underline-offset: 2px;
+}
+
+.project-row:has(.project-row-secondary:hover) .project-row-title {
+  text-decoration-line: none;
+}
+
+@media (hover: none) {
+  .project-row-delete {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .tool-target:hover,
 .tool-target-more:hover {
   color: var(--primary);
@@ -468,6 +505,10 @@ textarea::placeholder {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .activity-pulse {
+    animation: none;
+  }
+
   .tool-group-disclosure {
     transition: none;
   }

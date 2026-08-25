@@ -2,6 +2,7 @@ import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
 import { runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EXPERIMENT_TABLE_ACTION_CLASS_NAME = [
   "experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5",
@@ -29,9 +30,9 @@ export function ExperimentsTable({
   runs: Run[];
   experiments: Experiment[];
   emptyHint?: string;
-  onOpen: (experiment: Experiment) => void;
-  onOpenLogs: (experimentId: string, runId: string) => void;
-  onOpenCode: (experimentId: string) => void;
+  onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
+  onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
+  onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -106,16 +107,21 @@ export function ExperimentsTable({
               key={experiment.id}
               className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-[color-mix(in_oklab,_var(--text)_7%,_transparent)] bg-background cursor-pointer [&:hover]:bg-canvas [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
               role="listitem"
-              onClick={() => onOpen(experiment)}
+              onClick={() => onOpen(experiment, "preview")}
+              onDoubleClick={() => onOpen(experiment, "keepOpen")}
+              onAuxClick={(event) => {
+                if (event.button !== 1) return;
+                event.preventDefault();
+                onOpen(experiment, "keepOpen");
+              }}
             >
               <div className="experiment-table-name [grid-area:name] self-start min-w-0">
                 <button
                   type="button"
                   className="experiment-table-title block w-full overflow-hidden text-text font-semibold text-left text-ellipsis whitespace-nowrap"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpen(experiment);
-                  }}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpen(experiment, intent),
+                  { stopPropagation: true })}
                 >
                   {experiment.title || experiment.slug}
                 </button>
@@ -142,12 +148,16 @@ export function ExperimentsTable({
                 role="group"
                 aria-label={`Actions for ${experiment.title || experiment.slug}`}
                 onClick={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onAuxClick={(event) => event.stopPropagation()}
               >
                 <button
                   className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
                   disabled={!logsRun}
                   title={logsRun ? "Open logs" : "No runs yet"}
-                  onClick={() => logsRun && onOpenLogs(experiment.id, logsRun.id)}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
+                    if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
+                  }, { stopPropagation: true })}
                 >
                   <Terminal size={15} />
                   Logs
@@ -155,7 +165,9 @@ export function ExperimentsTable({
                 <button
                   className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
                   title={`Browse code on ${experiment.branchName}`}
-                  onClick={() => onOpenCode(experiment.id)}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpenCode(experiment.id, intent),
+                  { stopPropagation: true })}
                 >
                   <FolderTree size={15} />
                   Code

@@ -1,6 +1,6 @@
 ---
 name: orx-evidence
-description: "Analyze run results through `orx logs`. Use after any run reaches a terminal state, before declaring a run a success or failure, when metrics are missing from output, or when designing what a run command should print."
+description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results."
 ---
 
 Run logs are the evidence channel. Make the run command print everything needed
@@ -31,3 +31,17 @@ configuration. If a run's result is not in its log, it cannot be inspected later
 - Echo the configuration the run actually used so the log identifies the variant.
 - For a long run, print periodic one-line metrics so its trajectory remains
   visible through byte-range reads.
+
+## Validate before reporting
+
+Never infer a result from run status or memory. Before accepting or reporting a
+run-derived claim, confirm that:
+
+- the log identifies the variant and effective configuration;
+- the final metric and compact summary are present;
+- the relevant trajectory is recoverable for a long run; and
+- the returned byte window actually contains the supporting output.
+
+Truncated output is not evidence of absence. Use `--head`, `--bytes`, or
+`--range` until the relevant portion has been read. Format the resulting chat
+response using the evidence-and-links contract in the session playbook.

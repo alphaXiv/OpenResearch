@@ -23,6 +23,7 @@ import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
 import { StatusBadge } from "./StatusBadge";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -50,8 +51,13 @@ type ExpNodeData = {
   parentSlug: string | null;
   githubOwner: string;
   githubRepo: string;
-  onOpenView: (id: string, view: ExperimentView) => void;
-  onOpenCode: (experimentId: string, branch: string, view: CodeView) => void;
+  onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
+  onOpenCode: (
+    experimentId: string,
+    branch: string,
+    view: CodeView,
+    intent: TabOpenIntent,
+  ) => void;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
 
@@ -197,12 +203,9 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         role="button"
         tabIndex={0}
         className="node-overview-link nodrag"
-        onClick={() => onOpenView(exp.id, "overview")}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          onOpenView(exp.id, "overview");
-        }}
+        {...tabOpenGestureHandlers<HTMLDivElement>((intent) =>
+          onOpenView(exp.id, "overview", intent),
+        )}
       >
         <div className="node-eyebrow">
           <span>{kind}</span>
@@ -239,7 +242,9 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <button
             className="node-action"
             title="Open logs"
-            onClick={() => onOpenView(exp.id, "terminal")}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenView(exp.id, "terminal", intent),
+            )}
           >
             <Terminal size={13} />
             Logs
@@ -248,7 +253,9 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         <button
           className="node-action"
           title={`Browse code on ${exp.branchName}`}
-          onClick={() => onOpenCode(exp.id, exp.branchName, "files")}
+          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+            onOpenCode(exp.id, exp.branchName, "files", intent),
+          )}
         >
           <FolderTree size={13} />
           Code
@@ -276,8 +283,10 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           latestRun={latestRun}
           parentSlug={parentSlug}
           anchor={hover.rect}
-          onOpenLogs={runs.length > 0 ? () => onOpenView(exp.id, "terminal") : undefined}
-          onOpenCode={() => onOpenCode(exp.id, exp.branchName, "files")}
+          onOpenLogs={runs.length > 0
+            ? (intent) => onOpenView(exp.id, "terminal", intent)
+            : undefined}
+          onOpenCode={(intent) => onOpenCode(exp.id, exp.branchName, "files", intent)}
           onMouseEnter={hover.keepOpen}
           onMouseLeave={hover.onMouseLeave}
         />
@@ -341,9 +350,14 @@ export function TreeView({
   /** Owning project — supplies owner/repo for the GitHub branch links. */
   project: Project;
   /** Open an experiment view as a right-pane tab (card shortcut buttons). */
-  onOpenView: (id: string, view: ExperimentView) => void;
+  onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
   /** Browse an experiment branch's code in the project-level Code tab. */
-  onOpenCode: (experimentId: string, branch: string, view: CodeView) => void;
+  onOpenCode: (
+    experimentId: string,
+    branch: string,
+    view: CodeView,
+    intent: TabOpenIntent,
+  ) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;

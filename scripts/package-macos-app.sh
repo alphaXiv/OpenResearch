@@ -52,10 +52,10 @@ fi
 echo "==> Creating styled DMG (drag-to-Applications installer window)"
 rm -f "$DMG"
 VOLNAME="OpenResearch"
-# WIN_W/WIN_H must match the canvas hardcoded in generate-dmg-background.mjs, and
-# APP_X/APPS_X the arrow gap it draws — change these together.
-WIN_W=640 WIN_H=400 ICON=128
-APP_X=160 APPS_X=480 ICON_Y=170     # Finder icon-center positions in the window
+# WIN_W/WIN_H must match LOGICAL_W/LOGICAL_H in generate-dmg-background.mjs, and
+# APP_X/APPS_X/ICON_Y/ICON constrain the ARROW it draws — change these together.
+WIN_W=640 WIN_H=320 ICON=128
+APP_X=160 APPS_X=480 ICON_Y=150     # Finder icon-center positions in the window
 
 STAGE="$(mktemp -d)"
 BUILD="$(mktemp -d)"

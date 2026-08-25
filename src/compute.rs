@@ -326,6 +326,7 @@ pub trait ComputeBackend: Send + Sync {
     }
 
     async fn cancel(&self, handle: &StoredRun) -> Result<()> {
+        // Agent-session callers route through orx up before reaching this trusted path.
         crate::commands::exp::request_local_run_cancel(&Store::open()?, &handle.id)
     }
 
@@ -627,6 +628,38 @@ pub fn capabilities() -> Vec<Capabilities> {
         .collect()
 }
 
+pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
+    if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
+        return Err(anyhow!("--manifest only applies with --backend k8s."));
+    }
+    if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
+        return Err(anyhow!("--host only applies with --backend ssh or slurm."));
+    }
+    if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
+        return Err(anyhow!("--org only applies with --backend openresearch."));
+    }
+    if args.disk.is_some() && args.backend.as_deref() != Some("openresearch") {
+        return Err(anyhow!("--disk only applies with --backend openresearch."));
+    }
+    if args.provider.is_some() && args.backend.as_deref() != Some("openresearch") {
+        return Err(anyhow!(
+            "--provider only applies with --backend openresearch."
+        ));
+    }
+    if let Some(backend) = args.backend.as_deref() {
+        if !crate::local::BACKENDS.contains(&backend) {
+            return Err(anyhow!(
+                "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
+                 modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
+                 slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                 openresearch (an ephemeral OpenResearch box), local (this machine).",
+                backend
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
@@ -691,7 +724,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         commit_sha: Some(source.0.revision.clone()),
         result_markdown: None,
         cancel_requested: false,
-        chat_session_id: crate::local::chat::launching_chat_session(),
+        chat_session_id: args.launching_chat_session(),
     };
     reserve_run(&store, &pending, args.force)?;
     let pending_backend_json = descriptor.to_json();

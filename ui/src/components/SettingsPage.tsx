@@ -17,6 +17,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   getComputeSettings,
@@ -29,6 +30,7 @@ import {
   getLocalMachine,
   getModalSettings,
   getOpenResearchSettings,
+  getOverleafSettings,
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
@@ -36,6 +38,7 @@ import {
   setComputeDefault,
   setProjectDefaults,
   provisionModal,
+  saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
   initializeProjectGit,
@@ -88,7 +91,7 @@ import {
 import { onDataDirMove, onHarnessAuth } from "../events";
 import { useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
-import { GitTokenForm } from "./GitTokenForm";
+import { GitTokenForm, TokenForm } from "./GitTokenForm";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { StatusBadge } from "./StatusBadge";
@@ -2287,6 +2290,68 @@ function ProjectDefaultsTab() {
   );
 }
 
+/** The Overleaf Git authentication token, which is machine-wide like the GitHub
+ * PAT above it. Which Overleaf *project* a paper pushes to is per-paper, and
+ * lives on the .tex tab instead. */
+function OverleafCard() {
+  const [hasToken, setHasToken] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getOverleafSettings()
+      .then((s) => setHasToken(s.hasToken))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  return (
+    <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
+      <h3>Overleaf</h3>
+      <div className={KV_CLASS_NAME}>
+        <span className="k">Git token</span>
+        <span className="v">
+          <span className={`${BADGE_CLASS_NAME} ${hasToken ? "ok" : ""}`}>
+            {hasToken === null ? (error ? "Unavailable" : "Checking…") : hasToken ? "Saved" : "Not set"}
+          </span>
+        </span>
+      </div>
+      <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
+        With a token saved, a paper opened in the dashboard can be kept in step with an Overleaf
+        project, in both directions. Overleaf&apos;s Git integration comes with a paid Overleaf
+        plan; without one, a paper can still be uploaded to Overleaf as a new project. The token
+        stays on this machine — unlike the GitHub one, it is not sent to compute backends.
+      </p>
+      {hasToken ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <button
+            className={BUTTON_CLASS_NAME}
+            disabled={saving}
+            onClick={() => {
+              setSaving(true);
+              setError(null);
+              void deleteOverleafToken()
+                .then((s) => setHasToken(s.hasToken))
+                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                .finally(() => setSaving(false));
+            }}
+          >
+            {saving ? "Removing…" : "Remove token"}
+          </button>
+        </div>
+      ) : (
+        <TokenForm
+          save={saveOverleafToken}
+          onSaved={(result) => setHasToken(result.hasToken)}
+          placeholder="Overleaf Git authentication token"
+          createHref="https://www.overleaf.com/user/settings"
+          busyLabel="Saving…"
+        />
+      )}
+      {error && <div className="error">{error}</div>}
+    </div>
+  );
+}
+
 // --- git -----------------------------------------------------------------------
 
 function GitTab({
@@ -2437,6 +2502,7 @@ function GitTab({
               </>
             )}
           </div>
+          <OverleafCard />
           {publicationError && <div className="error">{syncErrorMessage(publicationError)}</div>}
           {error && <div className="error">{syncErrorMessage(error)}</div>}
         </>

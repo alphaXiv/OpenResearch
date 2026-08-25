@@ -27,6 +27,9 @@ jobs:
       - name: Dev-slot helper tests
         run: node --test scripts/dev-slot.test.mjs
 
+      - name: UI unit tests
+        run: node --test --experimental-strip-types ui/tests/*.test.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

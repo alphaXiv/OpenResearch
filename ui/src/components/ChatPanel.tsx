@@ -2,7 +2,6 @@ import {
   ArrowUpRight,
   Blocks,
   BookOpen,
-  ChartSpline,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -12,7 +11,6 @@ import {
   FileText,
   FlaskConical,
   FolderOpen,
-  GitBranch,
   Globe,
   HelpCircle,
   Lightbulb,
@@ -41,6 +39,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { BrandMark } from "./Wordmark";
 import {
@@ -58,8 +57,10 @@ import {
   interruptChat,
   listChatSessions,
   reasoningFor,
+  recoverChatTurn,
   reconcileReasoning,
   renameChatSession,
+  retryQueuedMessage,
   respondChat,
   selectChatBranch,
   sendChatMessage,
@@ -79,12 +80,27 @@ import {
 } from "../api";
 import { activePath, forkPositions } from "../transcriptTree";
 import { onChatEvent } from "../events";
+import {
+  queuedRetryLabel,
+  recoveryAction as parseRecoveryAction,
+  recoveryTurnOptions,
+  retryStatusLabel,
+} from "../chatRecovery";
+import {
+  containsShellGlob,
+  orxArgsMatch,
+  orxArgv,
+  shellWords,
+  shellWrapperBody,
+  unwrapShellBody,
+} from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
+import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
 import {
   defaultSelection,
   HARNESS_LABELS,
@@ -95,16 +111,26 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import {
-  commandsForSlashContext,
   commandsForHarness,
   effectiveCommandPlanMode,
+  insertSlashCommand,
   parsePlanCommand,
   removeSlashCommand,
   slashCommandContext,
   type SlashCommandContext,
 } from "../planCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
-import { ICON_BUTTON_BASE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MODEL_ITEM_CLASS_NAME, PAPER_TITLE_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import {
+  COMPOSER_CONTROL_CLASS_NAME,
+  COMPOSER_ICON_CONTROL_CLASS_NAME,
+  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
+  ICON_BUTTON_BASE_CLASS_NAME,
+  ICON_BUTTON_CLASS_NAME,
+  MODEL_ITEM_CLASS_NAME,
+  PAPER_TITLE_CLASS_NAME,
+  SPINNER_CLASS_NAME,
+} from "../styleClasses";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import {
   escapeMarkdownText,
   fencedCodeMarkdown,
@@ -917,7 +943,20 @@ function baseName(path: string): string {
   return trimmed.slice(trimmed.lastIndexOf("/") + 1) || trimmed;
 }
 
-type ToolActivityKind = "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
+function skillNameFromPath(path: string): string | null {
+  const parts = path.replace(/\\/g, "/").replace(/\/+$/, "").split("/").filter(Boolean);
+  if (parts.at(-1)?.toLowerCase() !== "skill.md") return null;
+  return parts.at(-2) ?? null;
+}
+
+function nativeOrxSkillPath(tool: string, skillName: string): string | null {
+  if (!/^orx-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skillName)) return null;
+  if (tool === "Skill") return `.claude/skills/${skillName}/SKILL.md`;
+  if (tool === "skill") return `.opencode/skills/${skillName}/SKILL.md`;
+  return null;
+}
+
+type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
 
 interface ToolActivity {
   kind: ToolActivityKind;
@@ -930,9 +969,23 @@ interface ToolActivity {
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
   runIds?: string[];
   experimentIds?: string[];
+  /** Chat sessions `orx agent spawn` created in this tool call. */
+  spawnedSessionIds?: string[];
 }
 
-type OpenTranscriptFile = (path: string, line?: number, exp?: string, ref?: string) => void;
+type OpenTranscriptFile = (
+  path: string,
+  line: number | undefined,
+  exp: string | undefined,
+  ref: string | undefined,
+  intent: TabOpenIntent,
+) => void;
+type OpenTranscriptTarget = (id: string, intent: TabOpenIntent) => void;
+type OpenSubagent = (
+  spawnPartId: string,
+  label: string | undefined,
+  intent: TabOpenIntent,
+) => void;
 
 function inputString(input: Record<string, unknown>, ...keys: string[]): string | null {
   for (const key of keys) {
@@ -960,6 +1013,17 @@ function inputStringArray(input: Record<string, unknown>, key: string): string[]
   for (let index = 0; index < Math.min(values.length, TOOL_TARGET_INSPECTION_LIMIT); index++) {
     if (typeof values[index] === "string") strings.push(values[index]);
     if (strings.length >= TOOL_TARGET_LIMIT) break;
+  }
+  return strings;
+}
+
+function exactInputStringArray(input: Record<string, unknown>, key: string): string[] | null {
+  const values = input[key];
+  if (!Array.isArray(values)) return null;
+  const strings: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") return null;
+    strings.push(value);
   }
   return strings;
 }
@@ -1008,10 +1072,11 @@ function meaningfulCommand(command: string): string {
   const trimmed = command.trim();
   const wrapped = trimmed.match(/^\/bin\/(?:ba|z)?sh\s+-lc\s+([\s\S]+)$/);
   let body = (wrapped?.[1] ?? trimmed).trim();
-  const first = body[0];
-  if ((first === "\"" || first === "'") && body[body.length - 1] === first) {
-    body = body.slice(1, -1);
-  }
+  body = unwrapShellBody(body);
+  return normalizeShellBody(body);
+}
+
+function normalizeShellBody(body: string): string {
   return stripHeredocBodies(body).replace(/[\t\r ]+/g, " ").trim();
 }
 
@@ -1070,45 +1135,15 @@ function stripHeredocBodies(command: string): string {
   return kept.join("\n");
 }
 
-function shellWords(input: string): string[] {
-  const words: string[] = [];
-  let word = "";
-  let quote: "\"" | "'" | null = null;
-  let escaped = false;
-  const push = () => {
-    if (word) words.push(word);
-    word = "";
-  };
-
-  for (const char of input) {
-    if (escaped) {
-      word += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\" && quote !== "'") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) quote = null;
-      else word += char;
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) push();
-    else word += char;
-  }
-  push();
-  return words;
-}
-
 function validReadTarget(value: string | undefined): string | null {
   const target = value?.replace(/[)'\"]+$/, "");
-  if (!target || target === "-" || /^\d+$/.test(target) || /[$`]/.test(target)) return null;
+  if (
+    !target
+    || target === "-"
+    || /^\d+$/.test(target)
+    || /[$`]/.test(target)
+    || containsShellGlob(target)
+  ) return null;
   return target;
 }
 
@@ -1247,6 +1282,9 @@ function commandFilePath(
 }
 
 const UUID_PATTERN = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+/** Session ids as `orx agent spawn` prints them, so the spawn card can link to
+ * the session it started. The id is only in the output — never the command. */
+const SPAWNED_SESSION_PATTERN = new RegExp(`\\bchat_(${UUID_PATTERN})\\b`, "gi");
 const RUN_TARGET_PATTERN = `(?:${UUID_PATTERN}|[0-9a-f]{8})`;
 
 interface ShellCommandSegment {
@@ -1365,13 +1403,21 @@ function shellCommandSegments(command: string): ShellCommandSegment[] {
 }
 
 function orxCommandSegments(command: string, args: string): ShellCommandSegment[] {
-  const invocation = new RegExp(`(?:^|\\b(?:do|then|else|if|while|until)\\s+)(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s]+\\s+)*orx\\s+${args}\\b`, "i");
-  return shellCommandSegments(command).filter((segment) => invocation.test(segment.code));
+  return shellCommandSegments(command).filter((segment) => orxArgsMatch(segment.raw, args));
 }
 
 function commandInvokesOrx(command: string, args: string): boolean {
-  if (orxCommandSegments(command, args).length > 0) return true;
-  return new RegExp(`(?:^|[\\s($;])orx\\s+${args}\\b`, "i").test(command);
+  return orxCommandSegments(command, args).length > 0;
+}
+
+function spawnedSessionIds(output: string | undefined): string[] {
+  if (!output) return [];
+  const ids = new Set<string>();
+  for (const match of output.slice(0, TOOL_OUTPUT_SCAN_LIMIT).matchAll(SPAWNED_SESSION_PATTERN)) {
+    ids.add(match[0].toLowerCase());
+    if (ids.size >= TOOL_TARGET_LIMIT) break;
+  }
+  return [...ids];
 }
 
 function idsFromToolOutput(output: string | undefined, resource: "runs" | "experiments"): string[] {
@@ -1455,9 +1501,9 @@ function commandRunIds(command: string, output?: string, preservedIds: string[] 
   }
   let hasUnresolvedTarget = false;
   for (const { invocation, offset } of invocationOffsets(command, invocations)) {
-    const logs = /\borx\s+logs\b/i.exec(invocation.raw);
-    if (!logs) continue;
-    const words = shellWords(invocation.raw.slice(logs.index + logs[0].length));
+    const argv = orxArgv(invocation.raw);
+    if (argv?.[0] !== "logs") continue;
+    const words = argv.slice(1);
     let target: string | null = null;
     for (let index = 0; index < words.length; index++) {
       const word = words[index];
@@ -1507,14 +1553,18 @@ function commandExperimentIds(command: string, output?: string, preservedIds: st
   const ids = new Set<string>();
   let hasUnresolvedTarget = false;
   for (const { invocation, offset } of invocationOffsets(command, invocations)) {
+    const argv = orxArgv(invocation.raw);
+    const target = argv?.[0] === "exp" && (argv[1] === "status" || argv[1] === "desc")
+      ? argv[2]
+      : null;
     let resolved = false;
-    for (const match of invocation.raw.matchAll(new RegExp(`\\borx\\s+exp\\s+(?:status|desc)\\s+["']?(${RUN_TARGET_PATTERN})`, "gi"))) {
-      ids.add(match[1]);
+    if (target && new RegExp(`^${RUN_TARGET_PATTERN}$`, "i").test(target)) {
+      ids.add(target);
       resolved = true;
     }
-    const match = /\borx\s+exp\s+(?:status|desc)\s+["']?\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/.exec(invocation.raw);
-    if (match) {
-      const variable = match[1];
+    const variableMatch = target ? /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(target) : null;
+    if (variableMatch) {
+      const variable = variableMatch[1];
       const assignmentIds = assignedIdsBefore(command, variable, offset, RUN_TARGET_PATTERN);
       if (assignmentIds.length > 0) {
         for (const id of assignmentIds) ids.add(id);
@@ -1549,6 +1599,7 @@ function toolActivity(part: ChatPart): ToolActivity {
     : {};
   const normalizedInput = { ...input, ...argumentsInput };
   const rawCommand = inputString(normalizedInput, "command", "cmd");
+  const commandArgv = exactInputStringArray(normalizedInput, "commandArgv");
   const toolOutput = part.state?.output || part.state?.error;
   const legacyTargetIds = normalizedTargetIds(inputStringArray(normalizedInput, "targetIds"));
   const resourceRunIds = normalizedTargetIds(inputStringArray(normalizedInput, "runTargetIds"));
@@ -1584,24 +1635,59 @@ function toolActivity(part: ChatPart): ToolActivity {
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
     case "bash": {
-      if (!rawCommand) return { kind: "command", label: "Ran a command" };
-      const command = meaningfulCommand(rawCommand);
-      const litSegment = orxCommandSegments(command, "(?:lit|paper)")[0];
-      const litCall = litSegment ? parseOrxLit(litSegment.raw) : null;
-      if (litCall) {
-        const label = litCall.kind === "lit"
-          ? litCall.query ? `Searched for “${litCall.query}”` : "Searched the literature"
-          : litCall.id ? `Read ${litCall.id}` : "Read a paper";
-        return { kind: litCall.kind === "lit" ? "search" : "read", label, litCall };
+      if (!rawCommand && !commandArgv?.length) return { kind: "command", label: "Ran a command" };
+      const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
+      const shellSegments = shellCommandSegments(command);
+      let literatureInputs: Array<string | readonly string[]> = shellSegments.map((segment) => segment.raw);
+      if (commandArgv?.length) {
+        const wrapperBody = shellWrapperBody(commandArgv);
+        literatureInputs = wrapperBody === null
+          ? [commandArgv]
+          : shellCommandSegments(normalizeShellBody(wrapperBody)).map((segment) => segment.raw);
+      }
+      let litCall: ReturnType<typeof parseOrxLit> = null;
+      for (const input of literatureInputs) {
+        litCall = parseOrxLit(input);
+        if (litCall) break;
+      }
+      const hasNonLiteratureOrx = literatureInputs.some((input) => {
+        const argv = orxArgv(input);
+        return argv !== null && argv[0] !== "discover" && argv[0] !== "paper";
+      });
+      if (litCall && !hasNonLiteratureOrx) {
+        const discoveryLabel = litCall.kind === "discover"
+          ? {
+              keyword: "Searched alphaXiv full text",
+              embedding: "Searched alphaXiv semantically",
+              openalex: "Searched OpenAlex",
+              biorxiv: "Searched bioRxiv",
+            }[litCall.strategy]
+          : null;
+        const label = litCall.kind === "discover"
+            ? litCall.query
+              ? `${discoveryLabel} for “${litCall.query}”`
+              : discoveryLabel ?? "Searched the literature"
+            : litCall.id ? `Read ${litCall.id}` : "Read a paper";
+        return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall };
       }
 
-      const shellSegments = shellCommandSegments(command);
+      if (commandInvokesOrx(command, "agent\\s+spawn")) {
+        return {
+          kind: "agent",
+          label: "Delegated a task to a new agent",
+          spawnedSessionIds: spawnedSessionIds(toolOutput),
+          litCall: litCall ?? undefined,
+        };
+      }
       const shellInvocations = shellSegments.map((segment) => shellInvocation(segment.raw));
       const readsExperimentStatus = commandInvokesOrx(command, "exp\\s+status");
       const readsExperimentNotes = commandInvokesOrx(command, "exp\\s+desc");
-      const updatesExperimentNotes = orxCommandSegments(command, "exp\\s+desc").some((segment) =>
-        /(?:^|\s)--(?:set(?:=|\s)|stdin\b)/.test(segment.raw),
-      );
+      const updatesExperimentNotes = orxCommandSegments(command, "exp\\s+desc").some((segment) => {
+        const argv = orxArgv(segment.raw) ?? [];
+        return argv.some(
+          (token) => token === "--set" || token.startsWith("--set=") || token === "--stdin",
+        );
+      });
       const notesLabel = updatesExperimentNotes ? "Updated experiment notes" : "Read experiment notes";
       const combinedLabel = updatesExperimentNotes
         ? "Checked experiment status and updated notes"
@@ -1609,16 +1695,16 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (commandInvokesOrx(command, "logs")) {
         const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
         const label = runIds.length === 1 ? "Reviewed run log" : "Reviewed run logs";
-        return { kind: "project", label, runIds };
+        return { kind: "project", label, runIds, litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+run")) {
-        return { kind: "project", label: "Started an experiment run" };
+        return { kind: "project", label: "Started an experiment run", litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return { kind: "project", label: "Waited for an experiment run" };
+        return { kind: "project", label: "Waited for an experiment run", litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: "Cancelled an experiment run" };
+        return { kind: "project", label: "Cancelled an experiment run", litCall: litCall ?? undefined };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1626,6 +1712,7 @@ function toolActivity(part: ChatPart): ToolActivity {
           kind: "project",
           label: combinedLabel,
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (readsProject && readsExperimentNotes) {
@@ -1633,6 +1720,7 @@ function toolActivity(part: ChatPart): ToolActivity {
           kind: "project",
           label: notesLabel,
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (readsProject && readsExperimentStatus) {
@@ -1640,16 +1728,18 @@ function toolActivity(part: ChatPart): ToolActivity {
           kind: "project",
           label: "Checked experiment status",
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (readsProject) {
-        return { kind: "project", label: "Read project details" };
+        return { kind: "project", label: "Read project details", litCall: litCall ?? undefined };
       }
       if (readsExperimentStatus && readsExperimentNotes) {
         return {
           kind: "project",
           label: combinedLabel,
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (readsExperimentStatus) {
@@ -1657,6 +1747,7 @@ function toolActivity(part: ChatPart): ToolActivity {
           kind: "project",
           label: "Checked experiment status",
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (readsExperimentNotes) {
@@ -1664,23 +1755,31 @@ function toolActivity(part: ChatPart): ToolActivity {
           kind: "project",
           label: notesLabel,
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
+          litCall: litCall ?? undefined,
         };
       }
       if (commandInvokesOrx(command, "runs?")) {
-        return { kind: "project", label: "Listed project runs" };
+        return { kind: "project", label: "Listed project runs", litCall: litCall ?? undefined };
+      }
+      if (commandInvokesOrx(command, "projects")) {
+        return { kind: "project", label: "Listed projects", litCall: litCall ?? undefined };
+      }
+      if (commandInvokesOrx(command, "compute")) {
+        return { kind: "project", label: "Checked compute options", litCall: litCall ?? undefined };
       }
 
       const gitShowTarget = shellInvocations
         .map(commandGitShowTarget)
         .find((target) => target != null);
       if (gitShowTarget) {
+        const skillName = skillNameFromPath(gitShowTarget.path);
         return {
-          kind: "read",
-          label: `Read ${baseName(gitShowTarget.path)}`,
+          kind: skillName ? "skill" : "read",
+          label: skillName ? `Read ${skillName} skill` : `Read ${baseName(gitShowTarget.path)}`,
           filePath: gitShowTarget.path,
           fileRef: gitShowTarget.ref,
           labelPrefix: "Read ",
-          labelTarget: baseName(gitShowTarget.path),
+          labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
         };
       }
 
@@ -1698,12 +1797,13 @@ function toolActivity(part: ChatPart): ToolActivity {
           )
         : null;
       if (readTarget && readPath) {
+        const skillName = skillNameFromPath(readPath);
         return {
-          kind: "read",
-          label: `Read ${baseName(readTarget)}`,
+          kind: skillName ? "skill" : "read",
+          label: skillName ? `Read ${skillName} skill` : `Read ${baseName(readTarget)}`,
           filePath: readPath,
           labelPrefix: "Read ",
-          labelTarget: baseName(readTarget),
+          labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
         };
       }
       if (shellInvocations.some((invocation) =>
@@ -1734,7 +1834,6 @@ function toolActivity(part: ChatPart): ToolActivity {
           searchPattern: pattern,
         };
       }
-      if (readInvocation) return { kind: "read", label: "Read a file" };
       if (gitAction === "status") return { kind: "command", label: "Checked Git status" };
       if (gitAction === "diff") return { kind: "command", label: "Reviewed code changes" };
       if (gitAction === "log") return { kind: "command", label: "Read Git history" };
@@ -1750,8 +1849,29 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (packageAction("build")) return { kind: "command", label: "Built the project" };
       return { kind: "command", label: `Ran ${command}` };
     }
+    case "skill": {
+      const skillName = inputString(normalizedInput, "skill", "name");
+      const filePath = skillName ? nativeOrxSkillPath(tool, skillName) : null;
+      return {
+        kind: "skill",
+        label: skillName ? `Loaded ${skillName} skill` : "Loaded a skill",
+        filePath: filePath ?? undefined,
+        labelPrefix: filePath ? "Loaded " : undefined,
+        labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
+      };
+    }
     case "read": {
       const target = filePath ? baseName(filePath) : null;
+      const skillName = filePath ? skillNameFromPath(filePath) : null;
+      if (skillName) {
+        return {
+          kind: "skill",
+          label: `Read ${skillName} skill`,
+          filePath: filePath ?? undefined,
+          labelPrefix: "Read ",
+          labelTarget: `${skillName} skill`,
+        };
+      }
       return target
         ? { kind: "read", label: `Read ${target}`, filePath: filePath ?? undefined, labelPrefix: "Read ", labelTarget: target }
         : { kind: "read", label: "Read a file" };
@@ -1855,6 +1975,8 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
   }
   const props = { size: 16, strokeWidth: 1.75, className: `tool-kind-icon shrink-0 ${className}` };
   switch (activity.kind) {
+    case "skill":
+      return <Blocks {...props} />;
     case "read":
     case "project":
       return <BookOpen {...props} />;
@@ -1874,10 +1996,12 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
 function ToolTargetOverflow({
   items,
   onOpen,
+  onSelect,
   targetType,
 }: {
   items: Array<{ id: string; label: string }>;
-  onOpen?: (id: string) => void;
+  onOpen?: OpenTranscriptTarget;
+  onSelect?: (id: string) => void;
   targetType: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -1897,14 +2021,20 @@ function ToolTargetOverflow({
           {items.map((item, index) => (
             <span key={item.id}>
               {index > 0 && ", "}
-              {onOpen ? (
+              {onOpen || onSelect ? (
                 <button
                   className="tool-target"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onOpen(item.id);
-                  }}
+                  {...(onOpen
+                    ? tabOpenGestureHandlers<HTMLButtonElement>(
+                        (intent) => onOpen(item.id, intent),
+                        { stopPropagation: true },
+                      )
+                    : {
+                        onClick: (event: ReactMouseEvent<HTMLButtonElement>) => {
+                          event.stopPropagation();
+                          onSelect?.(item.id);
+                        },
+                      })}
                 >
                   {item.label}
                 </button>
@@ -1937,15 +2067,17 @@ function ToolActivityLabel({
   activity,
   onOpenFile,
   onOpenRun,
+  onOpenSpawnedSession,
   runExperimentName,
   onOpenExperiment,
   experimentName,
 }: {
   activity: ToolActivity;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
+  onOpenSpawnedSession?: (sessionId: string) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
   if (activity.searchPattern) {
@@ -1985,16 +2117,56 @@ function ToolActivityLabel({
     return (
       <>
         {activity.labelPrefix}
-        <button
+        <span
           className="tool-target"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onOpenFile(filePath, undefined, undefined, activity.fileRef);
-          }}
+          role="button"
+          tabIndex={0}
+          {...tabOpenGestureHandlers<HTMLSpanElement>((intent) =>
+            onOpenFile(filePath, undefined, undefined, activity.fileRef, intent),
+          { stopPropagation: true })}
         >
           {activity.labelTarget}
-        </button>
+        </span>
+      </>
+    );
+  }
+  if (activity.spawnedSessionIds?.length && onOpenSpawnedSession) {
+    const sessionIds = activity.spawnedSessionIds;
+    const single = sessionIds.length === 1;
+    const visibleSessionIds = sessionIds.slice(0, 3);
+    const hiddenSessions = sessionIds.slice(visibleSessionIds.length).map((sessionId, index) => ({
+      id: sessionId,
+      label: `agent ${visibleSessionIds.length + index + 1}`,
+    }));
+    return (
+      <>
+        {single ? "Delegated a task to " : "Delegated tasks to "}
+        {visibleSessionIds.map((sessionId, index) => (
+          <span key={sessionId}>
+            {index > 0 && ", "}
+            <button
+              className="tool-target"
+              title="Open the session this agent spawned"
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onOpenSpawnedSession(sessionId);
+              }}
+            >
+              {single ? "a new agent" : `agent ${index + 1}`}
+            </button>
+          </span>
+        ))}
+        {hiddenSessions.length > 0 && (
+          <>
+            {", "}
+            <ToolTargetOverflow
+              items={hiddenSessions}
+              onSelect={onOpenSpawnedSession}
+              targetType="agent sessions"
+            />
+          </>
+        )}
       </>
     );
   }
@@ -2019,11 +2191,9 @@ function ToolActivityLabel({
               <button
                 className="tool-target"
                 title={`Open logs for run ${runId}`}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onOpenRun(runId);
-                }}
+                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                  onOpenRun(runId, intent),
+                { stopPropagation: true })}
               >
                 {runExperimentName?.(runId) || "Experiment"}
               </button>
@@ -2060,11 +2230,9 @@ function ToolActivityLabel({
               <button
                 className="tool-target"
                 title={`Open experiment ${experimentName?.(experimentId) || ""}`.trim()}
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  onOpenExperiment(experimentId);
-                }}
+                {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                  onOpenExperiment(experimentId, intent),
+                { stopPropagation: true })}
               >
                 {experimentName?.(experimentId) || "Experiment"}
               </button>
@@ -2088,16 +2256,24 @@ function ToolActivityLabel({
 function summarizeToolGroup(activities: ToolActivity[]): string {
   const count = (kind: ToolActivityKind) => activities.filter((activity) => activity.kind === kind).length;
   const clauses: string[] = [];
-  const reads = count("read");
-  const searches = count("search");
+  const paperReads = activities.filter((activity) => activity.litCall?.kind === "paper").length;
+  const literatureSearches = activities.filter((activity) => activity.litCall?.kind === "discover").length;
+  const reads = activities.filter((activity) => activity.kind === "read" && activity.litCall?.kind !== "paper").length;
+  const searches = activities.filter((activity) => activity.kind === "search" && activity.litCall?.kind !== "discover").length;
   const edits = count("edit");
   const projects = count("project");
   const web = count("web");
   const commands = count("command");
   const agents = count("agent");
+  const skillActions = activities
+    .filter((activity) => activity.kind === "skill")
+    .map((activity) => `${activity.label[0].toLowerCase()}${activity.label.slice(1)}`);
 
-  if (reads) clauses.push(reads === 1 ? "Read a file" : "Read files");
+  if (skillActions.length) clauses.push(skillActions.join(skillActions.length === 2 ? " and " : ", "));
+  if (reads) clauses.push(reads === 1 ? "read a file" : "read files");
+  if (paperReads) clauses.push(paperReads === 1 ? "read a paper" : "read papers");
   if (searches) clauses.push("searched code");
+  if (literatureSearches) clauses.push("searched literature");
   if (edits) clauses.push(edits === 1 ? "edited a file" : "edited files");
   if (projects) clauses.push("reviewed project data");
   if (web) clauses.push("browsed the web");
@@ -2118,12 +2294,14 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     [/^Updated /, "Updating "],
     [/^Created /, "Creating "],
     [/^Deleted /, "Deleting "],
+    [/^Loaded /, "Loading "],
     [/^Ran /, "Running "],
     [/^Started /, "Starting "],
     [/^Waited /, "Waiting "],
     [/^Checked /, "Checking "],
     [/^Built /, "Building "],
     [/^Cancelled /, "Cancelling "],
+    [/^Delegated /, "Delegating "],
   ];
   let label = activity.label;
   for (const [pattern, replacement] of replacements) {
@@ -2149,6 +2327,8 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     [/^Updated /, "Update "],
     [/^Created /, "Create "],
     [/^Deleted /, "Delete "],
+    [/^Loaded /, "Load "],
+    [/^Delegated /, "Delegate "],
     [/^Ran /, "Run "],
     [/^Started /, "Start "],
     [/^Waited /, "Wait "],
@@ -2253,7 +2433,7 @@ function useDelayedToolShimmer(active: boolean): boolean {
 }
 
 function groupIconActivity(activities: ToolActivity[]): ToolActivity {
-  const priority: ToolActivityKind[] = ["read", "search", "edit", "project", "web", "command", "agent"];
+  const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "web", "command", "agent"];
   for (const kind of priority) {
     const activity = activities.find((candidate) => candidate.kind === kind);
     if (activity) return activity;
@@ -2277,6 +2457,7 @@ function squashableToolPartKey(part: ChatPart): string | null {
     activity.litCall?.kind === "paper" ? activity.litCall.id ?? null : null,
     activity.runIds ?? null,
     activity.experimentIds ?? null,
+    activity.spawnedSessionIds ?? null,
   ]);
 }
 
@@ -2294,6 +2475,62 @@ function squashToolParts(parts: ChatPart[]): SquashedToolPart[] {
   return squashed;
 }
 
+function TurnStatusRow({
+  part,
+  busy,
+  recovering,
+  onRecover,
+}: {
+  part: ChatPart;
+  busy: boolean;
+  recovering: boolean;
+  onRecover?: (turnId: string, action: "retry" | "continue") => void;
+}) {
+  const input = part.state?.input;
+  const nextRetryAt = input?.nextRetryAt ?? null;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (typeof nextRetryAt !== "number") return;
+    setNow(Date.now());
+    if (nextRetryAt <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current >= nextRetryAt) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [nextRetryAt]);
+  if (part.id === "turn-retry") {
+    const label = retryStatusLabel(input ?? {}, now);
+    return (
+      <div className="turn-retry-row flex items-center gap-2 py-1 px-1 text-sm text-subtext">
+        <span className={SPINNER_CLASS_NAME} />
+        <span>{label}</span>
+      </div>
+    );
+  }
+  const action = parseRecoveryAction(input?.recoveryAction);
+  const turnId = input?.turnId;
+  if ((action !== "retry" && action !== "continue") || !turnId) return null;
+  const label = action === "retry" ? "Retry" : "Continue";
+  const errorMessage = cleanToolError(part.state?.error || "This turn did not finish.");
+  return (
+    <div className="turn-recovery-row flex items-center justify-between gap-2 py-1.5 px-2.5 border border-border rounded-md bg-background">
+      <span className="min-w-0 truncate text-sm text-accent-red" title={errorMessage}>
+        {errorMessage}
+      </span>
+      <button
+        type="button"
+        className="shrink-0 h-7 px-2.5 rounded-sm border border-border bg-background text-xs font-medium text-text disabled:opacity-50 [&:hover:not(:disabled)]:bg-surface"
+        disabled={busy || recovering}
+        onClick={() => onRecover?.(turnId, action)}
+      >
+        {recovering ? "Starting…" : label}
+      </button>
+    </div>
+  );
+}
+
 /** Routine successful calls are static activity rows. Only failures disclose
  * raw command/output, because that detail is useful for diagnosis. */
 function ToolRow({
@@ -2301,6 +2538,7 @@ function ToolRow({
   repeatCount = 1,
   onOpenFile,
   onOpenRun,
+  onOpenSpawnedSession,
   runExperimentName,
   onOpenExperiment,
   experimentName,
@@ -2308,9 +2546,10 @@ function ToolRow({
   part: ChatPart;
   repeatCount?: number;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
+  onOpenSpawnedSession?: (sessionId: string) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
   const state = part.state;
@@ -2333,6 +2572,7 @@ function ToolRow({
           activity={activity}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
+          onOpenSpawnedSession={onOpenSpawnedSession}
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
@@ -2383,6 +2623,7 @@ function ToolGroup({
   pendingTail,
   onOpenFile,
   onOpenRun,
+  onOpenSpawnedSession,
   runExperimentName,
   onOpenExperiment,
   experimentName,
@@ -2390,9 +2631,10 @@ function ToolGroup({
   parts: ChatPart[];
   pendingTail?: boolean;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
+  onOpenSpawnedSession?: (sessionId: string) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
 }) {
   const [open, setOpen] = useState(false);
@@ -2428,6 +2670,7 @@ function ToolGroup({
                 activity={pendingActivity}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
+                onOpenSpawnedSession={onOpenSpawnedSession}
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
@@ -2443,6 +2686,7 @@ function ToolGroup({
           part={parts[0]}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
+          onOpenSpawnedSession={onOpenSpawnedSession}
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
@@ -2465,6 +2709,7 @@ function ToolGroup({
               activity={pendingActivity}
               onOpenFile={onOpenFile}
               onOpenRun={onOpenRun}
+              onOpenSpawnedSession={onOpenSpawnedSession}
               runExperimentName={runExperimentName}
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
@@ -2504,6 +2749,7 @@ function ToolGroup({
                 repeatCount={count}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
+                onOpenSpawnedSession={onOpenSpawnedSession}
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
@@ -2530,7 +2776,7 @@ function PromptCard({
   part: ChatPart;
   onRespond?: (answer: PromptAnswer) => void;
   onOpenFile?: OpenTranscriptFile;
-  onOpenPlan?: (plan: string, promptId: string) => void;
+  onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
 }) {
   const p = part.prompt as ChatPrompt;
   const [picked, setPicked] = useState<string[]>([]);
@@ -2622,7 +2868,12 @@ function PromptCard({
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
         </div>
         {docked && (
-          <button className="prompt-plan-open self-start border-0 bg-transparent text-accent-blue text-sm p-0 cursor-pointer [&:hover]:underline" onClick={() => onOpenPlan(p.plan ?? "", part.id)}>
+          <button
+            className="prompt-plan-open self-start border-0 bg-transparent text-accent-blue text-sm p-0 cursor-pointer [&:hover]:underline"
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenPlan(p.plan ?? "", part.id, intent),
+            )}
+          >
             View full plan
           </button>
         )}
@@ -2767,6 +3018,10 @@ function partIsVisible(part: ChatPart, activePermissionId?: string | null): bool
   return true; // tool, image, …
 }
 
+function isTurnStatusPart(part: ChatPart): boolean {
+  return part.id === "turn-retry" || part.id === "turn-recovery";
+}
+
 /** Whether a message renders anything once resolved-permission cards vanish —
  * a bridge permission card rides its own message, so resolving it leaves the
  * message empty and it must drop out of the transcript entirely. */
@@ -2879,12 +3134,16 @@ const Message = memo(function Message({
   pendingTailToolId,
   onOpenFile,
   onOpenRun,
+  onOpenSpawnedSession,
   runExperimentName,
   onOpenExperiment,
   experimentName,
   onRespond,
   onOpenPlan,
   onOpenSubagent,
+  busy = false,
+  recoveringTurnId,
+  onRecover,
   skills,
   predictTextTail = false,
   forkCount,
@@ -2900,16 +3159,20 @@ const Message = memo(function Message({
   activePermissionId: string | null;
   pendingTailToolId?: string | null;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
+  onOpenSpawnedSession?: (sessionId: string) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
   onRespond?: (answer: PromptAnswer) => void;
   /** Open a plan's full markdown in the right pane (plan cards/strip). */
-  onOpenPlan?: (plan: string, promptId: string) => void;
+  onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
-  onOpenSubagent?: (spawnPartId: string, label?: string) => void;
-  /** Known slash-skills, for rendering a leading `/name` as a command chip. */
+  onOpenSubagent?: OpenSubagent;
+  busy?: boolean;
+  recoveringTurnId?: string | null;
+  onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
   /** Set only on a user message, the one bearer of the fork controls. */
@@ -2932,10 +3195,9 @@ const Message = memo(function Message({
       .filter((p) => p.type === "text")
       .map((p) => p.text ?? "")
       .join("\n");
-    // A leading known `/command` renders as the same chip the composer shows.
-    // Unknown commands (or skills removed since) fall back to plain text.
-    const slash = text.match(/^\/(\S+)([\s\S]*)$/);
-    const command = slash ? skills?.find((s) => s.name === slash[1]) : undefined;
+    // Known `/command` tokens render as the chips the composer showed, where
+    // they were typed. Unknown commands (or skills removed since) stay plain text.
+    const isCommand = (name: string) => !!skills?.some((s) => s.name === name);
     // Optimistic parts carry a data URL; server parts carry a file name.
     const attachments = message.parts
       .filter((p) => p.type === "image" && p.text)
@@ -2998,14 +3260,7 @@ const Message = memo(function Message({
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
         <div className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:mr-0.5 [&_.skill-chip]:align-baseline">
-          {command ? (
-            <>
-              <span className="skill-chip inline-flex items-center py-px px-[7px] font-mono text-md font-medium text-primary bg-primary-subtle border border-border-variant rounded-sm">/{command.name}</span>
-              {slash![2]}
-            </>
-          ) : (
-            text
-          )}
+          <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
@@ -3041,13 +3296,18 @@ const Message = memo(function Message({
       </div>
     );
   }
+  const turnStatus = message.parts.find(isTurnStatusPart);
+  const regularParts = turnStatus
+    ? message.parts.filter((part) => part !== turnStatus)
+    : message.parts;
   return (
-    <div className="msg-assistant text-lg leading-[1.62] text-text min-w-0">
-      {renderParts(message.parts, {
+    <div className="msg-assistant group/turn text-lg leading-[1.62] text-text min-w-0">
+      {renderParts(regularParts, {
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
         onOpenRun,
+        onOpenSpawnedSession,
         runExperimentName,
         onOpenExperiment,
         experimentName,
@@ -3056,6 +3316,14 @@ const Message = memo(function Message({
         onOpenSubagent,
         predictTextTail,
       })}
+      {turnStatus && (
+        <TurnStatusRow
+          part={turnStatus}
+          busy={busy}
+          recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
+          onRecover={onRecover}
+        />
+      )}
     </div>
   );
 });
@@ -3072,13 +3340,14 @@ function renderParts(
     activePermissionId?: string | null;
     pendingTailToolId?: string | null;
     onOpenFile?: OpenTranscriptFile;
-    onOpenRun?: (runId: string) => void;
+    onOpenRun?: OpenTranscriptTarget;
+    onOpenSpawnedSession?: (sessionId: string) => void;
     runExperimentName?: (runId: string) => string;
-    onOpenExperiment?: (experimentId: string) => void;
+    onOpenExperiment?: OpenTranscriptTarget;
     experimentName?: (experimentId: string) => string;
     onRespond?: (answer: PromptAnswer) => void;
-    onOpenPlan?: (plan: string, promptId: string) => void;
-    onOpenSubagent?: (spawnPartId: string, label?: string) => void;
+    onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
+    onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
   },
 ): React.ReactNode[] {
@@ -3087,6 +3356,7 @@ function renderParts(
     pendingTailToolId,
     onOpenFile,
     onOpenRun,
+    onOpenSpawnedSession,
     runExperimentName,
     onOpenExperiment,
     experimentName,
@@ -3111,6 +3381,7 @@ function renderParts(
         pendingTail={toolRun.some((part) => part.id === pendingTailToolId)}
         onOpenFile={onOpenFile}
         onOpenRun={onOpenRun}
+        onOpenSpawnedSession={onOpenSpawnedSession}
         runExperimentName={runExperimentName}
         onOpenExperiment={onOpenExperiment}
         experimentName={experimentName}
@@ -3240,11 +3511,11 @@ export function SubagentTranscript({
 }: {
   spawn: ChatPart;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
-  onOpenSubagent?: (spawnPartId: string, label?: string) => void;
+  onOpenSubagent?: OpenSubagent;
 }) {
   const parts = spawn.children ?? [];
   const running = spawn.state?.status === "running";
@@ -3303,7 +3574,7 @@ function SubagentBlock({
 }: {
   part: ChatPart;
   pendingTail?: boolean;
-  onOpenSubagent?: (spawnPartId: string, label?: string) => void;
+  onOpenSubagent?: OpenSubagent;
 }) {
   const errored = part.state?.status === "error";
   const errorMessage = cleanToolError(part.state?.error || part.state?.output || "");
@@ -3342,7 +3613,9 @@ function SubagentBlock({
     <button
       className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-lg text-left rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-lg"
       title={errored && errorMessage ? errorMessage : "Open sub-agent transcript"}
-      onClick={() => onOpenSubagent?.(part.id, activity.label)}
+      {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+        onOpenSubagent?.(part.id, activity.label, intent),
+      )}
       disabled={!onOpenSubagent}
     >
       {line}
@@ -3445,6 +3718,22 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
       }));
       return;
     }
+    const turnStatus = changes.find(([, state]) => isTurnStatusPart(state.part))?.[1].part;
+    if (turnStatus?.id === "turn-recovery") {
+      const action = parseRecoveryAction(turnStatus.state?.input?.recoveryAction);
+      setAnnouncement((current) => ({
+        text: `Turn did not finish.${action ? ` ${action === "retry" ? "Retry" : "Continue"} is available.` : ""}`,
+        sequence: current.sequence + 1,
+      }));
+      return;
+    }
+    if (turnStatus?.id === "turn-retry") {
+      setAnnouncement((current) => ({
+        text: "The CLI is retrying the turn.",
+        sequence: current.sequence + 1,
+      }));
+      return;
+    }
     const failures = changes.filter(([, state]) => state.status === "error");
     if (failures.length > 0) {
       const labels = failures.slice(0, 2).map(([, state]) => toolActivity(state.part).label).join(", ");
@@ -3478,7 +3767,7 @@ function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {
     const part = parts[index];
     // A steer lands at the tail without ending the tool that is still running.
-    if (part.type === "steer" || !partIsVisible(part)) continue;
+    if (part.type === "steer" || isTurnStatusPart(part) || !partIsVisible(part)) continue;
     if (part.type !== "tool" || part.state?.status === "error") return null;
     return part.id;
   }
@@ -3501,12 +3790,15 @@ const Transcript = memo(function Transcript({
   busy,
   onOpenFile,
   onOpenRun,
+  onOpenSpawnedSession,
   runExperimentName,
   onOpenExperiment,
   experimentName,
   onRespond,
   onOpenPlan,
   onOpenSubagent,
+  recoveringTurnId,
+  onRecover,
   skills,
 }: {
   /** The branch on screen, oldest first. */
@@ -3519,13 +3811,16 @@ const Transcript = memo(function Transcript({
   onSelectFork: (leafId: string) => void;
   busy: boolean;
   onOpenFile?: OpenTranscriptFile;
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
+  onOpenSpawnedSession?: (sessionId: string) => void;
   runExperimentName?: (runId: string) => string;
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
   onRespond?: (answer: PromptAnswer) => void;
-  onOpenPlan?: (plan: string, promptId: string) => void;
-  onOpenSubagent?: (spawnPartId: string, label?: string) => void;
+  onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
+  onOpenSubagent?: OpenSubagent;
+  recoveringTurnId?: string | null;
+  onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
 }) {
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -3548,32 +3843,43 @@ const Transcript = memo(function Transcript({
       <span className="sr-only" role="status" aria-live="polite">
         <span key={transcriptAnnouncement.sequence}>{transcriptAnnouncement.text}</span>
       </span>
-      {visibleMessages.map((m) => (
-        <Message
-          key={m.id}
-          message={m}
-          forkCount={positions.get(m.id)?.count}
-          forkIndex={positions.get(m.id)?.index}
-          forkPrevId={positions.get(m.id)?.prevId}
-          forkNextId={positions.get(m.id)?.nextId}
-          forkDisabled={!canFork}
-          branchDisabled={busy}
-          onFork={onFork}
-          onSelectFork={onSelectFork}
-          activePermissionId={activePermissionId}
-          pendingTailToolId={pendingTailTool?.messageId === m.id ? pendingTailTool.toolId : null}
-          onOpenFile={onOpenFile}
-          onOpenRun={onOpenRun}
-          runExperimentName={runExperimentName}
-          onOpenExperiment={onOpenExperiment}
-          experimentName={experimentName}
-          onRespond={onRespond}
-          onOpenPlan={onOpenPlan}
-          onOpenSubagent={onOpenSubagent}
-          skills={skills}
-          predictTextTail={busy && m === activeMessage && m.role === "assistant"}
-        />
-      ))}
+      {visibleMessages.map((m) => {
+        const turnStatus = m.parts.find(isTurnStatusPart);
+        const turnId = turnStatus?.state?.input?.turnId;
+        // A session owns one turn slot, so one recovery disables every status
+        // card until its durable admission resolves.
+        const recoveryDisabled = turnStatus ? busy || recoveringTurnId !== null : false;
+        return (
+          <Message
+            key={m.id}
+            message={m}
+            forkCount={positions.get(m.id)?.count}
+            forkIndex={positions.get(m.id)?.index}
+            forkPrevId={positions.get(m.id)?.prevId}
+            forkNextId={positions.get(m.id)?.nextId}
+            forkDisabled={!canFork}
+            branchDisabled={busy}
+            onFork={onFork}
+            onSelectFork={onSelectFork}
+            activePermissionId={activePermissionId}
+            pendingTailToolId={pendingTailTool?.messageId === m.id ? pendingTailTool.toolId : null}
+            onOpenFile={onOpenFile}
+            onOpenRun={onOpenRun}
+            onOpenSpawnedSession={onOpenSpawnedSession}
+            runExperimentName={runExperimentName}
+            onOpenExperiment={onOpenExperiment}
+            experimentName={experimentName}
+            onRespond={onRespond}
+            onOpenPlan={onOpenPlan}
+            onOpenSubagent={onOpenSubagent}
+            busy={recoveryDisabled}
+            recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
+            onRecover={onRecover}
+            skills={skills}
+            predictTextTail={busy && m === activeMessage && m.role === "assistant"}
+          />
+        );
+      })}
     </>
   );
 });
@@ -3742,7 +4048,9 @@ function SessionRow({
       className={`session-row relative flex items-center gap-2 w-full text-left py-[7px] px-2.5 rounded-md text-md text-text cursor-pointer select-none [&:hover]:bg-surface [&.active]:bg-surface [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-2xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
       }`}
-      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}`}
+      title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
+        session.parentSessionId ? " · Spawned by another agent" : ""
+      }`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
         if (editing) return;
@@ -3772,6 +4080,9 @@ function SessionRow({
           unread && <span className="unread-dot" />
         )}
       </span>
+      {session.parentSessionId && !editing && (
+        <Users className="text-muted shrink-0" size={12} aria-hidden />
+      )}
       {editing ? (
         <input
           ref={inputRef}
@@ -3856,7 +4167,6 @@ function SessionRow({
 export function ChatPanel({
   projectId,
   projectName,
-  paperId,
   railHeader,
   railOpen,
   onShowRail,
@@ -3883,8 +4193,6 @@ export function ChatPanel({
 }: {
   projectId: string;
   projectName: string;
-  /** arXiv id the project starts from — surfaces a /reproduce-paper shortcut. */
-  paperId?: string | null;
   /** Back-to-projects + project name block rendered at the top of the rail. */
   railHeader?: React.ReactNode;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
@@ -3902,21 +4210,38 @@ export function ChatPanel({
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
-  onOpenFile?: (path: string, sessionId?: string, line?: number, exp?: string, ref?: string) => void;
+  onOpenFile?: (
+    path: string,
+    sessionId: string | undefined,
+    line: number | undefined,
+    exp: string | undefined,
+    ref: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
   /** Open a run's logs in the right pane (agent-emitted `<run>` evidence chips).
    * Run ids are globally unique, so no session context is needed. */
-  onOpenRun?: (runId: string) => void;
+  onOpenRun?: OpenTranscriptTarget;
   /** Resolve a run to the experiment name shown on tool activity links. */
   runExperimentName?: (runId: string) => string;
   /** Open an experiment overview, where its notes are displayed. */
-  onOpenExperiment?: (experimentId: string) => void;
+  onOpenExperiment?: OpenTranscriptTarget;
   /** Resolve an experiment id to the name shown on tool activity links. */
   experimentName?: (experimentId: string) => string;
   /** Open a plan's markdown as a right-pane tab (plan strip / plan cards). */
-  onOpenPlan?: (plan: string, sessionId: string, promptId: string) => void;
+  onOpenPlan?: (
+    plan: string,
+    sessionId: string,
+    promptId: string,
+    intent: TabOpenIntent,
+  ) => void;
   /** Open a sub-agent's transcript as a right-pane tab (spawn-row "view").
    * `sessionId` is the chat session; `spawnPartId` locates the spawn part. */
-  onOpenSubagent?: (sessionId: string, spawnPartId: string, label?: string) => void;
+  onOpenSubagent?: (
+    sessionId: string,
+    spawnPartId: string,
+    label: string | undefined,
+    intent: TabOpenIntent,
+  ) => void;
   /** Open the pinned Files home for the active session. */
   onOpenWorktree: () => void;
   /** Reopen the demo welcome modal from the chat header. */
@@ -3966,6 +4291,14 @@ export function ChatPanel({
   // active session changes. Distinct from `selection`, which is the sticky
   // global preference that seeds *new* sessions.
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
+  const [recoveryOverrides, setRecoveryOverrides] = useState<
+    Partial<ModelSelection> & { planMode?: boolean }
+  >({});
+  const [recoveringTurnId, setRecoveringTurnId] = useState<string | null>(null);
+  const recoveringTurnRef = useRef(false);
+  const activeLeafRef = useRef<string | null>(null);
+  const [retryingQueuedId, setRetryingQueuedId] = useState<string | null>(null);
+  const pendingClientTurn = useRef<{ signature: string; id: string } | null>(null);
   // Sessions whose title was just replaced by a harness-generated one, mapped
   // to a nonce that bumps per reveal so a second retitle remounts the spans and
   // replays the animation instead of sitting on a finished one.
@@ -4006,70 +4339,54 @@ export function ChatPanel({
     transcriptSelection.dismiss();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
-  // Slash-skills: menu state is derived from the draft — open while the first
-  // token is an unfinished `/command` (no whitespace yet) with matches.
+  // Slash-skills: menu state is derived from the draft — open while the token
+  // under the caret is an unfinished `/command` (no whitespace yet) with
+  // matches, wherever in the message it was typed.
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [skillIdx, setSkillIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [composerCursor, setComposerCursor] = useState(0);
-  // A picked skill renders as a chip on the textarea's first line
-  // (Claude-desktop style); the textarea then holds only the args. send()
-  // reassembles `/name args`, so the wire and transcript keep the plain-text
-  // form. The chip overlays the textarea and the first line is indented past
-  // it (text-indent), so long args wrap full-width beneath the chip instead
-  // of being squeezed into a narrower column.
-  const [pickedSkill, setPickedSkill] = useState<SkillInfo | null>(null);
-  const chipRef = useRef<HTMLSpanElement>(null);
-  const [chipIndent, setChipIndent] = useState(0);
-  useLayoutEffect(() => {
-    setChipIndent(pickedSkill && chipRef.current ? chipRef.current.offsetWidth + 8 : 0);
-    syncChipScroll();
-  }, [pickedSkill]);
-
-  /** The chip belongs to the first line of *content*, so when the textarea
-   * scrolls it must ride along (and clip at the wrapper) instead of sitting
-   * fixed over whatever line scrolled to the top. */
-  function syncChipScroll() {
-    if (chipRef.current)
-      chipRef.current.style.transform = `translateY(${-(composerRef.current?.scrollTop ?? 0)}px)`;
-  }
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
+
   // Refetch when navigating (esp. back to chat after a Skills-tab upload) so
   // freshly uploaded skills appear in the `/` menu without a reload.
   useEffect(() => {
     getSkills(projectId).then(setSkills).catch(() => {});
   }, [projectId, mainView]);
+  // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
-    if (skill.source === "command" && skill.name === "plan" && slashContext) {
+    if (!slashContext) return;
+    if (skill.source === "command" && skill.name === "plan") {
       activatePlanCommand(draft, slashContext);
       return;
     }
-    if (slashContext?.inline) {
-      const before = draft.slice(0, slashContext.start);
-      const after = draft.slice(slashContext.end);
-      const insertion = `/${skill.name}`;
-      const separator = after ? "" : " ";
-      const cursor = before.length + insertion.length + separator.length;
-      setDraft(`${before}${insertion}${separator}${after}`);
-      setSkillMenuDismissed(true);
-      window.requestAnimationFrame(() => {
-        composerRef.current?.focus();
-        composerRef.current?.setSelectionRange(cursor, cursor);
-        setComposerCursor(cursor);
-      });
-      return;
-    }
-    setPickedSkill(skill);
-    setDraft("");
-    composerRef.current?.focus();
+    // The command replaces the `/query` token in place, so the chip lands where
+    // it was typed and the rest of the message stays untouched.
+    const next = insertSlashCommand(draft, slashContext, skill.name, 2);
+    setDraft(next.text);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
+      setComposerCursor(next.cursor);
+    });
   }
 
-  /** Backspace at the start deletes the command outright (Claude-desktop
-   * behavior) — the args stay put; re-type `/` to pick another skill. */
-  function removeSkillChip() {
-    setPickedSkill(null);
-    composerRef.current?.focus();
+  /** Backspace just behind a chip deletes the whole command, the way the chip
+   * it paints reads — a single object, not eight characters. */
+  function deleteCommandBehindCaret(textarea: HTMLTextAreaElement): boolean {
+    const cursor = textarea.selectionStart;
+    if (composingRef.current || cursor !== textarea.selectionEnd) return false;
+    const context = slashCommandContext(draft, cursor);
+    if (!context || context.end !== cursor) return false;
+    if (!knownCommand(context.query)) return false;
+    const next = removeSlashCommand(draft, context);
+    setDraft(next.text);
+    setComposerCursor(next.cursor);
+    window.requestAnimationFrame(() =>
+      textarea.setSelectionRange(next.cursor, next.cursor),
+    );
+    return true;
   }
 
   /** Queue files (upload button, clipboard paste, or drag-drop) as composer
@@ -4144,14 +4461,19 @@ export function ChatPanel({
     : undefined;
   const opts = activeHarness?.options;
   const commands = commandsForHarness(skills, opts?.planActivation);
-  const slashContext = !pickedSkill ? slashCommandContext(draft, composerCursor) : null;
+  const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
+  // Commands now live in the draft as text, so the menu also has to stay shut
+  // when the caret merely lands in or behind a name the user already finished —
+  // unless a longer command still extends it.
+  const completions =
+    slashToken === null ? [] : commands.filter((command) => command.name.startsWith(slashToken));
+  const typingCommand =
+    slashToken !== null &&
+    slashContext?.end === composerCursor &&
+    completions.some((command) => command.name !== slashToken);
   const skillMatches =
-    slashToken !== null && !skillMenuDismissed
-      ? commandsForSlashContext(commands, slashContext?.inline ?? false).filter((command) =>
-          command.name.startsWith(slashToken),
-        )
-      : [];
+    typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
   const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
   useEffect(() => setSkillIdx(0), [slashToken]);
@@ -4190,6 +4512,19 @@ export function ChatPanel({
   const selectModel = (next: Partial<ModelSelection>) => {
     if (!composerSelection) return;
     const merged = { ...composerSelection, ...next };
+    const changed: Partial<ModelSelection> = {};
+    if (next.model !== undefined && next.model !== composerSelection.model) changed.model = next.model;
+    if (
+      next.permissionMode !== undefined &&
+      next.permissionMode !== composerSelection.permissionMode
+    )
+      changed.permissionMode = next.permissionMode;
+    if (
+      next.reasoningLevel !== undefined &&
+      next.reasoningLevel !== composerSelection.reasoningLevel
+    )
+      changed.reasoningLevel = next.reasoningLevel;
+    setRecoveryOverrides((current) => ({ ...current, ...changed }));
     setSelection(merged);
     void onPreferredAgentChange(merged).catch(() => {});
     if (openSession) {
@@ -4210,6 +4545,7 @@ export function ChatPanel({
     // Plan is session-scoped. Claude exposes it in the permission dropdown,
     // but it must not become the saved default for future sessions.
     if (id === "plan" && activeHarness?.id === "claude-code") {
+      setRecoveryOverrides((current) => ({ ...current, permissionMode: id }));
       setSessionOverride((current) => ({ ...current, permissionMode: id }));
     } else {
       setSessionOverride((current) => {
@@ -4259,6 +4595,7 @@ export function ChatPanel({
   }, [openSession?.planMode, planModeOverride]);
 
   async function setIndependentPlanMode(planMode: boolean) {
+    setRecoveryOverrides((current) => ({ ...current, planMode }));
     planModeOverrideRef.current = planMode;
     setPlanModeOverride(planMode);
     if (!openSession) return;
@@ -4315,7 +4652,6 @@ export function ChatPanel({
   function activatePlanCommand(text: string, context: SlashCommandContext) {
     const next = removeSlashCommand(text, context);
     setDraft(next.text);
-    setPickedSkill(null);
     setSkillMenuDismissed(true);
     void togglePlanMode();
     window.requestAnimationFrame(() => {
@@ -4373,6 +4709,29 @@ export function ChatPanel({
     }
   }, [projectId]);
 
+  const reseedSession = useCallback(
+    async (sessionId: string) => {
+      const leafBefore = composerScopeRef.current.activeId === sessionId
+        ? activeLeafRef.current
+        : undefined;
+      const [{ messages, queued, activeLeafId }] = await Promise.all([
+        getChatMessages(sessionId),
+        syncSessionList(),
+      ]);
+      const localLeafMoved = leafBefore !== undefined
+        && composerScopeRef.current.activeId === sessionId
+        && activeLeafRef.current !== leafBefore;
+      dispatch({
+        type: "seed",
+        sessionId,
+        messages,
+        queued,
+        activeLeafId: localLeafMoved ? activeLeafRef.current : activeLeafId,
+      });
+    },
+    [syncSessionList, dispatch],
+  );
+
   // Reset everything when the project changes.
   useEffect(() => {
     setSessions([]);
@@ -4392,7 +4751,6 @@ export function ChatPanel({
         : new Set(),
     );
     setDraft("");
-    setPickedSkill(null);
     setAttachments([]);
     dispatch({ type: "reset" });
     loadedSessions.current = new Set();
@@ -4414,6 +4772,11 @@ export function ChatPanel({
   }, [projectId, syncSessionList]);
 
   // Load message history when a session becomes active.
+  useEffect(() => {
+    setRecoveryOverrides({});
+    pendingClientTurn.current = null;
+  }, [activeId]);
+
   useEffect(() => {
     if (!activeId || loadedSessions.current.has(activeId)) return;
     loadedSessions.current.add(activeId);
@@ -4535,7 +4898,6 @@ export function ChatPanel({
   // the streaming tail, and the pending-permission lookup.
   const allMessages = activeId ? (state.messagesBySession[activeId] ?? NO_MESSAGES) : NO_MESSAGES;
   const activeLeafId = activeId ? (state.activeLeafBySession[activeId] ?? null) : null;
-  const activeLeafRef = useRef(activeLeafId);
   activeLeafRef.current = activeLeafId;
   const messages = useMemo(() => activePath(allMessages, activeLeafId), [allMessages, activeLeafId]);
   const busy = activeId ? state.busySessions.has(activeId) : false;
@@ -4544,6 +4906,24 @@ export function ChatPanel({
   // Messages the user parked behind the running turn (oldest first). Populated
   // by chat.queued events and the seed snapshot; each runs when its turn ends.
   const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
+  const hasRetryingQueue = queued.some((item) => item.dispatchState === "retrying");
+  const firstBlockedQueueIndex = queued.findIndex((item) => item.dispatchState === "blocked");
+  const nextQueueRetryAt = queued.reduce<number | null>((latest, item) => {
+    if (item.dispatchState !== "retrying" || typeof item.nextRetryAt !== "number") return latest;
+    return latest === null ? item.nextRetryAt : Math.min(latest, item.nextRetryAt);
+  }, null);
+  const [queueClock, setQueueClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasRetryingQueue || nextQueueRetryAt === null) return;
+    setQueueClock(Date.now());
+    if (nextQueueRetryAt <= Date.now()) return;
+    const timer = window.setInterval(() => {
+      const current = Date.now();
+      setQueueClock(current);
+      if (current >= nextQueueRetryAt) window.clearInterval(timer);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [hasRetryingQueue, nextQueueRetryAt]);
   useEffect(() => {
     const queuedMode = queued.reduce<boolean | undefined>(
       (mode, item) => item.planMode ?? mode,
@@ -4636,6 +5016,10 @@ export function ChatPanel({
     return null;
   }, [messages, activeSession?.harness, activeId, state.busySessions]);
 
+  // A pending question card owns the composer's text as a plain answer — no
+  // command in it is ever expanded, so none of it is chipped either.
+  const knownCommand = (name: string) =>
+    !pendingQuestion && commands.some((command) => command.name === name);
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -4672,7 +5056,8 @@ export function ChatPanel({
   const openPlan = useMemo(
     () =>
       onOpenPlan && activeId
-        ? (plan: string, promptId: string) => onOpenPlan(plan, activeId, promptId)
+        ? (plan: string, promptId: string, intent: TabOpenIntent) =>
+            onOpenPlan(plan, activeId, promptId, intent)
         : undefined,
     [onOpenPlan, activeId],
   );
@@ -4680,7 +5065,8 @@ export function ChatPanel({
   const openSubagent = useMemo(
     () =>
       onOpenSubagent && activeId
-        ? (spawnPartId: string, label?: string) => onOpenSubagent(activeId, spawnPartId, label)
+        ? (spawnPartId: string, label: string | undefined, intent: TabOpenIntent) =>
+            onOpenSubagent(activeId, spawnPartId, label, intent)
         : undefined,
     [onOpenSubagent, activeId],
   );
@@ -4690,8 +5076,13 @@ export function ChatPanel({
   const openFileInSession = useMemo(
     () =>
       onOpenFile &&
-      ((path: string, line?: number, exp?: string, ref?: string) =>
-        onOpenFile(path, activeId ?? undefined, line, exp, ref)),
+      ((
+        path: string,
+        line: number | undefined,
+        exp: string | undefined,
+        ref: string | undefined,
+        intent: TabOpenIntent,
+      ) => onOpenFile(path, activeId ?? undefined, line, exp, ref, intent)),
     [onOpenFile, activeId],
   );
 
@@ -4746,10 +5137,9 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
-    const args = draft.trim();
-    // Reassemble the picked skill chip into the plain `/name args` wire form —
-    // the backend's slash expansion and the transcript both see only text.
-    const originalText = pickedSkill ? `/${pickedSkill.name}${args ? ` ${args}` : ""}` : args;
+    // Slash tokens stay in the wire form: the server resolves every selected
+    // skill and supplies this exact message as their shared request context.
+    const originalText = draft.trim();
     const planCommand = !pendingQuestion
       ? parsePlanCommand(originalText, opts?.planActivation)
       : null;
@@ -4783,7 +5173,6 @@ export function ChatPanel({
     };
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
       setDraft("");
-      setPickedSkill(null);
       setSkillMenuDismissed(false);
       try {
         if (activeHarness?.id === "claude-code") {
@@ -4823,11 +5212,10 @@ export function ChatPanel({
     // (Claude-desktop behavior). This also works while the turn is HELD on
     // the card — where a new message would be rejected as busy and silently
     // dropped. A failed answer restores the draft so the text isn't lost.
-    // (Auto-convert is off while a card is pending; a chip picked from the
-    // menu or left over just serializes into the note text, same as typing it.)
+    // (Nothing is chipped or expanded while a card is pending — a `/command`
+    // in the answer serializes into the note text exactly as it reads.)
     if ((text || pendingAnnotations.length > 0) && pendingQuestion && pending.length === 0) {
       setDraft("");
-      setPickedSkill(null);
       setAnnotations([]);
       void respond({
         promptId: pendingQuestion,
@@ -4839,6 +5227,27 @@ export function ChatPanel({
       });
       return;
     }
+    const turnSignature = JSON.stringify({
+      text,
+      images: pending.map((attachment) => ({
+        mediaType: attachment.mediaType,
+        name: attachment.name,
+        dataUrl: attachment.dataUrl,
+      })),
+      annotations: wireAnnotations,
+      settings: effective
+        ? {
+            model: effective.model,
+            permissionMode: effective.permissionMode,
+            planMode: independentPlanMode,
+            reasoningLevel: effective.reasoningLevel,
+          }
+        : null,
+    });
+    const clientTurnId = pendingClientTurn.current?.signature === turnSignature
+      ? pendingClientTurn.current.id
+      : `ct_${crypto.randomUUID()}`;
+    pendingClientTurn.current = { signature: turnSignature, id: clientTurnId };
     if (busy) {
       // A turn is already running. Steering hands the message to it now, and
       // the delivered text comes back inline on the assistant message. Parking
@@ -4851,7 +5260,6 @@ export function ChatPanel({
       }
       const sid = activeId;
       setDraft("");
-      setPickedSkill(null);
       setAttachments([]);
       setAnnotations([]);
       setAttachError(null);
@@ -4887,9 +5295,13 @@ export function ChatPanel({
             turnOpts,
             images.length ? images : undefined,
             wireAnnotations,
+            clientTurnId,
             steering && !queue && !planRequested ? "steer" : undefined,
           );
-        await queueSessionMutation(sendBusy);
+        const response = await queueSessionMutation(sendBusy);
+        if (response.turn?.existing) await reseedSession(sid);
+        setRecoveryOverrides({});
+        if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
       } catch {
         // Never reached the turn — restore the composer so a retry is one keypress.
         clearFailedPlanCommand();
@@ -4908,7 +5320,6 @@ export function ChatPanel({
       return;
     }
     setDraft("");
-    setPickedSkill(null);
     setAttachments([]);
     setAnnotations([]);
     setAttachError(null);
@@ -4967,8 +5378,12 @@ export function ChatPanel({
           turnOpts,
           images.length ? images : undefined,
           wireAnnotations,
+          clientTurnId,
         );
-      await queueSessionMutation(sendTurn);
+      const response = await queueSessionMutation(sendTurn);
+      if (response.turn?.existing) await reseedSession(targetSessionId);
+      setRecoveryOverrides({});
+      if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
     } catch (err) {
       // The message never reached a turn — put it back in the composer so a
       // retry is one keypress, whichever branch below applies.
@@ -5002,8 +5417,38 @@ export function ChatPanel({
   }
 
   function stop() {
-    if (activeId) void interruptChat(activeId);
+    if (!activeId) return;
+    void interruptChat(activeId).catch(() => {
+      setSettingsError("Could not stop the turn. Try again.");
+    });
   }
+
+  const recoverFailedTurn = useCallback(
+    async (turnId: string, action: "retry" | "continue") => {
+      if (!activeId || recoveringTurnRef.current) return;
+      recoveringTurnRef.current = true;
+      setSettingsError(null);
+      setRecoveringTurnId(turnId);
+      try {
+        const turnOpts = recoveryTurnOptions({
+          model: recoveryOverrides.model,
+          permissionMode: recoveryOverrides.permissionMode,
+          planMode: recoveryOverrides.planMode,
+          reasoningLevel: recoveryOverrides.reasoningLevel,
+        });
+        const sessionId = activeId;
+        const response = await recoverChatTurn(sessionId, turnId, action, turnOpts);
+        if (response.turn.existing) await reseedSession(sessionId);
+        setRecoveryOverrides({});
+      } catch {
+        setSettingsError("Could not recover this turn. Try again.");
+      } finally {
+        recoveringTurnRef.current = false;
+        setRecoveringTurnId(null);
+      }
+    },
+    [activeId, recoveryOverrides, reseedSession],
+  );
 
   const forkTurn = useCallback(
     (messageId: string, text: string) => {
@@ -5043,17 +5488,32 @@ export function ChatPanel({
     [activeId, busy, queueSessionMutation],
   );
 
-  // Optimistic: drop locally now; the server's chat.queued echo reconciles. A
-  // message that already started running server-side simply isn't found.
+  // Durable cancellation wins before the chip disappears. If persistence
+  // fails, leave it visible so a restart cannot surprise the user by sending it.
   function cancelQueued(itemId: string) {
     if (!activeId) return;
     const sid = activeId;
-    dispatch({
-      type: "setQueued",
-      sessionId: sid,
-      items: queued.filter((q) => q.id !== itemId),
-    });
-    void cancelQueuedMessage(sid, itemId).catch(() => {});
+    void cancelQueuedMessage(sid, itemId)
+      .then(({ removed }) => {
+        if (!removed) return;
+        return reseedSession(sid);
+      })
+      .catch(() => setSettingsError("Could not remove the queued message. Try again."));
+  }
+
+  async function retryQueued(itemId: string) {
+    if (!activeId || retryingQueuedId) return;
+    const sid = activeId;
+    setSettingsError(null);
+    setRetryingQueuedId(itemId);
+    try {
+      await retryQueuedMessage(sid, itemId);
+      await reseedSession(sid);
+    } catch {
+      setSettingsError("Could not retry the queued message. Try again.");
+    } finally {
+      setRetryingQueuedId(null);
+    }
   }
 
   // Escape stops the streaming turn and drops focus back into the composer,
@@ -5194,6 +5654,19 @@ export function ChatPanel({
     onSelectMainView("chat");
   }, [onSelectMainView]);
 
+  /** Follow a spawn card into the session it started. Spawned sessions are
+   * ordinary top-level sessions, so this is just a switch in the rail — via
+   * "All", because selecting a row the active filter hides would leave the
+   * thread keyed to a session with no row (see `setArchived`). */
+  const openSpawnedSession = useCallback(
+    (sessionId: string) => {
+      setSessionFilter("all");
+      setActiveId(sessionId);
+      onSelectMainView("chat");
+    },
+    [onSelectMainView],
+  );
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -5212,7 +5685,7 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-2.5 mr-3.5 mb-2.5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg shadow-[0_6px_24px_color-mix(in_oklab,_var(--text)_5%,_transparent),_0_1px_4px_color-mix(in_oklab,_var(--text)_4%,_transparent)] overflow-visible">
+    <aside className={`session-rail w-68 shrink-0 flex flex-col mt-5 mr-3.5 mb-5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg overflow-visible ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`}>
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
@@ -5243,7 +5716,7 @@ export function ChatPanel({
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
-          Skills
+          Customize
         </button>
         {SETTINGS_NAV.map((item) => (
           <button
@@ -5382,7 +5855,7 @@ export function ChatPanel({
           <span>Loading conversation…</span>
         </div>
       ) : !threadMounted ? (
-        <div className="chat-empty flex-1 flex flex-col items-center justify-center @container text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
+        <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
           <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
             <BrandMark />
           </div>
@@ -5390,68 +5863,6 @@ export function ChatPanel({
           <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-semibold">
             <FolderOpen size={19} />
             <span>{projectName}</span>
-          </div>
-          <div className="chat-empty-starters grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2.5 w-[min(100%,_620px)] mt-19 [@container((min-width:_500px))]:grid-cols-[repeat(4,_minmax(0,_1fr))] [@container((min-width:_500px))]:w-[min(100%,_720px)]">
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange blue"
-              onClick={() => {
-                setPickedSkill(null);
-                setDraft("Explore this codebase and explain its architecture, key components, and open research questions.");
-                composerRef.current?.focus();
-              }}
-            >
-              <BookOpen size={16} />
-              <span>Explore this codebase</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange purple"
-              onClick={() => {
-                const skill = skills.find((s) => s.name === "reproduce-paper");
-                if (paperId && skill) {
-                  // Both args are optional (the playbook injects the linked paper;
-                  // compute defaults to the configured target) — arm with an empty draft.
-                  setPickedSkill(skill);
-                  setDraft("");
-                } else {
-                  setPickedSkill(null);
-                  setDraft(
-                    paperId
-                      ? `/reproduce-paper `
-                      : "Find and summarize the research most relevant to this project.",
-                  );
-                }
-                composerRef.current?.focus();
-              }}
-            >
-              <GitBranch size={16} />
-              <span>{paperId ? "Reproduce the linked paper" : "Review relevant literature"}</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange green"
-              onClick={() => {
-                setPickedSkill(null);
-                setDraft("Set up and run an experiment for this project, including a baseline and meaningful variants.");
-                composerRef.current?.focus();
-              }}
-            >
-              <FlaskConical size={16} />
-              <span>Run an experiment</span>
-            </button>
-            <button
-              type="button"
-              className="chat-empty-starter min-h-28 flex flex-col items-start justify-between gap-5 p-4 border border-border rounded-lg text-text bg-background shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_5%,_transparent)] text-left text-md font-medium leading-[1.35] transition-[border-color,background,translate] duration-120 ease-standard [&:hover]:border-muted [&:hover]:bg-surface [&:hover]:-translate-y-px [&.blue_svg]:text-accent-blue [&.purple_svg]:text-accent-purple [&.green_svg]:text-accent-green [&.orange_svg]:text-accent-orange orange"
-              onClick={() => {
-                setPickedSkill(null);
-                setDraft("Analyze the latest experiment results and recommend the most useful next iteration.");
-                composerRef.current?.focus();
-              }}
-            >
-              <ChartSpline size={16} />
-              <span>Analyze results</span>
-            </button>
           </div>
         </div>
       ) : (
@@ -5474,12 +5885,15 @@ export function ChatPanel({
               busy={busy}
               onOpenFile={openFileInSession}
               onOpenRun={onOpenRun}
+              onOpenSpawnedSession={openSpawnedSession}
               runExperimentName={runExperimentName}
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
               onRespond={respond}
               onOpenPlan={openPlan}
               onOpenSubagent={openSubagent}
+              recoveringTurnId={recoveringTurnId}
+              onRecover={recoverFailedTurn}
               skills={commands}
             />
             {busy &&
@@ -5513,7 +5927,7 @@ export function ChatPanel({
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer pt-0 px-3 pb-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+      <div className="composer py-5 px-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -5529,7 +5943,7 @@ export function ChatPanel({
               activeSession ? HARNESS_LABELS[activeSession.harness] : "The agent"
             }
             showResumeModes={activeSession?.harness === "claude-code"}
-            onView={() => openPlan?.(pendingPlan.plan, pendingPlan.promptId)}
+            onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
             onApprove={(resumeMode) =>
               respond({
                 promptId: pendingPlan.promptId,
@@ -5550,30 +5964,64 @@ export function ChatPanel({
         )}
         {queued.length > 0 && (
           <div className="composer-queued flex flex-col gap-1 mb-1.5">
-            {queued.map((q) => (
+            {queued.map((q, index) => (
               <div
                 key={q.id}
-                className="queued-chip flex items-center gap-2 py-1.5 px-2.5 text-sm text-subtext bg-surface border border-border rounded-sm"
-                title={q.text}
+                className="queued-chip flex flex-wrap items-center gap-x-2 gap-y-1 py-1.5 px-2.5 text-sm text-subtext bg-background border border-border rounded-sm"
+                title={q.error ? `${q.text}\n\n${q.error}` : q.text}
               >
-                <Clock size={13} className="shrink-0 text-muted" />
-                <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
+                {q.dispatchState === "blocked"
+                  ? <TriangleAlert size={13} className="shrink-0 text-accent-amber" />
+                  : <Clock size={13} className="shrink-0 text-muted" />}
+                <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-text">
                   {q.text}
                 </span>
-                <span className="shrink-0 text-xs text-muted uppercase tracking-wide">Queued</span>
-                <button
-                  title="Cancel queued message"
-                  aria-label="Cancel queued message"
-                  onClick={() => cancelQueued(q.id)}
-                  className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
-                >
-                  <X size={11} />
-                </button>
+                {q.dispatchState !== "blocked" && (
+                  <span className="shrink-0 text-xs text-muted">
+                    {q.dispatchState === "retrying"
+                      ? queuedRetryLabel(q.nextRetryAt, queueClock)
+                      : "Queued"}
+                  </span>
+                )}
+                {q.dispatchState === "blocked" ? (
+                  <>
+                    <button
+                      onClick={() => void retryQueued(q.id)}
+                      aria-label={`Retry queued message: ${q.text}`}
+                      disabled={retryingQueuedId !== null}
+                      className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-xs text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
+                    >
+                      {retryingQueuedId === q.id ? "Retrying…" : "Retry"}
+                    </button>
+                    <button
+                      onClick={() => cancelQueued(q.id)}
+                      aria-label={`Remove queued message: ${q.text}`}
+                      disabled={retryingQueuedId !== null}
+                      className="shrink-0 px-1.5 py-0.5 border-0 text-xs text-muted bg-transparent cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:text-text"
+                    >
+                      Remove
+                    </button>
+                    {index === firstBlockedQueueIndex && index < queued.length - 1 && (
+                      <span className="basis-full pl-5 text-xs text-muted">
+                        Later queued messages will wait until this is retried or removed.
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <button
+                    title="Remove queued message"
+                    aria-label="Remove queued message"
+                    onClick={() => cancelQueued(q.id)}
+                    className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
               </div>
             ))}
           </div>
         )}
-        <div className="composer-box relative flex flex-col border border-border rounded-md bg-background" data-onboarding="composer">
+        <div className={`composer-box relative flex flex-col border border-border rounded-lg bg-background ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`} data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
             <div className="composer-harness-warning py-2 px-3 text-subtext text-xs leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
               <strong>{activeHarness.name} is unavailable.</strong>{" "}
@@ -5639,24 +6087,13 @@ export function ChatPanel({
             </div>
           )}
           <div className="composer-input relative flex overflow-hidden [&_textarea]:flex-1">
-            {pickedSkill && (
-              // Inert like inline text: clicks fall through to the textarea
-              // (pointer-events: none); Backspace at the start removes it.
-              <span ref={chipRef} className="skill-chip inline-flex items-center py-px px-[7px] font-mono text-md font-medium text-primary bg-primary-subtle border border-border-variant rounded-sm composer-chip absolute top-[9px] left-3 z-1 pointer-events-none">
-                /{pickedSkill.name}
-              </span>
-            )}
             <textarea
               ref={composerRef}
+              // Native prose stays visible; the aligned mirror paints only skill tokens.
+              className="relative z-1 bg-transparent"
               value={draft}
-              style={pickedSkill ? { textIndent: chipIndent } : undefined}
-              onScroll={syncChipScroll}
               placeholder={
                 // A pending question card owns typed text (see send()); say so.
-                // With a chip active, the skill's arg hint says what to type. For
-                // the paper-reproduction skills with a paper attached, both parts
-                // are optional — paper defaults to it, compute to the configured
-                // target — so the hint just states the defaults.
                 // While a steerable turn runs, Enter goes to that turn, so name
                 // the gesture and its queue chord — the send button is a Stop
                 // button for the whole busy stretch.
@@ -5664,18 +6101,13 @@ export function ChatPanel({
                 // picker for a new session and the open session once one exists.
                 pendingQuestion
                   ? "Type a custom answer…"
-                  : pickedSkill
-                    ? ["reproduce-paper", "paper-to-marimo"].includes(pickedSkill.name) &&
-                      paperId
-                      ? `[optional — defaults to ${paperId} on your default compute]`
-                      : pickedSkill.argHint
-                    : steering && activeHarness
-                      ? `Steer ${HARNESS_LABELS[activeHarness.id]}… (${queueChord} to queue)`
+                  : steering && activeHarness
+                    ? `Steer ${HARNESS_LABELS[activeHarness.id]}… (${queueChord} to queue)`
                     : composerSelection
                       ? activeHarness?.agentReady
-                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… ( / for commands)`
+                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… (/ for commands and skills)`
                         : `${HARNESS_LABELS[composerSelection.harness]} is unavailable — open the model picker`
-                      : "Ask the research agent… ( / for commands)"
+                      : "Ask the research agent… (/ for commands and skills)"
               }
               rows={2}
               onPaste={onComposerPaste}
@@ -5691,27 +6123,34 @@ export function ChatPanel({
                 const v = e.target.value;
                 const cursor = e.target.selectionStart;
                 setComposerCursor(cursor);
-                const completedCommand = cursor > 0 && /\s/.test(v[cursor - 1])
-                  ? slashCommandContext(v, cursor - 1)
-                  : null;
-                if (completedCommand?.query === "plan") {
+                // `/plan` is the one command the composer consumes rather than
+                // sends: it toggles the mode the moment the space lands. Not
+                // while a question card is pending (its answer is a note, never
+                // a command) and not mid-IME-composition, where the text can
+                // transiently look complete.
+                const completedCommand =
+                  cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current
+                    ? slashCommandContext(v, cursor - 1)
+                    : null;
+                if (completedCommand?.query === "plan" && opts?.planActivation) {
                   activatePlanCommand(v, completedCommand);
                   return;
                 }
-                // Auto-convert a typed/pasted full `/name ` into the chip the
-                // moment the space lands. Known names only — unknown `/foo`
-                // stays plain text (server-side pass-through contract). Not
-                // while a question card is pending (its answer is a note, never
-                // skill-expanded) and not mid-IME-composition.
-                if (!pickedSkill && !pendingQuestion && !composingRef.current) {
-                  const m = v.match(/^\/(\S+)\s([\s\S]*)$/);
-                  const hit = m && commands.find((command) => command.name === m[1].toLowerCase());
-                  if (hit) {
-                    setPickedSkill(hit);
-                    setDraft(m[2]);
-                    setSkillMenuDismissed(false);
-                    return;
-                  }
+                const completedSkill = completedCommand
+                  ? commands.find(
+                      (command) =>
+                        command.source !== "command" &&
+                        command.name === completedCommand.query,
+                    )
+                  : undefined;
+                if (completedSkill && completedCommand) {
+                  const next = insertSlashCommand(v, completedCommand, completedSkill.name, 2);
+                  setDraft(next.text);
+                  window.requestAnimationFrame(() => {
+                    composerRef.current?.setSelectionRange(next.cursor, next.cursor);
+                    setComposerCursor(next.cursor);
+                  });
+                  return;
                 }
                 setDraft(v);
                 setSkillMenuDismissed(false);
@@ -5733,7 +6172,7 @@ export function ChatPanel({
                     );
                     return;
                   }
-                  if (e.key === "Enter" || e.key === "Tab") {
+                  if (e.key === "Tab" || e.key === "Enter") {
                     e.preventDefault();
                     pickSkill(skillMatches[activeSkillIdx]);
                     return;
@@ -5744,17 +6183,11 @@ export function ChatPanel({
                     return;
                   }
                 }
-                // Backspace at the very start deletes the command chip.
-                // (Escape deliberately doesn't touch the chip — it's the
+                // Backspace just behind a chip deletes the whole command.
+                // (Escape deliberately doesn't touch it — that's the
                 // stop-the-turn gesture, see the document listener above.)
-                if (
-                  pickedSkill &&
-                  e.key === "Backspace" &&
-                  e.currentTarget.selectionStart === 0 &&
-                  e.currentTarget.selectionEnd === 0
-                ) {
+                if (e.key === "Backspace" && deleteCommandBehindCaret(e.currentTarget)) {
                   e.preventDefault();
-                  removeSkillChip();
                   return;
                 }
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -5763,12 +6196,21 @@ export function ChatPanel({
                 }
               }}
             />
+            {/* After the textarea: its ref must be attached before the mirror
+              * measures it. */}
+            <ComposerSkillChips
+              text={draft}
+              isCommand={knownCommand}
+              skills={commands}
+              projectId={projectId}
+              textareaRef={composerRef}
+            />
           </div>
           <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
             <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
               <button
                 type="button"
-                className="composer-bare inline-flex items-center justify-center rounded-sm p-1.5 text-text transition-[background] duration-150 ease-standard hover:bg-surface"
+                className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-bare`}
                 title="Data sources"
                 aria-label="Data sources"
                 aria-haspopup="dialog"
@@ -5797,7 +6239,7 @@ export function ChatPanel({
             />
             <button
               type="button"
-              className="composer-attach inline-flex shrink-0 items-center justify-center w-7.5 h-7.5 rounded-sm text-text cursor-pointer transition-[background] duration-150 ease-standard [&:hover]:bg-surface"
+              className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-attach`}
               title="Attach a PDF or image"
               aria-label="Attach a PDF or image"
               onClick={() => fileInputRef.current?.click()}
@@ -5807,7 +6249,7 @@ export function ChatPanel({
             {planActive && (
               <button
                 type="button"
-                className="plan-indicator group inline-flex h-7.5 shrink-0 items-center gap-1.5 rounded-sm bg-surface px-2 text-sm text-muted transition-colors hover:text-text focus-visible:text-text"
+                className={`${COMPOSER_CONTROL_CLASS_NAME} plan-indicator group shrink-0 gap-1.5 bg-surface px-2 text-sm text-muted hover:text-text focus-visible:text-text`}
                 title="Exit Plan mode"
                 aria-label="Exit Plan mode"
                 onClick={() => void exitPlanMode()}
@@ -5823,19 +6265,21 @@ export function ChatPanel({
             {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
                 message. */}
-            <ModelPicker
-              value={composerSelection}
-              onSelect={selectModel}
-              permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
-              defaultPermissionId={opts?.defaultPermissionMode ?? null}
-              onSelectPermission={setPermissionMode}
-              reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
-              defaultReasoningId={reasoning.defaultId}
-              onSelectReasoning={setReasoningLevel}
-              onHarnesses={setHarnesses}
-              lockHarness={!!openSession}
-            />
-            <ContextMeter usage={openSession?.contextUsage} />
+            <div className="flex min-w-0 items-center">
+              <ModelPicker
+                value={composerSelection}
+                onSelect={selectModel}
+                permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
+                defaultPermissionId={opts?.defaultPermissionMode ?? null}
+                onSelectPermission={setPermissionMode}
+                reasoningChoices={activeHarness?.agentReady ? reasoning.choices : []}
+                defaultReasoningId={reasoning.defaultId}
+                onSelectReasoning={setReasoningLevel}
+                onHarnesses={setHarnesses}
+                lockHarness={!!openSession}
+              />
+              <ContextMeter usage={openSession?.contextUsage} />
+            </div>
             {busy && !pendingQuestion ? (
               // Stop whenever the turn is busy and typed text has nowhere to
               // go — actively streaming, or held on a plan/permission card
@@ -5853,10 +6297,7 @@ export function ChatPanel({
                 onClick={() => void send()}
                 disabled={
                   !activeHarness?.agentReady ||
-                  (!pickedSkill &&
-                    !draft.trim() &&
-                    attachments.length === 0 &&
-                    annotations.length === 0)
+                  (!draft.trim() && attachments.length === 0 && annotations.length === 0)
                 }
               >
                 <CornerDownLeft size={16} />

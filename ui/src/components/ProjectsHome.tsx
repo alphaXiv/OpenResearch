@@ -1,10 +1,16 @@
 import { Plus, Trash2 } from "lucide-react";
-import { Wordmark } from "./Wordmark";
 import { GitHubMark } from "./BackendLogos";
 import { useEffect, useRef, useState } from "react";
-import { deleteProject, timeAgo, type Project } from "../api";
+import {
+  deleteProject,
+  listProjectActivity,
+  timeAgo,
+  type Project,
+  type ProjectActivity,
+} from "../api";
+import { onProjectActivityEvent } from "../events";
 import { NewProjectForm } from "./NewProjectForm";
-import { BUTTON_CLASS_NAME, MONO_CLASS_NAME } from "../styleClasses";
+import { BUTTON_CLASS_NAME } from "../styleClasses";
 
 export function NewProjectDialog({
   onClose,
@@ -25,7 +31,7 @@ export function NewProjectDialog({
       [...dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
       )];
-    (focusable()[0] ?? dialog).focus();
+    (dialog.querySelector<HTMLElement>("[data-initial-focus]") ?? focusable()[0] ?? dialog).focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -71,14 +77,14 @@ export function NewProjectDialog({
 
   return (
     <div
-      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.42)] flex items-center justify-center p-5 overflow-y-auto z-100"
+      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.42)] flex items-start justify-center p-5 [--new-project-modal-top:clamp(4rem,20vh,24rem)] pt-[var(--new-project-modal-top)] overflow-y-auto z-100"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={dialogRef}
-        className="modal w-120 max-w-full max-h-[calc(100vh_-_40px)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl"
+        className="modal w-120 max-w-full max-h-[calc(100vh_-_var(--new-project-modal-top)_-_1.25rem)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl [&_h2]:font-medium"
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-project-dialog-title"
@@ -88,6 +94,112 @@ export function NewProjectDialog({
         <NewProjectForm onCancel={onClose} onCreated={onCreated} />
       </div>
     </div>
+  );
+}
+
+function DeleteProjectDialog({
+  project,
+  deleting,
+  error,
+  onClose,
+  onConfirm,
+}: {
+  project: Project;
+  deleting: boolean;
+  error: string | null;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  const deletingRef = useRef(deleting);
+  onCloseRef.current = onClose;
+  deletingRef.current = deleting;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = () =>
+      [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])')];
+    (focusable()[0] ?? dialog).focus();
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!deletingRef.current) onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const controls = focusable();
+      if (controls.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown, true);
+      previousFocus?.focus();
+    };
+  }, []);
+
+  const hasSyncedRepository = Boolean(
+    project.githubEnabled && (project.githubUrl || (project.githubOwner && project.githubRepo)),
+  );
+
+  return (
+    <div
+      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.42)] flex items-center justify-center p-5 overflow-y-auto z-100"
+      onClick={(event) => {
+        if (!deleting && event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="modal w-110 max-w-full bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-project-dialog-title"
+        aria-describedby="delete-project-dialog-description"
+        tabIndex={-1}
+      >
+        <h2 id="delete-project-dialog-title" className="mt-0 mb-3 text-xl">Delete project?</h2>
+        <div id="delete-project-dialog-description" className="flex flex-col gap-2 text-md leading-normal text-subtext">
+          <p className="m-0">
+            Delete <strong className="font-semibold text-text">{project.name}</strong> from OpenResearch?
+            Its experiments, runs, and chats will be permanently removed.
+          </p>
+          <p className="m-0">
+            The local folder{hasSyncedRepository ? " and linked GitHub repository are" : " is"} kept.
+          </p>
+          {error && <p className="m-0 text-accent-red" role="alert">{error}</p>}
+        </div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button className={BUTTON_CLASS_NAME} disabled={deleting} onClick={onClose}>Cancel</button>
+          <button className={`${BUTTON_CLASS_NAME} danger`} disabled={deleting} onClick={onConfirm}>
+            {deleting ? "Deleting…" : "Delete project"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LiveDot() {
+  return (
+    <span className="activity-pulse h-2 w-2 shrink-0 rounded-full bg-accent-teal animate-[or-pulse_1.2s_ease-in-out_infinite]" />
   );
 }
 
@@ -104,20 +216,52 @@ export function ProjectsHome({
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null);
+  const [activityByProject, setActivityByProject] = useState<Record<string, ProjectActivity>>({});
+  const activityRequestRef = useRef(0);
+  const activityKey = projects.map((project) => project.id).join("\u0000");
+
+  useEffect(() => {
+    let current = true;
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const refresh = () => {
+      refreshTimer = null;
+      const requestId = ++activityRequestRef.current;
+      void listProjectActivity()
+        .then((activity) => {
+          if (!current || requestId !== activityRequestRef.current) return;
+          setActivityByProject(
+            Object.fromEntries(activity.map((summary) => [summary.projectId, summary])),
+          );
+        })
+        .catch(() => {});
+    };
+    const scheduleRefresh = () => {
+      if (refreshTimer !== null) return;
+      refreshTimer = setTimeout(refresh, 100);
+    };
+
+    refresh();
+    const unsubscribe = onProjectActivityEvent(scheduleRefresh);
+    return () => {
+      current = false;
+      unsubscribe();
+      if (refreshTimer !== null) clearTimeout(refreshTimer);
+    };
+  }, [activityKey]);
 
   async function onDelete(p: Project) {
-    const hasGithubRepository = Boolean(p.githubUrl || (p.githubOwner && p.githubRepo));
-    const ok = window.confirm(
-      `Delete project "${p.name}"?\n\nIts experiments, runs and chats are removed from orx. ` +
-        `The local folder (${p.path})${hasGithubRepository ? " and its GitHub repository" : ""} are kept.`,
-    );
-    if (!ok) return;
     setDeleting(p.id);
+    setDeleteError(null);
     try {
       await deleteProject(p.id);
+      setDeleteError(null);
+      setProjectPendingDelete(null);
       onDeleted(p.id);
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err));
+      setDeleteError(err instanceof Error ? err.message : String(err));
     } finally {
       setDeleting(null);
     }
@@ -125,11 +269,8 @@ export function ProjectsHome({
 
   return (
     <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas">
-      <div className="home-inner max-w-155 my-0 mx-auto pt-12 px-6 pb-16">
-        <div className="home-brand font-display text-4xl tracking-[-0.02em] mb-9">
-          <Wordmark />
-        </div>
-        <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-2xl [&_h2]:tracking-[-0.01em]">
+      <div className="home-inner max-w-290 my-0 mx-auto pt-12 px-6 pb-16 [@media((max-width:_960px))]:pt-6 [@media((max-width:_960px))]:px-4">
+        <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-4xl [&_h2]:tracking-[-0.02em] [@media((max-width:_520px))]:items-start [@media((max-width:_520px))]:flex-col">
           <h2>Projects</h2>
           <button
             className={BUTTON_CLASS_NAME}
@@ -138,67 +279,129 @@ export function ProjectsHome({
             <Plus size={15} /> New project
           </button>
         </div>
-        <div className="home-list flex flex-col gap-2.5">
-          {projects.length === 0 ? (
-            <div className="changes-note text-sm text-muted">No projects yet — create one to get started.</div>
-          ) : (
-            [...projects].sort((a, b) => b.updatedAt - a.updatedAt).map((p) => {
-              const hasGithubRepository = Boolean(p.githubUrl || (p.githubOwner && p.githubRepo));
-              const githubUrl =
-                p.githubUrl ??
-                (p.githubOwner && p.githubRepo
-                  ? `https://github.com/${p.githubOwner}/${p.githubRepo}`
-                  : null);
-              const githubState = p.githubEnabled
-                ? "GitHub syncing on"
-                : hasGithubRepository
-                  ? "GitHub syncing off"
-                  : "local only";
-              return (
-              <div
-                key={p.id}
-                className="project-card relative flex flex-col gap-1 text-left py-3.5 px-4 bg-background border border-border rounded-lg cursor-pointer transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-[0_3px_12px_color-mix(in_srgb,_var(--text)_8%,_transparent)] [&_>_:not(.project-card-open,_.project-delete)]:relative [&_>_:not(.project-card-open,_.project-delete)]:z-1 [&_>_:not(.project-card-open,_.project-delete)]:pointer-events-none [&_.project-delete]:absolute [&_.project-delete]:top-2.5 [&_.project-delete]:right-2.5 [&_.project-delete]:z-2 [&_.project-delete]:hidden [&_.project-delete]:p-[5px] [&_.project-delete]:rounded-sm [&_.project-delete]:text-muted [&_.project-delete]:leading-[0] [&:is(:hover,_:focus-within)_.project-delete]:block [&_.name]:font-semibold [&_.name]:text-base [&_.paper]:text-xs [&_.paper]:text-muted [&_.time]:text-xs [&_.time]:text-muted"
-              >
-                <button
-                  className="project-card-open absolute inset-0 rounded-[inherit] [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid [&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2"
-                  aria-label={`Open ${p.name}`}
-                  onClick={() => onOpen(p.id)}
-                />
-                <span className="name">{p.name}</span>
-                <span className={`project-card-sync [&_a]:pointer-events-auto inline-flex items-center self-start gap-[7px] text-text [&_a]:inline-flex [&_a]:text-subtext [&_a:hover]:text-text ${MONO_CLASS_NAME}`}>
-                  {githubState}
-                  {p.githubEnabled && githubUrl && (
-                    <a
-                      href={githubUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      data-tip="Open repository on GitHub"
-                      aria-label={`Open ${p.name} on GitHub`}
-                      onClick={(event) => event.stopPropagation()}
-                    >
-                      <GitHubMark size={14} />
-                    </a>
-                  )}
-                </span>
-                {p.paperId && <span className={`paper ${MONO_CLASS_NAME}`}>arXiv {p.paperId}</span>}
-                <span className="time">created {timeAgo(p.createdAt)}</span>
-                <button
-                  className="project-delete [&:hover]:text-[var(--danger,_#d33)] [&:hover]:bg-[var(--overlay,_rgba(0,_0,_0,_0.05))]"
-                  data-tip={`Delete ${p.name}`}
-                  data-tip-align="end"
-                  aria-label={`Delete ${p.name}`}
-                  disabled={deleting === p.id}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(p);
-                  }}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-              );
-            })
-          )}
+        <div className="home-list overflow-hidden rounded-lg border border-border bg-background">
+          <div>
+            <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 pl-4 pr-2 text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
+              <span>Project</span>
+              <span>Agents</span>
+              <span>Experiments</span>
+              <span>Repository</span>
+            </div>
+            {projects.length === 0 ? (
+              <div className="py-8 px-4 text-sm text-muted">No projects yet — create one to get started.</div>
+            ) : (
+              [...projects].sort((a, b) => {
+                const aActivity = activityByProject[a.id]?.lastMessageAt ?? a.createdAt;
+                const bActivity = activityByProject[b.id]?.lastMessageAt ?? b.createdAt;
+                return bActivity - aActivity || a.name.localeCompare(b.name);
+              }).map((p) => {
+                const summary = activityByProject[p.id];
+                const githubUrl = p.githubEnabled
+                  ? p.githubUrl ??
+                    (p.githubOwner && p.githubRepo
+                      ? `https://github.com/${p.githubOwner}/${p.githubRepo}`
+                      : null)
+                  : null;
+                const githubState = githubUrl
+                  ? p.githubOwner && p.githubRepo
+                    ? `${p.githubOwner}/${p.githubRepo}`
+                    : githubUrl
+                        .replace(/^https?:\/\/github\.com\//, "")
+                        .replace(/\.git$/, "")
+                        .replace(/\/$/, "")
+                  : "Local";
+                const agentsLabel = summary
+                  ? summary.activeAgents > 0
+                    ? `${summary.activeAgents} active`
+                    : "Idle"
+                  : "—";
+                const agentTotal = summary
+                  ? `${summary.totalAgents} total agent${summary.totalAgents === 1 ? "" : "s"}`
+                  : "—";
+                const experimentLabel = !summary
+                  ? "—"
+                  : summary.runningExperiments > 0
+                    ? `${summary.runningExperiments} running`
+                    : summary.totalExperiments === 0
+                      ? "None"
+                      : `${summary.totalExperiments} total`;
+                const experimentTotal =
+                  summary && summary.runningExperiments > 0
+                    ? `${summary.totalExperiments} total`
+                    : null;
+                return (
+                  <div
+                    key={p.id}
+                    className="group project-row relative grid cursor-pointer grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border-variant py-4 pl-4 pr-2 text-left transition-colors duration-120 ease-standard last:border-b-0 hover:bg-surface-bright focus-within:bg-surface-bright [@media((max-width:_960px))]:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)] [@media((max-width:_960px))]:items-start [@media((max-width:_960px))]:gap-x-4 [@media((max-width:_960px))]:gap-y-3 [@media((max-width:_960px))]:py-4 [@media((max-width:_960px))]:px-4 [@media((max-width:_600px))]:grid-cols-2"
+                  >
+                    <button
+                      className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
+                      aria-label={`Open ${p.name}`}
+                      onClick={() => onOpen(p.id)}
+                    />
+                    {/* Cells stay click-transparent so the stretched button owns row navigation. */}
+                    <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
+                      <span className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
+                      <span className="relative z-2 flex items-center gap-1.5 text-xs text-muted [@media((max-width:_960px))]:flex-wrap">
+                        <span>Created {timeAgo(p.createdAt)}</span>
+                        {p.paperId && <span aria-hidden="true">·</span>}
+                        {p.paperId && <span>arXiv paper ID: {p.paperId}</span>}
+                        <button
+                          className="project-row-secondary project-row-delete inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm leading-0 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface hover:text-accent-red group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto focus:opacity-100 focus:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-text"
+                          aria-label={`Delete ${p.name}`}
+                          disabled={deleting === p.id}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setDeleteError(null);
+                            setProjectPendingDelete(p);
+                          }}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </span>
+                    </div>
+                    <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">Agents</span>
+                      <span className="inline-flex items-center gap-2 text-md text-text">
+                        {summary && summary.activeAgents > 0 && (
+                          <LiveDot />
+                        )}
+                        {agentsLabel}
+                      </span>
+                      <span className="text-xs text-muted">{agentTotal}</span>
+                    </div>
+                    <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">Experiments</span>
+                      <span className="inline-flex items-center gap-2 text-md text-text">
+                        {summary && summary.runningExperiments > 0 && (
+                          <LiveDot />
+                        )}
+                        {experimentLabel}
+                      </span>
+                      {experimentTotal && <span className="text-xs text-muted">{experimentTotal}</span>}
+                    </div>
+                    <div className="relative z-1 min-w-0 pointer-events-none [@media((max-width:_600px))]:col-span-2">
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:mb-1 [@media((max-width:_960px))]:block">Repository</span>
+                      {githubUrl ? (
+                        <a
+                          className="project-row-secondary inline-flex max-w-full items-center gap-2 text-sm text-text no-underline pointer-events-auto hover:underline underline-offset-2"
+                          href={githubUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Open ${p.name} on GitHub`}
+                        >
+                          <span className="inline-flex shrink-0"><GitHubMark size={14} /></span>
+                          <span className="overflow-hidden text-ellipsis whitespace-nowrap [@media((max-width:_960px))]:whitespace-normal [@media((max-width:_960px))]:break-all">{githubState}</span>
+                        </a>
+                      ) : (
+                        <span className="text-sm text-text pointer-events-none">{githubState}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
         </div>
       </div>
 
@@ -209,6 +412,18 @@ export function ProjectsHome({
             setModalOpen(false);
             onCreated(project, githubPublicationError);
           }}
+        />
+      )}
+      {projectPendingDelete && (
+        <DeleteProjectDialog
+          project={projectPendingDelete}
+          deleting={deleting === projectPendingDelete.id}
+          error={deleteError}
+          onClose={() => {
+            setDeleteError(null);
+            setProjectPendingDelete(null);
+          }}
+          onConfirm={() => void onDelete(projectPendingDelete)}
         />
       )}
     </div>

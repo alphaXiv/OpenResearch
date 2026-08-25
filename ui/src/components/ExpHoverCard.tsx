@@ -23,6 +23,7 @@ import { BackendBadge } from "./BackendLogos";
 import { countChanges } from "./GitDiff";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const CARD_W = 380;
 const GAP = 12; // node ↔ card
@@ -129,8 +130,8 @@ export function ExpHoverCard({
   parentSlug: string | null;
   /** Viewport rect of the hovered node (kept fresh by useHoverIntent). */
   anchor: DOMRect;
-  onOpenLogs?: () => void;
-  onOpenCode: () => void;
+  onOpenLogs?: (intent: TabOpenIntent) => void;
+  onOpenCode: (intent: TabOpenIntent) => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -259,12 +260,18 @@ export function ExpHoverCard({
       {exp.title && <div className="hc-title">{exp.title}</div>}
       <div className="hc-actions">
         {onOpenLogs && (
-          <button type="button" onClick={onOpenLogs}>
+          <button
+            type="button"
+            {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenLogs)}
+          >
             <Terminal size={13} />
             Logs
           </button>
         )}
-        <button type="button" onClick={onOpenCode}>
+        <button
+          type="button"
+          {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
+        >
           <FolderTree size={13} />
           Code
         </button>

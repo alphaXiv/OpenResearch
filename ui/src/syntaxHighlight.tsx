@@ -5,6 +5,10 @@
 
 import type { ReactNode } from "react";
 import { refractor } from "refractor";
+import latex from "refractor/latex";
+
+// The common bundle stops short of latex, and .tex is a first-class file here.
+refractor.register(latex);
 
 interface HastNode {
   type: string;

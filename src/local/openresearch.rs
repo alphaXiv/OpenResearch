@@ -201,7 +201,7 @@ pub async fn submit_local_openresearch_with_source(
         cancel_requested: store
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
-        chat_session_id: crate::local::chat::launching_chat_session(),
+        chat_session_id: args.launching_chat_session(),
     };
 
     // From here the box is billing: never leak it behind an error the store

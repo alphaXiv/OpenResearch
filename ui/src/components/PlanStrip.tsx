@@ -1,5 +1,6 @@
 import { ChevronDown, CornerDownLeft, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const PROMPT_ACTIONS_CLASS_NAME = [
   "prompt-actions flex flex-wrap [&_.btn-primary]:inline-flex",
@@ -62,7 +63,7 @@ export function PlanStrip({
   /** The harness's display name for the strip copy (e.g. "Claude Code",
    * "Codex"); falls back to a generic label when the harness is unknown. */
   agentLabel: string;
-  onView: () => void;
+  onView: (intent: TabOpenIntent) => void;
   onApprove: (resumeMode?: "auto" | "bypassPermissions") => void;
   /** Claude approval chooses its next permission mode; Codex preserves the
    * current permission choice and only leaves the independent Plan axis. */
@@ -110,7 +111,10 @@ export function PlanStrip({
         <span className="plan-strip-title text-md font-semibold whitespace-nowrap">
           {synthesized ? `${agentLabel} is ready to proceed` : `${agentLabel} proposed a plan`}
         </span>
-        <button className="plan-strip-open ml-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline" onClick={onView}>
+        <button
+          className="plan-strip-open ml-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
+          {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
+        >
           Open plan
         </button>
       </div>

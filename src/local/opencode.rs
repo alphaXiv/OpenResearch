@@ -31,15 +31,8 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `opencode` on PATH, else the installer's default drop location.
 pub fn find_opencode() -> Result<PathBuf> {
-    if let Some(paths) = crate::local::shell_env::search_path() {
-        // An empty component (`PATH=":/usr/bin"`) means cwd — never a place to
-        // pick up a binary we are about to execute. Mirrors `find_on_path`.
-        for dir in std::env::split_paths(&paths).filter(|dir| !dir.as_os_str().is_empty()) {
-            let candidate = dir.join("opencode");
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
+    if let Some(found) = crate::local::shell_env::find_on_path("opencode") {
+        return Ok(found);
     }
     if let Some(home) = dirs::home_dir() {
         let fallback = home.join(".opencode").join("bin").join("opencode");
@@ -100,27 +93,84 @@ fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
     serde_json::to_string_pretty(&cfg).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// The local research playbook: project context, cardinal rules, and the local
-/// command surface used by `orx up`.
+/// The research playbook: durable project context and skill routing for `orx up`.
 /// The playbook template — a literal, GitHub-readable markdown file. Rendered
 /// by [`playbook_md`]: the leading HTML comment is stripped and `{token}`
-/// placeholders are substituted (project facts, the compute default, and the
-/// skills index).
+/// placeholders are substituted (project facts, state, skills, and the compute default).
 const SYSTEM_PROMPT: &str = include_str!("../../SYSTEM_PROMPT.md");
 
-fn playbook_md(project: &LocalProject) -> String {
-    let all_backends_enabled = true;
+#[derive(Default)]
+struct ProjectState {
+    experiments: usize,
+    runs: usize,
+    active_runs: usize,
+}
+
+impl ProjectState {
+    fn load(project_id: &str) -> Result<Self> {
+        let store = store::Store::open()?;
+        let experiments = store.list_experiments_by_project(project_id)?.len();
+        let runs = store.list_runs_by_project(project_id)?;
+        let active_runs = runs
+            .iter()
+            .filter(|run| matches!(run.status.as_str(), "starting" | "running"))
+            .count();
+        Ok(Self {
+            experiments,
+            runs: runs.len(),
+            active_runs,
+        })
+    }
+}
+
+fn plural(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+fn project_state_md(project: &LocalProject, state: &ProjectState) -> String {
+    let has_run_command = project
+        .run_command
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty());
+    let run_command = if has_run_command {
+        "The fixed run command is configured."
+    } else {
+        "No fixed run command is configured."
+    };
+
+    if state.experiments == 0 && state.runs == 0 {
+        let fresh_run_command = if has_run_command {
+            "the fixed run command is configured."
+        } else {
+            "no fixed run command is configured."
+        };
+        return format!(
+            "This is a fresh project: **0 experiments and 0 runs**. The experiment tree is empty \
+             and {fresh_run_command}"
+        );
+    }
+
+    let active = if state.active_runs == 0 {
+        "no active runs".to_string()
+    } else {
+        format!("{} active", plural(state.active_runs, "run", "runs"))
+    };
+    format!(
+        "This project currently has **{}** and **{}** ({active}). {run_command} This is an \
+         orientation snapshot; use `orx` when you need live details.",
+        plural(state.experiments, "experiment", "experiments"),
+        plural(state.runs, "run", "runs"),
+    )
+}
+
+fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
     let id = &project.id;
     let name = &project.name;
     let publication_line = if project.github_enabled() {
-        "- Source: immutable snapshots from committed local Git revisions\n- GitHub publication: enabled for experiment visibility; never used for compute transport"
+        "- GitHub publication: enabled for experiment visibility; never used for compute transport"
     } else {
-        "- Source: immutable snapshots from committed local Git revisions\n- GitHub publication: disabled"
+        "- GitHub publication: disabled"
     };
-    let experiment_publish_clause = "created locally";
-    let edit_step = "2. **Edit** in this worktree: check out `<branch>`, change the code, and commit. Do not push just to launch compute; `orx` snapshots the committed revision directly.";
-    let compute_contract = "Every backend receives the same immutable archive of the recorded local Git revision; no backend clones a repository or needs GitHub credentials.";
-    let baseline = &project.baseline_branch;
     let artifacts = super::files::files_dir(project)
         .to_string_lossy()
         .into_owned();
@@ -140,118 +190,26 @@ fn playbook_md(project: &LocalProject) -> String {
     // told to OMIT `--backend`, never to echo the default back, so even a
     // stale prompt launches on the current default.
     let configured_compute_default = crate::config::compute_default();
-    let compute_default = if all_backends_enabled {
-        Some(
-            configured_compute_default
-                .clone()
-                .unwrap_or_else(|| ("local".to_string(), None)),
-        )
-    } else {
-        Some(("local".to_string(), None))
-    };
+    let compute_default = configured_compute_default
+        .clone()
+        .unwrap_or_else(|| ("local".to_string(), None));
     let compute_default_source = if configured_compute_default.is_some() {
         "the user's configured default"
     } else {
-        "the local fallback"
+        "the default `local` backend"
     };
-    let compute_bullet = if !all_backends_enabled {
-        "- Compute: run immutable snapshots of recorded commits on configured backends.".to_string()
-    } else {
-        match &compute_default {
-        Some((b, f)) => {
-            let flavor_part = f
-                .as_ref()
-                .map_or(String::new(), |f| format!(" (`--flavor {f}`)"));
-            format!(
-                "- Compute: default target **{b}**{flavor_part} — {compute_default_source}; omit `--backend` \
-                 on `orx exp run` to launch there. \
-                 Use another backend only when the user names one (see \"Compute backends\")"
-            )
-        }
-        None => {
-            "- Compute: backends — `hf`, `modal`, `k8s`, `ssh`, `slurm`, `ray`, or `local` —\n  \
-                 chosen by the user per run; **there is no default backend** (see \"Compute\n  \
-                 backends\")"
-                .to_string()
-        }
-        }
-    };
-    let backends_intro = if !all_backends_enabled {
-        "`orx exp run` transfers the recorded source snapshot to the selected backend.".to_string()
-    } else {
-        match &compute_default {
-            Some((b, f)) => {
-                let flavor_part = f
-                    .as_ref()
-                    .map_or(String::new(), |f| format!(" --flavor {f}"));
-                // The omit-instruction must match what a bare launch actually
-                // needs: with a saved flavor both flags can go; a flavor-required
-                // backend without one still needs --flavor; ssh always needs
-                // --host. Contradicting the launch validation here sends the
-                // agent into a guaranteed-failing command.
-                let omit_hint = if f.is_some() {
-                    "Omit it (and `--flavor`) to use the default.".to_string()
-                } else if super::FLAVOR_REQUIRED_BACKENDS.contains(&b.as_str()) {
-                    "Omit `--backend` to use the default, but still pass `--flavor` — no default \
-                 flavor is saved."
-                        .to_string()
-                } else {
-                    "Omit it to use the default.".to_string()
-                };
-                let mut s = format!(
-                    "`orx exp run` launches on {compute_default_source} — **{b}{flavor_part}** \
-                 — when you omit `--backend`. {omit_hint} \
-                 Deviate only when the user names another backend for the task or this \
-                 conversation — a connected token for some other backend is NOT a signal to \
-                 switch."
-                );
-                if b == "ssh" {
-                    s.push_str(" (`--host <alias>` is still required on every launch.)");
-                }
-                s
-            }
-            None => "`orx exp run` requires an explicit `--backend` — **there is no default**.\n\
-                 Which backend to use is the user's decision: if the task doesn't name one and\n\
-                 the user hasn't already picked one in this conversation, ask before launching."
-                .to_string(),
-        }
-    };
-    let (run_invocation, run_guidance, compute_guidance) = if all_backends_enabled {
-        (
-            "`orx exp run <expId> [--backend <hf|modal|k8s|ssh|slurm|openresearch|local>] [flags]`",
-            "Launch the node's run. Backend flags, flavors, and sizing: **`orx-compute` skill** (k8s manifest: **`orx-compute-k8s`**).",
-            "Before launching on a backend you have not used this session, load the `orx-compute` skill; k8s additionally needs `orx-compute-k8s`.",
-        )
-    } else {
-        (
-            "`orx exp run <expId> [--backend <name>] [flags]`",
-            "Launch the recorded commit on a configured backend.",
-            "Load `orx-compute` for the launch and wait contract.",
-        )
-    };
-    let skills_scope = if all_backends_enabled {
-        "backend flags and sizing, the k8s manifest, tree shaping, git recipes, log analysis, and artifact naming"
-    } else {
-        "local runs, tree shaping, local git recipes, log analysis, and artifact naming"
-    };
-    let launch_step = if !all_backends_enabled {
-        "3. **Launch**: `orx exp run <expId>` using the configured backend."
-    } else if compute_default.is_some() {
-        "3. **Launch**: `orx exp run <expId>` — omitting `--backend` uses the default\n   \
-         target (flags the default still needs are listed under \"Compute backends\") —\n   \
-         or name one explicitly (`--flavor` for hf/modal/ray, `--host` for ssh/slurm; k8s\n   \
-         reads the committed manifest; local takes no flags)."
-    } else {
-        "3. **Launch**: `orx exp run <expId> --backend <backend>` (`--flavor` for\n   \
-         hf/modal/ray, `--host` for ssh/slurm; k8s reads the committed manifest; local\n   \
-         takes no flags)."
-    };
-    // The modular skills installed into this session's worktree (see
-    // `agent_skills::ensure_session_skills`). Generated from the Local set so
-    // the playbook index and the files on disk can never drift.
-    let skills_list = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
+    let (compute_backend, compute_flavor) = &compute_default;
+    let flavor_part = compute_flavor
+        .as_ref()
+        .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
+    let compute_bullet = format!(
+        "- Compute: default target **{compute_backend}**{flavor_part} — \
+         {compute_default_source}; load **`orx-compute`** before launching"
+    );
+    let project_state = project_state_md(project, state);
+    let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
         .iter()
-        .map(|s| format!("- **{}** — {}", s.name, s.description))
+        .map(|skill| format!("- `{}`", skill.name))
         .collect::<Vec<_>>()
         .join("\n");
     let template = SYSTEM_PROMPT
@@ -262,20 +220,11 @@ fn playbook_md(project: &LocalProject) -> String {
         .replace("{name}", name)
         .replace("{id}", id)
         .replace("{publication_line}", publication_line)
-        .replace("{experiment_publish_clause}", experiment_publish_clause)
-        .replace("{edit_step}", edit_step)
-        .replace("{compute_contract}", compute_contract)
-        .replace("{baseline}", baseline)
         .replace("{paper_line}", &paper_line)
         .replace("{compute_bullet}", &compute_bullet)
         .replace("{artifacts}", &artifacts)
-        .replace("{skills_list}", &skills_list)
-        .replace("{launch_step}", launch_step)
-        .replace("{backends_intro}", &backends_intro)
-        .replace("{run_invocation}", run_invocation)
-        .replace("{run_guidance}", run_guidance)
-        .replace("{compute_guidance}", compute_guidance)
-        .replace("{skills_scope}", skills_scope)
+        .replace("{project_state}", &project_state)
+        .replace("{skill_names}", &skill_names)
 }
 
 /// Keep the files we drop into the checkout out of `git status` / accidental
@@ -295,6 +244,7 @@ fn exclude_agent_files(hub: &Path) {
         ".claude/skills/",
         ".opencode/skills/",
         ".agents/skills/",
+        ".orx/latex-templates/",
     ]
     .into_iter()
     .filter(|entry| !existing.lines().any(|l| l.trim() == *entry))
@@ -340,7 +290,8 @@ pub fn ensure_playbook(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&playbook, playbook_md(project))
+    let project_state = ProjectState::load(&project.id)?;
+    std::fs::write(&playbook, playbook_md(project, &project_state))
         .map_err(|e| anyhow!("Could not write {}: {}", playbook.display(), e))?;
     // Modular skills, written fresh beside the playbook (same freshness
     // semantics) so this session's agent discovers them natively.
@@ -349,6 +300,9 @@ pub fn ensure_playbook(
         // User-uploaded skills land beside the built-ins, same freshness.
         super::user_skills::write_into_session(&workdir, dir, &project.id)?;
     }
+    // LaTeX templates the agent copies from, written fresh for the same reason —
+    // and independent of the skills dir, since no harness owns them.
+    super::latex_templates::write_into_session(&workdir, &project.id)?;
     // One shared exclude covers every worktree.
     exclude_agent_files(Path::new(&project.repo_path));
     // The playbook points the agent at the artifacts dir — make sure it exists.
@@ -465,6 +419,7 @@ async fn spawn_agent(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    up_port: Option<u16>,
 ) -> Result<AgentChild> {
     let bin = find_opencode()?;
     // The clone/worktree setup inside can hit the network; keep it off the
@@ -514,7 +469,7 @@ async fn spawn_agent(
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, up_port);
     if let Some(config) = &config_override {
         // The repo tracks its own opencode.json; ours rides OPENCODE_CONFIG.
         // Project configs load after OPENCODE_CONFIG and would override our
@@ -555,6 +510,7 @@ pub struct AgentHost {
     /// clone or health poll must not block status reads or turn replies.
     spawn_lock: Mutex<()>,
     inner: Mutex<HashMap<String, AgentChild>>,
+    up_port: std::sync::OnceLock<u16>,
 }
 
 impl AgentHost {
@@ -563,7 +519,12 @@ impl AgentHost {
             model_override,
             spawn_lock: Mutex::new(()),
             inner: Mutex::new(HashMap::new()),
+            up_port: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn set_up_port(&self, port: u16) {
+        let _ = self.up_port.set(port);
     }
 
     /// Status of every live child; reaps children that died behind our back.
@@ -602,7 +563,13 @@ impl AgentHost {
         }
         // inner released: status()/port reads keep answering while the spawn
         // (clone/fetch + health poll) is in flight instead of hanging.
-        let agent = spawn_agent(project, self.model_override.as_deref(), session_id).await?;
+        let agent = spawn_agent(
+            project,
+            self.model_override.as_deref(),
+            session_id,
+            self.up_port.get().copied(),
+        )
+        .await?;
         let status = agent.status();
         self.inner
             .lock()
@@ -650,135 +617,154 @@ mod tests {
     }
 
     fn sample_playbook() -> String {
-        playbook_md(&sample_project())
+        playbook_md(&sample_project(), &ProjectState::default())
     }
 
-    /// The playbook's "## Skills" index must list exactly the Local-set skills,
-    /// in order — regenerate-and-compare so it can never freeze out of sync with
-    /// `agent_skills::skills` (the same set written into the session worktree).
-    #[test]
-    fn playbook_skills_index_matches_local_set() {
-        let md = sample_playbook();
-        let expected: Vec<String> = agent_skills::skills(SkillSet::Local)
-            .iter()
-            .map(|s| format!("- **{}** — {}", s.name, s.description))
-            .collect();
-
-        // The "## Skills" section body: between the heading and the next `## `.
-        let after = md
-            .split("## Skills\n")
-            .nth(1)
-            .expect("no ## Skills section");
-        let section = after.split("\n## ").next().unwrap();
-
-        let listed: Vec<String> = section
-            .lines()
-            .filter(|l| l.starts_with("- **"))
-            .map(str::to_string)
-            .collect();
-        assert_eq!(
-            listed, expected,
-            "playbook Skills index drifted from Local set"
-        );
-    }
-
-    /// The slimmed playbook keeps its templated conditional logic — the
-    /// compute-default branch's placeholders must still resolve (no leftover
-    /// `{...}` braces from a botched edit).
+    /// The playbook's runtime placeholders must all resolve.
     #[test]
     fn playbook_has_no_unresolved_placeholders() {
         let md = sample_playbook();
-        // Every current token must be substituted — a typo'd or newly added
-        // token that playbook_md doesn't know about fails here.
-        for token in [
-            "{name}",
-            "{id}",
-            "{repo}",
-            "{baseline}",
-            "{paper_line}",
-            "{compute_bullet}",
-            "{artifacts}",
-            "{skills_list}",
+        // Scanned, not listed: a NEWLY ADDED token playbook_md doesn't know
+        // about is exactly the case a hardcoded list cannot catch, and the
+        // agent would read the literal `{token}` as instruction.
+        let leftover: Vec<&str> = md
+            .lines()
+            .flat_map(|line| {
+                line.match_indices('{').filter_map(move |(i, _)| {
+                    let rest = &line[i + 1..];
+                    let end = rest.find('}')?;
+                    let token = &rest[..end];
+                    (!token.is_empty() && token.chars().all(|c| c.is_ascii_lowercase() || c == '_'))
+                        .then_some(&line[i..=i + end + 1])
+                })
+            })
+            .collect();
+        assert!(leftover.is_empty(), "unresolved placeholders: {leftover:?}");
+        for retired in [
+            "{files}",
+            "{memory}",
+            "{experiment_publish_clause}",
+            "{edit_step}",
+            "{compute_contract}",
             "{launch_step}",
             "{backends_intro}",
             "{run_invocation}",
             "{run_guidance}",
             "{compute_guidance}",
             "{skills_scope}",
+            "{max_spawns}",
+            "{skills_list}",
         ] {
-            assert!(!md.contains(token), "unresolved placeholder {token}");
-        }
-        for retired in ["{files}", "{memory}"] {
             assert!(!md.contains(retired), "retired placeholder {retired}");
         }
         // The template's leading HTML comment (repo-reader documentation) must
         // be stripped — the prompt starts at the title.
         assert!(
-            md.starts_with("# OpenResearch local agent"),
+            md.starts_with("# OpenResearch agent"),
             "template comment not stripped"
         );
         assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        // Sanity: the slimmed pointers to the modules survived.
+        // Sanity: skill routing names every installed native skill without
+        // duplicating the descriptions already surfaced by the harness.
+        assert!(md.contains("Use the available OpenResearch skills"));
+        assert!(md.contains("execute important user flows"));
+        assert!(!md.contains("orx skill <name>"));
+        for skill in agent_skills::skills(SkillSet::Local) {
+            assert!(md.contains(&format!("- `{}`", skill.name)));
+            assert!(!md.contains(skill.description));
+        }
         assert!(md.contains("orx-compute"));
-        assert!(md.contains("orx-reports"));
-        assert!(md.contains("orx-evidence"));
+        assert!(md.contains("helping the user across the research process"));
+        assert!(md.contains("The user's current project is **Test Project**"));
+        assert!(!md.contains("running inside `orx up`"));
         assert!(!md.contains("## Memory"));
         assert!(!md.contains("User memory"));
         assert!(!md.contains("Project memory"));
     }
 
     #[test]
-    fn playbook_requires_commits_without_pushes() {
+    fn playbook_keeps_runtime_facts_and_delegates_procedures() {
         let mut project = sample_project();
         project.github_owner.clear();
         project.github_repo.clear();
-        let md = playbook_md(&project);
-        assert!(md.contains("immutable archive"));
-        assert!(md.contains("Do not push just to launch compute"));
-        assert!(md.contains("orx-compute-k8s"));
-        assert!(md.contains("--backend <hf|modal"));
+        let md = playbook_md(&project, &ProjectState::default());
+        assert!(md.contains("default target"));
+        assert!(md.contains("orx-compute"));
+        assert!(md.contains("orx-instances"));
+        assert!(!md.contains("## Cardinal rules"));
+        assert!(!md.contains("## Command index"));
+        assert!(!md.contains("## The auto-research loop"));
+        assert!(!md.contains("## Compute backends"));
     }
 
     #[test]
-    fn playbook_explains_opt_in_run_wakeups() {
+    fn playbook_short_circuits_orientation_for_a_fresh_project() {
         let md = sample_playbook();
-        assert!(md.contains("`orx exp wake <expId>`"));
-        assert!(md.contains("Unregistered runs never wake the chat"));
-        assert!(md.contains("cancelled runs never send a wake-up"));
+        assert!(md.contains("## Project state"));
+        assert!(md.contains("fresh project: **0 experiments and 0 runs**"));
+        assert!(md.contains("experiment tree is empty and no fixed run command is configured"));
+        assert!(!md.contains("Do not inspect the tree"));
+
+        let mut project = sample_project();
+        project.run_command = Some("python train.py".into());
+        let configured = playbook_md(&project, &ProjectState::default());
+        assert!(
+            configured.contains("experiment tree is empty and the fixed run command is configured")
+        );
+    }
+
+    #[test]
+    fn playbook_summarizes_existing_project_state_without_inlining_the_tree() {
+        let mut project = sample_project();
+        project.run_command = Some("python train.py".into());
+        let state = ProjectState {
+            experiments: 12,
+            runs: 18,
+            active_runs: 1,
+        };
+        let md = playbook_md(&project, &state);
+        assert!(md.contains("**12 experiments**"));
+        assert!(md.contains("**18 runs** (1 run active)"));
+        assert!(md.contains("fixed run command is configured"));
+        assert!(md.contains("orientation snapshot"));
+        assert!(!md.contains("Experiment tree:"));
+    }
+
+    #[test]
+    fn compute_skill_explains_opt_in_run_wakeups() {
+        let md = sample_playbook();
+        let compute = agent_skills::find("orx-compute", SkillSet::Local).unwrap();
+        assert!(compute.content.contains("`orx exp wake <expId>`"));
+        assert!(compute.content.contains("Wake-up is opt-in"));
+        assert!(!md.contains("`orx exp wake <expId>`"));
         assert!(!md.contains("OpenResearch injects an `[orx]` message"));
     }
 
     #[test]
-    fn playbook_makes_project_brief_descriptive_not_authoritative() {
+    fn reports_skill_owns_artifact_output_policy() {
         let md = sample_playbook();
-        assert!(md.contains("PROJECT.md describes the project; the user directs it"));
-        assert!(md.contains("the user's latest request"));
-        assert!(md.contains("descriptive, never prescriptive"));
-        assert!(
-            md.contains("Never refuse, delay, redirect, or ask for confirmation solely because")
-        );
-        assert!(md.contains("Do not read the brief at session start"));
-        assert!(md.contains("orx project brief update"));
-        assert!(!md.contains("No project summary yet."));
-        assert!(!md.contains("None proposed yet."));
+        let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
+        assert!(reports.content.contains("descriptive filename"));
+        assert!(reports.content.contains("artifacts root"));
+        assert!(!md.contains("PROJECT.md"));
     }
 
     #[test]
-    fn playbook_requires_clickable_file_references() {
+    fn playbook_owns_clickable_references() {
         let md = sample_playbook();
-        assert!(md.contains("chip renders as a small pill"));
-        assert!(md.contains("every file or"));
-        assert!(md.contains("artifact mentioned in prose"));
-        assert!(md.contains("never a bare or backticked path"));
-        assert!(md.contains("Use repo-relative paths"));
-        assert!(md.contains("committed version"));
-        assert!(md.contains("Logs are the only evidence channel"));
-        assert!(md.contains("run ids come from `orx runs`"));
-        assert!(md.contains("Add a short label to name"));
-        assert!(md.contains("the claim when useful"));
+        let evidence = agent_skills::find("orx-evidence", SkillSet::Local).unwrap();
+        assert!(md.contains("## Evidence and links in chat"));
+        assert!(md.contains("<file path=\"relative/path.py\" />"));
+        assert!(md.contains("exp=\"<experimentId>\""));
+        assert!(md.contains("<run id=\"<runId>\" />"));
         assert!(md.contains("<file path=\"artifacts/<relative-path>\" />"));
-        assert!(md.contains("Wrong: Saved as"));
-        assert!(md.contains("<file path=\"artifacts/figures/result.png\" />"));
+        assert!(md.contains("Scholarly claims use the source links"));
+        assert!(md.contains("Use `$...$` for inline math"));
+        assert!(evidence.content.contains("Validate before reporting"));
+        assert!(evidence
+            .content
+            .contains("Truncated output is not evidence of absence"));
+        assert!(!evidence.content.contains("<file path="));
     }
 
     #[test]
@@ -787,7 +773,10 @@ mod tests {
         local_only.github_owner.clear();
         local_only.github_repo.clear();
 
-        for md in [sample_playbook(), playbook_md(&local_only)] {
+        for md in [
+            sample_playbook(),
+            playbook_md(&local_only, &ProjectState::default()),
+        ] {
             crate::local::assert_agent_guidance_is_ui_agnostic("playbook", &md);
         }
     }

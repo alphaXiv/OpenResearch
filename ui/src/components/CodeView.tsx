@@ -67,7 +67,7 @@ export function CodeView({
           ref={i + 1 === targetLine ? targetRowRef : undefined}
           className={`file-view-line flex items-stretch ${
             i + 1 === targetLine
-              ? "file-view-line-highlight bg-[color-mix(in_srgb,_var(--primary)_16%,_transparent)] shadow-[inset_2px_0_0_var(--primary)]"
+              ? "file-view-line-highlight bg-accent-blue-subtle shadow-[inset_2px_0_0_var(--accent-blue)]"
               : ""
           }`}
         >

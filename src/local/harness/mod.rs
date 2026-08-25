@@ -26,14 +26,15 @@ mod options;
 mod plan_gate;
 pub(crate) mod title;
 
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::error::{anyhow, Result};
+use crate::error::Result;
 use crate::local::chat::{
-    PromptAnswer, ResumeCtx, SteerMessage, SteerReceiver, TurnCtx, WirePrompt,
+    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, SteerReceiver, TurnCtx, WirePrompt,
 };
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
@@ -49,6 +50,62 @@ pub use plan_gate::decide as plan_gate_decide;
 /// bound; the interruption is a clear, recoverable error either way. Shared
 /// by the codex and claude adapters (each applies it to its own event wait).
 pub(crate) const TURN_WATCHDOG: Duration = Duration::from_secs(30 * 60);
+
+pub(crate) const ORX_MAX_RETRIES: u32 = 3;
+pub(crate) const ORX_MAX_ATTEMPTS: u32 = ORX_MAX_RETRIES + 1;
+pub(crate) const ORX_RETRY_BUDGET: Duration = Duration::from_secs(15);
+
+/// Delay before retry number 1/2/3. Jitter is deterministic per turn and
+/// retry number so status rendered before sleeping always matches the sleep.
+pub(crate) fn orx_retry_delay(
+    turn_id: &str,
+    retry_number: u32,
+    explicit: Option<Duration>,
+) -> Option<Duration> {
+    if retry_number == 0 || retry_number > ORX_MAX_RETRIES {
+        return None;
+    }
+    let base = Duration::from_secs(1 << (retry_number - 1));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    turn_id.hash(&mut hasher);
+    retry_number.hash(&mut hasher);
+    let unit = (hasher.finish() % 10_001) as f64 / 10_000.0;
+    let jittered = base.mul_f64(0.75 + unit * 0.5);
+    let delay = explicit.unwrap_or(jittered);
+    (delay <= ORX_RETRY_BUDGET).then_some(delay)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOutcome {
+    Completed,
+}
+
+#[derive(Debug)]
+pub struct TurnFailure {
+    pub kind: &'static str,
+    pub message: String,
+    pub delivery: DeliveryState,
+}
+
+impl TurnFailure {
+    pub fn adapter(error: crate::error::Error, delivery: DeliveryState) -> Self {
+        Self {
+            kind: "adapter_error",
+            message: error.to_string(),
+            delivery,
+        }
+    }
+}
+
+impl std::fmt::Display for TurnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TurnFailure {}
+
+pub type TurnResult = std::result::Result<TurnOutcome, TurnFailure>;
 
 /// How an answered interactive prompt flows back into the harness. The two axes
 /// a harness can live on:
@@ -113,8 +170,12 @@ pub trait Harness: Send + Sync {
 
     /// Run one chat turn: spawn the CLI, parse its event stream, push wire
     /// parts onto `ctx`. Default is "not a chat harness".
-    async fn run_turn(&self, _ctx: &mut TurnCtx) -> Result<()> {
-        Err(anyhow!("{} cannot run chat turns", self.id()))
+    async fn run_turn(&self, _ctx: &mut TurnCtx) -> TurnResult {
+        Err(TurnFailure {
+            kind: "unsupported",
+            message: format!("{} cannot run chat turns", self.id()),
+            delivery: DeliveryState::Rejected,
+        })
     }
 
     /// Whether this harness can take user input into a running turn. Gates
@@ -583,5 +644,24 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn orx_retry_policy_is_bounded_and_jittered() {
+        for retry in 1..=ORX_MAX_RETRIES {
+            let delay = orx_retry_delay("turn-a", retry, None).unwrap();
+            let base = Duration::from_secs(1 << (retry - 1));
+            assert!(delay >= base.mul_f64(0.75));
+            assert!(delay <= base.mul_f64(1.25));
+            assert_eq!(delay, orx_retry_delay("turn-a", retry, None).unwrap());
+        }
+        assert!(orx_retry_delay("turn-a", 0, None).is_none());
+        assert!(orx_retry_delay("turn-a", ORX_MAX_RETRIES + 1, None).is_none());
+        assert!(orx_retry_delay(
+            "turn-a",
+            1,
+            Some(ORX_RETRY_BUDGET + Duration::from_millis(1))
+        )
+        .is_none());
     }
 }

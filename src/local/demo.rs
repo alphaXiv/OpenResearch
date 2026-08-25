@@ -31,8 +31,8 @@ const LITERATURE_ASSISTANT_MESSAGE_ID: &str = "msg_demo_nanochat_literature_assi
 const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
-const BASELINE_SHA: &str = "1b3a42272a65478d26306696cb7bcb80e26c2e18";
-const EXPERIMENT_SHA: &str = "346231fe75f91cd62b3040195993f33dc0e1853b";
+const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
+const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
@@ -75,27 +75,6 @@ const RESULT_MARKDOWN: &str = r#"Completed the nanochat CPU / Apple-Silicon pipe
 - SFT: 1,500 steps, final validation BPB 0.7389
 - Chat confirmation: the model answered that the capital of France is Paris
 - Evidence pack: [README](evidence/README.md), structured metrics, checkpoint metadata, tokenizer, inference transcript, and run manifest
-"#;
-
-const PROJECT_BRIEF: &str = r#"# Objective
-
-Explore how OpenResearch organizes a realistic research project by training and evaluating Andrej Karpathy's [nanochat](https://github.com/karpathy/nanochat), a repository for training a mini-GPT from scratch, on the CPU/Apple-Silicon pipeline.
-
-# Current Project Summary
-
-The recorded `runs/runcpu.sh` pipeline completed successfully on Apple Silicon. A 6-layer, 73.5M-parameter model was pretrained for 5,000 steps, evaluated, supervised-fine-tuned for 1,500 steps, and confirmed through the chat CLI. The bundled evidence contains metrics, checkpoint metadata, the trained tokenizer, figures, and the final inference transcript. Model weights, optimizer states, datasets, and environments were intentionally omitted to keep the demo bundle small.
-
-# Important Highlights
-
-- Base training processed 81.92M tokens and ended at validation BPB 1.165758; the validation curve was still improving at the final checkpoint.
-- Base evaluation measured train BPB 1.152185 and validation BPB 1.119301.
-- SFT reached validation BPB 0.7389, and the final chat CLI answered that the capital of France is Paris.
-- The evidence-backed diagnosis is that insufficient pretraining is the primary bottleneck, with model size a secondary ceiling and SFT likely amplifying repetition.
-
-# Future Experiments
-
-- Keep the d6 model and recipe fixed while extending pretraining to nanochat's target token-to-parameter ratio of 12, evaluating checkpoints at 5,000, about 11,000, and 16,992 steps.
-- If longer pretraining improves the base model but repetition remains after SFT, compare SFT early stopping or a lower learning rate without changing the pretraining recipe.
 "#;
 
 const REPORT: &str = r#"# nanochat CPU / Apple-Silicon pipeline results
@@ -251,7 +230,6 @@ fn seed_at(
     let project_slug = demo_project_slug(store)?;
     let files = data_root.join("files").join(&project_slug);
     std::fs::create_dir_all(&files)?;
-    super::files::ensure_project_brief_contents_at(&files, PROJECT_BRIEF)?;
     std::fs::write(files.join("cpu-apple-silicon-pipeline-results.md"), REPORT)?;
     std::fs::write(
         files.join("nanochat-bottleneck-diagnosis.md"),
@@ -330,6 +308,7 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_614,
         updated_at: 1_785_879_263_859,
     };
@@ -369,6 +348,7 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(FIGURE_BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_630,
         updated_at: 1_785_879_263_858,
     };
@@ -411,6 +391,7 @@ fn seed_at(
         context_usage_json: None,
         bootstrap_context: Some(LITERATURE_BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_634,
         updated_at: 1_785_879_263_857,
     };
@@ -996,7 +977,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     for (id, path, title) in [
         (
             "literature-skill",
-            ".agents/skills/orx-lit/SKILL.md",
+            ".agents/skills/orx-lit-review/SKILL.md",
             "Load literature search workflow",
         ),
         (
@@ -1076,7 +1057,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         parts.push(tool_part(
             &format!("literature-search-{index}"),
             shell_tool,
-            json!({ "command": format!("orx lit \"{query}\" --limit 8") }),
+            json!({ "command": format!("orx discover keyword \"{query}\" --limit 8") }),
             Some("Relevant papers and passages retrieved."),
             Some("Search the literature"),
         ));
@@ -1536,12 +1517,8 @@ mod tests {
             reasoning_level: None,
         };
         let first = seed_at(&store, &data, &repo, selection.clone()).unwrap();
-        let brief_path = data.join("files/nanochat/PROJECT.md");
-        let seeded_brief = std::fs::read_to_string(&brief_path).unwrap();
-        assert!(seeded_brief.contains("# Future Experiments"));
-        assert!(seeded_brief.contains("intentionally omitted to keep the demo bundle small"));
-        let customized_brief = format!("{seeded_brief}\nUser note.\n");
-        std::fs::write(&brief_path, &customized_brief).unwrap();
+        let user_notes = data.join("files/nanochat/user-notes.md");
+        std::fs::write(&user_notes, "# User notes\n").unwrap();
         let second = seed_at(
             &store,
             &data,
@@ -1658,14 +1635,14 @@ mod tests {
             .join("files/nanochat/cpu-apple-silicon-pipeline-results.md")
             .is_file());
         assert_eq!(
+            std::fs::read_to_string(&user_notes).unwrap(),
+            "# User notes\n"
+        );
+        assert_eq!(
             std::fs::read_dir(data.join("files/nanochat"))
                 .unwrap()
                 .count(),
             8
-        );
-        assert_eq!(
-            std::fs::read_to_string(&brief_path).unwrap(),
-            customized_brief
         );
         for name in FigureAssets::iter() {
             assert!(data.join("files/nanochat").join(name.as_ref()).is_file());

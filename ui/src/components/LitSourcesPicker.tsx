@@ -1,5 +1,5 @@
 // Literature-source toggles shown inline in the composer chat-settings panel:
-// which sources `orx lit` / `orx paper` may use. State lives in settings.json
+// which sources discovery and paper reading may use. State lives in settings.json
 // (same `/api/settings/lit-sources` endpoint the CLI enforces).
 
 import { useEffect, useState } from "react";

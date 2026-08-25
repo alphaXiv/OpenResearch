@@ -13,6 +13,7 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import { SMALL_BUTTON_CLASS_NAME } from "../styleClasses";
+import type { TabOpenIntent } from "../tabPreview";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -37,8 +38,8 @@ export function DetailDrawer({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
   parentExperiment: Experiment | null;
-  onOpenView: (view: ExperimentView, runId?: string) => void;
-  onOpenCode: (view: CodeView) => void;
+  onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
+  onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -51,8 +52,8 @@ export function DetailDrawer({
         parentExperiment={parentExperiment}
         project={project}
         runs={expRuns}
-        onOpenLogs={(runId) => onOpenView("terminal", runId)}
-        onOpenCode={() => onOpenCode("files")}
+        onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
+        onOpenCode={(intent) => onOpenCode("files", intent)}
       />
     );
   }

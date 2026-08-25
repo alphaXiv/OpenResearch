@@ -1,13 +1,12 @@
 ---
 name: orx-create
-description: "Initialize a local project with `orx up` and add local experiment nodes with `orx create-experiment`. Use when starting a project or experiment, when the local tree is empty, or when choosing a baseline, parent, or run command."
+description: "Initialize a project with `orx up` and add experiment nodes with `orx create-experiment`. Use when starting a project or experiment, when the tree is empty, or when choosing a baseline, parent, or run command."
 ---
 
-## Start a local project
+## Start a project
 
-Run `orx up`, then use the dashboard to import an existing local Git repository
-or create a new local project. The project and experiment tree live in the
-local `orx` database. Optional GitHub publication is for collaboration and is
+Run `orx up`, then use the dashboard to import an existing Git repository or
+create a new project. Optional GitHub publication is for collaboration and is
 not required for compute.
 
 For an existing GitHub repository, clone it normally before importing it:
@@ -18,7 +17,7 @@ orx up
 ```
 
 Prefer an existing implementation over starting from a blank repository. For a
-paper, use `orx paper <id>` and `orx lit <query>` to find the authors' or best
+paper, use `orx paper <id>` and the `orx-lit-review` retrieval workflow to find the authors' or best
 community implementation, clone it, then import that checkout in `orx up`.
 
 Set the project's run command once before launching experiments:
@@ -27,9 +26,9 @@ Set the project's run command once before launching experiments:
 orx project edit <localProjectId> --run-command '<command>'
 ```
 
-## Add a local experiment node
+## Add an experiment node
 
-`orx create-experiment` accepts local project and experiment ids only:
+`orx create-experiment` accepts project and experiment ids:
 
 ```sh
 # First node in an empty project: the baseline root.
@@ -46,7 +45,7 @@ orx create-experiment <localProjectId> --title "Alternative baseline" --baseline
 
 - The first parentless node is the baseline. Later parentless nodes attach to
   the oldest root unless `--baseline` explicitly requests another root.
-- A child branches from its parent's local Git branch and inherits its run
+- A child branches from its parent's Git branch and inherits its run
   command. Vary code or configuration on the child; keep the command fixed.
 - `--description` should state the concrete change and measurement the node
   owes.

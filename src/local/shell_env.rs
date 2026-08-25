@@ -17,7 +17,8 @@
 //! `publish-branch` worker — still inherit the process environment.
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 /// Deliberately short. These are the variables whose divergence makes the app
@@ -35,9 +36,27 @@ pub fn var(key: &str) -> Option<OsString> {
         .or_else(|| std::env::var_os(key))
 }
 
-/// The PATH to search for harness binaries and hand to harness children.
+/// The PATH to search for the binaries orx spawns, and to hand its children.
 pub fn search_path() -> Option<OsString> {
     var("PATH")
+}
+
+/// Where `binary` lives, or None when this machine has no such tool. The path
+/// is returned as it sits on PATH; a caller that needs the real binary behind a
+/// symlink composes with `resolve_symlinks`.
+pub fn find_on_path(binary: &str) -> Option<PathBuf> {
+    search_in(&search_path()?, binary)
+}
+
+/// Split from the PATH lookup so the search is testable without a probe.
+fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
+    // A relative entry (`""`, meaning cwd, or `bin`) names no fixed directory —
+    // it resolves against whichever cwd is current, so it is never a place to
+    // pick up a binary.
+    std::env::split_paths(paths)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(binary))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Hand the imported variables to a child process. Every `orx` child re-resolves
@@ -101,6 +120,29 @@ mod tests {
 
     fn fenced(payload: &str) -> String {
         format!("nvm loaded\n{M}{payload}{M}")
+    }
+
+    #[test]
+    fn the_search_skips_relative_entries_and_takes_the_first_absolute_hit() {
+        let root = std::env::temp_dir().join(format!("orx-path-search-{}", std::process::id()));
+        let (early, late) = (root.join("early"), root.join("late"));
+        std::fs::create_dir_all(&early).expect("early");
+        std::fs::create_dir_all(&late).expect("late");
+        std::fs::write(early.join("tool"), "").expect("early tool");
+        std::fs::write(late.join("tool"), "").expect("late tool");
+
+        let paths =
+            std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
+                .expect("join");
+        assert_eq!(search_in(&paths, "tool"), Some(early.join("tool")));
+        assert_eq!(search_in(&paths, "absent"), None);
+
+        // A relative entry is rejected even when it does resolve: cargo runs
+        // tests from the package root, so `src/main.rs` is a real hit here.
+        let relative = std::env::join_paths([PathBuf::from("src")]).expect("join");
+        assert_eq!(search_in(&relative, "main.rs"), None);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

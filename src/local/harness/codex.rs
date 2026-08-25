@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,24 +38,26 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, find_on_path, jwt_payload, nonempty_str, parse_version, read_json,
-    resolve_symlinks, title_case, HarnessInfo, ModelInfo,
+    bin_version, jwt_payload, nonempty_str, parse_version, read_json, resolve_symlinks, title_case,
+    HarnessInfo, ModelInfo,
 };
 use super::options::{
     resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
     REASONING_DEFAULT_ID,
 };
 use super::{
-    should_synthesize_plan, synthesize_resume, Harness, ResumeAction, Waited, TURN_WATCHDOG,
+    should_synthesize_plan, synthesize_resume, Harness, ResumeAction, TurnFailure, TurnOutcome,
+    TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
-    PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage, WirePart, WirePrompt,
-    WireQuestionOption, WireToolState,
+    find_part_mut, prepare_env, set_chat_session_env, stored_to_wire, upsert_preserving_children,
+    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage,
+    WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
-use crate::local::codex::{CodexClient, ServerReqKind, TurnEvent};
+use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::opencode::ensure_playbook;
+use crate::local::shell_env::find_on_path;
 use crate::store::{Store, StoredChatMessage};
 
 // FALLBACK model table, used only when the app-server catalog is unreachable
@@ -126,10 +129,11 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source (the static table is only the
-/// fallback), for the same reason opencode parses `models --verbose`: the
-/// installed CLI knows its catalog and we don't — a curated table here shipped
-/// missing three models and a wrong Luna tier before this existed.
+/// default. This is the primary model source for first-party accounts and for
+/// custom providers that declare an explicit model catalog (the static table is
+/// only the fallback), for the same reason opencode parses `models --verbose`:
+/// the installed CLI knows its catalog and we don't — a curated table here
+/// shipped missing three models and a wrong Luna tier before this existed.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
@@ -264,6 +268,12 @@ struct CodexConfig {
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
     /// preselected tier must too.
     model_reasoning_effort: Option<String>,
+    /// An explicit provider model catalog (`model_catalog_json`). When a custom
+    /// provider declares one, the app-server's `model/list` reflects it and the
+    /// picker can offer every model the provider exposes; without one the CLI
+    /// falls back to its bundled first-party catalog, which says nothing about
+    /// a custom endpoint.
+    model_catalog_json: Option<String>,
     #[serde(default)]
     model_providers: HashMap<String, CodexProvider>,
 }
@@ -273,6 +283,32 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
     toml::from_str::<CodexConfig>(raw)
         .ok()?
         .model_reasoning_effort
+}
+
+/// Keep the configured model first without discarding catalog metadata.
+/// With either input absent, preserve the other as-is.
+fn custom_provider_models(
+    configured_model: Option<&str>,
+    catalog: Option<Vec<ModelInfo>>,
+) -> Vec<ModelInfo> {
+    let Some(configured_model) = configured_model else {
+        return catalog.unwrap_or_default();
+    };
+    let Some(mut models) = catalog else {
+        return vec![ModelInfo::new(configured_model)];
+    };
+    match models.iter().position(|model| model.id == configured_model) {
+        Some(0) => {}
+        Some(index) => {
+            let configured = models.remove(index);
+            models.insert(0, configured);
+        }
+        None => {
+            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
+            models.insert(0, ModelInfo::new(configured_model));
+        }
+    }
+    models
 }
 
 #[derive(Deserialize)]
@@ -285,6 +321,7 @@ struct CodexProvider {
 struct CustomProvider {
     model: Option<String>,
     env_key: Option<String>,
+    has_model_catalog: bool,
 }
 
 impl CustomProvider {
@@ -310,6 +347,9 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     Some(CustomProvider {
         model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
+        has_model_catalog: cfg
+            .model_catalog_json
+            .is_some_and(|path| !path.trim().is_empty()),
     })
 }
 
@@ -482,22 +522,25 @@ impl Harness for Codex {
 
         info.agent_ready = info.installed && info.authenticated;
         if info.agent_ready {
-            // The first-party catalog is meaningless for a custom provider, so
-            // offer only the model that provider is configured with (the
-            // picker's "Default model" entry covers the unset case).
-            //
-            // A custom provider's model gets no reasoning list of its own: the
-            // curated tiers below describe OpenAI's models, and we know nothing
-            // about what an arbitrary provider accepts. `ModelInfo::new` leaves
-            // `reasoning_levels` absent, so the composer falls back to the
-            // conservative harness-wide list rather than offering `ultra` to a
-            // provider that would reject it.
+            // A custom provider's bundled first-party catalog is meaningless,
+            // so probe only when its config declares an explicit catalog.
+            let custom_catalog = match (
+                custom_provider.as_ref(),
+                info.bin_path.as_deref().map(Path::new),
+            ) {
+                (Some(provider), Some(bin)) if provider.has_model_catalog => {
+                    codex_model_list(bin, configured_effort.as_deref()).await
+                }
+                _ => None,
+            };
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
-                Some(Some(model)) => info = info.with_models(vec![ModelInfo::new(model)]),
-                Some(None) => info = info.with_models(Vec::new()),
+                Some(configured_model) => {
+                    info =
+                        info.with_models(custom_provider_models(configured_model, custom_catalog))
+                }
                 None => {
                     // First-party account: ask the installed CLI for its own
                     // catalog (models + per-model efforts, the data codex's TUI
@@ -546,11 +589,17 @@ impl Harness for Codex {
         Some(info)
     }
 
-    async fn run_turn(&self, ctx: &mut TurnCtx) -> Result<()> {
+    async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         if !runs_app_server().await {
-            return run_turn_exec(ctx).await;
+            return run_turn_exec(ctx)
+                .await
+                .map(|()| TurnOutcome::Completed)
+                .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
         }
-        run_turn_app_server(ctx).await
+        run_turn_app_server(ctx)
+            .await
+            .map(|()| TurnOutcome::Completed)
+            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
     async fn generate_title(&self, first_message: &str) -> Option<String> {
@@ -901,6 +950,9 @@ enum TurnEnd {
 /// touches only `ctx.assistant.parts` via the TurnCtx helpers. Returns the
 /// turn's terminal state when this event ends it.
 fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option<TurnEnd> {
+    if method != "error" {
+        ctx.clear_retry_status();
+    }
     match method {
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
@@ -964,13 +1016,28 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                 .get("willRetry")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if !will_retry {
-                ctx.push_error(error_message(params.get("error")));
+            if will_retry {
+                ctx.show_retry_status("native", "Codex CLI is retrying", 1, None, None);
+            } else {
+                ctx.mark_native_retry_exhausted();
+                ctx.clear_retry_status();
+                let mut message = error_message(params.get("error"));
+                if let Some(info) = params.get("codexErrorInfo").or_else(|| {
+                    params
+                        .get("error")
+                        .and_then(|error| error.get("codexErrorInfo"))
+                }) {
+                    message.push_str(&format!("\n\ncodexErrorInfo: {info}"));
+                }
+                ctx.mark_terminal_failure("codex_terminal", message.clone());
+                ctx.push_error(message);
             }
         }
-        "guardianWarning" => {
-            if let Some(message) = params.get("message").and_then(Value::as_str) {
-                ctx.push_error(message.to_string());
+        // Codex 0.144 emits this before the typed review event; ignoring it avoids duplicate rows.
+        "guardianWarning" => {}
+        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+            if let Some(message) = guardian_review_failure(params) {
+                ctx.push_error(message);
             }
         }
         "turn/completed" => {
@@ -993,7 +1060,16 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
             }
             let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
             if status == "failed" {
-                return Some(TurnEnd::Failed(error_message(turn.get("error"))));
+                ctx.mark_native_retry_exhausted();
+                let mut message = error_message(turn.get("error"));
+                if let Some(info) = turn.get("codexErrorInfo").or_else(|| {
+                    turn.get("error")
+                        .and_then(|error| error.get("codexErrorInfo"))
+                }) {
+                    message.push_str(&format!("\n\ncodexErrorInfo: {info}"));
+                }
+                ctx.mark_terminal_failure("codex_terminal", message.clone());
+                return Some(TurnEnd::Failed(message));
             }
             // Defensive: the pins say turn/completed carries a final status,
             // but a non-final one must not truncate the turn if codex ever
@@ -1245,6 +1321,9 @@ fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<Wir
             let mut input = serde_json::json!({
                 "command": item.get("command").map(command_string).unwrap_or_default(),
             });
+            if let Some(argv) = item.get("command").and_then(command_argv) {
+                input["commandArgv"] = serde_json::json!(argv);
+            }
             if let Some(cwd) = item.get("cwd").and_then(Value::as_str) {
                 input["cwd"] = Value::String(cwd.to_string());
             }
@@ -1927,6 +2006,148 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
+fn persisted_thread_was_rejected(error: &JsonRpcError) -> bool {
+    let message = error.message.to_ascii_lowercase();
+    message.contains("thread")
+        && [
+            "not found",
+            "unknown",
+            "invalid",
+            "does not exist",
+            "unavailable",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
+const RECOVERY_SNAPSHOT_BYTES: usize = 32 * 1024;
+
+fn newest_utf8_tail(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut start = value.len() - max_bytes;
+    while !value.is_char_boundary(start) {
+        start += 1;
+    }
+    &value[start..]
+}
+
+fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
+    for part in parts {
+        match part.kind.as_str() {
+            "text" => {
+                if let Some(text) = part.text.as_deref().filter(|text| !text.trim().is_empty()) {
+                    lines.push(text.trim().to_string());
+                }
+            }
+            "tool" => {
+                let state = part.state.as_ref();
+                let label = state
+                    .and_then(|state| state.title.as_deref())
+                    .or(part.tool.as_deref())
+                    .unwrap_or("tool");
+                let status = state
+                    .map(|state| state.status.as_str())
+                    .unwrap_or("unknown");
+                lines.push(format!("[tool: {label} — {status}]"));
+            }
+            "prompt" => {
+                if let Some(prompt) = part.prompt.as_ref() {
+                    let outcome = if prompt.resolved {
+                        "resolved"
+                    } else {
+                        "unresolved"
+                    };
+                    lines.push(format!("[{} prompt — {outcome}]", prompt.kind));
+                }
+            }
+            _ => {}
+        }
+        recovery_part_lines(&part.children, lines);
+    }
+}
+
+fn codex_recovery_snapshot(session_id: &str, current_turn_id: &str) -> String {
+    let Ok(store) = Store::open() else {
+        return String::new();
+    };
+    let current_user_id = store
+        .get_chat_turn(session_id, current_turn_id)
+        .ok()
+        .flatten()
+        .and_then(|turn| turn.user_message_id);
+    let Ok(messages) = store.list_chat_messages(session_id) else {
+        return String::new();
+    };
+    let mut entries = Vec::new();
+    for message in messages {
+        if current_user_id.as_deref() == Some(message.id.as_str()) {
+            continue;
+        }
+        let wire = stored_to_wire(&message);
+        let mut lines = Vec::new();
+        recovery_part_lines(&wire.parts, &mut lines);
+        if !lines.is_empty() {
+            entries.push(format!("{}:\n{}", wire.role, lines.join("\n")));
+        }
+    }
+    let mut selected = Vec::new();
+    let mut bytes = 0;
+    for entry in entries.into_iter().rev() {
+        let cost = entry.len() + 2;
+        if bytes + cost > RECOVERY_SNAPSHOT_BYTES {
+            if selected.is_empty() {
+                selected.push(newest_utf8_tail(&entry, RECOVERY_SNAPSHOT_BYTES).to_string());
+            }
+            break;
+        }
+        bytes += cost;
+        selected.push(entry);
+    }
+    selected.reverse();
+    selected.join("\n\n")
+}
+
+async fn ensure_codex_pre_accept(ctx: &mut TurnCtx) -> Result<Arc<CodexClient>> {
+    loop {
+        let ensure = ctx.host.codex.ensure(&ctx.session_id);
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, ensure)
+                .await
+                .map_err(|_| anyhow!("Codex setup exceeded the ORX retry budget"))?,
+            None => ensure.await,
+        };
+        match result {
+            Ok(client) => {
+                ctx.clear_retry_status();
+                return Ok(client);
+            }
+            Err(error) => {
+                ctx.host.codex.kill_session(&ctx.session_id).await;
+                let detail = error.to_string();
+                let retryable = !["JSON-RPC -32600", "JSON-RPC -32601", "JSON-RPC -32602"]
+                    .iter()
+                    .any(|code| detail.contains(code));
+                let retry = retryable.then(|| ctx.schedule_orx_retry(None)).flatten();
+                let Some((retry_number, delay)) = retry else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("codex_setup", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Restarting Codex app-server",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -1951,7 +2172,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
 
-    let client = ctx.host.codex.ensure(&ctx.session_id).await?;
+    let mut client = ensure_codex_pre_accept(ctx).await?;
     let auto_review_supported =
         if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
             codex_auto_review_supported(&client, &repo).await
@@ -1982,7 +2203,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         Some(id) => {
             let mut params = thread_setup.clone();
             params["threadId"] = Value::String(id.clone());
-            match client.try_request("thread/resume", params).await? {
+            let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
+            client = resume_client;
+            match resumed {
                 Ok(resumed) => {
                     // Capture the effective model codex reports (top-level
                     // `model`) — the required `settings.model` for a
@@ -1998,9 +2221,23 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 // propagates as the turn's error (the `?` above) — a resumable
                 // thread must never be discarded over a timeout/hiccup.
                 Err(err) => {
+                    if !persisted_thread_was_rejected(&err) {
+                        ctx.mark_terminal_failure("json_rpc", err.to_string());
+                        return Err(anyhow!("codex thread/resume failed: {err}"));
+                    }
                     eprintln!(
                         "orx up: codex thread/resume rejected ({err}); starting a fresh thread"
                     );
+                    let snapshot = codex_recovery_snapshot(&ctx.session_id, &ctx.turn_id);
+                    if !snapshot.is_empty() {
+                        let instructions = thread_setup
+                            .get("developerInstructions")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        thread_setup["developerInstructions"] = Value::String(format!(
+                            "{instructions}\n\n<orx-recovery-context>\nThe persisted native Codex thread was unavailable. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{snapshot}\n</orx-recovery-context>"
+                        ));
+                    }
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
@@ -2073,7 +2310,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         }
     }
 
-    let started = client.request("turn/start", turn_params).await?;
+    let started = codex_pre_accept_request(ctx, &client, "turn/start", turn_params, true).await?;
     if applied_mask_mode == Some("default") && ctx.plan_reset_pending {
         Store::open()?.clear_chat_session_plan_reset(&ctx.session_id)?;
         ctx.plan_reset_pending = false;
@@ -2087,6 +2324,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .and_then(|t| t.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    if turn_id.is_some() {
+        ctx.mark_delivery(DeliveryState::Accepted);
+    } else {
+        ctx.mark_delivery(DeliveryState::Unknown);
+        return Err(anyhow!("codex turn/start returned no turn id"));
+    }
     // Arm the native interrupt now rather than on `turn/started` — an
     // interrupt landing before that notification would otherwise no-op.
     if let Some(turn_id) = turn_id.as_deref() {
@@ -2174,10 +2417,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             }
             Waited::Event(Err(_)) => {
                 client.interrupt_active_turn().await;
-                ctx.push_error(format!(
+                let message = format!(
                     "codex produced no output for {} minutes — turn interrupted",
                     TURN_WATCHDOG.as_secs() / 60
-                ));
+                );
+                ctx.mark_terminal_failure("codex_watchdog", message.clone());
+                ctx.push_error(message);
                 settle_running_subagents(&mut ctx.assistant.parts);
                 let _ = ctx.flush();
                 return Ok(());
@@ -2653,6 +2898,134 @@ fn has_error_part(ctx: &TurnCtx, message: &str) -> bool {
     })
 }
 
+fn retry_after(error: &JsonRpcError) -> Option<Duration> {
+    let data = error.data.as_ref()?;
+    data.get("retryAfterMs")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .or_else(|| {
+            data.get("retryAfter")
+                .and_then(Value::as_u64)
+                .map(Duration::from_secs)
+        })
+}
+
+async fn codex_pre_accept_request(
+    ctx: &mut TurnCtx,
+    client: &CodexClient,
+    method: &str,
+    params: Value,
+    ambiguous_transport: bool,
+) -> Result<Value> {
+    loop {
+        if ambiguous_transport {
+            ctx.persist_delivery(DeliveryState::Unknown)?;
+        }
+        let request = client.try_request(method, params.clone());
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, request)
+                .await
+                .map_err(|_| anyhow!("codex {method} exceeded the ORX retry budget"))?,
+            None => request.await,
+        };
+        match result {
+            Ok(Ok(value)) => {
+                ctx.clear_retry_status();
+                return Ok(value);
+            }
+            Ok(Err(error)) if error.code == -32001 => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(retry_after(&error))
+                else {
+                    ctx.mark_terminal_failure("server_overloaded", error.to_string());
+                    return Err(anyhow!("codex {method} failed: {error}"));
+                };
+                let next_retry_at = crate::store::now_ms() + delay.as_millis() as i64;
+                ctx.show_retry_status(
+                    "orx",
+                    "Codex app-server is overloaded",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(next_retry_at),
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(error)) => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                ctx.mark_terminal_failure("json_rpc", error.to_string());
+                return Err(anyhow!("codex {method} failed: {error}"));
+            }
+            Err(error) => {
+                ctx.mark_delivery(if ambiguous_transport {
+                    DeliveryState::Unknown
+                } else {
+                    DeliveryState::NotSent
+                });
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn codex_resume_thread(
+    ctx: &mut TurnCtx,
+    mut client: Arc<CodexClient>,
+    params: Value,
+) -> Result<(Arc<CodexClient>, std::result::Result<Value, JsonRpcError>)> {
+    loop {
+        let request = client.try_request("thread/resume", params.clone());
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, request)
+                .await
+                .map_err(|_| anyhow!("codex thread/resume exceeded the ORX retry budget"))?,
+            None => request.await,
+        };
+        match result {
+            Ok(Ok(value)) => {
+                ctx.clear_retry_status();
+                return Ok((client, Ok(value)));
+            }
+            Ok(Err(error)) if error.code == -32001 => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(retry_after(&error))
+                else {
+                    ctx.mark_terminal_failure("server_overloaded", error.to_string());
+                    return Err(anyhow!("codex thread/resume failed: {error}"));
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Codex app-server is overloaded",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(error)) => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                return Ok((client, Err(error)));
+            }
+            Err(error) => {
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("codex_resume", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Reconnecting to Codex",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                ctx.host.codex.kill_session(&ctx.session_id).await;
+                tokio::time::sleep(delay).await;
+                client = ensure_codex_pre_accept(ctx).await?;
+            }
+        }
+    }
+}
+
 /// Bounded well under the shared request timeout: a steer is awaited *in* the
 /// event loop, so a slow app-server would otherwise freeze the transcript and
 /// hide any card it raises.
@@ -2673,7 +3046,9 @@ async fn steer_turn(
     steer: SteerMessage,
 ) {
     let Some(turn_id) = turn_id else {
-        ctx.host.park_steer(&ctx.session_id, steer);
+        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
+            ctx.push_error(format!("Could not preserve steering message: {error}"));
+        }
         return;
     };
     let answered = client
@@ -2689,7 +3064,11 @@ async fn steer_turn(
         .await;
     match answered {
         Ok(Ok(_)) => ctx.record_steer(&steer.display),
-        Ok(Err(_)) => ctx.host.park_steer(&ctx.session_id, steer),
+        Ok(Err(_)) => {
+            if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
+                ctx.push_error(format!("Could not preserve steering message: {error}"));
+            }
+        }
         Err(e) => {
             // Record it anyway: the composer is already cleared, so this is
             // the only copy of what the user typed.
@@ -2703,7 +3082,7 @@ async fn steer_turn(
 
 /// `thread/start` and record the new thread id as the session's native id.
 async fn start_thread(ctx: &mut TurnCtx, client: &CodexClient, params: Value) -> Result<String> {
-    let result = client.request("thread/start", params).await?;
+    let result = codex_pre_accept_request(ctx, client, "thread/start", params, false).await?;
     let thread_id = result
         .get("thread")
         .and_then(|t| t.get("id"))
@@ -2817,6 +3196,46 @@ fn command_string(v: &Value) -> String {
             .join(" "),
         _ => String::new(),
     }
+}
+
+fn command_argv(v: &Value) -> Option<Vec<String>> {
+    let Value::Array(parts) = v else {
+        return None;
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    parts
+        .iter()
+        .map(|part| part.as_str().map(str::to_string))
+        .collect()
+}
+
+fn guardian_review_failure(params: &Value) -> Option<String> {
+    let review = params.get("review");
+    let status = review
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    if matches!(status, Some("inProgress") | Some("approved")) {
+        return None;
+    }
+    if let Some(rationale) = review
+        .and_then(|value| value.get("rationale"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(rationale.to_string());
+    }
+    Some(
+        match status {
+            Some("denied") => "Automatic approval review denied.",
+            Some("timedOut") => "Automatic approval review timed out.",
+            Some("aborted") => "Automatic approval review aborted.",
+            _ => "Automatic approval review failed.",
+        }
+        .to_string(),
+    )
 }
 
 // --- legacy exec path (codex < 0.144, and ORX_CODEX_EXEC=1) -------------------
@@ -2983,7 +3402,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
-    set_chat_session_env(&mut cmd, &ctx.session_id);
+    set_chat_session_env(&mut cmd, &ctx.session_id, ctx.host.up_port());
     // Pin the sandboxed turn's store to the exact path granted above. The
     // grant was resolved from the host's env, but the child could resolve a
     // different data dir — `prepare_env` injects dashboard-synced vars (a
@@ -2996,9 +3415,14 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(dir) = &data_dir_pin {
         cmd.env("ORX_DATA_DIR", dir);
     }
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {}: {}", bin.display(), e))?;
+    ctx.persist_delivery(DeliveryState::Unknown)?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            ctx.mark_delivery(DeliveryState::NotSent);
+            return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
+        }
+    };
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut counter = 0usize;
@@ -3014,6 +3438,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        ctx.mark_delivery(DeliveryState::Accepted);
         // Legacy events nest under "msg"; item-style events are flat.
         let msg = event.get("msg").unwrap_or(&event);
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
@@ -3209,6 +3634,10 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
+
     #[test]
     fn custom_provider_uses_its_env_key_and_configured_model() {
         // The exact shape from the bug report: a gateway provider that opts out
@@ -3279,6 +3708,98 @@ requires_openai_auth = false
         assert!(!provider.is_ready());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn custom_provider_records_whether_a_model_catalog_is_declared() {
+        // A declared catalog (the DeepSeek-style setup) means the app-server
+        // `model/list` reflects the provider's own models, so orx should probe
+        // it and offer every listed model.
+        assert!(
+            parse_custom_provider(
+                r#"
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+model_catalog_json = "~/.codex/models.json"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+
+        // A bare gateway provider has no explicit catalog; the CLI would fall
+        // back to its bundled first-party list, so orx keeps offering only the
+        // configured model instead of a catalog that says nothing about the
+        // endpoint.
+        assert!(
+            !parse_custom_provider(
+                r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(
+            !parse_custom_provider(
+                r#"
+model_provider = "custom"
+model_catalog_json = "  "
+[model_providers.custom]
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(parse_custom_provider("not toml ===").is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_keep_the_configured_model_first() {
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![
+                ModelInfo::new("first"),
+                ModelInfo::new("configured").with_label(Some("Configured model"), None),
+                ModelInfo::new("last"),
+            ]),
+        );
+
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
+
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert!(models[0].reasoning_levels.is_none());
+        assert!(models[0].default_reasoning_level.is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_preserve_catalog_fallbacks() {
+        let models = custom_provider_models(Some("configured"), None);
+        assert_eq!(model_ids(&models), ["configured"]);
+
+        let models = custom_provider_models(
+            None,
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["first", "last"]);
+        assert!(custom_provider_models(None, None).is_empty());
     }
 
     #[test]
@@ -4019,6 +4540,76 @@ requires_openai_auth = false
         assert_eq!(state.output.as_deref(), Some("final"));
     }
 
+    #[test]
+    fn command_execution_preserves_structured_argv() {
+        let array_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c1",
+                "command": ["/bin/zsh", "-lc", "orx discover keyword \"multi word query\""]
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let array_input = array_part.state.unwrap().input.unwrap();
+        assert_eq!(
+            array_input["command"],
+            "/bin/zsh -lc orx discover keyword \"multi word query\""
+        );
+        assert_eq!(
+            array_input["commandArgv"],
+            serde_json::json!([
+                "/bin/zsh",
+                "-lc",
+                "orx discover keyword \"multi word query\""
+            ])
+        );
+
+        let string_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c2",
+                "command": "orx projects"
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            string_part.state.unwrap().input.unwrap()["commandArgv"].is_null(),
+            "string commands keep the legacy wire shape"
+        );
+
+        let malformed_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c3",
+                "command": ["orx", 7, "projects"]
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let malformed_input = malformed_part.state.unwrap().input.unwrap();
+        assert_eq!(malformed_input["command"], "orx projects");
+        assert!(malformed_input["commandArgv"].is_null());
+
+        let empty_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c4",
+                "command": []
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let empty_input = empty_part.state.unwrap().input.unwrap();
+        assert_eq!(empty_input["command"], "");
+        assert!(empty_input["commandArgv"].is_null());
+    }
+
     /// The live spike's approval request (trimmed) → a permission card whose
     /// native_id round-trips the JSON-RPC id, plus the decision mapping.
     #[test]
@@ -4145,7 +4736,10 @@ requires_openai_auth = false
             "error",
             &serde_json::json!({"error":{"message":"transient"},"willRetry":true}),
         );
-        assert!(ctx.assistant.parts.is_empty(), "retried errors stay silent");
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        let retry = ctx.assistant.parts[0].state.as_ref().unwrap();
+        assert_eq!(retry.status, "running");
+        assert_eq!(retry.input.as_ref().unwrap()["retryOwner"], "native");
         apply_notification(
             &mut ctx,
             "error",
@@ -4157,17 +4751,87 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn guardian_warning_surfaces_message() {
+    fn guardian_approval_reviews_use_typed_statuses() {
         let mut ctx = TurnCtx::test_stub();
         apply_notification(
             &mut ctx,
             "guardianWarning",
             &serde_json::json!({"message":"Automatic review stopped this turn."}),
         );
-        let warning = ctx.assistant.parts[0].state.as_ref().unwrap();
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/started",
+            &serde_json::json!({"review":{"status":"inProgress","rationale":null}}),
+        );
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{"status":"approved","rationale":"Safe."}}),
+        );
+        assert!(ctx.assistant.parts.is_empty());
+
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{"status":"denied","rationale":"Blocked by policy."}}),
+        );
+        assert_eq!(ctx.assistant.parts.len(), 1);
         assert_eq!(
-            warning.error.as_deref(),
-            Some("Automatic review stopped this turn.")
+            ctx.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("Blocked by policy.")
+        );
+    }
+
+    #[test]
+    fn guardian_terminal_reviews_have_deterministic_fallbacks() {
+        for (status, expected) in [
+            ("denied", "Automatic approval review denied."),
+            ("timedOut", "Automatic approval review timed out."),
+            ("aborted", "Automatic approval review aborted."),
+            ("futureStatus", "Automatic approval review failed."),
+        ] {
+            let mut ctx = TurnCtx::test_stub();
+            apply_notification(
+                &mut ctx,
+                "guardianWarning",
+                &serde_json::json!({"message":"duplicate untyped notice"}),
+            );
+            apply_notification(
+                &mut ctx,
+                "item/autoApprovalReview/completed",
+                &serde_json::json!({"review":{"status":status,"rationale":"  "}}),
+            );
+            assert_eq!(ctx.assistant.parts.len(), 1);
+            assert_eq!(
+                ctx.assistant.parts[0]
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+
+        let mut missing = TurnCtx::test_stub();
+        apply_notification(
+            &mut missing,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{}}),
+        );
+        assert_eq!(
+            missing.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("Automatic approval review failed.")
         );
     }
 
@@ -4925,5 +5589,14 @@ requires_openai_auth = false
             )),
             None
         );
+    }
+
+    #[test]
+    fn recovery_snapshot_tail_respects_utf8_byte_limit() {
+        let value = format!("old{}new", "🦀".repeat(10));
+        let tail = newest_utf8_tail(&value, 12);
+        assert!(tail.len() <= 12);
+        assert!(tail.ends_with("new"));
+        assert!(value.ends_with(tail));
     }
 }

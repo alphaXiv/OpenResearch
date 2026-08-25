@@ -15,7 +15,7 @@ import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
 import { onHarnessAuth } from "../events";
 import type { AgentSelection } from "../api";
-import { MODEL_ITEM_CLASS_NAME } from "../styleClasses";
+import { COMPOSER_CONTROL_CLASS_NAME, MODEL_ITEM_CLASS_NAME } from "../styleClasses";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -287,7 +287,7 @@ export function ModelPicker({
       <button
         ref={triggerRef}
         type="button"
-        className="composer-pill inline-flex min-w-0 max-w-full items-center gap-[5px] text-md text-text py-[5px] px-2 rounded-sm whitespace-nowrap transition-[background] duration-150 ease-standard [&:hover]:bg-surface"
+        className={`${COMPOSER_CONTROL_CLASS_NAME} composer-pill min-w-0 max-w-full gap-[5px] px-2 text-md text-text whitespace-nowrap`}
         title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
@@ -482,7 +482,7 @@ export function OptionPicker({
     <div className="option-picker relative inline-flex" ref={ref}>
       <button
         type="button"
-        className={variant === "pill" ? "composer-pill inline-flex items-center gap-[5px] text-md text-text py-[5px] px-2 rounded-sm whitespace-nowrap transition-[background] duration-150 ease-standard [&:hover]:bg-surface" : "composer-bare inline-flex items-center gap-[3px] text-md text-text py-[5px] px-1 rounded-sm transition-[background] duration-150 ease-standard [&:hover]:bg-surface [&.context-ring]:inline-flex [&.context-ring]:items-center [&.context-ring]:mr-2"}
+        className={`${COMPOSER_CONTROL_CLASS_NAME} ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-md text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-md text-text"}`}
         title={title}
         onClick={() => setOpen((v) => !v)}
       >
