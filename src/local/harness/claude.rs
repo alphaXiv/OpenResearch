@@ -404,6 +404,10 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
         "CLAUDE_CONFIG_DIR",
         native_store::prepare_claude(NativeStore::Isolated).ok()?,
     );
+    cmd.env(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        native_store::claude_secure_storage_config_dir(),
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");

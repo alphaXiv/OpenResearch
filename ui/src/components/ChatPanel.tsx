@@ -4460,7 +4460,10 @@ export function ChatPanel({
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
   const opts = activeHarness?.options;
-  const commands = commandsForHarness(skills, opts?.planActivation);
+  const commands = useMemo(
+    () => commandsForHarness(skills, opts?.planActivation),
+    [skills, opts?.planActivation],
+  );
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
   // Commands now live in the draft as text, so the menu also has to stay shut

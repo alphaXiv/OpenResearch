@@ -24,13 +24,14 @@ use std::sync::OnceLock;
 /// Deliberately short. These are the variables whose divergence makes the app
 /// and the CLI behave like different installs; credentials reach harness
 /// children through `chat::prepare_env` instead.
-pub const IMPORTED: [&str; 7] = [
+pub const IMPORTED: [&str; 8] = [
     "PATH",
     "ORX_DATA_DIR",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
     "OPENCODE_DB",
     "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "CODEX_HOME",
 ];
 
@@ -157,7 +158,7 @@ mod tests {
     fn reads_every_imported_variable() {
         let vars = parse_probe(
             &fenced(
-                "/opt/homebrew/bin:/usr/bin\0/data\0/share\0/config\0/open.db\0/claude\0/codex\0",
+                "/opt/homebrew/bin:/usr/bin\0/data\0/share\0/config\0/open.db\0/claude\0/secure\0/codex\0",
             ),
             M,
         )
@@ -168,12 +169,16 @@ mod tests {
         assert_eq!(vars["XDG_CONFIG_HOME"], OsString::from("/config"));
         assert_eq!(vars["OPENCODE_DB"], OsString::from("/open.db"));
         assert_eq!(vars["CLAUDE_CONFIG_DIR"], OsString::from("/claude"));
+        assert_eq!(
+            vars["CLAUDE_SECURESTORAGE_CONFIG_DIR"],
+            OsString::from("/secure")
+        );
         assert_eq!(vars["CODEX_HOME"], OsString::from("/codex"));
     }
 
     #[test]
     fn unset_variables_are_dropped_so_lookups_fall_through() {
-        let vars = parse_probe(&fenced("/usr/bin\0\0\0\0\0\0\0"), M).unwrap();
+        let vars = parse_probe(&fenced("/usr/bin\0\0\0\0\0\0\0\0"), M).unwrap();
         assert_eq!(vars["PATH"], OsString::from("/usr/bin"));
         assert!(!vars.contains_key("ORX_DATA_DIR"));
         assert!(!vars.contains_key("OPENCODE_DB"));

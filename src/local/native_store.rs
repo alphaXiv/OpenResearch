@@ -1,5 +1,6 @@
 //! Provider-native state used by chats launched through OpenResearch.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -20,16 +21,15 @@ pub struct NativeSessionLocation {
 
 static LINK_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn user_env_path(key: &str) -> Option<PathBuf> {
+fn user_env(key: &str) -> Option<OsString> {
     crate::local::shell_env::var(key)
+        .or_else(|| crate::config::synced_env_var(key).map(|value| value.trim().into()))
+}
+
+fn user_env_path(key: &str) -> Option<PathBuf> {
+    user_env(key)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .or_else(|| {
-            crate::config::synced_env_var(key)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
 }
 
 fn home_dir() -> PathBuf {
@@ -56,6 +56,13 @@ pub fn claude_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn claude_secure_storage_config_dir() -> OsString {
+    // Empty intentionally selects Claude's unsuffixed default Keychain namespace.
+    user_env("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        .or_else(|| user_env("CLAUDE_CONFIG_DIR"))
+        .unwrap_or_default()
+}
+
 pub fn codex_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/codex"),
@@ -72,9 +79,15 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
         (NativeStore::Isolated, isolated.clone()),
         (NativeStore::Legacy, legacy),
     ] {
-        if (store == NativeStore::Isolated || db != isolated)
-            && opencode_has_session(&db, native_id)?
-        {
+        if store == NativeStore::Legacy && db == isolated {
+            continue;
+        }
+        let found = match opencode_has_session(&db, native_id) {
+            Ok(found) => found,
+            Err(_) if store == NativeStore::Legacy => false,
+            Err(error) => return Err(error),
+        };
+        if found {
             return Ok(Some(NativeSessionLocation { store, path: db }));
         }
     }
@@ -124,7 +137,12 @@ fn session_location(
             continue;
         }
         for tree in trees {
-            if let Some(path) = tree_session_path(&root.join(tree), native_id)? {
+            let path = match tree_session_path(&root.join(tree), native_id) {
+                Ok(path) => path,
+                Err(_) if store == NativeStore::Legacy => continue,
+                Err(error) => return Err(error),
+            };
+            if let Some(path) = path {
                 return Ok(Some(NativeSessionLocation { store, path }));
             }
         }
@@ -186,7 +204,9 @@ pub fn prepare_claude(store: NativeStore) -> Result<PathBuf> {
     }
     prepare_links(
         &root,
+        &legacy,
         &[
+            home_dir().join(".claude.json"),
             legacy.join("settings.json"),
             legacy.join("settings.local.json"),
             legacy.join("CLAUDE.md"),
@@ -214,31 +234,34 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
         legacy.join("prompts"),
         legacy.join("packages"),
     ];
-    if let Ok(entries) = std::fs::read_dir(&legacy) {
-        sources.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
+    match std::fs::read_dir(&legacy) {
+        Ok(entries) => sources.extend(entries.flatten().map(|entry| entry.path()).filter(|path| {
             path.file_name()
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".config.toml"))
-        }));
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
-    prepare_links(&root, &sources)?;
-    Ok(root)
+    prepare_links(&root, &legacy, &sources)?;
+    Ok(root.canonicalize().unwrap_or(root))
 }
 
-fn prepare_links(root: &Path, sources: &[PathBuf]) -> Result<()> {
+fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
     let _guard = LINK_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     std::fs::create_dir_all(root)?;
     let mut process_lock = sources
         .iter()
-        .find(|source| source.exists())
-        .and_then(|source| source.parent())
-        .map(|parent| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(parent.join(".openresearch-native-links.lock"))
-                .map(fd_lock::RwLock::new)
+        .any(|source| source.exists())
+        .then(|| {
+            std::fs::create_dir_all(lock_root)?;
+            Ok::<_, std::io::Error>(fd_lock::RwLock::new(
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .write(true)
+                    .open(lock_root.join(".openresearch-native-links.lock"))?,
+            ))
         })
         .transpose()?;
     let _process_guard = process_lock.as_mut().map(|lock| lock.write()).transpose()?;
@@ -405,14 +428,15 @@ mod tests {
     fn native_store_smoke_test() {
         let root = std::env::temp_dir().join(format!("orx-native-store-{}", uuid::Uuid::new_v4()));
         let source = root.join("legacy/config.toml");
+        let legacy = source.parent().unwrap().to_path_buf();
         let isolated = root.join("isolated");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(&source, "old").unwrap();
-        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
         std::fs::remove_file(isolated.join("config.toml")).unwrap();
         std::fs::write(isolated.join("config.toml"), "new").unwrap();
 
-        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
 
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "new");
         assert!(source
@@ -429,12 +453,12 @@ mod tests {
         std::fs::remove_file(isolated.join("config.toml")).unwrap();
         std::fs::write(isolated.join("config.toml"), "isolated change").unwrap();
         std::fs::write(&source, "legacy change").unwrap();
-        prepare_links(&isolated, std::slice::from_ref(&source)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
         assert_eq!(std::fs::read_to_string(&source).unwrap(), "legacy change");
         let auth = root.join("legacy/auth.json");
         std::fs::write(&auth, "legacy").unwrap();
         std::fs::write(isolated.join("auth.json"), "isolated").unwrap();
-        prepare_links(&isolated, std::slice::from_ref(&auth)).unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&auth)).unwrap();
         assert_eq!(std::fs::read_to_string(&auth).unwrap(), "legacy");
         assert!(std::fs::read_dir(&isolated)
             .unwrap()

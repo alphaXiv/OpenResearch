@@ -884,6 +884,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(variant) = opencode_variant(ctx.reasoning_level.as_deref()) {
         body["variant"] = json!(variant);
     }
+    let turn_started_at = crate::store::now_ms();
     let send = ctx
         .http()
         .post(format!("{base}/session/{native_id}/message"))
@@ -953,6 +954,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 ctx.mark_delivery(DeliveryState::Accepted);
                 ctx.clear_retry_status();
                 if let Ok(message) = resp.json::<Value>().await {
+                    if !opencode_response_is_current(&message, turn_started_at) {
+                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                        ctx.mark_terminal_failure("opencode_stale_response", message);
+                        return Err(anyhow!(message));
+                    }
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
                             if let Some(wire) = to_wire_part(part) {
@@ -968,6 +974,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
+    message
+        .pointer("/info/time/created")
+        .and_then(Value::as_i64)
+        .is_some_and(|created| created >= turn_started_at)
 }
 
 /// OpenCode assistant `tokens` occupying the context window:
@@ -1615,6 +1628,18 @@ opencode/glm-5
             &mut HashMap::new(),
         );
         assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn stale_final_response_is_rejected() {
+        assert!(opencode_response_is_current(
+            &json!({"info":{"time":{"created":100}}}),
+            100
+        ));
+        assert!(!opencode_response_is_current(
+            &json!({"info":{"time":{"created":99}}}),
+            100
+        ));
     }
 
     #[test]

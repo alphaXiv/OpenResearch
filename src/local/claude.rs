@@ -553,6 +553,10 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     .await
     .map_err(|error| anyhow!("Claude config preparation failed: {error}"))??;
     cmd.env("CLAUDE_CONFIG_DIR", config_home);
+    cmd.env(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        crate::local::native_store::claude_secure_storage_config_dir(),
+    );
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.
