@@ -208,13 +208,17 @@ pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(resolved).map_err(Into::into)
 }
 
-struct TemporaryDirectory(PathBuf);
+pub(crate) struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
-    fn new(prefix: &str) -> Result<Self> {
+    pub(crate) fn new(prefix: &str) -> Result<Self> {
         let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path)?;
         Ok(Self(path))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 }
 

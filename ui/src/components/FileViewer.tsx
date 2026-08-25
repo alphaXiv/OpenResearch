@@ -7,6 +7,7 @@
 
 import {
   Check,
+  CloudUpload,
   Code,
   Copy,
   Download,
@@ -33,6 +34,7 @@ import {
   type ProjectFile,
 } from "../api";
 import { useLatexCompile } from "../useLatexCompile";
+import { useOverleafSync } from "../useOverleafSync";
 import {
   isExternalMarkdownTarget,
   markdownTargetUrl,
@@ -43,9 +45,10 @@ import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
 import { isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { OverleafPanel } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
-import { ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import { BUTTON_CLASS_NAME, ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
 
 type ArtifactPreviewFile = Omit<ProjectFile, "root">;
 type LoadedFile =
@@ -268,16 +271,58 @@ export function FileViewer({
     }
   };
 
-  // Compiling reaches only the live checkout, which is the same condition that
-  // makes the file editable in the first place.
+  // A .tex the compiler and the sync can both reach: the live checkout, which
+  // is the same condition that makes the file editable in the first place.
+  const liveTex = isLatex && onDisk && !viaPrunedWorktree;
   const latex = useLatexCompile({
     projectId,
     filePath,
     sessionId,
-    enabled: isLatex && onDisk && !viaPrunedWorktree,
+    enabled: liveTex,
     ready: data != null && !data.notFound,
     source: editable ? draft : (data?.content ?? ""),
   });
+
+  // Not gated on a local engine: a machine with no TeX install can still send
+  // the paper, and Overleaf compiles it there.
+  const overleaf = useOverleafSync({
+    projectId,
+    filePath,
+    sessionId,
+    enabled: liveTex,
+    savedSource: baseline,
+    dirty,
+    // A pull rewrote the file underneath this view; refetch so the editor shows
+    // what is now on disk rather than the copy it loaded.
+    onPulled: useCallback(
+      (paths: string[]) => {
+        if (paths.includes(filePath)) setNonce((n) => n + 1);
+      },
+      [filePath],
+    ),
+  });
+  const [showOverleaf, setShowOverleaf] = useState(false);
+  const overleafConflicts = overleaf.last?.conflicts.length ?? 0;
+  // A conflict is the one outcome the user has to act on, and an automatic sync
+  // can produce it with the panel closed.
+  useEffect(() => {
+    if (overleafConflicts > 0) setShowOverleaf(true);
+  }, [overleafConflicts]);
+  const overleafTip = overleaf.error
+    ? "Overleaf sync failed"
+    : overleafConflicts > 0
+      ? "Changed here and on Overleaf — choose which copy to keep"
+      : overleaf.blocked
+        ? "Save this file to sync it with Overleaf"
+        : overleaf.link
+          ? "In step with Overleaf"
+          : "Send this paper to Overleaf";
+  const overleafColor =
+    overleaf.error || overleafConflicts > 0
+      ? "text-accent-red"
+      : overleaf.link
+        ? "text-accent-green"
+        : undefined;
 
   // A .tex shows its compiled PDF or its source — nothing in between.
   const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
@@ -492,6 +537,22 @@ export function FileViewer({
             <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
           </a>
         )}
+        {liveTex && (
+          <button
+            className={`${ICON_BUTTON_CLASS_NAME} ${showOverleaf ? "active" : ""}`}
+            data-tip={overleafTip}
+            data-tip-align="end"
+            aria-label={`Overleaf — ${overleafTip.toLowerCase()}`}
+            aria-expanded={showOverleaf}
+            onClick={() => setShowOverleaf((open) => !open)}
+          >
+            {overleaf.syncing ? (
+              <span className={SPINNER_CLASS_NAME} />
+            ) : (
+              <CloudUpload size={13} className={overleafColor} />
+            )}
+          </button>
+        )}
         {isLatex && onDisk && (
           <button
             className={ICON_BUTTON_CLASS_NAME}
@@ -573,6 +634,44 @@ export function FileViewer({
               {latex.log}
             </pre>
           )}
+        </div>
+      )}
+      {liveTex && overleaf.staleOnDisk && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 flex items-center flex-wrap gap-2 text-sm text-accent-amber">
+          <span className="flex-1 min-w-0">
+            Overleaf&apos;s copy of this file was pulled while you had unsaved edits, so what you
+            see is no longer what is on disk. Saving now sends this draft to Overleaf instead.
+          </span>
+          <button
+            className={BUTTON_CLASS_NAME}
+            onClick={() => {
+              overleaf.reloaded();
+              setNonce((n) => n + 1);
+            }}
+          >
+            Discard my edits and reload
+          </button>
+        </div>
+      )}
+      {liveTex && overleaf.error && (
+        <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4 flex items-start gap-2">
+          <span className="flex-1 min-w-0 text-sm text-accent-red whitespace-pre-wrap">
+            {overleaf.error}
+          </span>
+          <button
+            className={ICON_BUTTON_CLASS_NAME}
+            data-tip="Dismiss"
+            data-tip-align="end"
+            aria-label="Dismiss Overleaf message"
+            onClick={overleaf.dismiss}
+          >
+            <X size={13} />
+          </button>
+        </div>
+      )}
+      {liveTex && showOverleaf && overleaf.loaded && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4">
+          <OverleafPanel overleaf={overleaf} />
         </div>
       )}
       {isLatex && onDisk && latex.engine === null && latex.installHint && (

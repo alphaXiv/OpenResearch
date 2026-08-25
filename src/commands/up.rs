@@ -345,6 +345,26 @@ fn router(state: AppState) -> Router {
         .route("/api/projects/{id}/file/open", post(open_project_file))
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
+        .route(
+            "/api/projects/{id}/file/overleaf",
+            get(overleaf_link)
+                .post(link_overleaf)
+                .delete(unlink_overleaf),
+        )
+        .route("/api/projects/{id}/file/overleaf/sync", post(sync_overleaf))
+        .route(
+            "/api/projects/{id}/file/overleaf/status",
+            get(overleaf_status),
+        )
+        .route(
+            "/api/projects/{id}/file/overleaf/upload",
+            get(overleaf_upload),
+        )
+        .route("/api/overleaf/settings", get(overleaf_settings))
+        .route(
+            "/api/overleaf/token",
+            post(set_overleaf_token).delete(delete_overleaf_token),
+        )
         .route("/api/files/abs", get(absolute_file))
         .route("/api/files/abs/raw", get(absolute_raw_file))
         .route(
@@ -2619,6 +2639,304 @@ async fn latex_engine() -> ApiResult {
     .await
 }
 
+// --- overleaf ------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverleafFileQ {
+    path: String,
+    session_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverleafFileReq {
+    path: String,
+    session_id: Option<String>,
+    /// Only on link: the project URL the user pasted.
+    #[serde(default)]
+    project: Option<String>,
+    /// Only on sync: how the user settled files both sides changed, keyed by
+    /// the checkout-relative path the panel showed them.
+    #[serde(default)]
+    resolve: std::collections::BTreeMap<String, String>,
+}
+
+fn overleaf_link_json(link: Option<&crate::store::OverleafLink>) -> Value {
+    let Some(link) = link else {
+        return Value::Null;
+    };
+    let project = local::overleaf::Project {
+        id: link.overleaf_project_id.clone(),
+        host: link.host.clone(),
+    };
+    json!({
+        "projectId": project.id,
+        "url": project.web_url(),
+    })
+}
+
+fn overleaf_state_json(link: Option<&crate::store::OverleafLink>) -> Value {
+    json!({
+        "hasToken": local::overleaf::token().is_some(),
+        "link": overleaf_link_json(link),
+    })
+}
+
+async fn overleaf_settings() -> ApiResult {
+    blocking_api(move || {
+        Ok(Json(
+            json!({ "hasToken": local::overleaf::token().is_some() }),
+        ))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SetOverleafTokenReq {
+    token: String,
+}
+
+/// Stored as given: the bridge is the only thing that can say whether a token
+/// works, and it needs a project to say it about. `link_overleaf` is where a
+/// bad token surfaces.
+async fn set_overleaf_token(Json(req): Json<SetOverleafTokenReq>) -> ApiResult {
+    blocking_api(move || {
+        let token = req.token.trim().to_string();
+        if token.is_empty() {
+            return Err(bad_request("token is required"));
+        }
+        // A newline would add a second field to the credential line the helper
+        // feeds git.
+        if token
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || !c.is_ascii())
+        {
+            return Err(bad_request(
+                "That does not look like an Overleaf token — it has spaces, line breaks, or characters a token does not contain. Copy it again from Overleaf's Account Settings.",
+            ));
+        }
+        local::overleaf::set_token(&token)?;
+        Ok(Json(json!({ "hasToken": true })))
+    })
+    .await
+}
+
+async fn delete_overleaf_token() -> ApiResult {
+    blocking_api(move || {
+        local::overleaf::clear_token()?;
+        Ok(Json(json!({ "hasToken": false })))
+    })
+    .await
+}
+
+async fn overleaf_link(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
+        let store = Store::open()?;
+        let link = store.overleaf_link(&id, &rel)?;
+        Ok(Json(overleaf_state_json(link.as_ref())))
+    })
+    .await
+}
+
+/// Link this `.tex` to an Overleaf project, proving the account can reach it
+/// before the link is stored — so a plan without Git integration is reported
+/// here, once, rather than on every later push.
+async fn link_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        let token = local::overleaf::token()
+            .ok_or_else(|| bad_request("Add an Overleaf Git authentication token first."))?;
+        let raw = req.project.unwrap_or_default();
+        let project = local::overleaf::parse_project(&raw).map_err(bad_request)?;
+        local::overleaf::probe(&project, &token).map_err(|e| bad_request(e.to_string()))?;
+        let store = Store::open()?;
+        let link = crate::store::OverleafLink {
+            overleaf_project_id: project.id,
+            host: project.host,
+            head: String::new(),
+            baseline: Default::default(),
+            root: String::new(),
+        };
+        store.set_overleaf_link(&id, &rel, &link)?;
+        Ok(Json(overleaf_state_json(Some(&link))))
+    })
+    .await
+}
+
+/// Validates the path but does not resolve it: unlinking a paper that has since
+/// been deleted or renamed must still work, or the link would outlive any way
+/// to remove it.
+async fn unlink_overleaf(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, _) = validated_project_file_path(&q.path)?;
+        let store = Store::open()?;
+        store.clear_overleaf_link(&id, &rel)?;
+        Ok(Json(overleaf_state_json(None)))
+    })
+    .await
+}
+
+/// Bring the paper and the linked Overleaf project into step, both ways. Like a
+/// failed compile, a refusal is the answer the user came for, so it comes back
+/// as a 400 carrying Overleaf's own words.
+async fn sync_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, root, full) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        let (token, link) = linked(&id, &rel)?;
+        let root = root.to_string_lossy().to_string();
+        // An agreement reached against another checkout says nothing about this
+        // one: starting from none makes every difference a conflict, which is
+        // the safe direction when we cannot tell who moved.
+        let baseline = if link.root == root {
+            link.baseline.clone()
+        } else {
+            Default::default()
+        };
+        let project = local::overleaf::Project {
+            id: link.overleaf_project_id.clone(),
+            host: link.host.clone(),
+        };
+        let payload = local::overleaf::collect(&full)?;
+        let folder = local::overleaf::folder_of(&rel);
+        let mut resolutions = std::collections::BTreeMap::new();
+        for (path, how) in &req.resolve {
+            let how = match how.as_str() {
+                "take-overleaf" => local::overleaf::Resolution::TakeOverleaf,
+                "keep-local" => local::overleaf::Resolution::KeepLocal,
+                other => return Err(bad_request(format!("unknown resolution {other:?}"))),
+            };
+            if let Some(path) = local::overleaf::from_checkout(folder.as_deref(), path) {
+                resolutions.insert(path, how);
+            }
+        }
+        let outcome = local::overleaf::sync(&payload, &project, &token, &baseline, &resolutions)
+            .map_err(|e| bad_request(e.to_string()))?;
+        let store = Store::open()?;
+        store.set_overleaf_link(
+            &id,
+            &rel,
+            &crate::store::OverleafLink {
+                head: outcome.head.clone(),
+                baseline: outcome.baseline.clone(),
+                root,
+                ..link
+            },
+        )?;
+        Ok(Json(json!({
+            "ok": true,
+            "pulled": local::overleaf::to_checkout(folder.as_deref(), &outcome.pulled),
+            "pushed": local::overleaf::to_checkout(folder.as_deref(), &outcome.pushed),
+            "conflicts": local::overleaf::to_checkout(folder.as_deref(), &outcome.conflicts),
+            "note": outcome.note,
+        })))
+    })
+    .await
+}
+
+/// Whether Overleaf has moved since the last sync — one `ls-remote`, no clone,
+/// so a linked paper can be watched while its tab is open without a transfer
+/// every time.
+async fn overleaf_status(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
+        let (token, link) = linked(&id, &rel)?;
+        let project = local::overleaf::Project {
+            id: link.overleaf_project_id,
+            host: link.host,
+        };
+        let head = local::overleaf::remote_head(&project, &token)
+            .map_err(|e| bad_request(e.to_string()))?;
+        Ok(Json(json!({ "remoteChanged": head != link.head })))
+    })
+    .await
+}
+
+/// The token and link a sync needs, or the 400 that says which is missing.
+fn linked(
+    id: &str,
+    path: &str,
+) -> std::result::Result<(String, crate::store::OverleafLink), ApiError> {
+    let token = local::overleaf::token()
+        .ok_or_else(|| bad_request("Add an Overleaf Git authentication token first."))?;
+    let link = Store::open()?
+        .overleaf_link(id, path)?
+        .ok_or_else(|| bad_request("This paper is not linked to an Overleaf project yet."))?;
+    Ok((token, link))
+}
+
+/// The no-plan path: a page that posts the paper straight into a new Overleaf
+/// project. Served rather than built in the browser because the files it
+/// carries are read from the checkout, and returned as HTML because Overleaf
+/// takes them as a form POST.
+async fn overleaf_upload(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> Response {
+    let built = tokio::task::spawn_blocking(move || {
+        let (_, _, full) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())
+            .map_err(|e| anyhow!("{}", e.1))?;
+        let payload = local::overleaf::collect(&full)?;
+        local::overleaf::upload_form_html(&payload)
+    })
+    .await;
+    match built {
+        Ok(Ok(html)) => Html(html).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::BAD_REQUEST,
+            Html(format!(
+                "<!doctype html><meta charset=\"utf-8\"><p>{}</p>",
+                local::overleaf::escape(&e.to_string())
+            )),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<!doctype html><meta charset=\"utf-8\"><p>{e}</p>")),
+        )
+            .into_response(),
+    }
+}
+
+/// Resolve a checkout `.tex` to (normalized repo-relative path, checkout root,
+/// canonical file). Confines the path exactly like `open_project_file`, and
+/// refuses a session whose worktree is gone for the same reason
+/// `write_project_file` does: both compiling and syncing act on the file the
+/// user is actually editing.
+fn resolve_project_tex(
+    id: &str,
+    path: &str,
+    session_id: Option<&str>,
+) -> std::result::Result<(String, std::path::PathBuf, std::path::PathBuf), ApiError> {
+    let (rel, rel_path) = validated_project_file_path(path)?;
+    if touches_git_dir(&rel_path) {
+        return Err(bad_request("cannot read files under .git"));
+    }
+    if !rel.to_ascii_lowercase().ends_with(".tex") {
+        return Err(bad_request("not a .tex file"));
+    }
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(id)?
+        .ok_or_else(|| not_found("project"))?;
+    let (root, root_kind) = resolve_checkout_root(&store, &project, session_id)?;
+    if session_id.is_some() && root_kind == "clone" {
+        return Err(bad_request(
+            "this session's worktree is no longer available — reload the file",
+        ));
+    }
+    let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+        Err(e) => return Err(ApiError::from(anyhow!("could not read the file: {e}"))),
+    };
+    if !full.starts_with(&root) {
+        return Err(bad_request("path escapes repository"));
+    }
+    if full.is_dir() {
+        return Err(bad_request("path is a directory"));
+    }
+    Ok((rel, root, full))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CompileLatexReq {
@@ -2636,36 +2954,7 @@ async fn compile_project_latex(
     Json(req): Json<CompileLatexReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let (rel, rel_path) = validated_project_file_path(&req.path)?;
-        if touches_git_dir(&rel_path) {
-            return Err(bad_request("cannot compile files under .git"));
-        }
-        if !rel.to_ascii_lowercase().ends_with(".tex") {
-            return Err(bad_request("not a .tex file"));
-        }
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let (root, root_kind) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        // Compiling writes a PDF, so a session that fell back to the clone is
-        // refused for the same reason `write_project_file` refuses it.
-        if req.session_id.is_some() && root_kind == "clone" {
-            return Err(bad_request(
-                "this session's worktree is no longer available — reload the file",
-            ));
-        }
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
-            Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
-            Err(e) => return Err(ApiError::from(anyhow!("compile failed: {e}"))),
-        };
-        if !full.starts_with(&root) {
-            return Err(bad_request("path escapes repository"));
-        }
-        if full.is_dir() {
-            return Err(bad_request("path is a directory"));
-        }
+        let (_, root, full) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
         // Asked here rather than inside `compile` so a machine that cannot build
         // *this* document gets a 400 with the install hint instead of a 500.
         if let Some(hint) = local::latex::missing_toolchain(&full) {

@@ -31,8 +31,9 @@ pub enum Program {
 }
 
 impl Program {
-    /// The engine binary, for driving it without latexmk.
-    fn binary(self) -> &'static str {
+    /// The engine binary, for driving it without latexmk. Overleaf names its
+    /// engines the same way, so this doubles as the `engine` it accepts.
+    pub(crate) fn binary(self) -> &'static str {
         match self {
             Program::Pdf => "pdflatex",
             Program::Xe => "xelatex",

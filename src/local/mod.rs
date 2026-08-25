@@ -28,6 +28,7 @@ pub mod model;
 pub mod native_store;
 pub mod opencode;
 pub mod openresearch;
+pub mod overleaf;
 pub mod projects;
 pub mod ray;
 pub mod resolve;

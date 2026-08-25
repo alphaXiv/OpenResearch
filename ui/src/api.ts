@@ -408,6 +408,105 @@ export const compileLatex = (
     sessionId: opts.sessionId,
   });
 
+/** The Overleaf project a `.tex` pushes to. */
+export interface OverleafLink {
+  projectId: string;
+  /** The project on overleaf.com, for opening it. */
+  url: string;
+}
+
+export interface OverleafState {
+  /** A Git authentication token is stored on this machine. */
+  hasToken: boolean;
+  /** Null until this paper is pointed at a project. */
+  link: OverleafLink | null;
+}
+
+/** Whether a Git authentication token is stored — the machine-wide half of the
+ * Overleaf state, for Settings. */
+export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+
+/** Store an Overleaf Git authentication token. Not validated here: only the Git
+ * bridge can judge a token, and it needs a project to judge it against, so a
+ * bad token surfaces from `linkOverleaf`. */
+export const saveOverleafToken = (token: string) =>
+  post<{ hasToken: boolean }>("/api/overleaf/token", { token });
+
+export const deleteOverleafToken = () =>
+  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+export const getOverleafState = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+
+/** Point this `.tex` at an Overleaf project. The server proves the account can
+ * reach it before storing the link, so this is where a plan without Git
+ * integration — or a bad token — is reported. */
+export const linkOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { project: string; sessionId?: string },
+) =>
+  post<OverleafState>(`/api/projects/${projectId}/file/overleaf`, {
+    path,
+    project: opts.project,
+    sessionId: opts.sessionId,
+  });
+
+export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafState>(r));
+
+/** How the user settled a file both sides changed, keyed by checkout-relative path. */
+export type OverleafResolution = "keep-local" | "take-overleaf";
+
+export interface OverleafSyncResult {
+  ok: boolean;
+  /** Files Overleaf changed alone, now written into the checkout. */
+  pulled: string[];
+  /** Files we changed alone, now committed to Overleaf. */
+  pushed: string[];
+  /** Files both sides changed since the last sync. Left untouched on both
+   * sides until the user says which copy to keep. */
+  conflicts: string[];
+  /** Main-document mismatch, or files left behind. */
+  note: string | null;
+}
+
+/** Bring the paper and the linked Overleaf project into step, both ways. */
+export const syncOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; resolve?: Record<string, OverleafResolution> } = {},
+) =>
+  post<OverleafSyncResult>(`/api/projects/${projectId}/file/overleaf/sync`, {
+    path,
+    sessionId: opts.sessionId,
+    resolve: opts.resolve,
+  });
+
+/** Whether Overleaf has moved since the last sync. One request and no transfer,
+ * so a linked paper can be watched while its tab is open. */
+export const getOverleafStatus = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  get<{ remoteChanged: boolean }>(
+    `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+  );
+
+/** Page that posts the paper to Overleaf as a new project — the path for an
+ * account whose plan has no Git integration. Opened in a tab, not fetched. */
+export const overleafUploadUrl = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => `/api/projects/${projectId}/file/overleaf/upload?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
+
 export interface CodeTree {
   root: CheckoutRoot;
   /** The listed branch (`ref` mode), else the checked-out branch, else null
