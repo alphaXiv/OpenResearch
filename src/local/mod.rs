@@ -27,6 +27,7 @@ pub mod modal;
 pub mod model;
 pub mod opencode;
 pub mod openresearch;
+pub mod overleaf;
 pub mod projects;
 pub mod ray;
 pub mod resolve;

@@ -474,6 +474,16 @@ impl Store {
                 error     TEXT,
                 tested_at INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS overleaf_links (
+                project_id TEXT NOT NULL,
+                tex_path   TEXT NOT NULL,
+                overleaf_project_id TEXT NOT NULL,
+                host       TEXT NOT NULL,
+                head       TEXT NOT NULL DEFAULT '',
+                baseline   TEXT NOT NULL DEFAULT '{}',
+                root       TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (project_id, tex_path)
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -1482,6 +1492,10 @@ impl Store {
     pub fn delete_local_project(&self, id: &str) -> Result<()> {
         let tx = self.begin()?;
         tx.execute(
+            "DELETE FROM overleaf_links WHERE project_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
             "DELETE FROM chat_queued_messages WHERE session_id IN
                (SELECT id FROM chat_sessions WHERE project_id = ?1)",
             params![id],
@@ -2455,6 +2469,69 @@ impl Store {
             .optional()?)
     }
 
+    /// The Overleaf project a `.tex` in this project pushes to, if one is linked.
+    pub fn overleaf_link(&self, project_id: &str, tex_path: &str) -> Result<Option<OverleafLink>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT overleaf_project_id, host, head, baseline, root FROM overleaf_links
+                 WHERE project_id = ?1 AND tex_path = ?2",
+                params![project_id, tex_path],
+                |row| {
+                    let baseline: String = row.get(3)?;
+                    Ok(OverleafLink {
+                        overleaf_project_id: row.get(0)?,
+                        host: row.get(1)?,
+                        head: row.get(2)?,
+                        root: row.get(4)?,
+                        // A baseline that will not parse is one we cannot trust
+                        // to say who changed what; empty makes the next sync
+                        // treat every difference as a conflict rather than
+                        // guess a direction.
+                        baseline: serde_json::from_str(&baseline).unwrap_or_default(),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_overleaf_link(
+        &self,
+        project_id: &str,
+        tex_path: &str,
+        link: &OverleafLink,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO overleaf_links
+               (project_id, tex_path, overleaf_project_id, host, head, baseline, root)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(project_id, tex_path) DO UPDATE SET
+               overleaf_project_id = excluded.overleaf_project_id,
+               host = excluded.host,
+               head = excluded.head,
+               baseline = excluded.baseline,
+               root = excluded.root",
+            params![
+                project_id,
+                tex_path,
+                link.overleaf_project_id,
+                link.host,
+                link.head,
+                serde_json::to_string(&link.baseline)?,
+                link.root
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_overleaf_link(&self, project_id: &str, tex_path: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM overleaf_links WHERE project_id = ?1 AND tex_path = ?2",
+            params![project_id, tex_path],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_ssh_host_test(&self, t: &SshHostTest) -> Result<()> {
         self.conn.execute(
             "INSERT INTO ssh_host_tests (host, reachable, git_found, tools_found, error, tested_at)
@@ -2484,6 +2561,26 @@ impl Store {
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
+}
+
+/// The Overleaf project one `.tex` file pushes to. Per file, not per project:
+/// a checkout can hold a paper and a rebuttal, and they are different Overleaf
+/// projects.
+#[derive(Debug, Clone)]
+pub struct OverleafLink {
+    pub overleaf_project_id: String,
+    /// `www.overleaf.com`, or a Server Pro site.
+    pub host: String,
+    /// Overleaf's HEAD at the last sync. A poll that sees the same sha knows
+    /// nothing moved there, and can skip the clone.
+    pub head: String,
+    /// What both sides agreed on at the last sync (path to content hash) — the
+    /// only thing that gives a later difference a direction.
+    pub baseline: std::collections::BTreeMap<String, String>,
+    /// The checkout the baseline was taken from. A session worktree and the hub
+    /// clone hold different copies of the same path, and an agreement made
+    /// against one says nothing about the other.
+    pub root: String,
 }
 
 /// Most recent preflight result per ssh host alias (Settings → Compute → SSH).
