@@ -95,7 +95,7 @@ async fn submit_controller_run(
         env.insert(key.to_string(), value.to_string_lossy().into_owned());
     });
     let mut secret_env = HashMap::new();
-    // Keep the Tinker key inherited only; run.sh is persisted on disk.
+    // Every local controller inherits this key without persisting it in run.sh.
     let tinker_key = if kind == "tinker_job" {
         env.insert("ORX_RUN_ID".to_string(), run_id.clone());
         Some(crate::jobs::tinker::resolve_api_key()?)

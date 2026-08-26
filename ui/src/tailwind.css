@@ -455,6 +455,34 @@ textarea::placeholder {
   padding-block: 0.5px;
 }
 
+/* Unlayered so `.run-chip svg` on the `.md` wrapper cannot tint the trailing
+   open-in-pane glyph; its 0.6 tracks that wrapper's `.file-chip svg` opacity. */
+.md .file-chip .file-chip-open {
+  color: currentColor;
+  opacity: 0.6;
+}
+
+/* Offset stays under the label's ellipsis clip; `.tool-target`'s 3px would cut. */
+.md .file-chip .file-chip-label {
+  text-decoration-line: underline;
+  text-decoration-color: var(--border-strong);
+  text-decoration-thickness: 0.6px;
+  text-underline-offset: 2px;
+}
+
+.md .file-chip:hover:not(:disabled) .file-chip-label,
+.md .file-chip:focus-visible .file-chip-label {
+  text-decoration-color: var(--primary);
+}
+
+.md .file-chip:disabled .file-chip-label {
+  text-decoration-line: none;
+}
+
+.md .file-chip:disabled .file-chip-open {
+  display: none;
+}
+
 .msg-assistant .md img {
   display: block;
   max-width: 100%;
