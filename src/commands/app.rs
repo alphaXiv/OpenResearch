@@ -48,10 +48,6 @@ pub fn launched_as_app_bundle() -> bool {
 /// process just exits).
 #[cfg(target_os = "macos")]
 pub async fn run() {
-    // First: everything below resolves a directory the probe can still change.
-    // The lock lives under `config_dir()`, so taking it earlier would lock the
-    // default path while the CLI locks the user's `XDG_CONFIG_HOME` one —
-    // protecting nothing at all.
     // App mode returns before `dispatch`, which is where `orx up` takes this
     // same read lock. Without it `orx delete` from a CLI install sees no reader
     // and wipes the store out from under a running app.
@@ -115,9 +111,6 @@ pub(crate) async fn hydrate_shell_env() {
             return;
         }
     };
-    // The lock below is still taken after this, so `orx delete` can win a
-    // few-second window at startup. Locking first is worse: the lock path comes
-    // from `config_dir()`, which this probe can still change.
     // The markers are the success signal, not the exit status — an interactive
     // rc file routinely ends on a failing command.
     match crate::local::shell_env::parse_probe(&String::from_utf8_lossy(&out.stdout), &marker) {

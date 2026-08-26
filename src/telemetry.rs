@@ -11,10 +11,10 @@
 //!   generate an install id. The official release workflow embeds the immutable
 //!   production build channel; a runtime override may only disable it.
 //! - **Opt-out.** A `--no-telemetry` flag and a persistent `orx telemetry off`
-//!   (also toggleable from the `orx up` onboarding step). A disabled run sends
-//!   nothing, touches no disk, and generates no install id. (In an eligible
-//!   official build, *agreeing* to the consent step persists the install id —
-//!   an opt-in; see `record_consent`.)
+//!   (also toggleable from `orx up`). Disabled product telemetry sends nothing
+//!   and generates no install id. The telemetry choice itself is the sole
+//!   exception: it is queued durably so opt-outs are observable; see
+//!   `record_consent`.
 //! - **Never blocks or crashes the CLI.** Events enter a disk-backed outbox,
 //!   then send on a background task with a bounded flush window. Failed sends
 //!   retry on the next run; telemetry errors never enter a command's `?` chain.
@@ -533,6 +533,10 @@ pub(crate) fn effective_disabled_reason() -> Option<DisabledReason> {
     disabled_reason(flag())
 }
 
+pub(crate) fn preference_enabled() -> bool {
+    preference_disabled_reason(false).is_none()
+}
+
 /// Convenience: `true` when events should be sent.
 fn is_enabled(cli_flag: bool) -> bool {
     disabled_reason(cli_flag).is_none()
@@ -730,10 +734,10 @@ fn remove_queued_product_events() {
         .map(|entry| entry.path())
         .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
     {
-        let keep = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .is_some_and(|payload| is_consent_payload(&payload));
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let keep = serde_json::from_slice(&bytes).is_ok_and(|payload| is_consent_payload(&payload));
         if !keep {
             let _ = std::fs::remove_file(path);
         }
@@ -757,7 +761,7 @@ pub(crate) fn retry_outbox() {
             .and_then(|meta| meta.modified())
             .ok()
     });
-    // ponytail: no eviction preserves rejected events; move to SQLite if queue scans become costly.
+    // ponytail: no eviction preserves retryable events; move to SQLite if queue scans become costly.
     for path in paths.into_iter().take(20) {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
@@ -843,12 +847,10 @@ fn consent_distinct_id(agreed: bool) -> String {
     CONSENT_SENTINEL_ID.to_string()
 }
 
-/// Record a telemetry consent decision — `cli_telemetry_consent` with
+/// Record a telemetry toggle choice — `cli_telemetry_consent` with
 /// `{ agreed: bool }`. Within an eligible official build, this is the ONE event
 /// that ignores the user's telemetry preference: it must land even when the
-/// user chose to disable telemetry, otherwise every rejection would be
-/// invisible and the agree/reject ratio would be hopelessly skewed toward
-/// "agree".
+/// user chose to disable telemetry, otherwise off choices would be invisible.
 ///
 /// Identity policy (phantom-free by construction):
 /// - `agreed` → the persistent install id. The user just consented to
@@ -933,15 +935,18 @@ async fn flush_pending() {
 pub(crate) struct TelemetrySession;
 
 impl TelemetrySession {
-    /// Fire the invocation event now. `command` is a stable event label (see
-    /// `command_name` in `main.rs`), not raw user input. Inert when disabled.
+    /// Drain queued events and optionally fire the invocation event now.
+    /// `command` is a stable event label (see `command_name` in `main.rs`), not
+    /// raw user input. Inert when disabled.
     /// The `--no-telemetry` flag is read from the process-global (set in `main`
     /// before this is called), matching every other event path. The handle is
     /// registered in the pending set and flushed by `finish`.
-    pub(crate) fn start(command: &str) -> TelemetrySession {
+    pub(crate) fn start(command: Option<&str>) -> TelemetrySession {
         retry_outbox();
-        // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
-        capture("command", json!({ "command": command }));
+        if let Some(command) = command {
+            // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
+            capture("command", json!({ "command": command }));
+        }
         TelemetrySession
     }
 
@@ -1071,7 +1076,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-tel-persist-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
 
-        assert!(preference_disabled_reason(false).is_none());
+        assert!(preference_enabled());
 
         // Persist an opt-out and confirm it disables.
         set_persisted_disabled(true).unwrap();
@@ -1079,11 +1084,12 @@ mod tests {
             preference_disabled_reason(false),
             Some(DisabledReason::Persisted)
         ));
+        assert!(!preference_enabled());
 
         // Clearing it re-enables (and doesn't wipe the install id via the lock).
         let _ = install_id();
         set_persisted_disabled(false).unwrap();
-        assert!(preference_disabled_reason(false).is_none());
+        assert!(preference_enabled());
         assert!(
             load_settings().and_then(|s| s.install_id).is_some(),
             "clearing opt-out must not clobber the install id"
@@ -1103,6 +1109,8 @@ mod tests {
         let consent = outbox_dir().join("consent.json");
         let malformed = outbox_dir().join("malformed.json");
         let active = outbox_dir().join(".active.tmp");
+        #[cfg(unix)]
+        let unreadable = outbox_dir().join("unreadable.json");
         std::fs::write(
             &product,
             serde_json::to_vec(&build_payload("command", "did", json!({ "command": "up" })))
@@ -1121,12 +1129,16 @@ mod tests {
         .unwrap();
         std::fs::write(&malformed, b"not-json").unwrap();
         std::fs::write(&active, b"partial").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", &unreadable).unwrap();
 
         set_persisted_disabled(true).unwrap();
         assert!(!product.exists());
         assert!(!malformed.exists());
         assert!(consent.exists());
         assert!(active.exists());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(unreadable).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1849,7 +1861,7 @@ mod tests {
         }
         assert!(environment_disabled_reason().is_some());
 
-        let session = TelemetrySession::start("up");
+        let session = TelemetrySession::start(Some("up"));
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true);

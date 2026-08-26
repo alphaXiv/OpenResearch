@@ -2189,7 +2189,7 @@ function TelemetryTab() {
     if (!settings || saving) return;
     setSaving(true);
     setError(null);
-    void setTelemetry(!settings.enabled)
+    void setTelemetry(!settings.preferenceEnabled)
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2214,9 +2214,9 @@ function TelemetryTab() {
             <button
               type="button"
               role="switch"
-              aria-checked={settings.enabled}
+              aria-checked={settings.preferenceEnabled}
               aria-label="Anonymous usage analytics"
-              className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.enabled ? "on" : ""}`}
+              className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.preferenceEnabled ? "on" : ""}`}
               disabled={saving}
               onClick={toggle}
             >

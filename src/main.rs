@@ -761,6 +761,7 @@ async fn main() {
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]
     if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
         commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
         let _session = telemetry::TelemetrySession::start_app();
@@ -828,16 +829,15 @@ async fn main() {
     // (e.g. the "not logged in" path) are still counted. Opt out with
     // --no-telemetry or `orx telemetry off`.
     telemetry::set_flag(cli.no_telemetry);
-    let session = should_capture_command(&command)
-        .then(|| telemetry::TelemetrySession::start(command_name(&command)));
+    let session = telemetry::TelemetrySession::start(
+        should_capture_command(&command).then(|| command_name(&command)),
+    );
 
     let result = dispatch(command).await;
     if let Some(warning) = warning {
         warning.finish().await;
     }
-    if let Some(session) = session {
-        session.finish(result.is_ok()).await;
-    }
+    session.finish(result.is_ok()).await;
 
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.

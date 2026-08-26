@@ -131,9 +131,9 @@ jobs:
         run: ORX_OFFICIAL_RELEASE_BUILD=1 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
 
       - name: Verify bundled production channel
-        run: |
-          actual="$(dist/OpenResearch.app/Contents/MacOS/OpenResearch --no-telemetry version --build-channel)"
-          test "$actual" = production
+        env:
+          ORX_TELEMETRY_ENV: "off"
+        run: test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch version --build-channel)" = production
 
       - name: Sign, notarize, and package the DMG
         env:

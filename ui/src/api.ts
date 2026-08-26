@@ -1107,6 +1107,8 @@ export const pushProjectGithub = (projectId: string) =>
 export interface TelemetrySettings {
   /** Whether usage analytics linked to the random installation ID is on. */
   enabled: boolean;
+  /** Saved user preference, independent of build and runtime eligibility. */
+  preferenceEnabled: boolean;
   /** When off, a short human reason (e.g. "--no-telemetry flag"); null when on. */
   reason: string | null;
 }

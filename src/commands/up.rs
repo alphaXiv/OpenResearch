@@ -108,7 +108,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
-    spawn_update_checker();
+    spawn_background_tasks();
 
     let app = router(state);
     let url = format!("http://127.0.0.1:{port}");
@@ -3373,10 +3373,8 @@ async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
     Ok(Json(json!(hf_token_status().await)))
 }
 
-/// Keep a long-running dashboard current. `main`'s invocation-time check only
-/// fires once, and `orx up` (and the macOS app it backs) can stay up for days —
-/// long enough to drift several releases behind without this.
-fn spawn_update_checker() {
+/// Keep update checks and telemetry delivery running for long-lived dashboards.
+fn spawn_background_tasks() {
     tokio::spawn(async {
         loop {
             updates::periodic_update_pass().await;
@@ -3384,10 +3382,8 @@ fn spawn_update_checker() {
         }
     });
     tokio::spawn(async {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            tokio::time::sleep(Duration::from_secs(60)).await;
             crate::telemetry::retry_outbox();
         }
     });
@@ -4079,13 +4075,14 @@ async fn set_git_settings(Json(req): Json<SetGitSettingsReq>) -> ApiResult {
 
 // --- telemetry settings -----------------------------------------------------
 
-/// `{ enabled, reason }` — the effective analytics state after build/runtime
-/// eligibility, per-run flags, and the persisted preference. `reason` is null
-/// when enabled.
+/// Effective eligibility plus the saved preference controlled by the switch.
 fn telemetry_settings_json() -> Value {
+    let preference_enabled = crate::telemetry::preference_enabled();
     match crate::telemetry::effective_disabled_reason() {
-        None => json!({ "enabled": true, "reason": null }),
-        Some(r) => json!({ "enabled": false, "reason": r.as_str() }),
+        None => json!({ "enabled": true, "preferenceEnabled": preference_enabled, "reason": null }),
+        Some(r) => {
+            json!({ "enabled": false, "preferenceEnabled": preference_enabled, "reason": r.as_str() })
+        }
     }
 }
 
