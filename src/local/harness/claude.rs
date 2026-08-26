@@ -44,6 +44,7 @@ use crate::local::chat::{
     WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::find_on_path;
 
@@ -360,7 +361,7 @@ fn has_api_credential() -> bool {
 /// `claude -p` child pinned to Haiku, mirroring how Claude Code titles its own
 /// conversations with a cheap background model. Deliberately *not* the session's
 /// resident child — a title request there would pollute the real conversation
-/// history.
+/// history. `--no-session-persistence` keeps the throwaway request unrecorded.
 ///
 /// `--model haiku` is a CLI model alias of the kind we already pass through from
 /// the catalog; a CLI too old to know it exits non-zero, which lands on `None`
@@ -375,6 +376,7 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
         "haiku",
         "--max-turns",
         "1",
+        "--no-session-persistence",
         // Naming a chat needs no tools and no MCP: booting the user's servers
         // for a one-line request would cost far more than the request itself.
         // With no tools to call, `--max-turns 1` can't be spent on a tool use.
@@ -398,6 +400,14 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
     // cwd's CLAUDE.md / settings into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude(NativeStore::Isolated).ok()?,
+    );
+    cmd.env(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        native_store::claude_secure_storage_config_dir(),
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
@@ -708,7 +718,7 @@ impl Harness for ClaudeCode {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".claude"))
+        Some(native_store::claude_home(NativeStore::Legacy))
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -1651,11 +1661,12 @@ fn commit_attempt_session(ctx: &mut TurnCtx, state: &TurnState) {
 
 /// The reasoning-level → `--effort` value the spawn config carries. Split out so
 /// the harness and the host agree on exactly what the child was launched with.
-fn spawn_config(ctx: &TurnCtx) -> SpawnConfig {
+fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
     SpawnConfig {
         permission_mode: ctx.permission_mode,
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
+        native_store,
         // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
         // port; whether the bridge was actually achieved is recorded on the
         // spawned child's config (a failed write leaves it false and the next
@@ -1900,14 +1911,32 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // cards are deliberately left alone — they resume via --resume.
     let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
 
-    let resume = ctx.native_session_id.clone();
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
+            .await
+            .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??,
+        None => None,
+    };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let resume = ctx
+        .native_session_id
+        .clone()
+        .filter(|_| native_session.is_some());
+    if ctx.native_session_id.is_some() && resume.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+    }
     let base_spec = SpawnSpec {
         chat: ctx.host.clone(),
         session_id: ctx.session_id.clone(),
         repo,
         playbook,
         resume: resume.clone(),
-        config: spawn_config(ctx),
+        config: spawn_config(ctx, native_store),
     };
     let mut retry_count = 0;
     let mut state;

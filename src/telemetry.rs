@@ -15,10 +15,9 @@
 //!   nothing, touches no disk, and generates no install id. (In an eligible
 //!   official build, *agreeing* to the consent step persists the install id —
 //!   an opt-in; see `record_consent`.)
-//! - **Never blocks or crashes the CLI.** Sends are fire-and-forget on a
-//!   background task with a bounded flush window (modeled on
-//!   [`crate::updates::UpdateWarning`]); every error is swallowed. A telemetry
-//!   fn returning to a command's `?` chain is impossible — they all return `()`.
+//! - **Never blocks or crashes the CLI.** Events enter a disk-backed outbox,
+//!   then send on a background task with a bounded flush window. Failed sends
+//!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
 use std::io::IsTerminal;
@@ -299,6 +298,10 @@ fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
 }
 
+fn outbox_dir() -> PathBuf {
+    crate::config::config_dir().join("telemetry-outbox")
+}
+
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
 /// from absent so a mutation refuses to clobber a file that might still hold a
 /// persisted opt-out we just failed to parse (a torn write, a hand-edit) —
@@ -540,9 +543,14 @@ fn is_enabled(cli_flag: bool) -> bool {
 /// lock as every other mutation so a concurrent install-id write can't clobber
 /// it. Returns the io result so the command can report a write failure.
 pub(crate) fn set_persisted_disabled(disabled: bool) -> std::io::Result<()> {
-    mutate_settings(|s| {
+    let result = mutate_settings(|s| {
         s.telemetry_disabled = if disabled { Some(true) } else { None };
-    })
+    });
+    if result.is_ok() && disabled {
+        cancel_pending();
+        let _ = std::fs::remove_dir_all(outbox_dir());
+    }
+    result
 }
 
 /// Process-global capture of the `--no-telemetry` flag, set once in `main`
@@ -591,6 +599,8 @@ fn build_payload_with_id(
             "os": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "ci": is_ci(),
+            // Hosted cloud agents were retired; released CLI installs are human-driven.
+            "installKind": "human",
         },
         "events": [{
             "eventId": event_id.to_string(),
@@ -637,35 +647,94 @@ fn iso8601_utc(ms: i64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
 }
 
-/// Fire one event, right now, on the current task, awaiting the send. All
-/// errors are swallowed — telemetry never fails a command. Intended to be
-/// wrapped in `tokio::spawn` by callers that don't want to wait.
-async fn send(event: String, event_id: uuid::Uuid, properties: serde_json::Value) {
-    let Some(install_id) = install_id() else {
-        return;
-    };
-    send_with_id(event, install_id, event_id, properties).await;
-}
-
-async fn send_with_id(
-    event: String,
-    install_id: String,
-    event_id: uuid::Uuid,
-    properties: serde_json::Value,
-) {
-    let payload = build_payload_with_id(&event, &install_id, event_id, properties);
+async fn post_payload(payload: &serde_json::Value) -> bool {
     let url = format!("{}{ANALYTICS_PATH}", telemetry_host());
-    // Bounded per-request timeout so a hung endpoint can't keep the background
-    // task alive indefinitely.
-    let _ = http()
+    http()
         .post(&url)
         .timeout(Duration::from_secs(3))
-        .json(&payload)
+        .json(payload)
         .send()
-        .await;
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
-/// Spawn a fire-and-forget send, returning its handle (or `None` when disabled).
+fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
+    if !is_enabled(flag()) {
+        return None;
+    }
+    let dir = outbox_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{event_id}.json"));
+    let tmp = dir.join(format!(".{event_id}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(payload).ok()?).ok()?;
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(tmp);
+        return None;
+    }
+    Some(path)
+}
+
+async fn deliver_payload(path: Option<PathBuf>, payload: serde_json::Value) {
+    if !is_enabled(flag()) {
+        return;
+    }
+    deliver_queued_payload(path, payload).await;
+}
+
+async fn deliver_queued_payload(path: Option<PathBuf>, payload: serde_json::Value) {
+    if post_payload(&payload).await {
+        if let Some(path) = path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn register_pending(handle: tokio::task::JoinHandle<()>) {
+    if let Ok(mut handles) = pending().lock() {
+        handles.retain(|pending| !pending.is_finished());
+        handles.push(handle);
+    }
+}
+
+fn retry_outbox() {
+    if !is_enabled(flag()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
+        return;
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|extension| extension.to_str()),
+                Some("json" | "tmp")
+            )
+        })
+        .collect();
+    paths.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+    // ponytail: no eviction preserves rejected events; move to SQLite if queue scans become costly.
+    for path in paths.into_iter().take(20) {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_slice(&bytes) else {
+            if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
+                let _ = std::fs::remove_file(path);
+            }
+            continue;
+        };
+        // Stable event IDs make concurrent retries harmless at the API dedupe constraint.
+        register_pending(tokio::spawn(deliver_payload(Some(path), payload)));
+    }
+}
+
+/// Queue an event and spawn its send, returning the handle (or `None` when disabled).
 /// Not awaited here — callers hold the handle and optionally grant it a flush
 /// window at shutdown. Reads the `--no-telemetry` flag from the process-global
 /// set in `main`, so there is exactly one flag-access idiom.
@@ -677,7 +746,10 @@ fn spawn_event(
         return None;
     }
     let event_id = uuid::Uuid::new_v4();
-    Some(tokio::spawn(send(event.into(), event_id, properties)))
+    let install_id = install_id()?;
+    let payload = build_payload_with_id(&event.into(), &install_id, event_id, properties);
+    let path = persist_payload(event_id, &payload);
+    Some(tokio::spawn(deliver_payload(path, payload)))
 }
 
 /// Handles of spawned event sends that haven't been flushed yet. Draining +
@@ -691,18 +763,23 @@ fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// Fire an event without blocking: spawn the send and register its handle for
-/// the single exit-time flush. Crucially does NOT await the flush window here —
+fn cancel_pending() {
+    if let Ok(mut handles) = pending().lock() {
+        for handle in handles.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+/// Queue an event on disk, spawn the send, and register its handle for the
+/// single exit-time flush. Crucially does NOT await the flush window here —
 /// awaiting inline would delay the caller's next `println!` (the "✓ …" success
 /// line) by up to the flush duration. Safe to call unconditionally — no-ops when
 /// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
 /// await.
 pub(crate) fn capture(event: impl Into<String>, extra: serde_json::Value) {
     if let Some(handle) = spawn_event(event, extra) {
-        if let Ok(mut handles) = pending().lock() {
-            handles.retain(|pending| !pending.is_finished());
-            handles.push(handle);
-        }
+        register_pending(handle);
     }
 }
 
@@ -750,14 +827,14 @@ pub(crate) async fn record_consent(agreed: bool) {
     }
     let distinct_id = consent_distinct_id(agreed);
     let event_id = uuid::Uuid::new_v4();
+    let payload = build_payload_with_id(
+        "telemetry_consent",
+        &distinct_id,
+        event_id,
+        json!({ "agreed": agreed }),
+    );
     let send = async {
-        send_with_id(
-            "telemetry_consent".to_string(),
-            distinct_id,
-            event_id,
-            json!({ "agreed": agreed }),
-        )
-        .await;
+        let _ = post_payload(&payload).await;
     };
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
@@ -778,8 +855,8 @@ pub(crate) fn capture_onboarding_research_profile(profile: &ResearchProfile) {
     );
 }
 
-pub(crate) fn capture_project_created() {
-    capture("project_created", json!({}));
+pub(crate) fn capture_project_created(local: bool) {
+    capture("project_created", json!({ "local": local }));
 }
 
 pub(crate) fn capture_chat_session_started(harness: &str) {
@@ -811,9 +888,8 @@ async fn flush_pending() {
 // Per-invocation session — the DAU/retention/command-usage backbone
 // ---------------------------------------------------------------------------
 
-/// Fires a `cli_command` event at the start of a run (so commands that
-/// `std::process::exit` on their own are still counted) and, in `finish`, grants
-/// all pending sends a brief window to land. Modeled on
+/// Starts CLI or desktop telemetry and, in `finish`, grants all pending sends a
+/// brief window to land. Modeled on
 /// [`crate::updates::UpdateWarning`].
 pub(crate) struct TelemetrySession;
 
@@ -824,8 +900,16 @@ impl TelemetrySession {
     /// before this is called), matching every other event path. The handle is
     /// registered in the pending set and flushed by `finish`.
     pub(crate) fn start(command: &str) -> TelemetrySession {
+        retry_outbox();
         // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
         capture("command", json!({ "command": command }));
+        TelemetrySession
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start_app() -> TelemetrySession {
+        retry_outbox();
+        capture("app_started", json!({}));
         TelemetrySession
     }
 
@@ -847,15 +931,22 @@ impl TelemetrySession {
 /// The motivating key event. Fire only on success.
 ///
 /// - `kind`: `"create"` (a node was created) or `"run"` (a run was launched).
+/// - `local`: `true` when dispatched via the local `orx up` store path.
+///   This is a dispatch axis, not a "runs on this machine" axis — for example,
+///   `target="openresearch"` provisions an ephemeral OpenResearch box. Every
+///   current dispatch uses the local store path, so callers pass `true` today.
 /// - `target`: for a run, a COARSE compute label — the backend/provider name
 ///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"ray"`, `"openresearch"`,
-///   `"local"`). `None` for `create` (no compute).
+///   `"local"`) for local-mode runs. `None` for `create` (no compute).
 ///   Always a fixed enum label, never an id, name, or path.
+///
+/// One vocabulary axis per property: `target` is always "what compute", `local`
+/// is always "which dispatch path". `kind`+`local` tell you how to read `target`.
 ///
 /// Non-blocking: the send is spawned and registered for the exit-time flush, so
 /// this returns immediately and never delays the command's own success output.
-pub(crate) fn capture_experiment_started(kind: &str, target: Option<&str>) {
-    let mut extra = json!({ "kind": kind });
+pub(crate) fn capture_experiment_started(kind: &str, local: bool, target: Option<&str>) {
+    let mut extra = json!({ "kind": kind, "local": local });
     if let (Some(obj), Some(t)) = (extra.as_object_mut(), target) {
         obj.insert("computeTarget".to_string(), json!(t));
     }
@@ -1220,7 +1311,7 @@ mod tests {
         let payload = build_payload(
             "experiment_started",
             "test-distinct-id",
-            json!({ "kind": "run", "computeTarget": "modal" }),
+            json!({ "kind": "run", "local": false, "computeTarget": "modal" }),
         );
 
         assert_eq!(payload["schemaVersion"], 1);
@@ -1234,9 +1325,11 @@ mod tests {
         assert!(context["os"].is_string());
         assert!(context["arch"].is_string());
         assert!(context["ci"].is_boolean());
+        assert_eq!(context["installKind"], "human");
         let props = &payload["events"][0]["properties"];
         // Event-specific coarse props.
         assert_eq!(props["kind"], "run");
+        assert_eq!(props["local"], false);
         assert_eq!(props["computeTarget"], "modal");
 
         assert!(payload["events"][0]["occurredAt"].is_string());
@@ -1317,6 +1410,7 @@ mod tests {
         // Event names remain stable across the first-party migration.
         for (bare, wire) in [
             ("command", "cli_command"),
+            ("app_started", "cli_app_started"),
             ("onboarding_completed", "cli_onboarding_completed"),
             (
                 "onboarding_research_profile_submitted",
@@ -1338,14 +1432,17 @@ mod tests {
     }
 
     #[test]
-    fn retry_payloads_reuse_the_client_event_id() {
+    fn payloads_reuse_the_supplied_client_event_id() {
         let _g = EnvGuard::new(OPT_VARS);
-        let dir = std::env::temp_dir().join(format!("orx-tel-retry-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("orx-tel-event-id-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         let event_id = uuid::Uuid::new_v4();
         let first = build_payload_with_id("command", "did", event_id, json!({ "command": "run" }));
-        let retry = build_payload_with_id("command", "did", event_id, json!({ "command": "run" }));
-        assert_eq!(first["events"][0]["eventId"], retry["events"][0]["eventId"]);
+        let second = build_payload_with_id("command", "did", event_id, json!({ "command": "run" }));
+        assert_eq!(
+            first["events"][0]["eventId"],
+            second["events"][0]["eventId"]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1394,19 +1491,64 @@ mod tests {
             bytes
         });
 
-        send_with_id(
-            "command".to_string(),
-            "install".to_string(),
-            event_id,
-            json!({ "command": "run" }),
-        )
-        .await;
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
+        assert!(post_payload(&payload).await);
         let request = String::from_utf8(server.await.unwrap()).unwrap();
         assert!(request.starts_with("POST /analytics/v1/cli-events HTTP/1.1\r\n"));
         let body = request.split("\r\n\r\n").nth(1).unwrap();
         let payload: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(payload["events"][0]["eventId"], event_id.to_string());
         assert_eq!(payload["events"][0]["name"], "cli_command");
+    }
+
+    #[tokio::test]
+    async fn outbox_keeps_rejected_payloads_until_acknowledged() {
+        use tokio::io::AsyncWriteExt;
+
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-outbox-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "ORX_TELEMETRY_HOST",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            for status in ["400 Bad Request", "202 Accepted"] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let event_id = uuid::Uuid::new_v4();
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
+        let path = outbox_dir().join(format!("{event_id}.json"));
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+
+        deliver_queued_payload(Some(path.clone()), payload.clone()).await;
+        assert!(path.exists(), "a rejected payload must remain queued");
+        deliver_queued_payload(Some(path.clone()), payload).await;
+        assert!(
+            !path.exists(),
+            "an acknowledged payload must leave the outbox"
+        );
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "release workflow production contract gate"]
+    async fn production_contract_is_accepted() {
+        assert_eq!(build_channel(), "production");
+        let payload = build_payload("app_started", "cli-release-contract-test", json!({}));
+        assert!(
+            post_payload(&payload).await,
+            "production rejected the release payload"
+        );
     }
 
     #[test]
@@ -1443,6 +1585,10 @@ mod tests {
         assert_eq!(onboarding["events"][0]["name"], "cli_onboarding_completed");
         assert!(property_keys(&onboarding).is_empty());
 
+        let app = build_payload("app_started", "did", json!({}));
+        assert_eq!(app["events"][0]["name"], "cli_app_started");
+        assert!(property_keys(&app).is_empty());
+
         let research_profile = build_payload(
             "onboarding_research_profile_submitted",
             "did",
@@ -1465,9 +1611,10 @@ mod tests {
             assert!(!profile_text.contains(forbidden));
         }
 
-        let project = build_payload("project_created", "did", json!({}));
+        let project = build_payload("project_created", "did", json!({ "local": true }));
         assert_eq!(project["events"][0]["name"], "cli_project_created");
-        assert!(property_keys(&project).is_empty());
+        assert_eq!(project["events"][0]["properties"]["local"], true);
+        assert_eq!(property_keys(&project), vec!["local"]);
 
         let chat = build_payload("chat_session_started", "did", json!({ "harness": "codex" }));
         assert_eq!(chat["events"][0]["name"], "cli_chat_session_started");
@@ -1525,9 +1672,9 @@ mod tests {
         let session = TelemetrySession::start("up");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
-        capture_project_created();
+        capture_project_created(true);
         capture_chat_session_started("codex");
-        capture_experiment_started("run", Some("local"));
+        capture_experiment_started("run", true, Some("local"));
 
         assert!(pending().lock().unwrap().is_empty());
         session.finish(true).await;

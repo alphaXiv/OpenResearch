@@ -760,6 +760,9 @@ async fn main() {
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]
     if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        telemetry::set_flag(false);
+        let _session = telemetry::TelemetrySession::start_app();
+        // AppKit owns process shutdown; the durable outbox covers termination before delivery.
         commands::app::run().await;
         return;
     }
