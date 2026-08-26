@@ -32,14 +32,9 @@ orx exp run <expId> --backend tinker
 
 ## Cancellation
 
-- Preserve async cancellation propagation rather than swallowing cancellation
-  exceptions. Eligible sampling futures can then use the SDK's best-effort
-  cancellation path.
-- `orx exp cancel` stops the local controller after a cooperative grace period.
-  Operations already accepted by Tinker may continue. Review or stop remaining
-  work at <https://tinker-console.thinkingmachines.ai/>.
-- Do not claim that orx terminated provider work or observed provider terminal
-  state; Tinker exposes no public session or training termination API.
+- `orx exp cancel` stops the local controller, so it sends no new Tinker
+  requests. Already accepted requests may finish; do not claim provider-side
+  termination.
 
 There is no flavor, host, image, manifest, or provider-specific timeout option.
 The machine running orx must remain awake and connected while the controller is

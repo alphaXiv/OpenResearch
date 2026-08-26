@@ -1613,13 +1613,6 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         .filter(|r| !is_terminal(&r.status))
         .collect();
     if !in_flight.is_empty() {
-        let active_tinker = active_tinker_run_ids(&in_flight);
-        if !active_tinker.is_empty() {
-            return Err(bad_request(format!(
-                "Tinker run(s) {} are still active. No runs were stopped; use each Tinker run's Stop action before deleting the project.",
-                active_tinker.join(", ")
-            )));
-        }
         let mut failures = Vec::new();
         for run in &in_flight {
             if let Err(err) = crate::commands::exp::request_local_run_cancel(&store, &run.id) {
@@ -1663,16 +1656,6 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         local::chat::cleanup_session_worktree(&project, &session.id);
     }
     Ok(Json(json!({ "ok": true })))
-}
-
-fn active_tinker_run_ids(runs: &[StoredRun]) -> Vec<&str> {
-    runs.iter()
-        .filter(|run| {
-            crate::jobs::BackendDescriptor::parse(&run.backend_json)
-                .is_ok_and(|descriptor| descriptor.kind == "tinker_job")
-        })
-        .map(|run| run.id.as_str())
-        .collect()
 }
 
 async fn list_experiments(Path(id): Path<String>) -> ApiResult {
@@ -6085,31 +6068,6 @@ mod tests {
 
         let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
         assert_eq!(value["cancelRequested"], true);
-    }
-
-    #[test]
-    fn active_tinker_runs_block_project_deletion_without_mutating_cancel_intent() {
-        let run = StoredRun {
-            id: "tinker-run".into(),
-            experiment_id: "experiment-1".into(),
-            project_id: "project-1".into(),
-            status: "running".into(),
-            backend_json: r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#.into(),
-            command: String::new(),
-            created_at: 1,
-            updated_at: 2,
-            ended_at: None,
-            exit_code: None,
-            commit_sha: None,
-            result_markdown: None,
-            cancel_requested: false,
-            chat_session_id: None,
-        };
-        assert_eq!(
-            active_tinker_run_ids(std::slice::from_ref(&run)),
-            ["tinker-run"]
-        );
-        assert!(!run.cancel_requested);
     }
 
     #[test]

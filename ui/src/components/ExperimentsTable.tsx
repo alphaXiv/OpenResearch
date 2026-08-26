@@ -3,7 +3,6 @@ import { useState } from "react";
 import { runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { isTinkerRun, TinkerCancelDialog } from "./TinkerCancelDialog";
 
 const EXPERIMENT_TABLE_ACTION_CLASS_NAME = [
   "experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5",
@@ -38,7 +37,6 @@ export function ExperimentsTable({
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [tinkerRun, setTinkerRun] = useState<Run | null>(null);
   const runsByExperiment = new Map<string, Run[]>();
   for (const run of runs) {
     const experimentRuns = runsByExperiment.get(run.experimentId);
@@ -63,7 +61,7 @@ export function ExperimentsTable({
     );
   }
 
-  async function cancel(runId: string) {
+  async function requestCancel(runId: string) {
     setCancelError(null);
     setPendingCancellation((current) => new Set(current).add(runId));
     try {
@@ -74,19 +72,8 @@ export function ExperimentsTable({
         next.delete(runId);
         return next;
       });
-      throw cause;
+      setCancelError(cause instanceof Error ? cause.message : String(cause));
     }
-  }
-
-  function requestCancel(run: Run) {
-    setCancelError(null);
-    if (isTinkerRun(run)) {
-      setTinkerRun(run);
-      return;
-    }
-    void cancel(run.id).catch((cause) =>
-      setCancelError(cause instanceof Error ? cause.message : String(cause)),
-    );
   }
 
   return (
@@ -190,7 +177,7 @@ export function ExperimentsTable({
                     className="experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5 border border-border rounded-md bg-background text-text text-sm font-medium leading-none [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:border-border-strong [&:disabled]:text-muted [&:disabled]:cursor-default [&:disabled]:opacity-50 [&.danger]:border-[color-mix(in_oklab,_var(--accent-red)_42%,_var(--border))] [&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))] [&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red [&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))] [@container((max-width:_560px))]:[&.danger]:ml-auto danger"
                     disabled={cancelling}
                     title={cancelling ? "Stop requested" : "Stop run"}
-                    onClick={() => requestCancel(liveRun)}
+                    onClick={() => void requestCancel(liveRun.id)}
                   >
                     <CircleStop size={15} />
                     {cancelling ? "Stopping…" : "Stop"}
@@ -201,9 +188,6 @@ export function ExperimentsTable({
           );
         })}
       </div>
-      {tinkerRun && (
-        <TinkerCancelDialog run={tinkerRun} onCancel={cancel} onClose={() => setTinkerRun(null)} />
-      )}
     </div>
   );
 }

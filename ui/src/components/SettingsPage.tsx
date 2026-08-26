@@ -1062,18 +1062,12 @@ function LocalSection() {
 
 function TinkerSection() {
   return (
-    <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        <code>--backend tinker</code> runs the experiment controller as a supervised process on
-        this machine; the project&apos;s Tinker SDK sends model operations to Tinker. The
-        project must add and lock <code>tinker</code> or <code>tinker-cookbook</code>, and this
-        machine must stay awake while the controller runs.
-      </p>
-      <p className={SETTINGS_NOTE_CLASS_NAME}>
-        Stopping a run stops its local controller. Work already accepted by Tinker may continue;
-        orx opens the Tinker dashboard so you can review or stop remaining work there.
-      </p>
-    </>
+    <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+      <code>--backend tinker</code> runs the experiment controller as a supervised process on this
+      machine; the project&apos;s Tinker SDK sends model operations to Tinker. The project must
+      add and lock <code>tinker</code> or <code>tinker-cookbook</code>, and this machine must stay
+      awake while the controller runs.
+    </p>
   );
 }
 

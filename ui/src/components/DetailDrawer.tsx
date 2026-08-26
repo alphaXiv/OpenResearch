@@ -14,7 +14,6 @@ import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import { SMALL_BUTTON_CLASS_NAME } from "../styleClasses";
 import type { TabOpenIntent } from "../tabPreview";
-import { isTinkerRun, TinkerCancelDialog, tinkerConsoleUrl } from "./TinkerCancelDialog";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -88,7 +87,6 @@ function TerminalView({
   const [error, setError] = useState<string | null>(null);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [tinkerRun, setTinkerRun] = useState<Run | null>(null);
   const historyRef = useRef<HTMLDivElement>(null);
 
   const selectedRun =
@@ -126,27 +124,16 @@ function TerminalView({
     return () => document.removeEventListener("mousedown", onDown);
   }, [historyOpen]);
 
-  async function stop(runId: string) {
-    setError(null);
-    setPendingRunId(runId);
-    try {
-      await cancelRun(runId);
-    } catch (err) {
-      setPendingRunId(null);
-      throw err;
-    }
-  }
-
-  function requestStop() {
+  async function stop() {
     if (!selectedRun) return;
     setError(null);
-    if (isTinkerRun(selectedRun)) {
-      setTinkerRun(selectedRun);
-      return;
+    setPendingRunId(selectedRun.id);
+    try {
+      await cancelRun(selectedRun.id);
+    } catch (err) {
+      setPendingRunId(null);
+      setError(err instanceof Error ? err.message : String(err));
     }
-    void stop(selectedRun.id).catch((err) =>
-      setError(err instanceof Error ? err.message : String(err)),
-    );
   }
 
   return (
@@ -162,7 +149,7 @@ function TerminalView({
           </span>
         )}
         {live && (
-          <button className={`${SMALL_BUTTON_CLASS_NAME} ghost`} disabled={cancelling} onClick={requestStop}>
+          <button className={`${SMALL_BUTTON_CLASS_NAME} ghost`} disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
             {cancelling ? "Cancelling…" : "Stop"}
           </button>
@@ -202,13 +189,6 @@ function TerminalView({
         )}
       </div>
 
-      {selectedRun?.status === "cancelled" && isTinkerRun(selectedRun) && (
-        <div className="border-b border-border bg-accent-amber-subtle px-3 py-2 text-sm text-accent-amber">
-          The local controller stopped. Accepted Tinker operations may still be running.{" "}
-          <a href={tinkerConsoleUrl(selectedRun)} target="_blank" rel="noreferrer">Open Tinker</a>
-        </div>
-      )}
-
       <div className="term-fill flex-1 min-h-0 bg-[var(--term-bg)] pt-1 pr-0 pb-1 pl-1.5">
         {selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
@@ -218,9 +198,6 @@ function TerminalView({
           <div className="term-empty h-full flex items-center justify-center p-6 text-center text-md text-muted">No runs yet — ask the agent to launch one.</div>
         )}
       </div>
-      {tinkerRun && (
-        <TinkerCancelDialog run={tinkerRun} onCancel={stop} onClose={() => setTinkerRun(null)} />
-      )}
     </div>
   );
 }

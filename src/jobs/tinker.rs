@@ -1,7 +1,6 @@
 use crate::error::{anyhow, Result};
 
 pub const API_KEY_ENV: &str = "TINKER_API_KEY";
-pub const CONSOLE_URL: &str = "https://tinker-console.thinkingmachines.ai/";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApiKeySource {

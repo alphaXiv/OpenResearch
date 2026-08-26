@@ -101,14 +101,11 @@ fn pid_alive(pid: &str) -> bool {
     {
         Ok(o) if o.status.success() => {
             let stat = String::from_utf8_lossy(&o.stdout);
-            live_process_state(stat.trim())
+            let stat = stat.trim();
+            !stat.is_empty() && !stat.starts_with('Z')
         }
         _ => false,
     }
-}
-
-fn live_process_state(state: &str) -> bool {
-    !state.is_empty() && !state.starts_with('Z')
 }
 
 /// The terminal state recorded in exit_code, if any. An empty file is run.sh
@@ -192,90 +189,32 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
     Ok(seen)
 }
 
-/// Give cooperative cleanup a chance before forcibly terminating the process
-/// group. Success means the group is confirmed gone.
+/// Cancel = TERM the process group (pid == pgid under `process_group(0)`);
+/// fall back to the pid alone if the group kill is refused.
 pub fn cancel_job(dir: &Path) -> Result<()> {
-    cancel_job_with_timeout(dir, std::time::Duration::from_secs(5))
-}
-
-fn cancel_job_with_timeout(dir: &Path, wait: std::time::Duration) -> Result<()> {
-    let raw = std::fs::read_to_string(dir.join("pid"))
+    let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
-    let pid: u32 = raw
-        .trim()
-        .parse()
-        .map_err(|_| anyhow!("Invalid local process id: {}", raw.trim()))?;
-    if !process_group_alive(pid) {
-        return Ok(());
-    }
-    for signal in ["INT", "TERM"] {
-        signal_process_group(pid, signal)?;
-        if wait_until_gone(wait, || process_group_alive(pid)) {
-            return Ok(());
-        }
-    }
-    signal_process_group(pid, "KILL")?;
-    if wait_until_gone(wait, || process_group_alive(pid)) {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Could not confirm local process group {pid} exited after SIGKILL"
-        ))
-    }
-}
-
-fn process_group_alive(pid: u32) -> bool {
-    // A dropped Child can remain as a zombie, so group existence alone is insufficient.
-    match std::process::Command::new("ps")
-        .args(["-e", "-o", "pgid=", "-o", "stat="])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            process_table_has_live_group(&String::from_utf8_lossy(&output.stdout), pid)
-        }
-        // Without process states, fail closed and leave cancellation retryable.
-        _ => true,
-    }
-}
-
-fn process_table_has_live_group(table: &str, pid: u32) -> bool {
-    table.lines().any(|line| {
-        let mut fields = line.split_whitespace();
-        let Some(pgid) = fields.next().and_then(|field| field.parse::<u32>().ok()) else {
-            return false;
-        };
-        pgid == pid && fields.next().is_some_and(live_process_state)
-    })
-}
-
-fn signal_process_group(pid: u32, signal: &str) -> Result<()> {
+    let pid = pid.trim().to_string();
     let group = std::process::Command::new("kill")
-        .args([&format!("-{signal}"), "--", &format!("-{pid}")])
+        .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|status| status.success())
+        .map(|s| s.success())
         .unwrap_or(false);
-    if group || !process_group_alive(pid) {
-        return Ok(());
-    }
-    Err(anyhow!(
-        "Could not send SIG{signal} to local process group {pid}"
-    ))
-}
-
-fn wait_until_gone(wait: std::time::Duration, mut alive: impl FnMut() -> bool) -> bool {
-    let deadline = std::time::Instant::now() + wait;
-    loop {
-        if !alive() {
-            return true;
+    if !group {
+        let process = std::process::Command::new("kill")
+            .args(["-TERM", &pid])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !process {
+            return Err(anyhow!("Could not terminate local process group {pid}"));
         }
-        if std::time::Instant::now() >= deadline {
-            return false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
     }
+    Ok(())
 }
 
 /// What "this machine" is, for the Compute settings card: the hardware a
@@ -396,17 +335,6 @@ mod tests {
         assert_eq!(odd[0].mem_mib, None);
     }
 
-    #[test]
-    fn process_group_liveness_ignores_zombies_but_not_live_members() {
-        let table = "3059 Z\n3059 Z+\n4012 Ss\n";
-        assert!(!process_table_has_live_group(table, 3059));
-        assert!(process_table_has_live_group(table, 4012));
-        assert!(process_table_has_live_group("  4012 Ss\n", 4012));
-        assert!(!process_table_has_live_group(table, 9999));
-        assert!(process_table_has_live_group("3059 Z\n3059 S\n", 3059));
-        assert!(!process_group_alive(u32::MAX));
-    }
-
     fn wait_terminal(dir: &Path) -> JobState {
         let mut state = inspect_job(dir);
         for _ in 0..100 {
@@ -459,7 +387,7 @@ mod tests {
 
         let cancelled = run_job(&LocalJobSpec {
             run_id: "cancelled".into(),
-            script: "trap 'exit 0' INT; while :; do sleep 1; done".into(),
+            script: "sleep 60".into(),
             env: HashMap::new(),
             secret_env: HashMap::new(),
         })
@@ -467,28 +395,9 @@ mod tests {
         assert_eq!(inspect_job(&cancelled).stage, "RUNNING");
         cancel_job(&cancelled).unwrap();
         let state = wait_terminal(&cancelled);
-        assert_eq!(state.stage, "COMPLETED");
-
-        let forced = run_job(&LocalJobSpec {
-            run_id: "forced".into(),
-            script: "trap '' INT TERM; while :; do sleep 1; done".into(),
-            env: HashMap::new(),
-            secret_env: HashMap::new(),
-        })
-        .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        let forced_pid: u32 = std::fs::read_to_string(forced.join("pid"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
-        cancel_job_with_timeout(&forced, std::time::Duration::from_millis(100)).unwrap();
-        assert!(!process_group_alive(forced_pid));
-
-        assert!(!wait_until_gone(
-            std::time::Duration::from_millis(20),
-            || true
-        ));
+        // TERM leaves either a dead pid with no exit_code, or a non-zero
+        // exit_code if run.sh got to write one — ERROR either way.
+        assert_eq!(state.stage, "ERROR");
 
         std::env::remove_var("ORX_DATA_DIR");
         let _ = std::fs::remove_dir_all(&base);

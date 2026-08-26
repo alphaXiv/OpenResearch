@@ -1,9 +1,9 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
 //! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
-//! box, Tinker through a local controller, or this machine) and a detached `orx supervise` watches the job beside
-//! it. The run's `backend_json` descriptor is the serialized handle a later
-//! supervisor uses to reattach.
+//! box, Tinker through a local controller, or this machine) and a detached
+//! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
+//! is the serialized handle a later supervisor uses to reattach.
 
 pub mod huggingface;
 pub mod kubernetes;
@@ -300,13 +300,9 @@ mod tests {
 
     #[test]
     fn tinker_descriptor_round_trips_as_a_local_handle() {
-        let json = format!(
-            r#"{{"kind":"tinker_job","jobId":"/tmp/run","url":"{}"}}"#,
-            tinker::CONSOLE_URL
-        );
-        let descriptor = BackendDescriptor::parse(&json).unwrap();
+        let json = r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#;
+        let descriptor = BackendDescriptor::parse(json).unwrap();
         assert_eq!(descriptor.local_ref().unwrap(), "/tmp/run");
-        assert_eq!(descriptor.url.as_deref(), Some(tinker::CONSOLE_URL));
         assert_eq!(
             BackendDescriptor::parse(&descriptor.to_json())
                 .unwrap()

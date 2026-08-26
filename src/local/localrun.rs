@@ -14,16 +14,13 @@ use crate::store::{now_ms, Store, StoredRun};
 
 /// Submit a local controller and print its run directory.
 pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    launch_run(args, "Local").await
-}
-
-pub async fn launch_tinker_run(args: &crate::ExpRunArgs) -> Result<()> {
-    launch_run(args, "Tinker").await
-}
-
-async fn launch_run(args: &crate::ExpRunArgs, label: &str) -> Result<()> {
     let run = crate::compute::submit(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
+    let label = if backend.kind == "tinker_job" {
+        "Tinker"
+    } else {
+        "Local"
+    };
     println!("\u{2713} {label} run started.");
     println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
     println!("  run  {}", run.id);
@@ -34,17 +31,12 @@ async fn launch_run(args: &crate::ExpRunArgs, label: &str) -> Result<()> {
     Ok(())
 }
 
-/// Submit a local experiment through the configured compute adapter.
-pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
-}
-
 pub async fn submit_local_run_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
     run_id: String,
 ) -> Result<StoredRun> {
-    submit_controller_run(args, source, run_id, "local_job", None).await
+    submit_controller_run(args, source, run_id, "local_job").await
 }
 
 pub async fn submit_tinker_run_with_source(
@@ -52,14 +44,7 @@ pub async fn submit_tinker_run_with_source(
     source: SourceSnapshot,
     run_id: String,
 ) -> Result<StoredRun> {
-    submit_controller_run(
-        args,
-        source,
-        run_id,
-        "tinker_job",
-        Some(crate::jobs::tinker::CONSOLE_URL),
-    )
-    .await
+    submit_controller_run(args, source, run_id, "tinker_job").await
 }
 
 async fn submit_controller_run(
@@ -67,7 +52,6 @@ async fn submit_controller_run(
     source: SourceSnapshot,
     run_id: String,
     kind: &str,
-    url: Option<&str>,
 ) -> Result<StoredRun> {
     let backend = kind.trim_end_matches("_job");
     if args.flavor.is_some() {
@@ -110,15 +94,15 @@ async fn submit_controller_run(
     crate::local::shell_env::export_to(|key, value| {
         env.insert(key.to_string(), value.to_string_lossy().into_owned());
     });
-    env.insert("ORX_RUN_ID".to_string(), run_id.clone());
     let mut secret_env = HashMap::new();
     // Keep the Tinker key inherited only; run.sh is persisted on disk.
-    let inherited_tinker_key = env.remove(crate::jobs::tinker::API_KEY_ENV);
     let tinker_key = if kind == "tinker_job" {
+        env.insert("ORX_RUN_ID".to_string(), run_id.clone());
         Some(crate::jobs::tinker::resolve_api_key()?)
     } else {
-        inherited_tinker_key
+        env.get(crate::jobs::tinker::API_KEY_ENV).cloned()
     };
+    env.remove(crate::jobs::tinker::API_KEY_ENV);
     if let Some(key) = tinker_key {
         secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
     }
@@ -136,7 +120,7 @@ async fn submit_controller_run(
         job_id: Some(dir.to_string_lossy().into_owned()),
         flavor: None,
         image: None,
-        url: url.map(str::to_string),
+        url: None,
         context: None,
         manifest: None,
         resources: None,
@@ -150,8 +134,7 @@ async fn submit_controller_run(
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let cancel_dir = dir.clone();
-        let _ = tokio::task::spawn_blocking(move || localbox::cancel_job(&cancel_dir)).await;
+        let _ = localbox::cancel_job(&dir);
         return Err(error);
     }
     let run = StoredRun {

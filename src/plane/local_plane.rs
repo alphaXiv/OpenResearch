@@ -6,7 +6,6 @@ use std::time::{Duration, Instant};
 
 use super::{CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog};
 use crate::error::{anyhow, Result};
-use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::{log_path, Store};
 use crate::ExpRunArgs;
@@ -284,8 +283,7 @@ impl LocalPlane {
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
-                Some("tinker") => crate::local::localrun::launch_tinker_run(&args).await,
-                Some("local") => crate::local::localrun::launch_local_run(&args).await,
+                Some("tinker" | "local") => crate::local::localrun::launch_local_run(&args).await,
                 Some(other) => Err(anyhow!(
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
@@ -339,14 +337,6 @@ impl LocalPlane {
                 None => crate::commands::exp::request_local_run_cancel(store, &r.id)?,
             }
             println!("\u{2713} Cancel requested for run {}.", r.id);
-            if BackendDescriptor::parse(&r.backend_json)
-                .is_ok_and(|descriptor| descriptor.kind == "tinker_job")
-            {
-                println!(
-                    "  Stopping the controller prevents new requests, but accepted Tinker operations may continue.\n  Review or stop remaining work at {}",
-                    crate::jobs::tinker::CONSOLE_URL
-                );
-            }
         }
         Ok(())
     }
