@@ -761,6 +761,7 @@ async fn main() {
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]
     if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
         let _session = telemetry::TelemetrySession::start_app();
         // AppKit owns process shutdown; the durable outbox covers termination before delivery.
@@ -827,19 +828,33 @@ async fn main() {
     // (e.g. the "not logged in" path) are still counted. Opt out with
     // --no-telemetry or `orx telemetry off`.
     telemetry::set_flag(cli.no_telemetry);
-    let session = telemetry::TelemetrySession::start(command_name(&command));
+    let session = should_capture_command(&command)
+        .then(|| telemetry::TelemetrySession::start(command_name(&command)));
 
     let result = dispatch(command).await;
     if let Some(warning) = warning {
         warning.finish().await;
     }
-    session.finish(result.is_ok()).await;
+    if let Some(session) = session {
+        session.finish(result.is_ok()).await;
+    }
 
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
         std::process::exit(1);
     }
+}
+
+fn should_capture_command(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Supervise(_)
+            | Command::Update(UpdateArgs {
+                background: true,
+                ..
+            })
+    )
 }
 
 /// A stable, PII-free event label for each command, decoupled from the enum
@@ -945,6 +960,25 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn internal_commands_do_not_emit_command_telemetry() {
+        assert!(!should_capture_command(&Command::Supervise(
+            SuperviseArgs {
+                run_id: "run-1".into(),
+            }
+        )));
+        assert!(!should_capture_command(&Command::Update(UpdateArgs {
+            background: true,
+            dry_run: false,
+            force: false,
+        })));
+        assert!(should_capture_command(&Command::Update(UpdateArgs {
+            background: false,
+            dry_run: true,
+            force: false,
+        })));
+    }
 
     #[test]
     fn discover_parses_independent_retrieval_options() {

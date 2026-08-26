@@ -548,7 +548,7 @@ pub(crate) fn set_persisted_disabled(disabled: bool) -> std::io::Result<()> {
     });
     if result.is_ok() && disabled {
         cancel_pending();
-        let _ = std::fs::remove_dir_all(outbox_dir());
+        remove_queued_product_events();
     }
     result
 }
@@ -647,21 +647,34 @@ fn iso8601_utc(ms: i64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
 }
 
-async fn post_payload(payload: &serde_json::Value) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryOutcome {
+    Acknowledged,
+    Rejected,
+    Retryable,
+}
+
+async fn post_payload(payload: &serde_json::Value) -> DeliveryOutcome {
     let url = format!("{}{ANALYTICS_PATH}", telemetry_host());
-    http()
+    let Ok(response) = http()
         .post(&url)
         .timeout(Duration::from_secs(3))
         .json(payload)
         .send()
         .await
-        .is_ok_and(|response| response.status().is_success())
+    else {
+        return DeliveryOutcome::Retryable;
+    };
+    if response.status().is_success() {
+        DeliveryOutcome::Acknowledged
+    } else if matches!(response.status().as_u16(), 400 | 413) {
+        DeliveryOutcome::Rejected
+    } else {
+        DeliveryOutcome::Retryable
+    }
 }
 
 fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
-    if !is_enabled(flag()) {
-        return None;
-    }
     let dir = outbox_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
@@ -682,10 +695,18 @@ async fn deliver_payload(path: Option<PathBuf>, payload: serde_json::Value) {
 }
 
 async fn deliver_queued_payload(path: Option<PathBuf>, payload: serde_json::Value) {
-    if post_payload(&payload).await {
+    if post_payload(&payload).await != DeliveryOutcome::Retryable {
         if let Some(path) = path {
             let _ = std::fs::remove_file(path);
         }
+    }
+}
+
+async fn deliver_retry_payload(path: PathBuf, payload: serde_json::Value) {
+    if is_consent_payload(&payload) {
+        deliver_queued_payload(Some(path), payload).await;
+    } else {
+        deliver_payload(Some(path), payload).await;
     }
 }
 
@@ -696,8 +717,31 @@ fn register_pending(handle: tokio::task::JoinHandle<()>) {
     }
 }
 
-fn retry_outbox() {
-    if !is_enabled(flag()) {
+fn is_consent_payload(payload: &serde_json::Value) -> bool {
+    payload["events"][0]["name"] == "cli_telemetry_consent"
+}
+
+fn remove_queued_product_events() {
+    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
+        return;
+    };
+    for path in entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+    {
+        let keep = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .is_some_and(|payload| is_consent_payload(&payload));
+        if !keep {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) fn retry_outbox() {
+    if environment_disabled_reason().is_some() {
         return;
     }
     let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
@@ -706,12 +750,7 @@ fn retry_outbox() {
     let mut paths: Vec<_> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| {
-            matches!(
-                path.extension().and_then(|extension| extension.to_str()),
-                Some("json" | "tmp")
-            )
-        })
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
         .collect();
     paths.sort_by_key(|path| {
         std::fs::metadata(path)
@@ -724,13 +763,14 @@ fn retry_outbox() {
             continue;
         };
         let Ok(payload) = serde_json::from_slice(&bytes) else {
-            if path.extension().and_then(|extension| extension.to_str()) == Some("tmp") {
-                let _ = std::fs::remove_file(path);
-            }
+            let _ = std::fs::remove_file(path);
             continue;
         };
+        if !is_consent_payload(&payload) && !is_enabled(flag()) {
+            continue;
+        }
         // Stable event IDs make concurrent retries harmless at the API dedupe constraint.
-        register_pending(tokio::spawn(deliver_payload(Some(path), payload)));
+        register_pending(tokio::spawn(deliver_retry_payload(path, payload)));
     }
 }
 
@@ -833,9 +873,8 @@ pub(crate) async fn record_consent(agreed: bool) {
         event_id,
         json!({ "agreed": agreed }),
     );
-    let send = async {
-        let _ = post_payload(&payload).await;
-    };
+    let path = persist_payload(event_id, &payload);
+    let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
     let _ = tokio::time::timeout(Duration::from_secs(3), send).await;
@@ -1050,6 +1089,44 @@ mod tests {
             "clearing opt-out must not clobber the install id"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opt_out_preserves_consent_and_never_consumes_temporary_files() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-prune-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+
+        let product = outbox_dir().join("product.json");
+        let consent = outbox_dir().join("consent.json");
+        let malformed = outbox_dir().join("malformed.json");
+        let active = outbox_dir().join(".active.tmp");
+        std::fs::write(
+            &product,
+            serde_json::to_vec(&build_payload("command", "did", json!({ "command": "up" })))
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &consent,
+            serde_json::to_vec(&build_payload(
+                "telemetry_consent",
+                CONSENT_SENTINEL_ID,
+                json!({ "agreed": false }),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&malformed, b"not-json").unwrap();
+        std::fs::write(&active, b"partial").unwrap();
+
+        set_persisted_disabled(true).unwrap();
+        assert!(!product.exists());
+        assert!(!malformed.exists());
+        assert!(consent.exists());
+        assert!(active.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1419,6 +1496,9 @@ mod tests {
             ("project_created", "cli_project_created"),
             ("chat_session_started", "cli_chat_session_started"),
             ("chat_message_sent", "cli_chat_message_sent"),
+            ("chat_retry_started", "cli_chat_retry_started"),
+            ("chat_retry_exhausted", "cli_chat_retry_exhausted"),
+            ("chat_recovery_action", "cli_chat_recovery_action"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
         ] {
@@ -1493,7 +1573,7 @@ mod tests {
 
         let payload =
             build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
-        assert!(post_payload(&payload).await);
+        assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         let request = String::from_utf8(server.await.unwrap()).unwrap();
         assert!(request.starts_with("POST /analytics/v1/cli-events HTTP/1.1\r\n"));
         let body = request.split("\r\n\r\n").nth(1).unwrap();
@@ -1503,7 +1583,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbox_keeps_rejected_payloads_until_acknowledged() {
+    async fn outbox_deletes_terminal_responses_and_retries_transient_responses() {
         use tokio::io::AsyncWriteExt;
 
         let _g = EnvGuard::new(OPT_VARS);
@@ -1515,27 +1595,75 @@ mod tests {
             format!("http://{}", listener.local_addr().unwrap()),
         );
         let server = tokio::spawn(async move {
-            for status in ["400 Bad Request", "202 Accepted"] {
+            for status in [
+                "400 Bad Request",
+                "413 Payload Too Large",
+                "408 Request Timeout",
+                "429 Too Many Requests",
+                "500 Internal Server Error",
+                "202 Accepted",
+            ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let response =
                     format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
         });
-        let event_id = uuid::Uuid::new_v4();
-        let payload =
-            build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
-        let path = outbox_dir().join(format!("{event_id}.json"));
         std::fs::create_dir_all(outbox_dir()).unwrap();
-        std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+        for should_remain in [false, false, true, true, true, false] {
+            let event_id = uuid::Uuid::new_v4();
+            let payload =
+                build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
+            let path = outbox_dir().join(format!("{event_id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+            deliver_queued_payload(Some(path.clone()), payload).await;
+            assert_eq!(path.exists(), should_remain);
+        }
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        deliver_queued_payload(Some(path.clone()), payload.clone()).await;
-        assert!(path.exists(), "a rejected payload must remain queued");
-        deliver_queued_payload(Some(path.clone()), payload).await;
-        assert!(
-            !path.exists(),
-            "an acknowledged payload must leave the outbox"
+    #[tokio::test]
+    async fn consent_retry_bypasses_persisted_opt_out() {
+        use tokio::io::AsyncWriteExt;
+
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir =
+            std::env::temp_dir().join(format!("orx-tel-consent-retry-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "ORX_TELEMETRY_HOST",
+            format!("http://{}", listener.local_addr().unwrap()),
         );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        set_persisted_disabled(true).unwrap();
+
+        let product_path = outbox_dir().join("product.json");
+        let product = build_payload("command", "install", json!({ "command": "run" }));
+        std::fs::write(&product_path, serde_json::to_vec(&product).unwrap()).unwrap();
+        deliver_retry_payload(product_path.clone(), product).await;
+        assert!(product_path.exists());
+
+        let consent_path = outbox_dir().join("consent.json");
+        let consent = build_payload(
+            "telemetry_consent",
+            CONSENT_SENTINEL_ID,
+            json!({ "agreed": false }),
+        );
+        std::fs::write(&consent_path, serde_json::to_vec(&consent).unwrap()).unwrap();
+        deliver_retry_payload(consent_path.clone(), consent).await;
+        assert!(!consent_path.exists());
+
         server.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1544,11 +1672,63 @@ mod tests {
     #[ignore = "release workflow production contract gate"]
     async fn production_contract_is_accepted() {
         assert_eq!(build_channel(), "production");
-        let payload = build_payload("app_started", "cli-release-contract-test", json!({}));
-        assert!(
-            post_payload(&payload).await,
-            "production rejected the release payload"
-        );
+        let payloads = [
+            build_payload(
+                "command",
+                "cli-release-contract-test",
+                json!({ "command": "up" }),
+            ),
+            build_payload("app_started", "cli-release-contract-test", json!({})),
+            build_payload(
+                "telemetry_consent",
+                "cli-release-contract-test",
+                json!({ "agreed": true }),
+            ),
+            build_payload(
+                "onboarding_completed",
+                "cli-release-contract-test",
+                json!({}),
+            ),
+            build_payload(
+                "onboarding_research_profile_submitted",
+                "cli-release-contract-test",
+                json!({ "researchAreas": ["AI/ML"], "paperCount": 1 }),
+            ),
+            build_payload(
+                "project_created",
+                "cli-release-contract-test",
+                json!({ "local": true }),
+            ),
+            build_payload(
+                "chat_session_started",
+                "cli-release-contract-test",
+                json!({ "harness": "codex" }),
+            ),
+            build_payload("chat_message_sent", "cli-release-contract-test", json!({})),
+            build_payload(
+                "chat_retry_started",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "provider_transient", "attempt": 1 }),
+            ),
+            build_payload(
+                "chat_retry_exhausted",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "provider_transient", "attempt": 3 }),
+            ),
+            build_payload(
+                "chat_recovery_action",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "terminal_turn", "attempt": 2, "action": "continue" }),
+            ),
+            build_payload(
+                "experiment_started",
+                "cli-release-contract-test",
+                json!({ "kind": "run", "local": true, "computeTarget": "local" }),
+            ),
+        ];
+        for payload in payloads {
+            assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
+        }
     }
 
     #[test]

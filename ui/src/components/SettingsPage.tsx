@@ -24,6 +24,7 @@ import {
   getEnvVars,
   getProjectGitStatus,
   getProjectDefaults,
+  getTelemetry,
   getHarnesses,
   getHfSettings,
   getK8sSettings,
@@ -37,6 +38,7 @@ import {
   listInstances,
   setComputeDefault,
   setProjectDefaults,
+  setTelemetry,
   provisionModal,
   saveOverleafToken,
   disableProjectGithub,
@@ -65,6 +67,7 @@ import {
   type Project,
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
+  type TelemetrySettings,
   type Harness,
   type HarnessId,
   type HfSettings,
@@ -2171,6 +2174,62 @@ function UpdatesTab() {
   );
 }
 
+function TelemetryTab() {
+  const [settings, setSettings] = useState<TelemetrySettings | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    void getTelemetry()
+      .then(setSettings)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  }, []);
+
+  const toggle = () => {
+    if (!settings || saving) return;
+    setSaving(true);
+    setError(null);
+    void setTelemetry(!settings.enabled)
+      .then(setSettings)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <>
+      <h2>Usage analytics</h2>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+        Share anonymous product usage linked only to a random installation ID.
+      </p>
+      {!settings ? (
+        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
+      ) : (
+        <div className={SETTINGS_CARD_CLASS_NAME}>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-md font-semibold">Anonymous usage analytics</div>
+              <p>No code, prompts, file contents, or account identifiers are sent.</p>
+              {!settings.enabled && settings.reason && <p>Currently off: {settings.reason}.</p>}
+            </div>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={settings.enabled}
+              aria-label="Anonymous usage analytics"
+              className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.enabled ? "on" : ""}`}
+              disabled={saving}
+              onClick={toggle}
+            >
+              <span />
+            </button>
+          </div>
+          {error && <div className="error">{error}</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
 /** Offered only inside the macOS app: the bundle carries an `orx` its owner's
  *  terminal can't see until it's linked onto PATH. */
 function InstallCliRow({
@@ -3031,6 +3090,9 @@ export function SettingsView({
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <StorageTab />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <TelemetryTab />
             </section>
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <UpdatesTab />

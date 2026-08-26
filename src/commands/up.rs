@@ -408,10 +408,6 @@ fn router(state: AppState) -> Router {
             get(telemetry_settings).post(set_telemetry_settings),
         )
         .route(
-            "/api/settings/telemetry/consent",
-            post(record_telemetry_consent),
-        )
-        .route(
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
@@ -3387,6 +3383,14 @@ fn spawn_update_checker() {
             tokio::time::sleep(updates::PERIODIC_CHECK_INTERVAL).await;
         }
     });
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            crate::telemetry::retry_outbox();
+        }
+    });
 }
 
 /// Startup summary of detected coding agents. Never blocks.
@@ -4098,6 +4102,7 @@ struct SetTelemetryReq {
 
 async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     let enabled = req.enabled;
+    crate::telemetry::record_consent(enabled).await;
     tokio::task::spawn_blocking(move || {
         crate::telemetry::set_persisted_disabled(!enabled)
             .map_err(|e| ApiError::from(anyhow!("could not save telemetry setting: {e}")))?;
@@ -4323,15 +4328,6 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("lit-sources task failed: {e}")))?
-}
-
-/// Record the analytics choice once when the user leaves onboarding. In an
-/// eligible official build this ignores the persisted preference so opt-outs
-/// are counted; development and runtime-disabled builds stay inert.
-async fn record_telemetry_consent(Json(req): Json<SetTelemetryReq>) -> ApiResult {
-    crate::telemetry::record_consent(req.enabled).await;
-    crate::telemetry::capture_onboarding_completed();
-    Ok(Json(json!({ "ok": true })))
 }
 
 // --- ssh hosts ----------------------------------------------------------------

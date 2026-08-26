@@ -1116,11 +1116,6 @@ export const getTelemetry = () => get<TelemetrySettings>("/api/settings/telemetr
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
-/** Record the consent decision once when the user leaves onboarding. Eligible
- * official builds send this even for opt-outs; development builds stay inert. */
-export const recordTelemetryConsent = (enabled: boolean) =>
-  post<{ ok: boolean }>("/api/settings/telemetry/consent", { enabled });
-
 export type HarnessId = "claude-code" | "codex" | "opencode";
 
 export interface HarnessModel {

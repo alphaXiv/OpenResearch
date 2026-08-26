@@ -52,7 +52,6 @@ pub async fn run() {
     // The lock lives under `config_dir()`, so taking it earlier would lock the
     // default path while the CLI locks the user's `XDG_CONFIG_HOME` one —
     // protecting nothing at all.
-    hydrate_shell_env().await;
     // App mode returns before `dispatch`, which is where `orx up` takes this
     // same read lock. Without it `orx delete` from a CLI install sees no reader
     // and wipes the store out from under a running app.
@@ -85,7 +84,7 @@ pub async fn run() {
 /// space-separated. NUL separates them because a PATH or a directory may
 /// contain spaces, colons, and newlines, but never NUL.
 #[cfg(target_os = "macos")]
-async fn hydrate_shell_env() {
+pub(crate) async fn hydrate_shell_env() {
     // Nonce, so rc-file chatter can't forge the fence around the values. The
     // leading `_` is load-bearing: `printf` reads `\0` plus up to three octal
     // digits, so a marker starting with a digit would be eaten by the escape.
