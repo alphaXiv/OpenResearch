@@ -396,10 +396,6 @@ fn router(state: AppState) -> Router {
             get(git_settings).post(set_git_settings),
         )
         .route(
-            "/api/settings/git/token",
-            post(set_git_token).delete(delete_git_token),
-        )
-        .route(
             "/api/settings/projects",
             get(project_defaults).post(set_project_defaults),
         )
@@ -1186,7 +1182,7 @@ async fn create_project(
     drop(create_admission);
     let (project, github_publication_error) = if github_sync_enabled {
         match push_project_for_sync(project.clone()).await {
-            Ok(project) => (project, None),
+            Ok((project, _)) => (project, None),
             Err(error) => {
                 let project = Store::open()?
                     .get_local_project(&project.id)?
@@ -1211,17 +1207,10 @@ async fn get_project(Path(id): Path<String>) -> ApiResult {
     Ok(Json(json!({ "project": project_json(&project) })))
 }
 
-fn github_token_source() -> Option<&'static str> {
-    if std::env::var("GITHUB_TOKEN").is_ok_and(|token| !token.trim().is_empty()) {
-        Some("env")
-    } else if crate::config::synced_env_var("GITHUB_TOKEN").is_some() {
-        Some("stored")
-    } else {
-        local::git::resolve_github_token().map(|_| "gh")
-    }
-}
-
-fn project_git_json(project: &local::model::LocalProject) -> Value {
+fn project_git_json(
+    project: &local::model::LocalProject,
+    github_status: local::github::Status,
+) -> Value {
     let path = std::path::Path::new(&project.repo_path);
     let initialized = local::git::is_repository(path);
     let branch = initialized
@@ -1267,8 +1256,8 @@ fn project_git_json(project: &local::model::LocalProject) -> Value {
             "emailSource": email_source,
         },
         "github": {
-            "authenticated": github_token_source().is_some(),
-            "tokenSource": github_token_source(),
+            "ghInstalled": github_status.installed,
+            "authenticated": github_status.authenticated,
             "enabled": project.github_enabled(),
             "owner": project.github_owner,
             "repo": project.github_repo,
@@ -1279,11 +1268,12 @@ fn project_git_json(project: &local::model::LocalProject) -> Value {
 }
 
 async fn project_git_status(Path(id): Path<String>) -> ApiResult {
+    let github_status = local::github::status().await;
     tokio::task::spawn_blocking(move || {
         let project = Store::open()?
             .get_local_project(&id)?
             .ok_or_else(|| anyhow!("project not found"))?;
-        Ok(Json(project_git_json(&project)))
+        Ok(Json(project_git_json(&project, github_status)))
     })
     .await
     .map_err(|error| ApiError::from(anyhow!("git task failed: {error}")))?
@@ -1301,6 +1291,7 @@ async fn initialize_project_git(
     reject_if_moving(&state)?;
     let _lock = project_publication_lock(&state, &id).await;
     let _creation_guard = state.project_creation_lock.lock().await;
+    let github_status = local::github::status().await;
     tokio::task::spawn_blocking(move || {
         let store = Store::open()?;
         let mut project = store
@@ -1311,7 +1302,7 @@ async fn initialize_project_git(
         local::git::validate_project_repository(path)?;
         project.baseline_branch = local::git::require_current_branch(path)?;
         store.update_local_project(&project)?;
-        Ok(Json(project_git_json(&project)))
+        Ok(Json(project_git_json(&project, github_status)))
     })
     .await
     .map_err(|error| ApiError::from(anyhow!("git task failed: {error}")))?
@@ -1361,7 +1352,7 @@ async fn create_independent_project_repository(
     let reroot_shallow = local::git::prepare_shallow_repository_for_publication(
         std::path::Path::new(&project.repo_path),
     )?;
-    let (owner, repo, _) = local::github::create_project_repo(&project.slug).await?;
+    let (owner, repo) = local::github::create_project_repo(&project.slug).await?;
     if reroot_shallow {
         local::git::reroot_shallow_repository(
             std::path::Path::new(&project.repo_path),
@@ -1378,17 +1369,21 @@ async fn create_independent_project_repository(
 
 async fn push_project_for_sync(
     mut project: local::model::LocalProject,
-) -> Result<local::model::LocalProject> {
-    if local::git::resolve_github_token().is_none() {
+) -> Result<(local::model::LocalProject, local::github::Status)> {
+    let github_status = local::github::status().await;
+    if !github_status.installed {
         return Err(anyhow!(
-            "Connect GitHub first with `gh auth login` or a GitHub token."
+            "GitHub CLI (`gh`) is required — install it from https://cli.github.com."
         ));
+    }
+    if !github_status.authenticated {
+        return Err(anyhow!("Authenticate GitHub first with `gh auth login`."));
     }
 
     let mut using_existing_repository = project.has_github_repository();
     if using_existing_repository {
         let can_push = local::github::repo_meta(&project.github_owner, &project.github_repo)
-            .await
+            .await?
             .is_some_and(|meta| meta.can_push && !meta.archived);
         if !can_push {
             project = create_independent_project_repository(project).await?;
@@ -1419,7 +1414,7 @@ async fn push_project_for_sync(
 
     project.github_sync_enabled = true;
     Store::open()?.update_local_project(&project)?;
-    Ok(project)
+    Ok((project, github_status))
 }
 
 async fn enable_project_github(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -1434,8 +1429,8 @@ async fn enable_project_github(State(state): State<AppState>, Path(id): Path<Str
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let project = push_project_for_sync(project).await.map_err(bad_request)?;
-    let git_status = project_git_json(&project);
+    let (project, github_status) = push_project_for_sync(project).await.map_err(bad_request)?;
+    let git_status = project_git_json(&project, github_status);
     Ok(Json(
         json!({ "project": project_json(&project), "git": git_status }),
     ))
@@ -1458,9 +1453,10 @@ async fn disable_project_github(
         .ok_or_else(|| not_found("project"))?;
     project.github_sync_enabled = false;
     store.update_local_project(&project)?;
+    let github_status = local::github::status().await;
     Ok(Json(json!({
         "project": project_json(&project),
-        "git": project_git_json(&project),
+        "git": project_git_json(&project, github_status),
     })))
 }
 
@@ -1476,9 +1472,10 @@ async fn push_project_github(State(state): State<AppState>, Path(id): Path<Strin
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
     let project_for_push = project.clone();
+    let github_status = local::github::status().await;
     let git_status = tokio::task::spawn_blocking(move || -> Result<Value> {
         push_project(&project_for_push)?;
-        Ok(project_git_json(&project_for_push))
+        Ok(project_git_json(&project_for_push, github_status))
     })
     .await
     .map_err(|error| ApiError::from(anyhow!("git task failed: {error}")))?
@@ -1490,7 +1487,7 @@ async fn push_project_github(State(state): State<AppState>, Path(id): Path<Strin
 
 async fn github_account() -> ApiResult {
     Ok(Json(
-        json!({ "login": local::github::viewer_login().await }),
+        json!({ "login": local::github::viewer_login().await.ok() }),
     ))
 }
 
@@ -1501,7 +1498,9 @@ struct ProjectRepoPreviewQuery {
 
 async fn github_project_repo_preview(Query(q): Query<ProjectRepoPreviewQuery>) -> ApiResult {
     let candidate = local::projects::project_slug_preview(&Store::open()?, q.name.trim())?;
-    let repo = local::github::available_project_repo_name(&candidate).await;
+    let repo = local::github::available_project_repo_name(&candidate)
+        .await
+        .map_err(bad_request)?;
     Ok(Json(json!({ "repo": repo })))
 }
 
@@ -1517,7 +1516,9 @@ async fn github_repo_access(Query(q): Query<RepoAccessQuery>) -> ApiResult {
     if owner.is_empty() || repo.is_empty() {
         return Err(bad_request("owner and repo are required"));
     }
-    let meta = local::github::repo_meta(owner, repo).await;
+    let meta = local::github::repo_meta(owner, repo)
+        .await
+        .map_err(bad_request)?;
     Ok(Json(json!({
         "canPush": meta.is_some_and(|meta| meta.can_push && !meta.archived),
     })))
@@ -3941,32 +3942,27 @@ fn git_out(args: &[&str]) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-fn git_settings_json() -> Value {
-    let gh_installed = std::process::Command::new("gh")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
+fn git_settings_json(github_status: local::github::Status) -> Value {
     json!({
         "gitVersion": git_out(&["--version"]),
         "userName": git_out(&["config", "--global", "user.name"]),
         "userEmail": git_out(&["config", "--global", "user.email"]),
-        "ghInstalled": gh_installed,
-        "githubTokenSource": github_token_source(),
+        "ghInstalled": github_status.installed,
+        "githubAuthenticated": github_status.authenticated,
     })
 }
 
-fn project_defaults_json() -> Value {
-    let token_source = github_token_source();
+fn project_defaults_json(github_status: local::github::Status) -> Value {
     json!({
         "githubForNewProjects": crate::config::github_for_new_projects(),
         "githubDefaultPromptSeen": crate::config::github_default_prompt_seen(),
-        "githubAuthenticated": token_source.is_some(),
-        "githubTokenSource": token_source,
+        "ghInstalled": github_status.installed,
+        "githubAuthenticated": github_status.authenticated,
     })
 }
 
 async fn project_defaults() -> ApiResult {
-    Ok(Json(project_defaults_json()))
+    Ok(Json(project_defaults_json(local::github::status().await)))
 }
 
 #[derive(Deserialize)]
@@ -3978,7 +3974,8 @@ struct SetProjectDefaultsReq {
 }
 
 async fn set_project_defaults(Json(req): Json<SetProjectDefaultsReq>) -> ApiResult {
-    if req.github_for_new_projects && github_token_source().is_none() {
+    let github_status = local::github::status().await;
+    if req.github_for_new_projects && !github_status.authenticated {
         return Err(bad_request(
             "Connect GitHub before enabling it by default for new projects.",
         ));
@@ -3987,54 +3984,12 @@ async fn set_project_defaults(Json(req): Json<SetProjectDefaultsReq>) -> ApiResu
     if let Some(seen) = req.github_default_prompt_seen {
         crate::config::set_github_default_prompt_seen(seen)?;
     }
-    Ok(Json(project_defaults_json()))
-}
-
-#[derive(Deserialize)]
-struct SetGitTokenReq {
-    token: String,
-}
-
-async fn set_git_token(Json(req): Json<SetGitTokenReq>) -> ApiResult {
-    let token = req.token.trim().to_string();
-    if token.is_empty() {
-        return Err(bad_request("token is required"));
-    }
-    let response = reqwest::Client::new()
-        .get("https://api.github.com/user")
-        .header("User-Agent", "orx")
-        .bearer_auth(&token)
-        .send()
-        .await
-        .map_err(|error| bad_request(format!("Could not reach api.github.com: {error}")))?;
-    if !response.status().is_success() {
-        return Err(bad_request(format!(
-            "GitHub rejected the token ({}).",
-            response.status()
-        )));
-    }
-    let scopes = response
-        .headers()
-        .get("x-oauth-scopes")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    if !scopes.trim().is_empty() && !scopes.split(',').any(|scope| scope.trim() == "repo") {
-        return Err(bad_request(
-            "Token is valid but lacks the `repo` scope needed for private repositories.",
-        ));
-    }
-    crate::config::write_synced_env_var("GITHUB_TOKEN", &token)?;
-    Ok(Json(git_settings_json()))
-}
-
-async fn delete_git_token() -> ApiResult {
-    crate::config::remove_synced_env_var("GITHUB_TOKEN")?;
-    Ok(Json(git_settings_json()))
+    Ok(Json(project_defaults_json(github_status)))
 }
 
 async fn git_settings() -> ApiResult {
-    tokio::task::spawn_blocking(|| Ok(Json(git_settings_json())))
+    let github_status = local::github::status().await;
+    tokio::task::spawn_blocking(move || Ok(Json(git_settings_json(github_status))))
         .await
         .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?
 }
@@ -4054,6 +4009,7 @@ async fn set_git_settings(Json(req): Json<SetGitSettingsReq>) -> ApiResult {
             "nothing to update: pass userName and/or userEmail",
         ));
     }
+    let github_status = local::github::status().await;
     tokio::task::spawn_blocking(move || {
         for (key, value) in [("user.name", name), ("user.email", email)] {
             if let Some(v) = value.filter(|v| !v.is_empty()) {
@@ -4067,7 +4023,7 @@ async fn set_git_settings(Json(req): Json<SetGitSettingsReq>) -> ApiResult {
                 }
             }
         }
-        Ok(Json(git_settings_json()))
+        Ok(Json(git_settings_json(github_status)))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("git task failed: {e}")))?

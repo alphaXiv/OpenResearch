@@ -94,7 +94,8 @@ import {
 import { onDataDirMove, onHarnessAuth } from "../events";
 import { useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
-import { GitTokenForm, TokenForm } from "./GitTokenForm";
+import { TokenForm } from "./GitTokenForm";
+import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { StatusBadge } from "./StatusBadge";
@@ -2299,11 +2300,11 @@ function ProjectDefaultsTab() {
 
   const load = () => {
     setError(null);
-    void getProjectDefaults()
+    return getProjectDefaults()
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   };
-  useEffect(load, []);
+  useEffect(() => void load(), []);
 
   const toggle = () => {
     if (!settings || saving) return;
@@ -2327,7 +2328,7 @@ function ProjectDefaultsTab() {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>GitHub publishing</h3>
             <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : ""}`}>
-              {settings.githubAuthenticated ? `Connected via ${settings.githubTokenSource}` : "Not connected"}
+              {settings.githubAuthenticated ? "Connected via GitHub CLI" : "Not connected"}
             </span>
           </div>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
@@ -2352,9 +2353,8 @@ function ProjectDefaultsTab() {
             </button>
           </div>
           {!settings.githubAuthenticated && (
-            <div className="project-default-connect [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0 [&_p]:text-muted [&_p]:text-sm mt-3.5 pt-3.5 border-t border-t-border-variant [&_.onb-token-form]:mt-2.5">
-              <p>Connect GitHub to make publishing the default for new projects.</p>
-              <GitTokenForm onSaved={load} />
+            <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+              <GitHubCliHelp ghInstalled={settings.ghInstalled} onCheck={load} />
             </div>
           )}
           {error && <div className="error">{error}</div>}
@@ -2364,9 +2364,47 @@ function ProjectDefaultsTab() {
   );
 }
 
-/** The Overleaf Git authentication token, which is machine-wide like the GitHub
- * PAT above it. Which Overleaf *project* a paper pushes to is per-paper, and
- * lives on the .tex tab instead. */
+function GitHubCliHelp({
+  ghInstalled,
+  onCheck,
+}: {
+  ghInstalled: boolean;
+  onCheck: () => Promise<void>;
+}) {
+  const [checking, setChecking] = useState(false);
+  const check = () => {
+    setChecking(true);
+    void onCheck().finally(() => setChecking(false));
+  };
+
+  return (
+    <>
+      <p className="git-card-helper text-subtext text-sm m-0">
+        {renderNote(ghInstalled
+          ? "Run `gh auth login` in your terminal."
+          : "Install GitHub CLI, then run `gh auth login` in your terminal.")}
+      </p>
+      <div className="flex flex-wrap gap-2 mt-2.5">
+        {!ghInstalled && (
+          <a
+            className={BUTTON_CLASS_NAME}
+            href="https://cli.github.com/"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Install GitHub CLI <ExternalLink size={12} />
+          </a>
+        )}
+        <button type="button" className={BUTTON_CLASS_NAME} disabled={checking} onClick={check}>
+          {checking ? "Checking…" : "Check again"}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/** The Overleaf Git authentication token is machine-wide. Which Overleaf
+ * *project* a paper pushes to is per-paper, and lives on the .tex tab. */
 function OverleafCard() {
   const [hasToken, setHasToken] = useState<boolean | null>(null);
   const [saving, setSaving] = useState(false);
@@ -2393,7 +2431,7 @@ function OverleafCard() {
         With a token saved, a paper opened in the dashboard can be kept in step with an Overleaf
         project, in both directions. Overleaf&apos;s Git integration comes with a paid Overleaf
         plan; without one, a paper can still be uploaded to Overleaf as a new project. The token
-        stays on this machine — unlike the GitHub one, it is not sent to compute backends.
+        stays on this machine and is not sent to compute backends.
       </p>
       {hasToken ? (
         <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
@@ -2418,7 +2456,6 @@ function OverleafCard() {
           onSaved={(result) => setHasToken(result.hasToken)}
           placeholder="Overleaf Git authentication token"
           createHref="https://www.overleaf.com/user/settings"
-          busyLabel="Saving…"
         />
       )}
       {error && <div className="error">{error}</div>}
@@ -2446,12 +2483,12 @@ function GitTab({
   const seqRef = useRef(0);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
 
-  const load = () => {
+  const load = (clear = true) => {
     const request = ++seqRef.current;
-    setStatus(null);
+    if (clear) setStatus(null);
     setError(null);
-    if (!project) return;
-    void getProjectGitStatus(project.id)
+    if (!project) return Promise.resolve();
+    return getProjectGitStatus(project.id)
       .then((projectStatus) => {
         if (request !== seqRef.current) return;
         setStatus(projectStatus);
@@ -2462,7 +2499,7 @@ function GitTab({
         }
       });
   };
-  useEffect(load, [project?.id]);
+  useEffect(() => void load(), [project?.id]);
 
   const syncErrorMessage = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -2538,17 +2575,14 @@ function GitTab({
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : ""}`}>{status.github.authenticated ? "Connected" : "Not connected"}</span>{status.github.authenticated && <span className="git-detail-meta text-muted text-sm">via {status.github.tokenSource}</span>}</span>
+              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : ""}`}>{status.github.authenticated ? "Connected via GitHub CLI" : "Not connected"}</span></span>
               <span className="k">Project</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">Syncing off</span>}</> : <span className={BADGE_CLASS_NAME}>Local only</span>}</span>
               {status.github.enabled && <><span className="k">Sync</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
             {!status.github.authenticated && (
-              <>
-                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
-                  GitHub is optional. Connect only when you want a hosted copy for collaboration.
-                </p>
-                <GitTokenForm onSaved={() => load()} />
-              </>
+              <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load(false)} />
+              </div>
             )}
             {status.github.authenticated && !status.github.enabled && (
               <>

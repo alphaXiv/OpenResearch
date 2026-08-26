@@ -999,20 +999,13 @@ export interface GitSettings {
   userName: string | null;
   userEmail: string | null;
   ghInstalled: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
+  githubAuthenticated: boolean;
 }
 
 export const getGitSettings = () => get<GitSettings>("/api/settings/git");
 
 export const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
   post<GitSettings>("/api/settings/git", body);
-
-/** Validate + persist a pasted GitHub token (stored in the synced env file). */
-export const saveGitToken = (token: string) =>
-  post<GitSettings>("/api/settings/git/token", { token });
-
-export const removeGitToken = () =>
-  fetch("/api/settings/git/token", { method: "DELETE" }).then((r) => json<GitSettings>(r));
 
 /** A paper linked to the researcher profile during onboarding. */
 export interface LinkedPaper {
@@ -1048,8 +1041,8 @@ export const setLitSources = (body: LitSourcesSettings) =>
 export interface ProjectDefaultsSettings {
   githubForNewProjects: boolean;
   githubDefaultPromptSeen: boolean;
+  ghInstalled: boolean;
   githubAuthenticated: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
 }
 
 export const getProjectDefaults = () =>
@@ -1079,8 +1072,8 @@ export interface ProjectGitStatus {
     emailSource: "local" | "global" | null;
   };
   github: {
+    ghInstalled: boolean;
     authenticated: boolean;
-    tokenSource: "env" | "stored" | "gh" | null;
     enabled: boolean;
     owner: string;
     repo: string;
