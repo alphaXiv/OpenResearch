@@ -1092,6 +1092,7 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         // to tell one from a placeholder or a user rename.
         "titleSource": s.title_source,
         "model": s.model,
+        "serviceTier": s.service_tier,
         "permissionMode": crate::local::harness::effective_permission_id(
             &s.harness,
             s.permission_mode.as_deref(),
@@ -1645,6 +1646,7 @@ struct SteerSink {
 #[derive(Default)]
 struct TurnSettings {
     model: Option<String>,
+    service_tier: Option<String>,
     permission_mode: Option<String>,
     plan_mode: bool,
     reasoning_level: Option<String>,
@@ -1654,6 +1656,7 @@ impl TurnSettings {
     fn of(ctx: &TurnCtx) -> Self {
         Self {
             model: ctx.model.clone(),
+            service_tier: ctx.service_tier.clone(),
             permission_mode: ctx
                 .permission_mode
                 .and_then(|mode| crate::local::harness::permission_id_for_mode(&ctx.harness, mode)),
@@ -1671,6 +1674,10 @@ impl TurnSettings {
                 .is_none_or(|value| running == Some(value))
         };
         matches(overrides.model.as_deref(), self.model.as_deref())
+            && matches(
+                overrides.service_tier.as_deref(),
+                self.service_tier.as_deref(),
+            )
             && matches(
                 overrides.permission_mode.as_deref(),
                 self.permission_mode.as_deref(),
@@ -3545,6 +3552,11 @@ impl ChatHost {
                 return Err(anyhow!("invalid permission mode for selected harness"));
             }
         }
+        if let Some(tier) = settings.service_tier.as_deref() {
+            if crate::local::harness::service_tier_for(&session.harness, tier).is_none() {
+                return Err(anyhow!("invalid speed for selected harness"));
+            }
+        }
         match action {
             "retry" => {
                 let project = store
@@ -3592,6 +3604,7 @@ impl ChatHost {
                     .set_chat_session_recovery_settings(
                         session_id,
                         settings.model.as_deref(),
+                        settings.service_tier.as_deref(),
                         settings.permission_mode.as_deref(),
                         plan_state,
                         settings.reasoning_level.as_deref(),
@@ -3620,6 +3633,7 @@ impl ChatHost {
                     return Err(error);
                 }
                 session.model = settings.model.clone();
+                session.service_tier = settings.service_tier.clone();
                 session.permission_mode = settings.permission_mode.clone();
                 if let Some((plan_mode, reset_pending)) = plan_state {
                     session.plan_mode = plan_mode;
@@ -4046,6 +4060,15 @@ impl ChatHost {
                 return Err(anyhow!("invalid permission mode for selected harness"));
             }
         }
+        if let Some(tier) = overrides
+            .service_tier
+            .as_deref()
+            .filter(|tier| !tier.is_empty())
+        {
+            if crate::local::harness::service_tier_for(&session.harness, tier).is_none() {
+                return Err(anyhow!("invalid speed for selected harness"));
+            }
+        }
         if overrides.plan_mode.is_some()
             && !crate::local::harness::supports_command_plan(&session.harness)
         {
@@ -4250,11 +4273,13 @@ impl ChatHost {
             store.set_chat_session_recovery_settings(
                 session_id,
                 overrides.model.as_deref(),
+                overrides.service_tier.as_deref(),
                 overrides.permission_mode.as_deref(),
                 plan_state,
                 overrides.reasoning_level.as_deref(),
             )?;
             session.model = overrides.model.clone();
+            session.service_tier = overrides.service_tier.clone();
             session.permission_mode = overrides.permission_mode.clone();
             if let Some((plan_mode, reset_pending)) = plan_state {
                 session.plan_mode = plan_mode;
@@ -4268,6 +4293,12 @@ impl ChatHost {
             if session.model.as_deref() != Some(model.as_str()) {
                 store.set_chat_session_model(&session.id, &model)?;
                 session.model = Some(model);
+            }
+        }
+        if let Some(tier) = overrides.service_tier.filter(|tier| !tier.is_empty()) {
+            if session.service_tier.as_deref() != Some(tier.as_str()) {
+                store.set_chat_session_service_tier(&session.id, Some(&tier))?;
+                session.service_tier = Some(tier);
             }
         }
         if let Some(requested_mode) = overrides.permission_mode.filter(|m| !m.is_empty()) {
@@ -4447,6 +4478,7 @@ impl ChatHost {
             prepared_input: turn_text.clone(),
             settings_json: serde_json::to_string(&TurnOverrides {
                 model: session.model.clone(),
+                service_tier: session.service_tier.clone(),
                 permission_mode: session.permission_mode.clone(),
                 permission_revision: None,
                 plan_mode: crate::local::harness::supports_command_plan(&session.harness)
@@ -5017,6 +5049,7 @@ impl ChatHost {
                 }
                 let overrides = TurnOverrides {
                     model: None,
+                    service_tier: None,
                     permission_mode: mode.and_then(|mode| {
                         crate::local::harness::permission_id_for_mode(&session.harness, mode)
                     }),
@@ -5619,6 +5652,7 @@ impl ChatHost {
 #[serde(rename_all = "camelCase")]
 pub struct TurnOverrides {
     pub model: Option<String>,
+    pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     #[serde(skip)]
     pub(crate) permission_revision: Option<u64>,
@@ -5631,6 +5665,7 @@ pub struct TurnOverrides {
 #[derive(Debug, Default)]
 pub struct RecoveryOverrides {
     pub model: Option<Option<String>>,
+    pub service_tier: Option<Option<String>>,
     pub permission_mode: Option<Option<String>>,
     pub plan_mode: Option<bool>,
     pub reasoning_level: Option<Option<String>>,
@@ -5640,6 +5675,9 @@ impl RecoveryOverrides {
     fn apply_to(self, settings: &mut TurnOverrides) {
         if let Some(model) = self.model {
             settings.model = model;
+        }
+        if let Some(service_tier) = self.service_tier {
+            settings.service_tier = service_tier;
         }
         if let Some(permission_mode) = self.permission_mode {
             settings.permission_mode = permission_mode;
@@ -5678,6 +5716,9 @@ impl TurnOverrides {
     fn apply_explicit(&mut self, next: &Self) {
         if next.model.is_some() {
             self.model.clone_from(&next.model);
+        }
+        if next.service_tier.is_some() {
+            self.service_tier.clone_from(&next.service_tier);
         }
         if next.permission_mode.is_some() {
             self.permission_mode.clone_from(&next.permission_mode);
@@ -5767,6 +5808,8 @@ pub struct TurnCtx {
     pub harness: String,
     pub native_session_id: Option<String>,
     pub model: Option<String>,
+    /// Codex processing tier for this turn (`default` or `priority`).
+    pub service_tier: Option<String>,
     /// Effective permission mode for this turn (session value; harness applies
     /// its own default when `None`).
     pub permission_mode: Option<crate::local::harness::PermissionMode>,
@@ -5819,6 +5862,7 @@ fn turn_ctx_from_stored(
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
         model: session.model.clone(),
+        service_tier: session.service_tier.clone(),
         permission_mode: session
             .permission_mode
             .as_deref()
@@ -6073,6 +6117,7 @@ impl TurnCtx {
             harness: "test".into(),
             native_session_id: None,
             model: None,
+            service_tier: None,
             permission_mode: None,
             plan_mode: false,
             plan_reset_pending: false,
@@ -8075,6 +8120,7 @@ mod bridge_tests {
             title: None,
             title_source: None,
             model: Some("claude-haiku-4-5".into()),
+            service_tier: None,
             permission_mode: None,
             plan_mode: false,
             plan_reset_pending: false,
@@ -8124,12 +8170,14 @@ mod bridge_tests {
         let value = session_json(&session, false);
         assert_eq!(value["permissionMode"], "approve-for-me");
         assert_eq!(value["planMode"], true);
+        assert!(value["serviceTier"].is_null());
     }
 
     #[test]
     fn queued_overrides_keep_the_last_explicit_value_on_each_axis() {
         let first = TurnOverrides {
             model: Some("first-model".into()),
+            service_tier: Some("priority".into()),
             permission_mode: Some("ask".into()),
             permission_revision: Some(1),
             plan_mode: Some(true),
@@ -8138,6 +8186,7 @@ mod bridge_tests {
         };
         let second = TurnOverrides {
             model: Some("second-model".into()),
+            service_tier: None,
             permission_mode: None,
             permission_revision: None,
             plan_mode: None,
@@ -8149,6 +8198,7 @@ mod bridge_tests {
         merged.apply_explicit(&second);
 
         assert_eq!(merged.model.as_deref(), Some("second-model"));
+        assert_eq!(merged.service_tier.as_deref(), Some("priority"));
         assert_eq!(merged.permission_mode.as_deref(), Some("ask"));
         assert_eq!(merged.plan_mode, Some(true));
         assert_eq!(merged.reasoning_level.as_deref(), Some("low"));
@@ -8209,6 +8259,7 @@ mod run_wakeup_tests {
                 title: None,
                 title_source: None,
                 model: None,
+                service_tier: None,
                 permission_mode: None,
                 plan_mode: false,
                 plan_reset_pending: false,
@@ -8966,6 +9017,7 @@ mod steering_tests {
                 title: None,
                 title_source: None,
                 model: None,
+                service_tier: None,
                 permission_mode: None,
                 plan_mode: false,
                 plan_reset_pending: false,
@@ -8985,6 +9037,7 @@ mod steering_tests {
     fn running_settings() -> TurnSettings {
         TurnSettings {
             model: Some("opus".into()),
+            service_tier: Some("default".into()),
             permission_mode: Some("auto".into()),
             plan_mode: false,
             reasoning_level: None,
@@ -9019,6 +9072,10 @@ mod steering_tests {
         for changed in [
             TurnOverrides {
                 model: Some("sonnet".into()),
+                ..TurnOverrides::default()
+            },
+            TurnOverrides {
+                service_tier: Some("priority".into()),
                 ..TurnOverrides::default()
             },
             // The session row already says "plan" by the time this arrives —

@@ -248,6 +248,24 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            let info = info.with_service_tiers(
+                m.get("serviceTiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"))
+                    .filter_map(|tier| {
+                        Some(OptionChoice {
+                            id: tier.get("id")?.as_str()?.to_string(),
+                            label: tier.get("name")?.as_str()?.to_string(),
+                            description: tier
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
+            );
             Some(match default {
                 Some(default) => info.with_reasoning_default(&efforts, default),
                 // No reported default (an older catalog shape) → keep the
@@ -2110,6 +2128,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        thread_setup["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
@@ -2167,6 +2188,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        turn_params["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
@@ -3294,6 +3318,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
+    }
+    if let Some(service_tier) = &ctx.service_tier {
+        cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
     }
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
@@ -4966,6 +4993,10 @@ requires_openai_auth = false
                         { "reasoningEffort": "max", "description": "" },
                         { "reasoningEffort": "ultra", "description": "" },
                     ],
+                    "serviceTiers": [
+                        { "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" },
+                        { "id": "ultrafast", "name": "Ultrafast", "description": "Access controlled" }
+                    ],
                 },
                 {
                     "id": "gpt-5.4-mini", "model": "gpt-5.4-mini",
@@ -5007,6 +5038,10 @@ requires_openai_auth = false
         assert_eq!(models[1].default_reasoning_level.as_deref(), Some("medium"));
         // The catalog's display name rides along for the picker.
         assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].id, "priority");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].label, "Fast");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap().len(), 1);
+        assert!(models[1].service_tiers.as_ref().unwrap().is_empty());
 
         // A config.toml `model_reasoning_effort` outranks the catalog default —
         // codex resolves it that way, so the preselect must too. A configured

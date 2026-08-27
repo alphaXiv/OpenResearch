@@ -373,6 +373,7 @@ impl Store {
                 title             TEXT,
                 title_source      TEXT,
                 model             TEXT,
+                service_tier      TEXT,
                 permission_mode   TEXT,
                 plan_mode         INTEGER NOT NULL DEFAULT 0,
                 plan_reset_pending INTEGER NOT NULL DEFAULT 0,
@@ -490,6 +491,7 @@ impl Store {
                 tour_completed           INTEGER NOT NULL DEFAULT 0,
                 preferred_harness        TEXT,
                 preferred_model          TEXT,
+                preferred_service_tier   TEXT,
                 preferred_permission_mode TEXT,
                 preferred_reasoning_level TEXT
             );",
@@ -502,6 +504,7 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE runs ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN service_tier TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_sessions ADD COLUMN plan_reset_pending INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_sessions ADD COLUMN reasoning_level TEXT",
@@ -522,6 +525,7 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
@@ -635,12 +639,12 @@ impl Store {
             "INSERT OR IGNORE INTO ui_state (
                  id, onboarding_completed, tour_completed,
                  preferred_harness, preferred_model,
-                 preferred_permission_mode, preferred_reasoning_level
+                 preferred_service_tier, preferred_permission_mode, preferred_reasoning_level
              )
              SELECT 1,
                     EXISTS(SELECT 1 FROM local_projects),
                     EXISTS(SELECT 1 FROM local_projects),
-                    harness, model, permission_mode, reasoning_level
+                    harness, model, service_tier, permission_mode, reasoning_level
              FROM (SELECT 1) seed
              LEFT JOIN chat_sessions ON chat_sessions.id = (
                  SELECT id FROM chat_sessions ORDER BY updated_at DESC LIMIT 1
@@ -735,20 +739,23 @@ impl Store {
     pub fn ui_state(&self) -> Result<StoredUiState> {
         Ok(self.conn.query_row(
             "SELECT onboarding_completed, tour_completed, preferred_harness,
-                    preferred_model, preferred_permission_mode, preferred_reasoning_level
+                    preferred_model, preferred_service_tier,
+                    preferred_permission_mode, preferred_reasoning_level
              FROM ui_state WHERE id = 1",
             [],
             |row| {
                 let harness = row.get::<_, Option<String>>(2)?;
                 let model = row.get::<_, Option<String>>(3)?;
-                let permission_mode = row.get::<_, Option<String>>(4)?;
-                let reasoning_level = row.get::<_, Option<String>>(5)?;
+                let service_tier = row.get::<_, Option<String>>(4)?;
+                let permission_mode = row.get::<_, Option<String>>(5)?;
+                let reasoning_level = row.get::<_, Option<String>>(6)?;
                 Ok(StoredUiState {
                     onboarding_completed: row.get(0)?,
                     tour_completed: row.get(1)?,
                     preferred_agent: harness.map(|harness| StoredAgentSelection {
                         harness,
                         model,
+                        service_tier,
                         permission_mode,
                         reasoning_level,
                     }),
@@ -777,11 +784,13 @@ impl Store {
         self.conn.execute(
             "UPDATE ui_state
              SET preferred_harness = ?1, preferred_model = ?2,
-                 preferred_permission_mode = ?3, preferred_reasoning_level = ?4
+                 preferred_service_tier = ?3,
+                 preferred_permission_mode = ?4, preferred_reasoning_level = ?5
              WHERE id = 1",
             params![
                 selection.harness,
                 selection.model,
+                selection.service_tier,
                 selection.permission_mode,
                 selection.reasoning_level,
             ],
@@ -1394,11 +1403,11 @@ impl Store {
         for session in sessions {
             tx.execute(
                 "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title,
-                                            title_source, model, permission_mode, plan_mode,
+                                            title_source, model, service_tier, permission_mode, plan_mode,
                                             plan_reset_pending, reasoning_level,
                                             archived, context_usage_json, bootstrap_context,
                                             active_leaf_id, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     session.id,
                     session.project_id,
@@ -1407,6 +1416,7 @@ impl Store {
                     session.title,
                     session.title_source,
                     session.model,
+                    session.service_tier,
                     session.permission_mode,
                     session.plan_mode,
                     session.plan_reset_pending,
@@ -1621,9 +1631,9 @@ impl Store {
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
-                                        permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
+                                        service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
                                         active_leaf_id, parent_session_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 s.id,
                 s.project_id,
@@ -1632,6 +1642,7 @@ impl Store {
                 s.title,
                 s.title_source,
                 s.model,
+                s.service_tier,
                 s.permission_mode,
                 s.plan_mode,
                 s.plan_reset_pending,
@@ -1774,6 +1785,14 @@ impl Store {
         self.conn.execute(
             "UPDATE chat_sessions SET model = ?2, updated_at = ?3 WHERE id = ?1",
             params![id, model, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_service_tier(&self, id: &str, tier: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET service_tier = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, tier, now_ms()],
         )?;
         Ok(())
     }
@@ -2316,6 +2335,7 @@ impl Store {
         &self,
         id: &str,
         model: Option<&str>,
+        service_tier: Option<&str>,
         permission_mode: Option<&str>,
         plan_state: Option<(bool, bool)>,
         reasoning_level: Option<&str>,
@@ -2326,14 +2346,15 @@ impl Store {
             .unwrap_or((None, None));
         transaction.execute(
             "UPDATE chat_sessions
-             SET model = ?2, permission_mode = ?3,
-                 plan_mode = COALESCE(?4, plan_mode),
-                 plan_reset_pending = COALESCE(?5, plan_reset_pending),
-                 reasoning_level = ?6, updated_at = ?7
+             SET model = ?2, service_tier = ?3, permission_mode = ?4,
+                 plan_mode = COALESCE(?5, plan_mode),
+                 plan_reset_pending = COALESCE(?6, plan_reset_pending),
+                 reasoning_level = ?7, updated_at = ?8
              WHERE id = ?1",
             params![
                 id,
                 model,
+                service_tier,
                 permission_mode,
                 plan_mode,
                 plan_reset_pending,
@@ -2614,6 +2635,8 @@ pub struct StoredChatSession {
     /// "unknown, don't overwrite".
     pub title_source: Option<String>,
     pub model: Option<String>,
+    /// Codex processing tier (`"default"` or `"priority"`); None uses CLI configuration.
+    pub service_tier: Option<String>,
     /// Permission-mode wire id (`"auto"` / `"plan"` / …); None = harness default.
     pub permission_mode: Option<String>,
     /// Independent Plan state for Codex/OpenCode. Claude keeps Plan in
@@ -2646,6 +2669,7 @@ pub struct StoredChatSession {
 pub struct StoredAgentSelection {
     pub harness: String,
     pub model: Option<String>,
+    pub service_tier: Option<String>,
     pub permission_mode: Option<String>,
     pub reasoning_level: Option<String>,
 }
@@ -2777,7 +2801,7 @@ fn row_to_chat_turn(
     })
 }
 
-const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, \
+const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id";
 
@@ -2802,18 +2826,19 @@ fn row_to_chat_session(
         native_session_id: row.get(3)?,
         title: row.get(4)?,
         model: row.get(5)?,
-        permission_mode: row.get(6)?,
-        plan_mode: row.get(7)?,
-        plan_reset_pending: row.get(8)?,
-        reasoning_level: row.get(9)?,
-        archived: row.get(10)?,
-        context_usage_json: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
-        title_source: row.get(14)?,
-        bootstrap_context: row.get(15)?,
-        active_leaf_id: row.get(16)?,
-        parent_session_id: row.get(17)?,
+        service_tier: row.get(6)?,
+        permission_mode: row.get(7)?,
+        plan_mode: row.get(8)?,
+        plan_reset_pending: row.get(9)?,
+        reasoning_level: row.get(10)?,
+        archived: row.get(11)?,
+        context_usage_json: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        title_source: row.get(15)?,
+        bootstrap_context: row.get(16)?,
+        active_leaf_id: row.get(17)?,
+        parent_session_id: row.get(18)?,
     })
 }
 
@@ -2882,6 +2907,7 @@ mod tests {
         let selection = StoredAgentSelection {
             harness: "codex".into(),
             model: Some("gpt-5.6".into()),
+            service_tier: Some("priority".into()),
             permission_mode: Some("plan".into()),
             reasoning_level: Some("high".into()),
         };
@@ -3476,6 +3502,7 @@ mod tests {
         let store = Store::open_at(dir.clone()).unwrap();
         let mut session = chat_session_fixture("chat_1");
         session.model = Some("old-model".into());
+        session.service_tier = Some("priority".into());
         session.permission_mode = Some("ask".into());
         session.reasoning_level = Some("high".into());
         store.create_chat_session(&session).unwrap();
@@ -3484,6 +3511,7 @@ mod tests {
             .set_chat_session_recovery_settings(
                 "chat_1",
                 None,
+                Some("default"),
                 None,
                 Some((true, false)),
                 Some("low"),
@@ -3491,6 +3519,7 @@ mod tests {
             .unwrap();
         let recovered = store.get_chat_session("chat_1").unwrap().unwrap();
         assert!(recovered.model.is_none());
+        assert_eq!(recovered.service_tier.as_deref(), Some("default"));
         assert!(recovered.permission_mode.is_none());
         assert!(recovered.plan_mode);
         assert_eq!(recovered.reasoning_level.as_deref(), Some("low"));
@@ -3601,6 +3630,7 @@ mod tests {
             title: None,
             title_source: None,
             model: None,
+            service_tier: None,
             permission_mode: None,
             plan_mode: false,
             plan_reset_pending: false,

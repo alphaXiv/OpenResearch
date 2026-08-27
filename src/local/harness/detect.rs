@@ -53,6 +53,9 @@ pub struct ModelInfo {
     /// `default` sentinel and the composer preselects this concrete tier.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_reasoning_level: Option<String>,
+    /// Additional processing tiers this model advertises (Codex Fast mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_tiers: Option<Vec<super::options::OptionChoice>>,
 }
 
 impl ModelInfo {
@@ -65,6 +68,7 @@ impl ModelInfo {
             display_name: None,
             description: None,
             default_reasoning_level: None,
+            service_tiers: None,
         }
     }
 
@@ -98,6 +102,11 @@ impl ModelInfo {
         } else {
             super::options::reasoning_choices(ids)
         });
+        self
+    }
+
+    pub(super) fn with_service_tiers(mut self, tiers: Vec<super::options::OptionChoice>) -> Self {
+        self.service_tiers = Some(tiers);
         self
     }
 }

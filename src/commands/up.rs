@@ -669,6 +669,7 @@ async fn complete_onboarding(
         store.set_preferred_agent(&StoredAgentSelection {
             harness: completion.selection.harness.clone(),
             model: completion.selection.model.clone(),
+            service_tier: None,
             permission_mode: preferred_permission_mode(
                 &completion.selection.harness,
                 completion.selection.permission_mode.clone(),
@@ -4198,6 +4199,7 @@ struct SetUiStateReq {
 struct StoredAgentSelectionReq {
     harness: String,
     model: Option<String>,
+    service_tier: Option<String>,
     permission_mode: Option<String>,
     reasoning_level: Option<String>,
 }
@@ -4213,14 +4215,21 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
                 }
                 let nonempty = |value: Option<String>| value.filter(|item| !item.trim().is_empty());
                 let permission_mode = nonempty(selection.permission_mode);
+                let service_tier = nonempty(selection.service_tier);
                 if permission_mode.as_deref().is_some_and(|mode| {
                     local::harness::permission_mode_for(&selection.harness, mode).is_none()
                 }) {
                     return Err(anyhow!("invalid permission mode for selected harness"));
                 }
+                if service_tier.as_deref().is_some_and(|tier| {
+                    local::harness::service_tier_for(&selection.harness, tier).is_none()
+                }) {
+                    return Err(anyhow!("invalid speed for selected harness"));
+                }
                 Ok(StoredAgentSelection {
                     harness: selection.harness.clone(),
                     model: nonempty(selection.model),
+                    service_tier,
                     permission_mode: preferred_permission_mode(&selection.harness, permission_mode),
                     reasoning_level: nonempty(selection.reasoning_level),
                 })
@@ -5068,6 +5077,7 @@ struct CreateChatSessionReq {
     project_id: String,
     harness: String,
     model: Option<String>,
+    service_tier: Option<String>,
     permission_mode: Option<String>,
     #[serde(default)]
     plan_mode: bool,
@@ -5092,11 +5102,18 @@ async fn create_chat_session(
         .ok_or_else(|| not_found("project"))?;
     let nonempty = |s: Option<String>| s.filter(|v| !v.trim().is_empty());
     let permission_mode = nonempty(req.permission_mode);
+    let service_tier = nonempty(req.service_tier);
     if permission_mode
         .as_deref()
         .is_some_and(|mode| local::harness::permission_mode_for(&req.harness, mode).is_none())
     {
         return Err(bad_request("invalid permission mode for selected harness"));
+    }
+    if service_tier
+        .as_deref()
+        .is_some_and(|tier| local::harness::service_tier_for(&req.harness, tier).is_none())
+    {
+        return Err(bad_request("invalid speed for selected harness"));
     }
     if req.plan_mode && !local::harness::supports_command_plan(&req.harness) {
         return Err(bad_request(
@@ -5111,6 +5128,7 @@ async fn create_chat_session(
         title: None,
         title_source: None,
         model: nonempty(req.model),
+        service_tier,
         permission_mode,
         plan_mode: req.plan_mode,
         plan_reset_pending: false,
@@ -5211,6 +5229,7 @@ struct SendChatReq {
     text: String,
     client_turn_id: Option<String>,
     model: Option<String>,
+    service_tier: Option<String>,
     permission_mode: Option<String>,
     plan_mode: Option<bool>,
     reasoning_level: Option<String>,
@@ -5246,6 +5265,7 @@ async fn send_chat_message(
     }
     let overrides = local::chat::TurnOverrides {
         model: req.model,
+        service_tier: req.service_tier,
         permission_mode: req.permission_mode,
         permission_revision: None,
         plan_mode: req.plan_mode,
@@ -5308,6 +5328,8 @@ struct RecoverChatReq {
     #[serde(default, deserialize_with = "present_nullable_string")]
     model: Option<Option<String>>,
     #[serde(default, deserialize_with = "present_nullable_string")]
+    service_tier: Option<Option<String>>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
     permission_mode: Option<Option<String>>,
     plan_mode: Option<bool>,
     #[serde(default, deserialize_with = "present_nullable_string")]
@@ -5337,6 +5359,7 @@ async fn recover_chat_turn(
             &req.action,
             local::chat::RecoveryOverrides {
                 model: req.model,
+                service_tier: req.service_tier,
                 permission_mode: req.permission_mode,
                 plan_mode: req.plan_mode,
                 reasoning_level: req.reasoning_level,
