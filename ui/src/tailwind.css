@@ -9,6 +9,15 @@
 @source "../index.html";
 @source ".";
 
+.tinker-logo {
+  clip-path: inset(34% 9%);
+}
+
+:root[data-theme="dark"] .tinker-logo {
+  filter: invert(1);
+  mix-blend-mode: screen;
+}
+
 @theme inline {
   --color-*: initial;
   --color-transparent: transparent;

@@ -3,7 +3,6 @@ import {
   ChevronDown,
   Cpu,
   ExternalLink,
-  Info,
   Monitor,
   Moon,
   Plus,
@@ -35,7 +34,7 @@ import {
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
-  listInstances,
+  listRuns,
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
@@ -54,7 +53,6 @@ import {
   moveDataDir,
   type DataDirSettings,
   type DataDirValidation,
-  shortId,
   rayPreflight,
   runDisplayStatus,
   slurmPreflight,
@@ -72,7 +70,6 @@ import {
   type HarnessId,
   type HfSettings,
   type HfTokenSource,
-  type Instance,
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
@@ -80,6 +77,7 @@ import {
   type OpenResearchSettings,
   type RayPreflight,
   type RaySettings,
+  type Run,
   type SlurmPreflight,
   type SlurmSettings,
   type SshHost,
@@ -98,6 +96,7 @@ import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
+import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
 import { BADGE_CLASS_NAME, BUTTON_CLASS_NAME, ERROR_BADGE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MONO_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SETTINGS_LOADING_CLASS_NAME, SETTINGS_SWITCH_CLASS_NAME, SMALL_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, SUCCESS_BADGE_CLASS_NAME, WARNING_BADGE_CLASS_NAME } from "../styleClasses";
 
@@ -116,6 +115,16 @@ const KV_CLASS_NAME = [
   "[&_.v]:break-all",
 ].join(" ");
 
+const COMPUTE_DETAILS_CLASS_NAME = [
+  "grid grid-cols-[9rem_minmax(0,1fr)] items-center gap-x-5 gap-y-2.5 font-sans text-md text-text",
+  "[&_.k]:font-medium [&_.k]:text-md [&_.k]:text-text",
+  "[&_.v]:min-w-0 [&_.v]:flex [&_.v]:items-center [&_.v]:flex-wrap [&_.v]:gap-2",
+  "[&_.v]:font-sans [&_.v]:text-md [&_.v]:text-text [&_.v]:break-words",
+].join(" ");
+
+const COMPUTE_DIAGNOSTIC_CLASS_NAME =
+  "mt-3 mx-0 mb-0 pl-3 border-l-2 border-l-accent-red font-sans text-md leading-relaxed text-text whitespace-pre-wrap";
+
 const SETTINGS_NOTE_CLASS_NAME = [
   "settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5",
   "border border-accent-amber rounded-md bg-accent-amber-subtle",
@@ -123,7 +132,7 @@ const SETTINGS_NOTE_CLASS_NAME = [
 ].join(" ");
 
 const FORM_CLASS_NAME = [
-  "form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
+  "form font-sans text-md text-text [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
   "[&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-mono",
   "[&_.repo-hint]:font-normal [&_.repo-hint]:text-xs",
   "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
@@ -188,8 +197,10 @@ const FORM_CLASS_NAME = [
   "[&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0",
   "[&_.paper-pick_.title]:text-md [&_.paper-pick_.title]:font-semibold",
   "flex flex-col gap-2.5 [&_label]:flex [&_label]:flex-col",
-  "[&_label]:gap-1 [&_label]:text-xs [&_label]:text-text",
+  "[&_label]:gap-1 [&_label]:text-sm [&_label]:text-text",
   "[&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2",
+  "[&_input]:font-sans [&_input]:text-sm [&_input]:font-normal [&_input]:text-text [&_input::placeholder]:text-subtext",
+  "[&_select]:font-sans [&_select]:text-sm [&_select]:font-normal [&_select]:text-text",
   "[&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end",
   "[&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start",
   "[&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ml-auto",
@@ -404,12 +415,6 @@ function K8sSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run on your own cluster with <code>--backend k8s</code>. The run&apos;s resources
-        (image, GPUs, topology) come from a manifest committed on the experiment branch
-        (default <code>.orx/k8s.yaml</code>); only the cluster context and namespace live
-        here. Auth comes from your kubeconfig.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
@@ -418,34 +423,40 @@ function K8sSection() {
         </div>
       ) : (
         <>
-          <div className={KV_CLASS_NAME}>
+          <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">Cluster</span>
             <span className="v">
               <K8sHealthBadge s={settings} />
             </span>
           </div>
           {settings.preflight.error && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>{settings.preflight.error}</p>
+            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.preflight.error}</p>
           )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <div className="row2">
               <label>
                 Context
-                <select value={context} onChange={(e) => setContext(e.target.value)}>
-                  <option value="">
-                    kubectl default{settings.currentContext ? ` (${settings.currentContext})` : ""}
-                  </option>
-                  {settings.contexts.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
+                <OptionPicker
+                  choices={[
+                    {
+                      id: "",
+                      label: `kubectl default${settings.currentContext ? ` (${settings.currentContext})` : ""}`,
+                    },
+                    ...(context && !settings.contexts.includes(context)
+                      ? [{ id: context, label: `${context} (not in kubeconfig)` }]
+                      : []),
+                    ...settings.contexts.map((item) => ({ id: item, label: item })),
+                  ]}
+                  value={context}
+                  variant="field"
+                  dropDown
+                  disabled={saving}
+                  onSelect={setContext}
+                />
               </label>
               <label>
                 Namespace
                 <input
-                  className={MONO_CLASS_NAME}
                   type="text"
                   value={namespace}
                   onChange={(e) => setNamespace(e.target.value)}
@@ -462,21 +473,14 @@ function K8sSection() {
               </button>
             </div>
           </form>
-          <div className={SETTINGS_CARD_CLASS_NAME}>
-            <div className="settings-card-head flex items-center gap-2.5 mb-3">
-              <h3>Run manifest</h3>
-            </div>
-            <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-              Each run applies the manifest committed on its experiment branch — default{" "}
-              <code>.orx/k8s.yaml</code>, or <code>--manifest &lt;path&gt;</code>. It declares
-              whatever the run needs (image, GPU requests, an Indexed Job across nodes, extra
-              Services, …); orx injects the run script as <code>$ORX_SCRIPT</code>, the{" "}
-              <code>orx-env</code> Secret, run labels, and a default timeout, and requires
-              exactly one Job (or one labelled <code>orx-primary: &quot;true&quot;</code>) whose
-              completion is the run&apos;s. Logs follow that Job&apos;s leader pod. Use{" "}
-              <code>{"{{ORX_RUN}}"}</code> in resource names to keep re-runs collision-free.
+          <section className="mt-7">
+            <h3 className="mt-0 mx-0 mb-1.5 text-md font-semibold text-text">Run manifest</h3>
+            <p className="m-0 font-sans text-md leading-relaxed text-text">
+              The manifest must define one Job. orx injects the run script, environment, labels,
+              and timeout. Use <code>{"{{ORX_RUN}}"}</code> in resource names, or override the
+              default path with <code>--manifest &lt;path&gt;</code>.
             </p>
-          </div>
+          </section>
         </>
       )}
     </>
@@ -527,11 +531,6 @@ function ModalSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Serverless GPUs on your own Modal account with{" "}
-        <code>--backend modal --flavor &lt;name&gt;</code> (t4, a10g, a100-80gb, h100, …). orx
-        manages a dedicated Python env with the Modal SDK; sandboxes scale to zero between runs.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !s ? (
@@ -540,7 +539,7 @@ function ModalSection() {
         </div>
       ) : (
         <>
-          <div className={KV_CLASS_NAME}>
+          <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">Status</span>
             <span className="v">
               <ModalBadge s={s} />
@@ -570,7 +569,7 @@ function ModalSection() {
           )}
           {error && <div className="error">{error}</div>}
           {!s.modalImportable && (
-            <div className="actions">
+            <div className="mt-6 flex justify-end">
               <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void provision()} disabled={provisioning}>
                 {provisioning ? "Setting up… (~30–60s)" : "Set up environment"}
               </button>
@@ -587,26 +586,35 @@ function ModalSection() {
 type HostTest = "testing" | SshPreflight;
 
 function HostTestCell({ test }: { test: HostTest | undefined }) {
-  if (test === undefined) return <span className="muted text-muted">never tested</span>;
-  if (test === "testing") return <span className={SPINNER_CLASS_NAME} />;
+  if (test === undefined) return <span className="block text-left text-[12px] text-text">Not checked</span>;
+  if (test === "testing")
+    return (
+      <span className="inline-flex items-center gap-1.5 text-text text-xs" role="status">
+        <span className={SPINNER_CLASS_NAME} aria-hidden="true" /> Testing…
+      </span>
+    );
+  const missingTools = test.missingTools ?? [];
   const badge = !test.reachable ? (
-    <span className={ERROR_BADGE_CLASS_NAME} title={test.error ?? undefined}>Unreachable</span>
+    <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>
   ) : !test.toolsFound ? (
-    <span className={ERROR_BADGE_CLASS_NAME}>Missing bash/tar</span>
+    <span className={ERROR_BADGE_CLASS_NAME}>
+      {missingTools.length === 1 ? `Needs ${missingTools[0]}` : "Needs tools"}
+    </span>
   ) : (
     <span className={SUCCESS_BADGE_CLASS_NAME}>Ready</span>
   );
   return (
-    <>
+    <div role="status">
       {badge}
-      <span className="ssh-tested-at block mt-0.5 text-muted text-xs">{timeAgo(test.testedAt)}</span>
-    </>
+      <span className="ssh-tested-at block mt-2 text-[12px] text-text">{timeAgo(test.testedAt)}</span>
+    </div>
   );
 }
 
 function SshSection() {
   const [hosts, setHosts] = useState<SshHost[] | null>(null);
   const [tests, setTests] = useState<Record<string, HostTest>>({});
+  const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     getSshHosts()
@@ -619,27 +627,28 @@ function SshSection() {
     try {
       const r = await sshPreflight(host);
       setTests((t) => ({ ...t, [host]: r }));
+      if (r.error) setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
     } catch (err) {
       setTests((t) => ({
         ...t,
         [host]: {
           reachable: false,
           toolsFound: false,
+          missingTools: [],
           error: err instanceof Error ? err.message : String(err),
           testedAt: Date.now(),
         },
       }));
+      setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
     }
+  }
+
+  function toggle(host: string, open: boolean) {
+    setExpandedHosts((expanded) => ({ ...expanded, [host]: !open }));
   }
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run experiments directly on your own boxes with{" "}
-        <code>--backend ssh --host &lt;alias&gt;</code>. Hosts come from{" "}
-        <code>~/.ssh/config</code>; auth uses your keys/agent (orx never reads a key). The host
-        just needs <code>git</code> and <code>bash</code>.
-      </p>
       {hosts === null ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
           <span className={SPINNER_CLASS_NAME} /> Reading ~/.ssh/config…
@@ -647,42 +656,80 @@ function SshSection() {
       ) : hosts.length === 0 ? (
         <p className="settings-empty text-muted text-md mt-1 mx-0 mb-0">No hosts found in ~/.ssh/config.</p>
       ) : (
-        <table className="flavor-table w-full border-collapse text-md [&_th]:pt-[5px] [&_th]:pr-2.5 [&_th]:pb-[5px] [&_th]:pl-0 [&_th]:border-b [&_th]:border-b-border [&_th]:text-left [&_th]:font-medium [&_th]:text-text [&_td]:pt-[5px] [&_td]:pr-2.5 [&_td]:pb-[5px] [&_td]:pl-0 [&_td]:border-b [&_td]:border-b-border-variant ssh-table table-fixed [&_th:nth-child(1)]:w-[20%] [&_th:nth-child(2)]:w-[26%] [&_th:nth-child(4)]:w-27 [&_th:nth-child(5)]:w-13 [&_td]:wrap-anywhere [&_td:last-child]:pr-0 [&_td:last-child]:text-right">
-          <thead>
-            <tr>
-              <th>Host</th>
-              <th>Address</th>
-              <th>Identity</th>
-              <th>Status</th>
-              <th />
-            </tr>
-          </thead>
-          <tbody>
-            {hosts.map((h) => (
-              <tr key={h.host}>
-                <td className={MONO_CLASS_NAME}>{h.host}</td>
-                <td className={`${MONO_CLASS_NAME} muted text-muted`}>
-                  {[h.user, h.hostname ?? "—"].filter(Boolean).join("@")}
-                  {h.port ? `:${h.port}` : ""}
-                </td>
-                <td className={`${MONO_CLASS_NAME} muted text-muted`}>{h.identityFile ?? "—"}</td>
-                <td>
-                  {/* Session-local result wins; the persisted one covers restarts. */}
-                  <HostTestCell test={tests[h.host] ?? h.lastTest} />
-                </td>
-                <td>
-                  <button
-                    className={SMALL_BUTTON_CLASS_NAME}
-                    onClick={() => void test(h.host)}
-                    disabled={tests[h.host] === "testing"}
-                  >
-                    Test
-                  </button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="border-y border-border-variant divide-y divide-border-variant">
+          {hosts.map((h) => {
+            // Session-local result wins; the persisted one covers restarts.
+            const hostTest = tests[h.host] ?? h.lastTest;
+            const testing = hostTest === "testing";
+            const open = expandedHosts[h.host] ?? false;
+            const address =
+              `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
+            return (
+              <div key={h.host}>
+                <div
+                  className="flex items-center gap-3 py-3 px-2 cursor-pointer transition-colors duration-120 ease-standard [&:hover]:bg-surface"
+                  onClick={() => toggle(h.host, open)}
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-2.5">
+                    <button
+                      type="button"
+                      className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
+                      aria-expanded={open}
+                      aria-label={`${open ? "Collapse" : "Expand"} ${h.host}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggle(h.host, open);
+                      }}
+                    >
+                      <ChevronDown
+                        size={15}
+                        className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
+                      />
+                    </button>
+                    <div className="min-w-0">
+                      <div className="truncate text-base font-medium text-text" title={h.host}>{h.host}</div>
+                      <div className="mt-1 truncate font-mono text-sm text-muted" title={address}>{address}</div>
+                    </div>
+                  </div>
+                  <div className="grid flex-none grid-cols-[6rem_5rem] items-center gap-x-[clamp(1rem,2vw,2.5rem)]">
+                    <div className="text-left">
+                      <HostTestCell test={hostTest} />
+                    </div>
+                    <button
+                      type="button"
+                      className={`${SMALL_BUTTON_CLASS_NAME} justify-self-end`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void test(h.host);
+                      }}
+                      disabled={testing}
+                    >
+                      {testing ? "Testing…" : hostTest ? "Retest" : "Test"}
+                    </button>
+                  </div>
+                </div>
+                {open && (
+                  <div className="border-t border-t-border-variant py-3 pr-2 pl-10">
+                    <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
+                      <dt className="text-sm font-medium text-subtext">Identity</dt>
+                      <dd className={`m-0 text-sm text-text wrap-anywhere${h.identityFile ? " font-mono" : ""}`}>
+                        {h.identityFile ?? "SSH defaults"}
+                      </dd>
+                      {hostTest !== "testing" && hostTest?.error && (
+                        <>
+                          <dt className="text-sm font-medium text-subtext">Last error</dt>
+                          <dd className="m-0 text-sm leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
+                            {hostTest.error}
+                          </dd>
+                        </>
+                      )}
+                    </dl>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </>
   );
@@ -693,13 +740,8 @@ function SshSection() {
 /** First failing check wins, like K8sHealthBadge. */
 function SlurmTestBadge({ test }: { test: "testing" | SlurmPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <span className={SPINNER_CLASS_NAME} />;
-  if (!test.reachable)
-    return (
-      <span className={ERROR_BADGE_CLASS_NAME} title={test.error ?? undefined}>
-        Unreachable
-      </span>
-    );
+  if (test === "testing") return <span className={BADGE_CLASS_NAME}>Testing…</span>;
+  if (!test.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>;
   if (!test.slurmFound) return <span className={ERROR_BADGE_CLASS_NAME}>No Slurm CLI</span>;
   if (!test.toolsFound) return <span className={ERROR_BADGE_CLASS_NAME}>Missing bash/tar</span>;
   return <span className={SUCCESS_BADGE_CLASS_NAME}>Ready</span>;
@@ -776,12 +818,6 @@ function SlurmSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run on your own cluster with <code>--backend slurm [--flavor h100:2]</code>. orx
-        submits via <code>sbatch</code> on the login node over ssh (auth is your keys/agent;
-        orx never reads a key) and the job runs in your cluster environment. The defaults
-        below apply when a launch doesn&apos;t override them.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
@@ -790,40 +826,38 @@ function SlurmSection() {
         </div>
       ) : (
         <>
-          {preflight?.error && <p className={SETTINGS_NOTE_CLASS_NAME}>{preflight.error}</p>}
+          {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           {preflight && preflight.partitions.length > 0 && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              Partitions: <code>{preflight.partitions.join(", ")}</code>
-            </p>
+            <div className={COMPUTE_DETAILS_CLASS_NAME}>
+              <span className="k">Partitions</span>
+              <span className="v">{preflight.partitions.join(", ")}</span>
+            </div>
           )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <div className="row2">
               <label>
                 Login node
-                <select
+                <OptionPicker
+                  choices={[
+                    { id: "", label: "Not set (pass --host per launch)" },
+                    ...(host && !settings.hosts.some((item) => item.host === host)
+                      ? [{ id: host, label: `${host} (not in ~/.ssh/config)` }]
+                      : []),
+                    ...settings.hosts.map((item) => ({ id: item.host, label: item.host })),
+                  ]}
                   value={host}
-                  onChange={(e) => {
-                    setHost(e.target.value);
+                  variant="field"
+                  dropDown
+                  disabled={saving}
+                  onSelect={(id) => {
+                    setHost(id);
                     setTest(null); // a badge earned by cluster A must not vouch for cluster B
                   }}
-                >
-                  <option value="">not set (pass --host per launch)</option>
-                  {/* A saved host that has since left ~/.ssh/config still needs an
-                      option, or the select renders blank while holding the value. */}
-                  {host && !settings.hosts.some((h) => h.host === host) && (
-                    <option value={host}>{host} (not in ~/.ssh/config)</option>
-                  )}
-                  {settings.hosts.map((h) => (
-                    <option key={h.host} value={h.host}>
-                      {h.host}
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
               <label>
                 Partition
                 <input
-                  className={MONO_CLASS_NAME}
                   type="text"
                   list="slurm-partitions"
                   value={partition}
@@ -841,7 +875,6 @@ function SlurmSection() {
               <label>
                 Account
                 <input
-                  className={MONO_CLASS_NAME}
                   type="text"
                   value={account}
                   onChange={(e) => setAccount(e.target.value)}
@@ -853,7 +886,6 @@ function SlurmSection() {
               <label>
                 Time limit
                 <input
-                  className={MONO_CLASS_NAME}
                   type="text"
                   value={timeLimit}
                   onChange={(e) => setTimeLimit(e.target.value)}
@@ -938,14 +970,6 @@ function RaySection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run on a Ray cluster with <code>--backend ray [--flavor gpu:1]</code>. orx
-        submits via the Ray Jobs API (Dashboard URL). Address resolution: this
-        setting, then <code>ASTROAI_RAY_JOBS_ADDRESS</code> /{" "}
-        <code>RAY_DASHBOARD_URL</code>, then <code>http://127.0.0.1:8265</code>.
-        Optional flavor maps to entrypoint CPUs/GPUs/memory (e.g.{" "}
-        <code>cpu:2</code>, <code>gpu:1,mem:8GiB</code>).
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
@@ -954,20 +978,23 @@ function RaySection() {
         </div>
       ) : (
         <>
-          <p className={SETTINGS_NOTE_CLASS_NAME}>
-            Effective: <code>{settings.resolvedAddress}</code> ({settings.source})
-          </p>
-          {preflight?.error && <p className={SETTINGS_NOTE_CLASS_NAME}>{preflight.error}</p>}
-          {preflight?.reachable && preflight.rayVersion && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              Ray version: <code>{preflight.rayVersion}</code>
-            </p>
-          )}
+          <div className={COMPUTE_DETAILS_CLASS_NAME}>
+            <span className="k">Effective URL</span>
+            <span className="v">{settings.resolvedAddress}</span>
+            <span className="k">Source</span>
+            <span className="v">{settings.source}</span>
+            {preflight?.reachable && preflight.rayVersion && (
+              <>
+                <span className="k">Ray version</span>
+                <span className="v">{preflight.rayVersion}</span>
+              </>
+            )}
+          </div>
+          {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <label>
               Jobs / Dashboard URL
               <input
-                className={MONO_CLASS_NAME}
                 type="text"
                 value={address}
                 onChange={(e) => {
@@ -1005,7 +1032,7 @@ function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
   if (test === null) return null;
   if (test === "testing") return <span className={BADGE_CLASS_NAME}>Testing…</span>;
   if (test.reachable) return <span className={SUCCESS_BADGE_CLASS_NAME}>Reachable</span>;
-  return <span className={WARNING_BADGE_CLASS_NAME}>Unreachable</span>;
+  return <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>;
 }
 
 // --- compute (local) --------------------------------------------------------------
@@ -1022,12 +1049,6 @@ function LocalSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run experiments as detached, supervised processes on the machine running orx with{" "}
-        <code>--backend local</code> — handy when you&apos;re already on a GPU box and using
-        this dashboard over port forwarding. Runs share CPU/RAM/GPU with the dashboard
-        itself, so prefer a remote backend for anything heavy.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !hw ? (
@@ -1035,9 +1056,9 @@ function LocalSection() {
           <span className={SPINNER_CLASS_NAME} /> Detecting hardware…
         </div>
       ) : (
-        <div className={KV_CLASS_NAME}>
+        <div className={COMPUTE_DETAILS_CLASS_NAME}>
           <span className="k">Hostname</span>
-          <span className={`v ${MONO_CLASS_NAME}`}>{hw.hostname}</span>
+          <span className="v">{hw.hostname}</span>
           <span className="k">System</span>
           <span className="v">
             {hw.os}/{hw.arch}
@@ -1064,17 +1085,6 @@ function LocalSection() {
   );
 }
 
-function TinkerSection() {
-  return (
-    <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-      <code>--backend tinker</code> runs the experiment controller as a supervised process on this
-      machine; the project&apos;s Tinker SDK sends model operations to Tinker. The project must
-      add and lock <code>tinker</code> or <code>tinker-cookbook</code>, and this machine must stay
-      awake while the controller runs.
-    </p>
-  );
-}
-
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection() {
@@ -1089,12 +1099,6 @@ function OpenResearchSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run on an ephemeral OpenResearch box billed to your org with{" "}
-        <code>--backend openresearch --flavor &lt;shape&gt;</code> (h100_sxm, cpu5c, …; browse
-        with <code>orx compute</code>). The box is provisioned for the run and deleted when it
-        ends. Needs <code>orx login</code> and a registered SSH key.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !s ? (
@@ -1108,7 +1112,7 @@ function OpenResearchSection() {
         </p>
       ) : (
         <>
-          <div className={KV_CLASS_NAME}>
+          <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">Status</span>
             <span className="v">
               <span className={SUCCESS_BADGE_CLASS_NAME}>Signed in</span>
@@ -1174,6 +1178,18 @@ const TARGET_LABELS: Record<ComputeTargetId, string> = {
   openresearch: "OpenResearch",
 };
 
+const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, string> = {
+  local: "Runs directly on this computer",
+  ssh: "Runs on a host from your SSH config",
+  tinker: "Runs through Tinker's remote compute",
+  hf: "Runs as a remote Hugging Face Job",
+  modal: "Runs in a remote Modal sandbox",
+  k8s: "Runs as a Job on your Kubernetes cluster",
+  slurm: "Runs as a scheduled job on your Slurm cluster",
+  ray: "Runs on the connected Ray cluster",
+  openresearch: "Runs on an ephemeral OpenResearch box",
+};
+
 /** Kind strings from the runs table — reuses the instances-table logos. */
 const TARGET_KIND: Record<ComputeTargetId, string> = {
   local: "local_job",
@@ -1186,6 +1202,52 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   ray: "ray_job",
   openresearch: "openresearch_job",
 };
+
+const TARGET_USAGE: Record<ComputeTargetId, string> = {
+  local: "The experiment runs as a supervised process on this computer and uses its CPU, memory, and GPUs.",
+  ssh: "The project is copied to the selected SSH host and runs there. Logs and status return to this dashboard.",
+  tinker: "A controller runs on this computer while the Tinker SDK sends model operations to Tinker's remote compute. This computer must stay awake and online.",
+  hf: "A Hugging Face Job runs remotely in your account using the selected hardware. Usage is billed by Hugging Face.",
+  modal: "A Modal sandbox runs remotely in your account using the selected hardware and scales to zero after the run.",
+  k8s: "A Kubernetes Job is created in the selected context and namespace from the project's .orx/k8s.yaml manifest.",
+  slurm: "The login node receives an sbatch job using the saved partition, account, and time limit; the cluster schedules the work.",
+  ray: "The run is submitted to the Ray Jobs endpoint, and the connected Ray cluster executes it.",
+  openresearch: "An ephemeral OpenResearch box runs the experiment, is billed to your organization, and is deleted when the run ends.",
+};
+
+function targetConnection(target: ComputeTargetSummary): string {
+  switch (target.id) {
+    case "local":
+      return "No credentials required; this computer is always available.";
+    case "ssh":
+      return `SSH config and keys — ${target.summary}`;
+    case "tinker":
+      return `TINKER_API_KEY — ${target.summary}`;
+    case "hf":
+      return `Hugging Face token — ${target.summary}`;
+    case "modal":
+      return `Modal token — ${target.summary}`;
+    case "k8s":
+      return `Kubeconfig — ${target.summary}`;
+    case "slurm":
+      return `SSH config — ${target.summary}`;
+    case "ray":
+      return `Ray Jobs endpoint — ${target.summary}`;
+    case "openresearch":
+      return `OpenResearch login and SSH key — ${target.summary}`;
+  }
+}
+
+function BackendOverview({ target }: { target: ComputeTargetSummary }) {
+  return (
+    <dl className="m-0 mt-8 grid grid-cols-[9rem_minmax(0,1fr)] gap-x-5 gap-y-4 font-sans">
+      <dt className="text-md font-medium text-subtext">How it connects</dt>
+      <dd className="m-0 text-md leading-relaxed text-text">{targetConnection(target)}</dd>
+      <dt className="text-md font-medium text-subtext">What happens</dt>
+      <dd className="m-0 text-md leading-relaxed text-text">{TARGET_USAGE[target.id]}</dd>
+    </dl>
+  );
+}
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
 const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
@@ -1200,195 +1262,274 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
 
-function TargetStatusBadge({ t, isDefault }: { t: ComputeTargetSummary; isDefault: boolean }) {
-  if (t.id === "local") return <span className={SUCCESS_BADGE_CLASS_NAME}>Ready</span>;
-  // Don't claim either answer when the check couldn't run.
-  if (t.unverified) return <span className={BADGE_CLASS_NAME}>Unknown</span>;
-  if (!t.configured && isDefault) return <span className={WARNING_BADGE_CLASS_NAME}>Not configured</span>;
-  if (!t.configured) return <span className={BADGE_CLASS_NAME}>Not set up</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>Configured</span>;
+const CUSTOM_FLAVOR_ID = "__custom__";
+
+function isCustomFlavor(backend: ComputeTargetId, flavor: string) {
+  return Boolean(flavor && !(FLAVOR_SUGGESTIONS[backend] ?? []).includes(flavor));
 }
 
-/** The default row's inline flavor editor (flavored backends only). */
-function DefaultFlavorEditor({
-  target,
-  flavor,
+function DefaultDestinationEditor({
+  settings,
   projectId,
   onSaved,
 }: {
-  target: ComputeTargetId;
-  flavor: string | null;
+  settings: ComputeSettings;
   projectId?: string;
-  onSaved: (s: ComputeSettings) => void;
+  onSaved: (settings: ComputeSettings) => void;
 }) {
-  const [value, setValue] = useState(flavor ?? "");
+  const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
+  const savedFlavor = settings.defaultFlavor ?? "";
+  const [backend, setBackend] = useState(savedBackend);
+  const [flavor, setFlavor] = useState(savedFlavor);
+  const [customFlavor, setCustomFlavor] = useState(isCustomFlavor(savedBackend, savedFlavor));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Reflect an outside change (e.g. default moved to another backend and back).
-  useEffect(() => setValue(flavor ?? ""), [flavor]);
+  const target = settings.targets.find((candidate) => candidate.id === backend);
+  const choices = settings.targets.filter(
+    (candidate) => candidate.configured || candidate.id === savedBackend,
+  );
+  const flavored = FLAVORED_TARGETS.includes(backend);
+  const flavorRequired = FLAVOR_REQUIRED.includes(backend);
+  const flavorSuggestions = FLAVOR_SUGGESTIONS[backend] ?? [];
+  const unchanged =
+    backend === savedBackend && (!flavored || flavor.trim() === savedFlavor);
+  const destination = backend === "local" ? "this machine" : TARGET_LABELS[backend];
+  const helperText =
+    saving
+      ? "Updating default destination…"
+      : flavorRequired && !flavor.trim()
+        ? `Choose a flavor to use ${destination} for new runs.`
+        : backend === "ssh"
+          ? "New runs use SSH; choose a host when launching."
+          : `New runs use ${destination} unless another backend is specified.`;
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (saving) return;
+  useEffect(() => {
+    setBackend(savedBackend);
+    setFlavor(savedFlavor);
+    setCustomFlavor(isCustomFlavor(savedBackend, savedFlavor));
+  }, [savedBackend, savedFlavor]);
+
+  async function save(nextBackend: ComputeTargetId, nextFlavor: string) {
+    const nextFlavored = FLAVORED_TARGETS.includes(nextBackend);
+    if (saving || (FLAVOR_REQUIRED.includes(nextBackend) && !nextFlavor.trim())) return;
     setSaving(true);
     setError(null);
     try {
-      onSaved(await setComputeDefault({ backend: target, flavor: value.trim() || null, projectId }));
+      onSaved(
+        await setComputeDefault({
+          backend: nextBackend,
+          flavor: nextFlavored ? nextFlavor.trim() || null : null,
+          projectId,
+        }),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      setBackend(savedBackend);
+      setFlavor(savedFlavor);
+      setCustomFlavor(isCustomFlavor(savedBackend, savedFlavor));
     } finally {
       setSaving(false);
     }
   }
 
-  const unchanged = value.trim() === (flavor ?? "");
-  return (
-    <form className="form [&_.form-seg]:self-start [&_.form-seg]:mb-0.5 [&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-mono [&_.repo-hint]:font-normal [&_.repo-hint]:text-xs [&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal [&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center [&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full [&_.folder-picker-control]:min-w-0 [&_.folder-picker-control]:py-2 [&_.folder-picker-control]:px-2.5 [&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background [&_.folder-picker-control]:border [&_.folder-picker-control]:border-border [&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer [&_.folder-picker-control]:text-left [&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard [&_.folder-picker-control:hover:not(:disabled)]:border-muted [&_.folder-picker-control:hover:not(:disabled)]:shadow-[0_2px_8px_rgb(0_0_0_/_5%)] [&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text [&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1 [&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden [&_.folder-picker-control_span]:text-ellipsis [&_.folder-picker-control_span]:whitespace-nowrap [&_.folder-picker-control_.placeholder]:text-muted [&_.folder-picker-icon]:flex-none [&_.folder-picker-icon]:text-current [&_.folder-picker-chevron]:flex-none [&_.folder-picker-chevron]:text-muted [&_.folder-picker-control:hover:not(:disabled)_.folder-picker-chevron]:text-subtext [&_.folder-picker-hint]:text-subtext [&_.folder-picker-hint]:text-sm [&_.folder-picker-hint]:font-normal [&_.folder-picker-hint]:leading-[1.4] [&_.project-location-field]:flex [&_.project-location-field]:flex-col [&_.project-location-field]:gap-2 [&_.project-location-label]:text-text [&_.project-location-label]:text-base [&_.project-location-label]:font-semibold [&_.project-field-label]:text-text [&_.project-field-label]:text-base [&_.project-field-label]:font-semibold [&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65 [&_.paper-destination]:flex [&_.paper-destination]:items-center [&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pr-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:pl-3 [&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md [&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1 [&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden [&_.paper-destination_code]:text-text [&_.paper-destination_code]:text-sm [&_.paper-destination_code]:font-normal [&_.paper-destination_code]:text-ellipsis [&_.paper-destination_code]:whitespace-nowrap [&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px] [&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant [&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface [&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm [&_.project-path-notice]:leading-[1.4] [&_.project-path-notice.error]:border-[color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))] [&_.paper-results]:flex [&_.paper-results]:flex-col [&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md [&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto [&_.paper-results_button]:flex [&_.paper-results_button]:flex-col [&_.paper-results_button]:items-start [&_.paper-results_button]:gap-0.5 [&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent [&_.paper-results_button]:border-0 [&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant [&_.paper-results_button]:text-left [&_.paper-results_button]:[font:inherit] [&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer [&_.paper-results_button:last-child]:border-b-0 [&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-md [&_.paper-results_.title]:font-medium [&_.paper-results_.id]:font-mono [&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted [&_.paper-pick_.id]:font-mono [&_.paper-pick_.id]:text-xs [&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center [&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3 [&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md [&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0 [&_.paper-pick_.title]:text-md [&_.paper-pick_.title]:font-semibold flex flex-col gap-2.5 [&_label]:flex [&_label]:flex-col [&_label]:gap-1 [&_label]:text-xs [&_label]:text-text [&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2 [&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end [&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start [&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ml-auto [&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap settings-form mt-3.5 pt-3.5 border-t border-t-border compute-flavor-form mb-3.5 [&_label]:max-w-80" onSubmit={submit}>
-      <label>
-        Default flavor
-        <input
-          className={MONO_CLASS_NAME}
-          type="text"
-          list={`flavors-${target}`}
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          placeholder={
-            FLAVOR_REQUIRED.includes(target)
-              ? `e.g. ${FLAVOR_SUGGESTIONS[target]?.[1] ?? ""}`
-              : "none (CPU-only)"
-          }
-          autoComplete="off"
-          spellCheck={false}
-        />
-        <datalist id={`flavors-${target}`}>
-          {(FLAVOR_SUGGESTIONS[target] ?? []).map((f) => (
-            <option key={f} value={f} />
-          ))}
-        </datalist>
-      </label>
-      {error && <div className="error">{error}</div>}
-      <div className="actions">
-        <button type="submit" className={SMALL_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
-          {saving ? "Saving…" : "Save flavor"}
-        </button>
-        {FLAVOR_REQUIRED.includes(target) && !flavor && (
-          <span className="muted text-muted compute-flavor-hint text-sm">
-            This backend requires a flavor — without a default one, each launch must pass{" "}
-            <code>--flavor</code>.
-          </span>
-        )}
-      </div>
-    </form>
-  );
-}
+  function changeBackend(id: string) {
+    const next = settings.targets.find((candidate) => candidate.id === id);
+    if (!next) return;
+    setBackend(next.id);
+    const nextFlavor = next.id === savedBackend ? savedFlavor : "";
+    setFlavor(nextFlavor);
+    setCustomFlavor(isCustomFlavor(next.id, nextFlavor));
+    if (!FLAVOR_REQUIRED.includes(next.id)) void save(next.id, nextFlavor);
+  }
 
-function TargetRow({
-  target,
-  isDefault,
-  isFallbackDefault,
-  defaultFlavor,
-  open,
-  onToggle,
-  onSettings,
-  onError,
-  projectId,
-}: {
-  target: ComputeTargetSummary;
-  isDefault: boolean;
-  isFallbackDefault: boolean;
-  defaultFlavor: string | null;
-  open: boolean;
-  onToggle: () => void;
-  onSettings: (s: ComputeSettings) => void;
-  onError: (msg: string) => void;
-  projectId?: string;
-}) {
-  // Mounted on first expand, kept mounted (hidden) after — each section's own
-  // mount-time fetch is the lazy detail load, and re-expanding doesn't refetch.
-  const [visited, setVisited] = useState(false);
-  const [settingDefault, setSettingDefault] = useState(false);
-  if (open && !visited) setVisited(true);
-
-  async function setDefault(backend: ComputeTargetId | null) {
-    if (settingDefault) return;
-    setSettingDefault(true);
-    try {
-      onSettings(await setComputeDefault({ backend, projectId }));
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSettingDefault(false);
+  function changeFlavor(id: string) {
+    if (id === CUSTOM_FLAVOR_ID) {
+      setCustomFlavor(true);
+      return;
     }
+    setCustomFlavor(false);
+    setFlavor(id);
+    if (!flavorRequired || id) void save(backend, id);
   }
 
   return (
-    <div className={`compute-row bg-background border border-border rounded-lg [&.disabled]:opacity-52 [&.disabled_.compute-row-head]:cursor-default [&.open_.compute-row-head:hover]:rounded-[var(--radius-lg)_var(--radius-lg)_0_0] [&.open_.compute-chevron]:rotate-180${open ? " open" : ""}${target.enabled ? "" : " disabled"}`}>
-      {/* The head is a plain clickable div, NOT role="button": it holds real
-          buttons (Make default, the chevron), and interactive elements must
-          not nest. The chevron is the keyboard-reachable expand control. */}
-      <div className="compute-row-head flex items-center gap-2.5 py-3 px-3.5 cursor-pointer select-none [&:hover]:bg-surface [&:hover]:rounded-lg [&_.badge]:flex-none" onClick={target.enabled ? onToggle : undefined}>
-        <span className="compute-row-logo inline-flex items-center flex-none">
-          <BackendLogo kind={TARGET_KIND[target.id]} size={18} />
-        </span>
-        <span className="compute-row-name text-md font-semibold text-text flex-none">{TARGET_LABELS[target.id]}</span>
-        <span className="compute-row-summary flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-muted text-sm">{target.summary}</span>
-        <TargetStatusBadge t={target} isDefault={isDefault} />
-        {isDefault ? (
-          <span className="badge inline-flex items-center font-sans text-xs font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle compute-default-pill flex-none text-primary border-primary">{isFallbackDefault ? "Local fallback" : "Default"}</span>
-        ) : (
-          <button
-            type="button"
-            className={`${SMALL_BUTTON_CLASS_NAME} compute-make-default flex-none`}
-            onClick={(e) => {
-              e.stopPropagation(); // the header click is expand/collapse
-              void setDefault(target.id);
-            }}
-            disabled={settingDefault || !target.enabled}
-          >
-            Make default
-          </button>
-        )}
-        <button
-          type="button"
-          className="compute-chevron-btn flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
-          aria-expanded={open}
-          aria-label={`${open ? "Collapse" : "Expand"} ${TARGET_LABELS[target.id]}`}
-          disabled={!target.enabled}
-          onClick={(e) => {
-            e.stopPropagation();
-            if (target.enabled) onToggle();
+    <section className="mb-8">
+      <h2 className="mt-0 mx-0 mb-2 text-lg">Default destination</h2>
+      <div>
+        <form
+          className="grid grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)] items-start gap-3"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!unchanged) void save(backend, flavor);
           }}
         >
-          <ChevronDown size={16} className="compute-chevron text-muted transition-transform duration-120 ease-standard" />
-        </button>
+          <OptionPicker
+            choices={choices.map((choice) => ({
+              id: choice.id,
+              label: TARGET_LABELS[choice.id],
+            }))}
+            value={backend}
+            variant="field"
+            dropDown
+            disabled={saving}
+            renderIcon={(choice) => {
+              const target = settings.targets.find((candidate) => candidate.id === choice.id);
+              return target ? <BackendLogo kind={TARGET_KIND[target.id]} size={16} /> : null;
+            }}
+            onSelect={changeBackend}
+          />
+          {flavored && (
+            <div>
+              {customFlavor ? (
+                <div className="relative">
+                  <input
+                    className="h-9 w-full rounded-md border border-border bg-background py-0 pr-10 pl-3 font-sans text-sm text-text outline-none focus:border-text"
+                    type="text"
+                    value={flavor}
+                    onChange={(event) => setFlavor(event.target.value)}
+                    onBlur={() => {
+                      if (flavorRequired && !flavor.trim()) {
+                        if (backend === savedBackend) {
+                          setFlavor(savedFlavor);
+                          setCustomFlavor(isCustomFlavor(savedBackend, savedFlavor));
+                        }
+                        return;
+                      }
+                      if (!unchanged) void save(backend, flavor);
+                    }}
+                    placeholder="Custom flavor"
+                    autoFocus
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={saving}
+                  />
+                  <button
+                    type="button"
+                    className="absolute inset-y-0 right-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
+                    aria-label="Choose a preset flavor"
+                    title="Choose a preset flavor"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => setCustomFlavor(false)}
+                  >
+                    <ChevronDown size={12} />
+                  </button>
+                </div>
+              ) : (
+                <OptionPicker
+                  choices={[
+                    {
+                      id: "",
+                      label: flavorRequired ? "Choose a flavor" : "No default flavor",
+                    },
+                    ...(flavor && !flavorSuggestions.includes(flavor)
+                      ? [{ id: flavor, label: `${flavor} (custom)` }]
+                      : []),
+                    ...flavorSuggestions.map((suggestion) => ({
+                      id: suggestion,
+                      label: suggestion,
+                    })),
+                    { id: CUSTOM_FLAVOR_ID, label: "Custom flavor…" },
+                  ]}
+                  value={flavor}
+                  variant="field"
+                  dropDown
+                  disabled={saving}
+                  onSelect={changeFlavor}
+                />
+              )}
+            </div>
+          )}
+        </form>
+        {error && <div className="error mt-2.5">{error}</div>}
+        {target && !target.configured && (
+          <p className={SETTINGS_NOTE_CLASS_NAME}>
+            This saved destination is not configured. Set it up below or choose another backend.
+          </p>
+        )}
       </div>
-      {visited && target.enabled && (
-        <div className="compute-row-body border-t border-t-border p-3.5 [&_.settings-card]:mb-0 [&_.settings-card]:mt-3.5" hidden={!open}>
-          {isDefault && !isFallbackDefault && (
-            <p className="settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5 border border-accent-amber rounded-md bg-accent-amber-subtle text-accent-amber font-medium compute-default-note flex items-center gap-2.5 flex-wrap">
-              The agent launches runs here unless you tell it otherwise, and so does{" "}
-              <code>orx exp run</code> with no <code>--backend</code> flag.{" "}
-              <button
-                type="button"
-                className={SMALL_BUTTON_CLASS_NAME}
-                onClick={() => void setDefault(null)}
-                disabled={settingDefault}
-              >
-                Clear default
-              </button>
-            </p>
-          )}
-          {isDefault && !target.configured && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              This target is the default but isn&apos;t configured — launches will fail until
-              it&apos;s set up below.
-            </p>
-          )}
-          {isDefault && FLAVORED_TARGETS.includes(target.id) && (
-            <DefaultFlavorEditor target={target.id} flavor={defaultFlavor} projectId={projectId} onSaved={onSettings} />
-          )}
+      <p className="mt-2 mb-0 text-sm text-subtext">{helperText}</p>
+    </section>
+  );
+}
+
+function TargetTile({
+  target,
+  isDefault,
+  onOpen,
+}: {
+  target: ComputeTargetSummary;
+  isDefault: boolean;
+  onOpen: () => void;
+}) {
+  const setupLabel = target.unverified
+    ? "Check setup"
+    : target.id === "openresearch"
+      ? "Sign in"
+      : target.id === "ray"
+        ? "Connect"
+        : "Set up";
+
+  return (
+    <button
+      type="button"
+      className="group flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-left font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface disabled:cursor-default disabled:opacity-52"
+      onClick={onOpen}
+      disabled={!target.enabled}
+    >
+      <span className="flex h-16 w-40 flex-none items-center justify-start">
+        <BackendLogo kind={TARGET_KIND[target.id]} size={48} />
+      </span>
+      <span className="mt-5 text-lg font-semibold text-text">{TARGET_LABELS[target.id]}</span>
+      <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-subtext">
+        {TARGET_CARD_DESCRIPTIONS[target.id]}
+      </span>
+      <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-md">
+        <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
+          {isDefault ? "Default" : target.configured ? "View settings" : setupLabel}
+        </span>
+        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
+          →
+        </span>
+      </span>
+    </button>
+  );
+}
+
+function BackendDetailPage({
+  target,
+  isDefault,
+  onBack,
+}: {
+  target: ComputeTargetSummary;
+  isDefault: boolean;
+  onBack: () => void;
+}) {
+  return (
+    <>
+      <button
+        type="button"
+        className="settings-back mb-10 inline-flex items-center gap-2 text-md font-medium text-subtext hover:text-text"
+        onClick={onBack}
+      >
+        <ArrowLeft size={16} /> Back to Compute
+      </button>
+      <div className="flex items-center justify-between gap-6">
+        <div className={`flex min-w-0 items-center ${target.id === "tinker" ? "gap-8" : "gap-5"}`}>
+          <span className="flex h-20 w-24 flex-none items-center justify-start">
+            <BackendLogo kind={TARGET_KIND[target.id]} size={72} />
+          </span>
+          <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]}</h1>
+        </div>
+        {isDefault && (
+          <span className="inline-flex flex-none items-center rounded-sm border border-primary bg-primary-subtle py-px px-2 text-xs font-medium text-primary">
+            Default
+          </span>
+        )}
+      </div>
+      <BackendOverview target={target} />
+      {target.id !== "tinker" && (
+        <div className="mt-8 font-sans text-md text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
           {target.id === "local" && <LocalSection />}
-          {target.id === "tinker" && <TinkerSection />}
           {target.id === "hf" && <HfSection />}
           {target.id === "modal" && <ModalSection />}
           {target.id === "k8s" && <K8sSection />}
@@ -1398,7 +1539,7 @@ function TargetRow({
           {target.id === "openresearch" && <OpenResearchSection />}
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1411,7 +1552,7 @@ function ComputeTab({
 }) {
   const [settings, setSettings] = useState<ComputeSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState<ComputeTargetId | null>(null);
+  const [selectedTarget, setSelectedTarget] = useState<ComputeTargetId | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Monotonic guard: a POST response applied via `apply` must not be
   // overwritten by a slower background GET that was already in flight.
@@ -1420,15 +1561,12 @@ function ComputeTab({
   useEffect(() => {
     seqRef.current++;
     setSettings(null);
-    setExpanded(null);
+    setSelectedTarget(null);
     setLoadError(null);
     setError(null);
   }, [project?.id]);
 
-  // Refetched whenever a row expands/collapses (not just on mount): a form
-  // saved inside a row (k8s context, HF token, …) changes the collapsed
-  // summaries, and the toggle is the natural moment to catch up. Cheap by
-  // contract — the endpoint only does fs/env probes.
+  // Returning to the directory refreshes summaries changed on a backend page.
   useEffect(() => {
     const seq = ++seqRef.current;
     getComputeSettings(project?.id)
@@ -1448,7 +1586,7 @@ function ComputeTab({
           return cur;
         });
       });
-  }, [expanded, project?.id]);
+  }, [selectedTarget, project?.id]);
 
   const apply = (s: ComputeSettings) => {
     seqRef.current++; // supersede any in-flight background GET
@@ -1456,63 +1594,73 @@ function ComputeTab({
     setError(null);
   };
 
-  // Server order is canonical (local first, then external backends).
+  // Preserve server order except for the selected default, which leads its section.
   const targets = settings ? settings.targets : null;
-  const fallbackDefault =
-    settings?.defaultBackend === "local" &&
-    settings.configuredDefaultBackend !== null &&
-    settings.configuredDefaultBackend !== undefined &&
-    settings.configuredDefaultBackend !== "local";
+  const defaultBackend = settings?.configuredDefaultBackend ?? settings?.defaultBackend;
+  const orderedTargets = targets
+    ? [...targets].sort(
+        (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
+      )
+    : null;
+  const configuredTargets = orderedTargets?.filter((target) => target.configured) ?? [];
+  const availableTargets = orderedTargets?.filter((target) => !target.configured) ?? [];
   const renderTarget = (target: ComputeTargetSummary) => (
-    <TargetRow
+    <TargetTile
       key={`${project?.id ?? "none"}:${target.id}`}
       target={target}
-      isDefault={settings?.defaultBackend === target.id}
-      isFallbackDefault={Boolean(fallbackDefault && target.id === "local")}
-      defaultFlavor={settings?.defaultFlavor ?? null}
-      open={target.enabled && expanded === target.id}
-      onToggle={() => setExpanded((current) => (current === target.id ? null : target.id))}
-      onSettings={apply}
-      onError={setError}
-      projectId={project?.id}
+      isDefault={defaultBackend === target.id}
+      onOpen={() => setSelectedTarget(target.id)}
     />
   );
+  const selected = selectedTarget
+    ? settings?.targets.find((target) => target.id === selectedTarget)
+    : null;
+
+  if (selected) {
+    return (
+      <BackendDetailPage
+        target={selected}
+        isDefault={defaultBackend === selected.id}
+        onBack={() => setSelectedTarget(null)}
+      />
+    );
+  }
 
   return (
     <>
       <h1>Compute</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Where <code>orx exp run</code> executes. Pick a default target; the agent uses it when
-        a launch doesn&apos;t name a backend (<code>--backend &lt;name&gt;</code> always wins).
+        Connect compute backends and choose where new runs execute.
       </p>
-      <ComputeActivity onViewHistory={onViewHistory} />
-      <h2 className="compute-section-title mt-0 mx-0 mb-2.5 text-lg">Targets</h2>
+      <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
-      ) : !targets ? (
+      ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
           <span className={SPINNER_CLASS_NAME} /> Checking compute targets…
         </div>
       ) : (
         <>
           {error && <div className="error">{error}</div>}
-          <div className="compute-list flex flex-col gap-2.5 mb-3.5">
-            {targets.filter((target) => target.id === "local").map(renderTarget)}
-            {targets.filter((target) => target.id !== "local").map(renderTarget)}
-          </div>
-          {fallbackDefault && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              Using this machine because the saved {settings?.configuredDefaultBackend} default is not currently configured.
-            </p>
+          <DefaultDestinationEditor
+            settings={settings}
+            projectId={project?.id}
+            onSaved={apply}
+          />
+          <section className="mb-8">
+            <h2 className="mt-0 mx-0 mb-2 text-lg">Ready to use</h2>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {configuredTargets.map(renderTarget)}
+            </div>
+          </section>
+          {availableTargets.length > 0 && (
+            <section className="mb-3.5">
+              <h2 className="mt-0 mx-0 mb-2 text-lg">More compute options</h2>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {availableTargets.map(renderTarget)}
+              </div>
+            </section>
           )}
-          <p className="compute-footnote flex items-start gap-1.5 mt-0.5 mx-0 mb-0 text-sm text-muted [&_svg]:flex-none [&_svg]:mt-px">
-            <Info size={14} aria-hidden="true" />
-            <span>
-              The default target and flavor are included in the research agent&apos;s
-              instructions — it launches runs there unless you name another backend. No other
-              compute settings are shared with it.
-            </span>
-          </p>
         </>
       )}
     </>
@@ -1583,11 +1731,6 @@ function HfSection() {
 
   return (
     <>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Run experiments on your Hugging Face account with{" "}
-        <code>--backend hf --flavor &lt;name&gt;</code> (t4-small, a10g-small, a100-large, …).
-        Billed to HF per minute.
-      </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
@@ -1596,7 +1739,7 @@ function HfSection() {
         </div>
       ) : (
         <>
-          <div className={KV_CLASS_NAME}>
+          <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">Status</span>
             <span className="v">
               <HfStatusBadge settings={settings} />
@@ -2885,14 +3028,14 @@ const isLive = (status: string) => status === "running" || status === "starting"
 /** Runtime: live instances show elapsed-so-far, finished ones total duration.
  *  Both start at submission time, so provisioning/queue time is included —
  *  that's the span the provider bills for. */
-function runtimeLabel(inst: Instance): string {
+function runtimeLabel(inst: Run): string {
   if (isLive(inst.status)) return fmtDuration(Date.now() - inst.createdAt);
   if (inst.endedAt) return fmtDuration(inst.endedAt - inst.createdAt);
   return "—";
 }
 
-/** One section's table: backend (logo + flavor), project, status, started, runtime. */
-function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; emptyLabel: string }) {
+/** One section's table: backend (logo + flavor), status, started, runtime. */
+function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabel: string }) {
   if (instances.length === 0) {
     return <p className="instances-empty m-0 py-3.5 px-4 border border-border rounded-lg bg-background text-subtext text-md">{emptyLabel}</p>;
   }
@@ -2902,7 +3045,6 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
         <thead>
           <tr>
             <th>Backend</th>
-            <th>Project</th>
             <th>Status</th>
             <th>Started</th>
             <th>Runtime</th>
@@ -2932,7 +3074,6 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
                     )}
                   </span>
                 </td>
-                <td>{inst.projectName ?? shortId(inst.projectId)}</td>
                 <td>
                   <StatusBadge status={runDisplayStatus(inst)} />
                 </td>
@@ -2947,8 +3088,8 @@ function InstancesTable({ instances, emptyLabel }: { instances: Instance[]; empt
   );
 }
 
-function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
-  const [instances, setInstances] = useState<Instance[] | null>(null);
+function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
+  const [instances, setInstances] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
@@ -2960,12 +3101,14 @@ function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
     return () => clearInterval(t);
   }, []);
 
-  // Point-in-time snapshot: the page refetches on every open, and this button
-  // refreshes in place while sitting on it — the run.updated
-  // SSE stream carries no projectName, so it can't drive this list directly.
+  // Point-in-time snapshot: the page refetches on every open and Refresh updates it in place.
   const load = () => {
+    if (!projectId) {
+      setInstances([]);
+      return;
+    }
     setRefreshing(true);
-    listInstances()
+    listRuns(projectId)
       .then((rows) => {
         setInstances(rows);
         setError(null);
@@ -2976,21 +3119,20 @@ function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
       })
       .finally(() => setRefreshing(false));
   };
-  useEffect(() => load(), []);
+  useEffect(() => load(), [projectId]);
 
-  const byRecent = (a: Instance, b: Instance) => b.createdAt - a.createdAt;
+  const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
   const past = instances?.filter((i) => !isLive(i.status)).sort(byRecent);
 
   return (
-    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-canvas [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-6.5">
-      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0 [&_p]:text-muted [&_p]:text-sm [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
+    <section className="compute-activity [&_.count-badge]:inline-flex [&_.count-badge]:items-center [&_.count-badge]:justify-center [&_.count-badge]:min-w-4.5 [&_.count-badge]:h-4.5 [&_.count-badge]:py-0 [&_.count-badge]:px-[5px] [&_.count-badge]:rounded-md [&_.count-badge]:bg-canvas [&_.count-badge]:border [&_.count-badge]:border-border [&_.count-badge]:text-xs [&_.count-badge]:font-medium [&_.count-badge]:text-text mt-5.5 mx-0 mb-8">
+      <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
             Running instances
             {running && running.length > 0 && <span className="count-badge">{running.length}</span>}
           </h2>
-          <p>Compute currently active across all projects.</p>
         </div>
         <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
@@ -3006,13 +3148,13 @@ function ComputeActivity({ onViewHistory }: { onViewHistory: () => void }) {
         <div className={SETTINGS_LOADING_CLASS_NAME}>
           <span className={SPINNER_CLASS_NAME} /> Loading…
         </div>
-      ) : <InstancesTable instances={running} emptyLabel="Nothing running right now." />}
+      ) : <InstancesTable instances={running} emptyLabel={projectId ? "Nothing running right now." : "Select a project to see its runs."} />}
     </section>
   );
 }
 
-function InstanceHistory({ onBack }: { onBack: () => void }) {
-  const [instances, setInstances] = useState<Instance[] | null>(null);
+function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
+  const [instances, setInstances] = useState<Run[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [, setTick] = useState(0);
@@ -3023,8 +3165,12 @@ function InstanceHistory({ onBack }: { onBack: () => void }) {
   }, []);
 
   const load = () => {
+    if (!projectId) {
+      setInstances([]);
+      return;
+    }
     setRefreshing(true);
-    listInstances()
+    listRuns(projectId)
       .then((rows) => {
         setInstances(rows.sort((a, b) => b.createdAt - a.createdAt));
         setError(null);
@@ -3035,7 +3181,7 @@ function InstanceHistory({ onBack }: { onBack: () => void }) {
       })
       .finally(() => setRefreshing(false));
   };
-  useEffect(load, []);
+  useEffect(load, [projectId]);
 
   return (
     <>
@@ -3048,12 +3194,11 @@ function InstanceHistory({ onBack }: { onBack: () => void }) {
           <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
         </button>
       </div>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">Every compute instance spun up across your projects.</p>
       {error && <div className="error">{error}</div>}
       {!instances ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
       ) : (
-        <InstancesTable instances={instances} emptyLabel="No instances yet." />
+        <InstancesTable instances={instances} emptyLabel={projectId ? "No instances yet." : "Select a project to see its history."} />
       )}
     </>
   );
@@ -3140,7 +3285,9 @@ export function SettingsView({
           onViewHistory={() => onSelectTab("instances")}
         />
       )}
-      {tab === "instances" && <InstanceHistory onBack={() => onSelectTab("compute")} />}
+      {tab === "instances" && (
+        <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
+      )}
       {tab === "environment" && (
         <>
           <h1>Environment</h1>

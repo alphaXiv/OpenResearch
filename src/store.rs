@@ -471,6 +471,7 @@ impl Store {
                 reachable INTEGER NOT NULL,
                 git_found INTEGER NOT NULL,
                 tools_found INTEGER NOT NULL DEFAULT 0,
+                missing_tools TEXT NOT NULL DEFAULT '',
                 error     TEXT,
                 tested_at INTEGER NOT NULL
             );
@@ -513,6 +514,7 @@ impl Store {
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE ssh_host_tests ADD COLUMN missing_tools TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE chat_run_wakeups ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'",
             "ALTER TABLE chat_run_wakeups ADD COLUMN claim_token TEXT",
             "ALTER TABLE chat_run_wakeups ADD COLUMN claimed_at INTEGER",
@@ -528,6 +530,12 @@ impl Store {
         ] {
             let _ = conn.execute(ddl, []);
         }
+        // Legacy tool failures cannot identify the missing dependency, so require one fresh check.
+        conn.execute(
+            "DELETE FROM ssh_host_tests
+             WHERE reachable = 1 AND tools_found = 0 AND missing_tools = ''",
+            [],
+        )?;
         // Chat messages became a tree (forked turns). Legacy rows are one linear
         // chain each; after this a NULL parent_id genuinely means "branch root".
         // All-or-nothing, because a half-applied backfill that still bumped the
@@ -2534,14 +2542,22 @@ impl Store {
 
     pub fn upsert_ssh_host_test(&self, t: &SshHostTest) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO ssh_host_tests (host, reachable, git_found, tools_found, error, tested_at)
-             VALUES (?1, ?2, 0, ?3, ?4, ?5)
+            "INSERT INTO ssh_host_tests (host, reachable, git_found, tools_found, missing_tools, error, tested_at)
+             VALUES (?1, ?2, 0, ?3, ?4, ?5, ?6)
              ON CONFLICT(host) DO UPDATE SET
                reachable = excluded.reachable,
                tools_found = excluded.tools_found,
+               missing_tools = excluded.missing_tools,
                error = excluded.error,
                tested_at = excluded.tested_at",
-            params![t.host, t.reachable, t.tools_found, t.error, t.tested_at],
+            params![
+                t.host,
+                t.reachable,
+                t.tools_found,
+                t.missing_tools.join(","),
+                t.error,
+                t.tested_at
+            ],
         )?;
         Ok(())
     }
@@ -2549,14 +2565,22 @@ impl Store {
     pub fn list_ssh_host_tests(&self) -> Result<Vec<SshHostTest>> {
         let mut stmt = self
             .conn
-            .prepare("SELECT host, reachable, tools_found, error, tested_at FROM ssh_host_tests")?;
+            .prepare(
+                "SELECT host, reachable, tools_found, missing_tools, error, tested_at FROM ssh_host_tests",
+            )?;
         let rows = stmt.query_map([], |row| {
+            let missing_tools = row.get::<_, String>(3)?;
             Ok(SshHostTest {
                 host: row.get(0)?,
                 reachable: row.get(1)?,
                 tools_found: row.get(2)?,
-                error: row.get(3)?,
-                tested_at: row.get(4)?,
+                missing_tools: missing_tools
+                    .split(',')
+                    .filter(|tool| !tool.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+                error: row.get(4)?,
+                tested_at: row.get(5)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -2593,6 +2617,7 @@ pub struct SshHostTest {
     pub host: String,
     pub reachable: bool,
     pub tools_found: bool,
+    pub missing_tools: Vec<String>,
     pub error: Option<String>,
     /// Unix millis.
     pub tested_at: i64,
@@ -2864,6 +2889,38 @@ mod tests {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(2048), "2.0 KB");
         assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    #[test]
+    fn legacy_ssh_tool_failures_require_a_fresh_check() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-legacy-ssh-tests-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = Connection::open(dir.join("orx.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ssh_host_tests (
+                 host TEXT PRIMARY KEY,
+                 reachable INTEGER NOT NULL,
+                 git_found INTEGER NOT NULL,
+                 tools_found INTEGER NOT NULL DEFAULT 0,
+                 error TEXT,
+                 tested_at INTEGER NOT NULL
+             );
+             INSERT INTO ssh_host_tests VALUES ('legacy-tools', 1, 0, 0, NULL, 1);
+             INSERT INTO ssh_host_tests VALUES ('legacy-connect', 0, 0, 0, 'timed out', 2);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open_at(dir.clone()).unwrap();
+        let tests = store.list_ssh_host_tests().unwrap();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].host, "legacy-connect");
+
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

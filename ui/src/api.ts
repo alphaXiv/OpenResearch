@@ -736,6 +736,7 @@ export const getSshHosts = () =>
 export interface SshPreflight {
   reachable: boolean;
   toolsFound: boolean;
+  missingTools?: string[];
   error: string | null;
   /** Unix millis. */
   testedAt: number;

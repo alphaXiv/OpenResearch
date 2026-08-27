@@ -4380,6 +4380,7 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
         host,
         reachable: p.reachable,
         tools_found: p.tools_found,
+        missing_tools: p.missing_tools,
         error: p.error,
         tested_at: now_ms(),
     };
@@ -4670,6 +4671,15 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
             "summary": "Runs as a detached process on this machine",
         },
         {
+            "id": "ssh",
+            "configured": ssh_hosts > 0,
+            "summary": match ssh_hosts {
+                0 => "No hosts in ~/.ssh/config".to_string(),
+                1 => "1 host in ~/.ssh/config".to_string(),
+                n => format!("{n} hosts in ~/.ssh/config"),
+            },
+        },
+        {
             "id": "tinker",
             "configured": tinker.is_some(),
             "summary": match tinker.map(|(_, source)| source) {
@@ -4707,15 +4717,6 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
                     s.namespace,
                 ),
             ),
-        },
-        {
-            "id": "ssh",
-            "configured": ssh_hosts > 0,
-            "summary": match ssh_hosts {
-                0 => "No hosts in ~/.ssh/config".to_string(),
-                1 => "1 host in ~/.ssh/config".to_string(),
-                n => format!("{n} hosts in ~/.ssh/config"),
-            },
         },
         {
             "id": "slurm",
