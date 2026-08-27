@@ -125,6 +125,7 @@ export const listProjectActivity = () =>
 export interface OnboardingSelection {
   harness: HarnessId;
   model: string | null;
+  serviceTier?: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
 }
@@ -1135,6 +1136,8 @@ export interface HarnessModel {
    * the CLI reports it (codex). When set, `reasoningLevels` has no `default`
    * sentinel and the composer preselects this concrete tier. */
   defaultReasoningLevel?: string;
+  /** Additional processing tiers this model advertises (Codex Fast mode). */
+  serviceTiers?: OptionChoice[];
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1198,6 +1201,38 @@ export function reasoningFor(
         ? REASONING_DEFAULT_ID
         : (harness?.options?.defaultReasoningLevel ?? choices[0]?.id ?? null);
   return { choices, defaultId };
+}
+
+export const SERVICE_TIER_DEFAULT_ID = "default";
+
+export function serviceTiersFor(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+): OptionChoice[] {
+  if (harness?.id !== "codex") return [];
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (!tiers?.length) return [];
+  return [
+    { id: SERVICE_TIER_DEFAULT_ID, label: "Standard", description: "Default speed" },
+    ...tiers,
+  ];
+}
+
+export function reconcileServiceTier(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+  current: string | null | undefined,
+): string | null {
+  // Harness detection is async; preserve a deliberate choice until its catalog loads.
+  if (!harness) return current ?? null;
+  if (harness.id !== "codex") return null;
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (tiers === undefined) return null;
+  const choices = serviceTiersFor(harness, modelId);
+  if (choices.length === 0) return SERVICE_TIER_DEFAULT_ID;
+  return current != null && choices.some((choice) => choice.id === current)
+    ? current
+    : SERVICE_TIER_DEFAULT_ID;
 }
 
 /**
@@ -1479,6 +1514,7 @@ export interface ChatSession {
    * `orx agent spawn --title`). Null on legacy sessions. */
   titleSource?: string | null;
   model: string | null;
+  serviceTier: string | null;
   permissionMode: string | null;
   /** Independent Plan axis for Codex/OpenCode. */
   planMode: boolean;
@@ -1502,6 +1538,7 @@ export const listChatSessions = (projectId: string) =>
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
   model?: string | null;
+  serviceTier?: string | null;
   permissionMode?: string | null;
   planMode?: boolean;
   reasoningLevel?: string | null;
@@ -1606,6 +1643,7 @@ export const sendChatMessage = (
     text,
     clientTurnId,
     model: opts.model,
+    serviceTier: opts.serviceTier,
     permissionMode: opts.permissionMode,
     planMode: opts.planMode,
     reasoningLevel: opts.reasoningLevel,

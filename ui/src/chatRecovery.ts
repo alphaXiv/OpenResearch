@@ -40,6 +40,7 @@ export function recoveryAction(
 export function recoveryTurnOptions(overrides: TurnOptions): TurnOptions {
   const options: TurnOptions = {};
   if (overrides.model !== undefined) options.model = overrides.model;
+  if (overrides.serviceTier !== undefined) options.serviceTier = overrides.serviceTier;
   if (overrides.permissionMode !== undefined) options.permissionMode = overrides.permissionMode;
   if (overrides.planMode !== undefined) options.planMode = overrides.planMode;
   if (overrides.reasoningLevel !== undefined) options.reasoningLevel = overrides.reasoningLevel;

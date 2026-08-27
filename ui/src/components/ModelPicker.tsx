@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   getHarnesses,
@@ -6,7 +6,9 @@ import {
   modelLabel,
   reasoningFor,
   reconcileReasoning,
+  reconcileServiceTier,
   REASONING_DEFAULT_ID,
+  serviceTiersFor,
   type Harness,
   type HarnessId,
   type OptionChoice,
@@ -49,6 +51,7 @@ export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
   return {
     harness: ready.id,
     model,
+    serviceTier: reconcileServiceTier(ready, model, null),
     permissionMode: ready.options?.defaultPermissionMode ?? null,
     reasoningLevel: reasoningFor(ready, model).defaultId,
   };
@@ -121,7 +124,7 @@ export function ModelPicker({
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "permissions">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions">("root");
 
   const close = () => {
     setOpen(false);
@@ -130,7 +133,7 @@ export function ModelPicker({
   };
 
   useEffect(() => {
-    if (open && (page === "reasoning" || page === "permissions")) {
+    if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
@@ -179,6 +182,11 @@ export function ModelPicker({
     onSelect({
       harness: harness.id,
       model,
+      serviceTier: reconcileServiceTier(
+        harness,
+        model,
+        sameHarness ? value?.serviceTier : null,
+      ),
       permissionMode: sameHarness
         ? value!.permissionMode
         : harness.options?.defaultPermissionMode ?? null,
@@ -211,6 +219,14 @@ export function ModelPicker({
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;
   const permissionLabel = permissionChoices.find((choice) => choice.id === effectivePermissionId)?.label;
   const reasoningAxisLabel = value?.harness === "opencode" ? "Variant" : "Effort";
+  const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
+  const speedChoices = serviceTiersFor(selectedHarness, value?.model);
+  const effectiveServiceTier = reconcileServiceTier(
+    selectedHarness,
+    value?.model,
+    value?.serviceTier,
+  );
+  const speedLabel = speedChoices.find((choice) => choice.id === effectiveServiceTier)?.label;
 
   const chooseReasoning = (id: string) => {
     onSelectReasoning?.(id);
@@ -219,6 +235,11 @@ export function ModelPicker({
 
   const choosePermission = (id: string) => {
     onSelectPermission?.(id);
+    close();
+  };
+
+  const chooseSpeed = (id: string) => {
+    if (value) onSelect({ ...value, serviceTier: id });
     close();
   };
 
@@ -288,7 +309,7 @@ export function ModelPicker({
         ref={triggerRef}
         type="button"
         className={`${COMPOSER_CONTROL_CLASS_NAME} composer-pill min-w-0 max-w-full gap-[5px] px-2 text-md text-text whitespace-nowrap`}
-        title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}`}
+        title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}${speedLabel ? ` · ${speedLabel}` : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
@@ -299,7 +320,12 @@ export function ModelPicker({
           }
         }}
       >
-        {value?.harness && <HarnessLogo harness={value.harness} size={14} />}
+        {effectiveServiceTier === "priority" ? (
+          <Zap size={14} fill="currentColor" aria-hidden="true" />
+        ) : value?.harness ? (
+          <HarnessLogo harness={value.harness} size={14} />
+        ) : null}
+        {effectiveServiceTier === "priority" && <span className="sr-only">Fast speed · </span>}
         <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
           {label}
           {reasoningLabel && <span className="model-picker-reasoning ml-1 text-muted">{reasoningLabel}</span>}
@@ -312,6 +338,7 @@ export function ModelPicker({
             <div className="model-root-menu p-1">
               {menuRow("Model", label, "models")}
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
+              {speedChoices.length > 0 && menuRow("Speed", speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow("Mode", permissionLabel, "permissions")}
             </div>
           )}
@@ -417,6 +444,12 @@ export function ModelPicker({
             <>
               {submenuHeader("Mode")}
               {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
+            </>
+          )}
+          {page === "speed" && (
+            <>
+              {submenuHeader("Speed")}
+              {choiceList(speedChoices, effectiveServiceTier ?? undefined, "default", chooseSpeed)}
             </>
           )}
         </div>

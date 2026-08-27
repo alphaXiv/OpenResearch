@@ -36,8 +36,13 @@ test("only the two safe recovery actions are accepted", () => {
 
 test("recovery sends only composer axes changed after the failed turn", () => {
   assert.deepEqual(
-    recoveryTurnOptions({ model: undefined, permissionMode: "auto", planMode: false }),
-    { permissionMode: "auto", planMode: false },
+    recoveryTurnOptions({
+      model: undefined,
+      serviceTier: "priority",
+      permissionMode: "auto",
+      planMode: false,
+    }),
+    { serviceTier: "priority", permissionMode: "auto", planMode: false },
   );
   assert.deepEqual(recoveryTurnOptions({ model: null }), { model: null });
   assert.deepEqual(recoveryTurnOptions({}), {});
