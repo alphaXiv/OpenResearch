@@ -2327,7 +2327,7 @@ function ProjectDefaultsTab() {
         <div className="settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5 [&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0">
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>GitHub publishing</h3>
-            <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : ""}`}>
+            <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : settings.ghInstalled ? "warn" : "err"}`}>
               {settings.githubAuthenticated ? "Connected via GitHub CLI" : "Not connected"}
             </span>
           </div>
@@ -2387,7 +2387,7 @@ function GitHubCliHelp({
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
           <a
-            className={BUTTON_CLASS_NAME}
+            className={PRIMARY_BUTTON_CLASS_NAME}
             href="https://cli.github.com/"
             target="_blank"
             rel="noreferrer"
@@ -2395,7 +2395,7 @@ function GitHubCliHelp({
             Install GitHub CLI <ExternalLink size={12} />
           </a>
         )}
-        <button type="button" className={BUTTON_CLASS_NAME} disabled={checking} onClick={check}>
+        <button type="button" className={`${BUTTON_CLASS_NAME} ${ghInstalled ? "text-accent-amber border-accent-amber" : ""}`} disabled={checking} onClick={check}>
           {checking ? "Checking…" : "Check again"}
         </button>
       </div>
@@ -2575,7 +2575,7 @@ function GitTab({
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : ""}`}>{status.github.authenticated ? "Connected via GitHub CLI" : "Not connected"}</span></span>
+              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : status.github.ghInstalled ? "warn" : "err"}`}>{status.github.authenticated ? "Connected via GitHub CLI" : "Not connected"}</span></span>
               <span className="k">Project</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">Syncing off</span>}</> : <span className={BADGE_CLASS_NAME}>Local only</span>}</span>
               {status.github.enabled && <><span className="k">Sync</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
