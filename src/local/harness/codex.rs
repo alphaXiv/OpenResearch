@@ -51,11 +51,12 @@ use super::{
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, prepare_env, set_chat_session_env, stored_to_wire, upsert_preserving_children,
-    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage,
-    WirePart, WirePrompt, WireQuestionOption, WireToolState,
+    find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
+    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage, WirePart,
+    WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::find_on_path;
 use crate::store::{Store, StoredChatMessage};
@@ -133,10 +134,11 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source (the static table is only the
-/// fallback), for the same reason opencode parses `models --verbose`: the
-/// installed CLI knows its catalog and we don't — a curated table here shipped
-/// missing three models and a wrong Luna tier before this existed.
+/// default. This is the primary model source for first-party accounts and for
+/// custom providers that declare an explicit model catalog (the static table is
+/// only the fallback), for the same reason opencode parses `models --verbose`:
+/// the installed CLI knows its catalog and we don't — a curated table here
+/// shipped missing three models and a wrong Luna tier before this existed.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
@@ -250,6 +252,24 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            let info = info.with_service_tiers(
+                m.get("serviceTiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"))
+                    .filter_map(|tier| {
+                        Some(OptionChoice {
+                            id: tier.get("id")?.as_str()?.to_string(),
+                            label: tier.get("name")?.as_str()?.to_string(),
+                            description: tier
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
+            );
             Some(match default {
                 Some(default) => info.with_reasoning_default(&efforts, default),
                 // No reported default (an older catalog shape) → keep the
@@ -271,6 +291,12 @@ struct CodexConfig {
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
     /// preselected tier must too.
     model_reasoning_effort: Option<String>,
+    /// An explicit provider model catalog (`model_catalog_json`). When a custom
+    /// provider declares one, the app-server's `model/list` reflects it and the
+    /// picker can offer every model the provider exposes; without one the CLI
+    /// falls back to its bundled first-party catalog, which says nothing about
+    /// a custom endpoint.
+    model_catalog_json: Option<String>,
     #[serde(default)]
     model_providers: HashMap<String, CodexProvider>,
 }
@@ -280,6 +306,32 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
     toml::from_str::<CodexConfig>(raw)
         .ok()?
         .model_reasoning_effort
+}
+
+/// Keep the configured model first without discarding catalog metadata.
+/// With either input absent, preserve the other as-is.
+fn custom_provider_models(
+    configured_model: Option<&str>,
+    catalog: Option<Vec<ModelInfo>>,
+) -> Vec<ModelInfo> {
+    let Some(configured_model) = configured_model else {
+        return catalog.unwrap_or_default();
+    };
+    let Some(mut models) = catalog else {
+        return vec![ModelInfo::new(configured_model)];
+    };
+    match models.iter().position(|model| model.id == configured_model) {
+        Some(0) => {}
+        Some(index) => {
+            let configured = models.remove(index);
+            models.insert(0, configured);
+        }
+        None => {
+            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
+            models.insert(0, ModelInfo::new(configured_model));
+        }
+    }
+    models
 }
 
 #[derive(Deserialize)]
@@ -292,6 +344,7 @@ struct CodexProvider {
 struct CustomProvider {
     model: Option<String>,
     env_key: Option<String>,
+    has_model_catalog: bool,
 }
 
 impl CustomProvider {
@@ -317,15 +370,10 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     Some(CustomProvider {
         model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
+        has_model_catalog: cfg
+            .model_catalog_json
+            .is_some_and(|path| !path.trim().is_empty()),
     })
-}
-
-/// `$CODEX_HOME` when set (the same two env sources the harness child sees),
-/// else `~/.codex`.
-fn codex_home() -> Option<PathBuf> {
-    super::detect::api_key("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
 /// `codex` on PATH, symlinks resolved (see `resolve_symlinks` — codex needs to
@@ -349,15 +397,14 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
 ///
 /// No `-m`: the user's default model at `low` effort is the cheap pin, and the
 /// session's own (possibly expensive) model selection is irrelevant to naming a
-/// chat. Like Codex desktop's own hidden titling thread, this leaves a throwaway
-/// rollout behind in `~/.codex/sessions`.
+/// chat. `--ephemeral` keeps the throwaway thread out of every session store.
 ///
 /// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
 /// and the caller keeps the placeholder title.
 async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String> {
     let fut = async {
         let mut cmd = Command::new(bin);
-        cmd.args(["exec", "--json", "--skip-git-repo-check"])
+        cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
             .args(["-c", "model_reasoning_effort=\"low\""])
@@ -376,6 +423,10 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             // server cwd's AGENTS.md into a request that only needs a title.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
+        cmd.env(
+            "CODEX_HOME",
+            native_store::prepare_codex(NativeStore::Isolated).ok()?,
+        );
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the title column.
         cmd.env("NO_COLOR", "1");
@@ -447,10 +498,8 @@ impl Harness for Codex {
         if let Some(bin) = find_codex() {
             info.record_bin(&bin, probe_bin(&bin).await);
         }
-        let home = codex_home();
-        let config_raw = home
-            .as_ref()
-            .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok());
+        let home = native_store::codex_home(NativeStore::Legacy);
+        let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
         let configured_effort = config_raw.as_deref().and_then(parse_configured_effort);
 
@@ -465,7 +514,7 @@ impl Harness for Codex {
                     "Set `{key}` for the configured Codex model provider."
                 ));
             }
-        } else if let Some(auth) = home.and_then(|home| read_json(home.join("auth.json"))) {
+        } else if let Some(auth) = read_json(home.join("auth.json")) {
             if nonempty_str(&auth, "OPENAI_API_KEY").is_some() {
                 info.authenticated = true;
                 info.auth_method = Some("apiKey");
@@ -487,22 +536,25 @@ impl Harness for Codex {
 
         info.agent_ready = info.ready();
         if info.agent_ready {
-            // The first-party catalog is meaningless for a custom provider, so
-            // offer only the model that provider is configured with (the
-            // picker's "Default model" entry covers the unset case).
-            //
-            // A custom provider's model gets no reasoning list of its own: the
-            // curated tiers below describe OpenAI's models, and we know nothing
-            // about what an arbitrary provider accepts. `ModelInfo::new` leaves
-            // `reasoning_levels` absent, so the composer falls back to the
-            // conservative harness-wide list rather than offering `ultra` to a
-            // provider that would reject it.
+            // A custom provider's bundled first-party catalog is meaningless,
+            // so probe only when its config declares an explicit catalog.
+            let custom_catalog = match (
+                custom_provider.as_ref(),
+                info.bin_path.as_deref().map(Path::new),
+            ) {
+                (Some(provider), Some(bin)) if provider.has_model_catalog => {
+                    codex_model_list(bin, configured_effort.as_deref()).await
+                }
+                _ => None,
+            };
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
-                Some(Some(model)) => info = info.with_models(vec![ModelInfo::new(model)]),
-                Some(None) => info = info.with_models(Vec::new()),
+                Some(configured_model) => {
+                    info =
+                        info.with_models(custom_provider_models(configured_model, custom_catalog))
+                }
                 None => {
                     // First-party account: ask the installed CLI for its own
                     // catalog (models + per-model efforts, the data codex's TUI
@@ -711,7 +763,7 @@ impl Harness for Codex {
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        codex_home()
+        Some(native_store::codex_home(NativeStore::Legacy))
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -736,10 +788,12 @@ impl Harness for Codex {
     fn extra_skill_targets(&self) -> Vec<(PathBuf, &'static str)> {
         // Keep the legacy `/orx` prompt for codex versions that don't yet read
         // `~/.agents/skills/`.
-        match codex_home() {
-            Some(home) => vec![(home.join("prompts").join("orx.md"), super::CODEX_PROMPT)],
-            None => Vec::new(),
-        }
+        vec![(
+            native_store::codex_home(NativeStore::Legacy)
+                .join("prompts")
+                .join("orx.md"),
+            super::CODEX_PROMPT,
+        )]
     }
 
     fn session_skills_dir(&self) -> Option<&'static str> {
@@ -1978,112 +2032,23 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
-fn persisted_thread_was_rejected(error: &JsonRpcError) -> bool {
-    let message = error.message.to_ascii_lowercase();
-    message.contains("thread")
-        && [
-            "not found",
-            "unknown",
-            "invalid",
-            "does not exist",
-            "unavailable",
-        ]
-        .iter()
-        .any(|needle| message.contains(needle))
-}
-
-const RECOVERY_SNAPSHOT_BYTES: usize = 32 * 1024;
-
-fn newest_utf8_tail(value: &str, max_bytes: usize) -> &str {
-    if value.len() <= max_bytes {
-        return value;
-    }
-    let mut start = value.len() - max_bytes;
-    while !value.is_char_boundary(start) {
-        start += 1;
-    }
-    &value[start..]
-}
-
-fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
-    for part in parts {
-        match part.kind.as_str() {
-            "text" => {
-                if let Some(text) = part.text.as_deref().filter(|text| !text.trim().is_empty()) {
-                    lines.push(text.trim().to_string());
-                }
-            }
-            "tool" => {
-                let state = part.state.as_ref();
-                let label = state
-                    .and_then(|state| state.title.as_deref())
-                    .or(part.tool.as_deref())
-                    .unwrap_or("tool");
-                let status = state
-                    .map(|state| state.status.as_str())
-                    .unwrap_or("unknown");
-                lines.push(format!("[tool: {label} — {status}]"));
-            }
-            "prompt" => {
-                if let Some(prompt) = part.prompt.as_ref() {
-                    let outcome = if prompt.resolved {
-                        "resolved"
-                    } else {
-                        "unresolved"
-                    };
-                    lines.push(format!("[{} prompt — {outcome}]", prompt.kind));
-                }
-            }
-            _ => {}
-        }
-        recovery_part_lines(&part.children, lines);
-    }
-}
-
-fn codex_recovery_snapshot(session_id: &str, current_turn_id: &str) -> String {
-    let Ok(store) = Store::open() else {
-        return String::new();
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
+        return;
     };
-    let current_user_id = store
-        .get_chat_turn(session_id, current_turn_id)
-        .ok()
-        .flatten()
-        .and_then(|turn| turn.user_message_id);
-    let Ok(messages) = store.list_chat_messages(session_id) else {
-        return String::new();
-    };
-    let mut entries = Vec::new();
-    for message in messages {
-        if current_user_id.as_deref() == Some(message.id.as_str()) {
-            continue;
-        }
-        let wire = stored_to_wire(&message);
-        let mut lines = Vec::new();
-        recovery_part_lines(&wire.parts, &mut lines);
-        if !lines.is_empty() {
-            entries.push(format!("{}:\n{}", wire.role, lines.join("\n")));
-        }
-    }
-    let mut selected = Vec::new();
-    let mut bytes = 0;
-    for entry in entries.into_iter().rev() {
-        let cost = entry.len() + 2;
-        if bytes + cost > RECOVERY_SNAPSHOT_BYTES {
-            if selected.is_empty() {
-                selected.push(newest_utf8_tail(&entry, RECOVERY_SNAPSHOT_BYTES).to_string());
-            }
-            break;
-        }
-        bytes += cost;
-        selected.push(entry);
-    }
-    selected.reverse();
-    selected.join("\n\n")
+    let instructions = setup
+        .get("developerInstructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
 }
 
-async fn ensure_codex_pre_accept(ctx: &mut TurnCtx) -> Result<Arc<CodexClient>> {
+async fn ensure_codex_pre_accept(
+    ctx: &mut TurnCtx,
+    native_store: NativeStore,
+) -> Result<Arc<CodexClient>> {
     loop {
-        let ensure = ctx.host.codex.ensure(&ctx.session_id);
+        let ensure = ctx.host.codex.ensure(&ctx.session_id, native_store);
         let result = match ctx.orx_retry_remaining() {
             Some(remaining) => tokio::time::timeout(remaining, ensure)
                 .await
@@ -2144,7 +2109,15 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
 
-    let mut client = ensure_codex_pre_accept(ctx).await?;
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
+    };
+    let preferred_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
     let auto_review_supported =
         if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
             codex_auto_review_supported(&client, &repo).await
@@ -2167,14 +2140,22 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        thread_setup["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
-    let thread_id = match ctx.native_session_id.clone() {
-        Some(id) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
-        Some(id) => {
+    let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
+        (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
+        (Some(_), None) => {
+            append_native_recovery_context(ctx, &mut thread_setup);
+            start_thread(ctx, &client, thread_setup).await?
+        }
+        (Some(id), Some(session)) => {
             let mut params = thread_setup.clone();
             params["threadId"] = Value::String(id.clone());
+            params["path"] = Value::String(session.path.to_string_lossy().into_owned());
             let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
             client = resume_client;
             match resumed {
@@ -2187,34 +2168,23 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     client.set_resumed_thread(&id);
                     id
                 }
-                // Codex *rejected* the id (e.g. minted by the old exec path,
-                // or the rollout is gone): start a fresh thread; prior context
-                // is lost either way. A transport failure, by contrast,
-                // propagates as the turn's error (the `?` above) — a resumable
-                // thread must never be discarded over a timeout/hiccup.
                 Err(err) => {
-                    if !persisted_thread_was_rejected(&err) {
+                    // Transport failures never reach this arm. Recover only if
+                    // the exact rollout disappeared after the initial lookup.
+                    if codex_native_session(&id).await?.is_some() {
                         ctx.mark_terminal_failure("json_rpc", err.to_string());
                         return Err(anyhow!("codex thread/resume failed: {err}"));
                     }
-                    eprintln!(
-                        "orx up: codex thread/resume rejected ({err}); starting a fresh thread"
-                    );
-                    let snapshot = codex_recovery_snapshot(&ctx.session_id, &ctx.turn_id);
-                    if !snapshot.is_empty() {
-                        let instructions = thread_setup
-                            .get("developerInstructions")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default();
-                        thread_setup["developerInstructions"] = Value::String(format!(
-                            "{instructions}\n\n<orx-recovery-context>\nThe persisted native Codex thread was unavailable. Use this ORX transcript snapshot as prior context; do not repeat completed tool actions.\n{snapshot}\n</orx-recovery-context>"
-                        ));
+                    if client.native_store() != NativeStore::Isolated {
+                        ctx.host.codex.kill_session(&ctx.session_id).await;
+                        client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
                     }
+                    append_native_recovery_context(ctx, &mut thread_setup);
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
         }
-        None => start_thread(ctx, &client, thread_setup).await?,
+        (None, _) => start_thread(ctx, &client, thread_setup).await?,
     };
 
     // Route events to this turn before starting it — nothing is missed.
@@ -2230,6 +2200,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        turn_params["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
@@ -2992,7 +2965,8 @@ async fn codex_resume_thread(
                 );
                 ctx.host.codex.kill_session(&ctx.session_id).await;
                 tokio::time::sleep(delay).await;
-                client = ensure_codex_pre_accept(ctx).await?;
+                let native_store = client.native_store();
+                client = ensure_codex_pre_accept(ctx, native_store).await?;
             }
         }
     }
@@ -3237,21 +3211,11 @@ fn writable_roots_override(roots: &[PathBuf]) -> Option<String> {
     if roots.is_empty() {
         return None;
     }
-    let list: Vec<String> = roots.iter().map(|p| toml_string(p)).collect();
+    let list: Vec<String> = roots.iter().map(|p| native_store::toml_string(p)).collect();
     Some(format!(
         "sandbox_workspace_write.writable_roots=[{}]",
         list.join(", ")
     ))
-}
-
-/// A path as a TOML basic-string literal, for `-c key="value"` overrides.
-/// serde_json's escaping emits only sequences TOML also accepts (`\"`, `\\`,
-/// control chars as `\uXXXX`) and leaves `/` literal — except DEL (0x7F),
-/// which serde_json passes through and TOML forbids unescaped.
-fn toml_string(path: &Path) -> String {
-    serde_json::to_string(&path.to_string_lossy())
-        .unwrap_or_else(|_| String::from("\"\""))
-        .replace('\u{7f}', "\\u007F")
 }
 
 async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
@@ -3266,12 +3230,23 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             .await
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
+    };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+        .await
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
-    match &ctx.native_session_id {
-        Some(native_id) => {
+    match (&ctx.native_session_id, &native_session) {
+        (Some(native_id), Some(_)) => {
             cmd.args(["exec", "resume", native_id]);
         }
-        None => {
+        _ => {
             cmd.arg("exec");
         }
     }
@@ -3356,11 +3331,22 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
+    if let Some(service_tier) = &ctx.service_tier {
+        cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
+    }
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
     }
-    let turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
-    let prompt = if ctx.native_session_id.is_none() {
+    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+        cmd.args(["-c", &override_arg]);
+    }
+    let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+            turn_text = format!("{recovery}\n\n{turn_text}");
+        }
+    }
+    let prompt = if native_session.is_none() {
         let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
         format!(
             "<system-context>\n{playbook_md}\n</system-context>\n\n{}",
@@ -3371,6 +3357,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     };
     cmd.arg(prompt);
     prepare_env(&mut cmd);
+    cmd.env("CODEX_HOME", codex_home);
     // Plain text only: a synced FORCE_COLOR would put escape codes in the
     // `--json` event stream, and every unparseable line reads as "not delivered".
     cmd.env("NO_COLOR", "1");
@@ -3545,6 +3532,15 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
+async fn codex_native_session(
+    native_id: &str,
+) -> Result<Option<native_store::NativeSessionLocation>> {
+    let native_id = native_id.to_string();
+    tokio::task::spawn_blocking(move || native_store::codex_session(&native_id))
+        .await
+        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
+}
+
 fn legacy_exec_text(text: &str, plan_mode: bool) -> String {
     if !plan_mode {
         return text.to_string();
@@ -3608,6 +3604,10 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
 
     #[test]
     fn custom_provider_uses_its_env_key_and_configured_model() {
@@ -3679,6 +3679,98 @@ requires_openai_auth = false
         assert!(!provider.is_ready());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn custom_provider_records_whether_a_model_catalog_is_declared() {
+        // A declared catalog (the DeepSeek-style setup) means the app-server
+        // `model/list` reflects the provider's own models, so orx should probe
+        // it and offer every listed model.
+        assert!(
+            parse_custom_provider(
+                r#"
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+model_catalog_json = "~/.codex/models.json"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+
+        // A bare gateway provider has no explicit catalog; the CLI would fall
+        // back to its bundled first-party list, so orx keeps offering only the
+        // configured model instead of a catalog that says nothing about the
+        // endpoint.
+        assert!(
+            !parse_custom_provider(
+                r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(
+            !parse_custom_provider(
+                r#"
+model_provider = "custom"
+model_catalog_json = "  "
+[model_providers.custom]
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(parse_custom_provider("not toml ===").is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_keep_the_configured_model_first() {
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![
+                ModelInfo::new("first"),
+                ModelInfo::new("configured").with_label(Some("Configured model"), None),
+                ModelInfo::new("last"),
+            ]),
+        );
+
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
+
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert!(models[0].reasoning_levels.is_none());
+        assert!(models[0].default_reasoning_level.is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_preserve_catalog_fallbacks() {
+        let models = custom_provider_models(Some("configured"), None);
+        assert_eq!(model_ids(&models), ["configured"]);
+
+        let models = custom_provider_models(
+            None,
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["first", "last"]);
+        assert!(custom_provider_models(None, None).is_empty());
     }
 
     #[test]
@@ -4823,12 +4915,18 @@ requires_openai_auth = false
     #[test]
     fn toml_string_quotes_and_escapes_paths() {
         assert_eq!(
-            toml_string(Path::new("/a/with space")),
+            native_store::toml_string(Path::new("/a/with space")),
             r#""/a/with space""#
         );
-        assert_eq!(toml_string(Path::new(r#"/a/"q""#)), r#""/a/\"q\"""#);
+        assert_eq!(
+            native_store::toml_string(Path::new(r#"/a/"q""#)),
+            r#""/a/\"q\"""#
+        );
         // DEL is the one char serde_json leaves raw that TOML rejects.
-        assert_eq!(toml_string(Path::new("/a/\u{7f}b")), r#""/a/\u007Fb""#);
+        assert_eq!(
+            native_store::toml_string(Path::new("/a/\u{7f}b")),
+            r#""/a/\u007Fb""#
+        );
     }
 
     #[test]
@@ -4910,6 +5008,10 @@ requires_openai_auth = false
                         { "reasoningEffort": "max", "description": "" },
                         { "reasoningEffort": "ultra", "description": "" },
                     ],
+                    "serviceTiers": [
+                        { "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" },
+                        { "id": "ultrafast", "name": "Ultrafast", "description": "Access controlled" }
+                    ],
                 },
                 {
                     "id": "gpt-5.4-mini", "model": "gpt-5.4-mini",
@@ -4951,6 +5053,10 @@ requires_openai_auth = false
         assert_eq!(models[1].default_reasoning_level.as_deref(), Some("medium"));
         // The catalog's display name rides along for the picker.
         assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].id, "priority");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].label, "Fast");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap().len(), 1);
+        assert!(models[1].service_tiers.as_ref().unwrap().is_empty());
 
         // A config.toml `model_reasoning_effort` outranks the catalog default —
         // codex resolves it that way, so the preselect must too. A configured
@@ -5468,14 +5574,5 @@ requires_openai_auth = false
             )),
             None
         );
-    }
-
-    #[test]
-    fn recovery_snapshot_tail_respects_utf8_byte_limit() {
-        let value = format!("old{}new", "🦀".repeat(10));
-        let tail = newest_utf8_tail(&value, 12);
-        assert!(tail.len() <= 12);
-        assert!(tail.ends_with("new"));
-        assert!(value.ends_with(tail));
     }
 }

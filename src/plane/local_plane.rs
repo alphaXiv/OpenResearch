@@ -283,12 +283,13 @@ impl LocalPlane {
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
                 }
-                Some("local") => crate::local::localrun::launch_local_run(&args).await,
+                Some("tinker" | "local") => crate::local::localrun::launch_local_run(&args).await,
                 Some(other) => Err(anyhow!(
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
                      slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                     openresearch (an ephemeral OpenResearch box), local (this machine).",
+                     openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
+                     local (this machine).",
                     other
                 )),
                 None => Err(anyhow!(
@@ -304,6 +305,7 @@ impl LocalPlane {
                      `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
                      `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
                      e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
+                     `--backend tinker` (a local controller using remote Tinker model compute), \
                      or `--backend local` (a detached process on this machine)."
                 )),
             },
@@ -312,7 +314,7 @@ impl LocalPlane {
         // Validation above guarantees a known backend before either dispatch path.
         if result.is_ok() {
             let target = backend_label.as_deref().unwrap_or("unknown");
-            crate::telemetry::capture_experiment_started("run", Some(target));
+            crate::telemetry::capture_experiment_started("run", true, Some(target));
         }
         result
     }

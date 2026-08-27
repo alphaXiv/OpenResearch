@@ -125,6 +125,7 @@ export const listProjectActivity = () =>
 export interface OnboardingSelection {
   harness: HarnessId;
   model: string | null;
+  serviceTier?: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
 }
@@ -408,6 +409,105 @@ export const compileLatex = (
     sessionId: opts.sessionId,
   });
 
+/** The Overleaf project a `.tex` pushes to. */
+export interface OverleafLink {
+  projectId: string;
+  /** The project on overleaf.com, for opening it. */
+  url: string;
+}
+
+export interface OverleafState {
+  /** A Git authentication token is stored on this machine. */
+  hasToken: boolean;
+  /** Null until this paper is pointed at a project. */
+  link: OverleafLink | null;
+}
+
+/** Whether a Git authentication token is stored — the machine-wide half of the
+ * Overleaf state, for Settings. */
+export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+
+/** Store an Overleaf Git authentication token. Not validated here: only the Git
+ * bridge can judge a token, and it needs a project to judge it against, so a
+ * bad token surfaces from `linkOverleaf`. */
+export const saveOverleafToken = (token: string) =>
+  post<{ hasToken: boolean }>("/api/overleaf/token", { token });
+
+export const deleteOverleafToken = () =>
+  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+export const getOverleafState = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+
+/** Point this `.tex` at an Overleaf project. The server proves the account can
+ * reach it before storing the link, so this is where a plan without Git
+ * integration — or a bad token — is reported. */
+export const linkOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { project: string; sessionId?: string },
+) =>
+  post<OverleafState>(`/api/projects/${projectId}/file/overleaf`, {
+    path,
+    project: opts.project,
+    sessionId: opts.sessionId,
+  });
+
+export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafState>(r));
+
+/** How the user settled a file both sides changed, keyed by checkout-relative path. */
+export type OverleafResolution = "keep-local" | "take-overleaf";
+
+export interface OverleafSyncResult {
+  ok: boolean;
+  /** Files Overleaf changed alone, now written into the checkout. */
+  pulled: string[];
+  /** Files we changed alone, now committed to Overleaf. */
+  pushed: string[];
+  /** Files both sides changed since the last sync. Left untouched on both
+   * sides until the user says which copy to keep. */
+  conflicts: string[];
+  /** Main-document mismatch, or files left behind. */
+  note: string | null;
+}
+
+/** Bring the paper and the linked Overleaf project into step, both ways. */
+export const syncOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; resolve?: Record<string, OverleafResolution> } = {},
+) =>
+  post<OverleafSyncResult>(`/api/projects/${projectId}/file/overleaf/sync`, {
+    path,
+    sessionId: opts.sessionId,
+    resolve: opts.resolve,
+  });
+
+/** Whether Overleaf has moved since the last sync. One request and no transfer,
+ * so a linked paper can be watched while its tab is open. */
+export const getOverleafStatus = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  get<{ remoteChanged: boolean }>(
+    `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+  );
+
+/** Page that posts the paper to Overleaf as a new project — the path for an
+ * account whose plan has no Git integration. Opened in a tab, not fetched. */
+export const overleafUploadUrl = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => `/api/projects/${projectId}/file/overleaf/upload?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
+
 export interface CodeTree {
   root: CheckoutRoot;
   /** The listed branch (`ref` mode), else the checked-out branch, else null
@@ -637,6 +737,7 @@ export const getSshHosts = () =>
 export interface SshPreflight {
   reachable: boolean;
   toolsFound: boolean;
+  missingTools?: string[];
   error: string | null;
   /** Unix millis. */
   testedAt: number;
@@ -713,6 +814,7 @@ export const rayPreflight = (address?: string) =>
 
 export type ComputeTargetId =
   | "local"
+  | "tinker"
   | "hf"
   | "modal"
   | "k8s"
@@ -899,20 +1001,13 @@ export interface GitSettings {
   userName: string | null;
   userEmail: string | null;
   ghInstalled: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
+  githubAuthenticated: boolean;
 }
 
 export const getGitSettings = () => get<GitSettings>("/api/settings/git");
 
 export const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
   post<GitSettings>("/api/settings/git", body);
-
-/** Validate + persist a pasted GitHub token (stored in the synced env file). */
-export const saveGitToken = (token: string) =>
-  post<GitSettings>("/api/settings/git/token", { token });
-
-export const removeGitToken = () =>
-  fetch("/api/settings/git/token", { method: "DELETE" }).then((r) => json<GitSettings>(r));
 
 /** A paper linked to the researcher profile during onboarding. */
 export interface LinkedPaper {
@@ -948,8 +1043,8 @@ export const setLitSources = (body: LitSourcesSettings) =>
 export interface ProjectDefaultsSettings {
   githubForNewProjects: boolean;
   githubDefaultPromptSeen: boolean;
+  ghInstalled: boolean;
   githubAuthenticated: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
 }
 
 export const getProjectDefaults = () =>
@@ -979,8 +1074,8 @@ export interface ProjectGitStatus {
     emailSource: "local" | "global" | null;
   };
   github: {
+    ghInstalled: boolean;
     authenticated: boolean;
-    tokenSource: "env" | "stored" | "gh" | null;
     enabled: boolean;
     owner: string;
     repo: string;
@@ -1007,6 +1102,8 @@ export const pushProjectGithub = (projectId: string) =>
 export interface TelemetrySettings {
   /** Whether usage analytics linked to the random installation ID is on. */
   enabled: boolean;
+  /** Saved user preference, independent of build and runtime eligibility. */
+  preferenceEnabled: boolean;
   /** When off, a short human reason (e.g. "--no-telemetry flag"); null when on. */
   reason: string | null;
 }
@@ -1015,11 +1112,6 @@ export const getTelemetry = () => get<TelemetrySettings>("/api/settings/telemetr
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
-
-/** Record the consent decision once when the user leaves onboarding. Eligible
- * official builds send this even for opt-outs; development builds stay inert. */
-export const recordTelemetryConsent = (enabled: boolean) =>
-  post<{ ok: boolean }>("/api/settings/telemetry/consent", { enabled });
 
 export type HarnessId = "claude-code" | "codex" | "opencode";
 
@@ -1044,6 +1136,8 @@ export interface HarnessModel {
    * the CLI reports it (codex). When set, `reasoningLevels` has no `default`
    * sentinel and the composer preselects this concrete tier. */
   defaultReasoningLevel?: string;
+  /** Additional processing tiers this model advertises (Codex Fast mode). */
+  serviceTiers?: OptionChoice[];
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -1107,6 +1201,38 @@ export function reasoningFor(
         ? REASONING_DEFAULT_ID
         : (harness?.options?.defaultReasoningLevel ?? choices[0]?.id ?? null);
   return { choices, defaultId };
+}
+
+export const SERVICE_TIER_DEFAULT_ID = "default";
+
+export function serviceTiersFor(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+): OptionChoice[] {
+  if (harness?.id !== "codex") return [];
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (!tiers?.length) return [];
+  return [
+    { id: SERVICE_TIER_DEFAULT_ID, label: "Standard", description: "Default speed" },
+    ...tiers,
+  ];
+}
+
+export function reconcileServiceTier(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+  current: string | null | undefined,
+): string | null {
+  // Harness detection is async; preserve a deliberate choice until its catalog loads.
+  if (!harness) return current ?? null;
+  if (harness.id !== "codex") return null;
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (tiers === undefined) return null;
+  const choices = serviceTiersFor(harness, modelId);
+  if (choices.length === 0) return SERVICE_TIER_DEFAULT_ID;
+  return current != null && choices.some((choice) => choice.id === current)
+    ? current
+    : SERVICE_TIER_DEFAULT_ID;
 }
 
 /**
@@ -1391,6 +1517,7 @@ export interface ChatSession {
    * `orx agent spawn --title`). Null on legacy sessions. */
   titleSource?: string | null;
   model: string | null;
+  serviceTier: string | null;
   permissionMode: string | null;
   /** Independent Plan axis for Codex/OpenCode. */
   planMode: boolean;
@@ -1414,6 +1541,7 @@ export const listChatSessions = (projectId: string) =>
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
   model?: string | null;
+  serviceTier?: string | null;
   permissionMode?: string | null;
   planMode?: boolean;
   reasoningLevel?: string | null;
@@ -1518,6 +1646,7 @@ export const sendChatMessage = (
     text,
     clientTurnId,
     model: opts.model,
+    serviceTier: opts.serviceTier,
     permissionMode: opts.permissionMode,
     planMode: opts.planMode,
     reasoningLevel: opts.reasoningLevel,

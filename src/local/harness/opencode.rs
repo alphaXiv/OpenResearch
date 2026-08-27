@@ -39,6 +39,7 @@ use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
 
 const OPENCODE_REINSTALL: &str =
@@ -285,6 +286,10 @@ async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<S
     // AGENTS.md into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env(
+        "OPENCODE_DB",
+        native_store::prepare_opencode(NativeStore::Isolated).ok()?,
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
@@ -740,11 +745,14 @@ fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Respo
     .into())
 }
 
-async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, reqwest::Response)> {
+async fn opencode_setup_attempt(
+    ctx: &mut TurnCtx,
+    store: NativeStore,
+) -> Result<(String, String, reqwest::Response)> {
     let status = ctx
         .host
         .opencode
-        .ensure(&ctx.project, &ctx.session_id)
+        .ensure(&ctx.project, &ctx.session_id, store)
         .await?;
     let port = status
         .port
@@ -779,10 +787,11 @@ async fn opencode_setup_attempt(ctx: &mut TurnCtx) -> Result<(String, String, re
 
 async fn opencode_pre_accept_setup(
     ctx: &mut TurnCtx,
+    store: NativeStore,
 ) -> Result<(String, String, reqwest::Response)> {
     loop {
         let remaining = ctx.orx_retry_remaining();
-        let attempt = opencode_setup_attempt(ctx);
+        let attempt = opencode_setup_attempt(ctx, store);
         let result = match remaining {
             Some(remaining) => tokio::time::timeout(remaining, attempt)
                 .await
@@ -842,7 +851,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .resolve_stale_prompts(&ctx.session_id, true)
         .await?;
 
-    let (native_id, base, events) = opencode_pre_accept_setup(ctx).await?;
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session(&id))
+            .await
+            .map_err(|error| anyhow!("OpenCode session lookup failed: {error}"))??,
+        None => None,
+    };
+    let store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+        ctx.native_session_id = None;
+    }
+
+    let (native_id, base, events) = opencode_pre_accept_setup(ctx, store).await?;
     let mut stream = events.bytes_stream();
 
     let mut body = json!({
@@ -864,6 +890,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(variant) = opencode_variant(ctx.reasoning_level.as_deref()) {
         body["variant"] = json!(variant);
     }
+    let turn_started_at = crate::store::now_ms();
     let send = ctx
         .http()
         .post(format!("{base}/session/{native_id}/message"))
@@ -933,6 +960,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 ctx.mark_delivery(DeliveryState::Accepted);
                 ctx.clear_retry_status();
                 if let Ok(message) = resp.json::<Value>().await {
+                    if !opencode_response_is_current(&message, turn_started_at) {
+                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                        ctx.mark_terminal_failure("opencode_stale_response", message);
+                        return Err(anyhow!(message));
+                    }
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
                             if let Some(wire) = to_wire_part(part) {
@@ -948,6 +980,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
+    message
+        .pointer("/info/time/created")
+        .and_then(Value::as_i64)
+        .is_some_and(|created| created >= turn_started_at)
 }
 
 /// OpenCode assistant `tokens` occupying the context window:
@@ -1595,6 +1634,18 @@ opencode/glm-5
             &mut HashMap::new(),
         );
         assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn stale_final_response_is_rejected() {
+        assert!(opencode_response_is_current(
+            &json!({"info":{"time":{"created":100}}}),
+            100
+        ));
+        assert!(!opencode_response_is_current(
+            &json!({"info":{"time":{"created":99}}}),
+            100
+        ));
     }
 
     #[test]

@@ -438,26 +438,42 @@ pub async fn cancel_job(target: &SshTarget, dir: &str) -> Result<()> {
 pub struct SshPreflight {
     pub reachable: bool,
     pub tools_found: bool,
+    pub missing_tools: Vec<String>,
     pub error: Option<String>,
 }
 
 pub async fn preflight(target: &SshTarget) -> SshPreflight {
     match ssh_run(
         target,
-        "command -v bash >/dev/null 2>&1 && command -v tar >/dev/null 2>&1 \
-         && echo TOOLS_OK || echo NO_TOOLS",
+        "command -v bash >/dev/null 2>&1 || echo MISSING_BASH; \
+         command -v tar >/dev/null 2>&1 || echo MISSING_TAR",
         None,
     )
     .await
     {
-        Ok(out) => SshPreflight {
-            reachable: true,
-            tools_found: out.contains("TOOLS_OK"),
-            error: None,
-        },
+        Ok(out) => {
+            let missing_tools = [("MISSING_BASH", "bash"), ("MISSING_TAR", "tar")]
+                .into_iter()
+                .filter(|(marker, _)| out.contains(marker))
+                .map(|(_, tool)| tool.to_string())
+                .collect::<Vec<_>>();
+            let error = (!missing_tools.is_empty()).then(|| {
+                format!(
+                    "This host needs {} installed before orx can copy and run experiments. Install the missing tools, then retest.",
+                    missing_tools.join(" and ")
+                )
+            });
+            SshPreflight {
+                reachable: true,
+                tools_found: missing_tools.is_empty(),
+                missing_tools,
+                error,
+            }
+        }
         Err(e) => SshPreflight {
             reachable: false,
             tools_found: false,
+            missing_tools: Vec::new(),
             error: Some(e.to_string()),
         },
     }

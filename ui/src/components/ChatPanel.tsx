@@ -59,6 +59,7 @@ import {
   reasoningFor,
   recoverChatTurn,
   reconcileReasoning,
+  reconcileServiceTier,
   renameChatSession,
   retryQueuedMessage,
   respondChat,
@@ -4450,6 +4451,10 @@ export function ChatPanel({
     ? {
         harness: openSession.harness,
         model: sessionOverride.model ?? openSession.model,
+        serviceTier:
+          sessionOverride.serviceTier !== undefined
+            ? sessionOverride.serviceTier
+            : openSession.serviceTier,
         permissionMode: sessionOverride.permissionMode ?? openSession.permissionMode,
         reasoningLevel: sessionOverride.reasoningLevel ?? openSession.reasoningLevel,
       }
@@ -4460,7 +4465,10 @@ export function ChatPanel({
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
   const opts = activeHarness?.options;
-  const commands = commandsForHarness(skills, opts?.planActivation);
+  const commands = useMemo(
+    () => commandsForHarness(skills, opts?.planActivation),
+    [skills, opts?.planActivation],
+  );
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
   // Commands now live in the draft as text, so the menu also has to stay shut
@@ -4486,6 +4494,11 @@ export function ChatPanel({
   // rejects.
   const composerSelection: ModelSelection | null = rawSelection && {
     ...rawSelection,
+    serviceTier: reconcileServiceTier(
+      activeHarness,
+      rawSelection.model,
+      rawSelection.serviceTier,
+    ),
     reasoningLevel: reconcileReasoning(
       activeHarness,
       rawSelection.model,
@@ -4514,6 +4527,11 @@ export function ChatPanel({
     const merged = { ...composerSelection, ...next };
     const changed: Partial<ModelSelection> = {};
     if (next.model !== undefined && next.model !== composerSelection.model) changed.model = next.model;
+    if (
+      next.serviceTier !== undefined &&
+      next.serviceTier !== composerSelection.serviceTier
+    )
+      changed.serviceTier = next.serviceTier;
     if (
       next.permissionMode !== undefined &&
       next.permissionMode !== composerSelection.permissionMode
@@ -5238,6 +5256,7 @@ export function ChatPanel({
       settings: effective
         ? {
             model: effective.model,
+            serviceTier: effective.serviceTier,
             permissionMode: effective.permissionMode,
             planMode: independentPlanMode,
             reasoningLevel: effective.reasoningLevel,
@@ -5270,6 +5289,7 @@ export function ChatPanel({
       const turnOpts = effective
         ? {
             model: effective.model,
+            serviceTier: effective.serviceTier,
             permissionMode: effective.permissionMode,
             // The composer's plan state, not just an unpersisted toggle: a
             // toggle that already persisted would otherwise reach the server
@@ -5328,6 +5348,7 @@ export function ChatPanel({
       if (!sid) {
         const session = await createChatSession(projectId, effective.harness, {
           model: effective.model,
+          serviceTier: effective.serviceTier,
           permissionMode: effective.permissionMode,
           planMode: independentPlanMode,
           reasoningLevel: effective.reasoningLevel,
@@ -5358,6 +5379,7 @@ export function ChatPanel({
       const turnOpts = effective
         ? {
             model: effective.model,
+            serviceTier: effective.serviceTier,
             permissionMode: effective.permissionMode,
             planMode: independentPlanMode,
             reasoningLevel: effective.reasoningLevel,
@@ -5432,6 +5454,7 @@ export function ChatPanel({
       try {
         const turnOpts = recoveryTurnOptions({
           model: recoveryOverrides.model,
+          serviceTier: recoveryOverrides.serviceTier,
           permissionMode: recoveryOverrides.permissionMode,
           planMode: recoveryOverrides.planMode,
           reasoningLevel: recoveryOverrides.reasoningLevel,

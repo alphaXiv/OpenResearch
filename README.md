@@ -52,7 +52,7 @@ experiment tree preserves their lineage.
 ## Run anywhere
 
 The same committed source snapshot can run locally, over SSH, or on Slurm,
-Kubernetes, Ray, Hugging Face Jobs, Modal, and managed OpenResearch compute.
+Kubernetes, Ray, Hugging Face Jobs, Modal, Tinker, and managed OpenResearch compute.
 Publishing the repository is not required.
 
 Run the workspace next to remote GPUs while using the browser on your laptop:

@@ -1,9 +1,9 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
 //! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
-//! box, or this machine) and a detached `orx supervise` watches the job beside
-//! it. The run's `backend_json` descriptor is the serialized handle a later
-//! supervisor uses to reattach.
+//! box, Tinker through a local controller, or this machine) and a detached
+//! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
+//! is the serialized handle a later supervisor uses to reattach.
 
 pub mod huggingface;
 pub mod kubernetes;
@@ -13,6 +13,7 @@ pub mod openresearch;
 pub mod ray;
 pub mod slurm;
 pub mod ssh;
+pub mod tinker;
 
 use std::collections::HashMap;
 
@@ -148,9 +149,9 @@ impl BackendDescriptor {
         }
     }
 
-    /// The local run dir (the reattach handle) for an on-this-machine run.
+    /// The local run dir (the reattach handle) for a local controller.
     pub fn local_ref(&self) -> Result<&str> {
-        if self.kind != "local_job" {
+        if !matches!(self.kind.as_str(), "local_job" | "tinker_job") {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
         }
         self.job_id.as_deref().ok_or_else(|| {
@@ -295,6 +296,19 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+    }
+
+    #[test]
+    fn tinker_descriptor_round_trips_as_a_local_handle() {
+        let json = r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#;
+        let descriptor = BackendDescriptor::parse(json).unwrap();
+        assert_eq!(descriptor.local_ref().unwrap(), "/tmp/run");
+        assert_eq!(
+            BackendDescriptor::parse(&descriptor.to_json())
+                .unwrap()
+                .kind,
+            "tinker_job"
+        );
     }
 
     #[test]

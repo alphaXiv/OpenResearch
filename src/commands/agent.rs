@@ -117,6 +117,9 @@ fn spawn(
     // Settings only carry over when the child runs the same harness; a model or
     // permission-mode id from one CLI is meaningless to another.
     let inherits = harness == parent.harness;
+    let changes_model = model
+        .as_deref()
+        .is_some_and(|model| parent.model.as_deref() != Some(model));
     // Claude activates Plan through its permission mode, not the plan axis, so
     // clearing `plan_mode` alone would still hand a planning parent's helper a
     // mode that only ever produces a plan.
@@ -134,6 +137,9 @@ fn spawn(
         title_source: title.is_some().then(|| "user".to_string()),
         title,
         model: model.or_else(|| inherits.then(|| parent.model.clone()).flatten()),
+        service_tier: (inherits && !changes_model)
+            .then(|| parent.service_tier.clone())
+            .flatten(),
         permission_mode: inherits
             .then(|| parent.permission_mode.clone())
             .flatten()
@@ -186,6 +192,7 @@ mod tests {
             title: None,
             title_source: None,
             model: None,
+            service_tier: None,
             permission_mode: None,
             plan_mode: false,
             plan_reset_pending: false,

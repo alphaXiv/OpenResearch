@@ -93,7 +93,7 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     if descriptor.kind == "openresearch_job" {
         return run_openresearch(store, stored, descriptor, run_id).await;
     }
-    if descriptor.kind == "local_job" {
+    if matches!(descriptor.kind.as_str(), "local_job" | "tinker_job") {
         return run_local(store, stored, descriptor, run_id).await;
     }
     let (namespace, job_id) = descriptor.hf_ref()?;

@@ -208,13 +208,17 @@ pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
     std::fs::canonicalize(resolved).map_err(Into::into)
 }
 
-struct TemporaryDirectory(PathBuf);
+pub(crate) struct TemporaryDirectory(PathBuf);
 
 impl TemporaryDirectory {
-    fn new(prefix: &str) -> Result<Self> {
+    pub(crate) fn new(prefix: &str) -> Result<Self> {
         let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path)?;
         Ok(Self(path))
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.0
     }
 }
 
@@ -1034,24 +1038,6 @@ pub fn identity(
     (name, email, name_source, email_source)
 }
 
-pub fn resolve_github_token() -> Option<String> {
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        let token = token.trim().to_string();
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    if let Some(token) = crate::config::synced_env_var("GITHUB_TOKEN") {
-        return Some(token);
-    }
-    let output = Command::new("gh").args(["auth", "token"]).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!token.is_empty()).then_some(token)
-}
-
 /// Fail early on a typo'd baseline branch — otherwise it only surfaces much
 /// later as an opaque `git push` refspec error on the first run.
 fn assert_branch_exists(dir: &Path, owner: &str, repo: &str, branch: &str) -> Result<()> {
@@ -1437,8 +1423,7 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
     Ok(true)
 }
 
-const GITHUB_CREDENTIAL_HELPER: &str =
-    "!f() { host=; while IFS='=' read key value; do [ \"$key\" = host ] && host=$value; done; [ \"$host\" = github.com ] || exit 0; echo username=x-access-token; echo \"password=$ORX_GITHUB_TOKEN\"; }; f";
+const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
 fn redact_remote_urls(text: &str) -> String {
     text.split_whitespace()
@@ -1454,28 +1439,34 @@ fn redact_remote_urls(text: &str) -> String {
         .join(" ")
 }
 
-fn authenticated_git(repo_path: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+fn authenticated_git_command(repo_path: &Path) -> Command {
     let mut command = Command::new("git");
     command
         .current_dir(repo_path)
+        .env("GH_HOST", "github.com")
         .env("GIT_TERMINAL_PROMPT", "0");
+    if let Some(paths) = super::shell_env::search_path() {
+        command.env("PATH", paths);
+    }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
         command.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes -oConnectTimeout=15");
     }
-    let token = resolve_github_token();
-    if let Some(token) = &token {
-        command
-            .env("GIT_CONFIG_COUNT", "3")
-            .env("GIT_CONFIG_KEY_0", "credential.helper")
-            .env("GIT_CONFIG_VALUE_0", "")
-            .env("GIT_CONFIG_KEY_1", "credential.helper")
-            .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
-            .env("GIT_CONFIG_KEY_2", "core.hooksPath")
-            .env("GIT_CONFIG_VALUE_2", "/dev/null")
-            .env("ORX_GITHUB_TOKEN", token);
-    }
+    command
+        .env("GH_PROMPT_DISABLED", "1")
+        .env("GIT_CONFIG_COUNT", "3")
+        .env("GIT_CONFIG_KEY_0", "credential.helper")
+        .env("GIT_CONFIG_VALUE_0", "")
+        .env("GIT_CONFIG_KEY_1", "credential.helper")
+        .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
+        .env("GIT_CONFIG_KEY_2", "core.hooksPath")
+        .env("GIT_CONFIG_VALUE_2", "/dev/null");
     #[cfg(unix)]
     command.process_group(0);
+    command
+}
+
+fn authenticated_git(repo_path: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    let mut command = authenticated_git_command(repo_path);
     let mut child = command
         .args(args)
         .stdout(Stdio::piped())
@@ -1523,10 +1514,7 @@ fn authenticated_git(repo_path: &Path, args: &[&str], timeout: Duration) -> Resu
         ));
     }
     if !status.success() {
-        let mut error = String::from_utf8_lossy(&stderr).trim().to_string();
-        if let Some(token) = token {
-            error = error.replace(&token, "[redacted]");
-        }
+        let error = String::from_utf8_lossy(&stderr).trim().to_string();
         return Err(anyhow!(
             "git {} failed: {}",
             args.first().copied().unwrap_or("command"),
@@ -1624,6 +1612,9 @@ pub fn spawn_branch_publication(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(paths) = super::shell_env::search_path() {
+        command.env("PATH", paths);
+    }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command
@@ -2175,6 +2166,29 @@ pub fn file_bytes_at_capped(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_git_uses_only_the_command_scoped_gh_credential_helper() {
+        use std::ffi::OsStr;
+
+        let command = authenticated_git_command(Path::new("."));
+        let search_path = crate::local::shell_env::search_path();
+        let env = |key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new(key))
+                .and_then(|(_, value)| value)
+        };
+
+        assert_eq!(env("GIT_CONFIG_COUNT"), Some(OsStr::new("3")));
+        assert_eq!(env("GH_HOST"), Some(OsStr::new("github.com")));
+        assert_eq!(env("PATH"), search_path.as_deref());
+        assert_eq!(env("GIT_CONFIG_VALUE_0"), Some(OsStr::new("")));
+        assert_eq!(
+            env("GIT_CONFIG_VALUE_1"),
+            Some(OsStr::new("!gh auth git-credential"))
+        );
+    }
 
     #[test]
     fn managed_large_file_ignores_are_anchored_escaped_and_idempotent() {

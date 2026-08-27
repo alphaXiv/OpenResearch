@@ -1,0 +1,29 @@
+name: Verify production telemetry contract
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  verify:
+    name: verify production telemetry contract
+    if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
+    runs-on: ubuntu-22.04
+    env:
+      ORX_OFFICIAL_RELEASE_BUILD: "1"
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify production accepts this release payload
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked telemetry::tests::production_contract_is_accepted -- --ignored --exact 2>&1 | tee /tmp/telemetry-contract.log
+          grep -q "test telemetry::tests::production_contract_is_accepted ... ok" /tmp/telemetry-contract.log

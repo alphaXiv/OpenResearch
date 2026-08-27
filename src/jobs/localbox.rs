@@ -32,6 +32,8 @@ pub struct LocalJobSpec {
     pub script: String,
     /// Exported inside run.sh (tokens, synced env) — written owner-only.
     pub env: HashMap<String, String>,
+    /// Inherited by the controller without being written into run.sh.
+    pub secret_env: HashMap<String, String>,
 }
 
 /// Submit the job: write run.sh, launch it detached in its own process group
@@ -70,6 +72,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 
     let mut cmd = std::process::Command::new("bash");
     cmd.arg("run.sh")
+        .envs(&spec.secret_env)
         .current_dir(&dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -352,8 +355,9 @@ mod tests {
 
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
-            script: "echo hello-$ORX_TEST_VAR".into(),
+            script: "[ -n \"$TINKER_API_KEY\" ] && echo hello-$ORX_TEST_VAR".into(),
             env: HashMap::from([("ORX_TEST_VAR".to_string(), "42".to_string())]),
+            secret_env: HashMap::from([("TINKER_API_KEY".to_string(), "s3cr3t-value".to_string())]),
         })
         .unwrap();
         let state = wait_terminal(&dir);
@@ -361,6 +365,7 @@ mod tests {
         // Python is defaulted to unbuffered so tailed-`log` output streams live.
         let run_sh = std::fs::read_to_string(dir.join("run.sh")).unwrap();
         assert!(run_sh.contains("export PYTHONUNBUFFERED='1'\n"));
+        assert!(!run_sh.contains("s3cr3t-value"));
 
         let mut lines = Vec::new();
         let seen = stream_logs(&dir, 0, &mut |l| lines.push(l.to_string())).unwrap();
@@ -373,6 +378,7 @@ mod tests {
             run_id: "failing".into(),
             script: "exit 3".into(),
             env: HashMap::new(),
+            secret_env: HashMap::new(),
         })
         .unwrap();
         let state = wait_terminal(&failed);
@@ -383,6 +389,7 @@ mod tests {
             run_id: "cancelled".into(),
             script: "sleep 60".into(),
             env: HashMap::new(),
+            secret_env: HashMap::new(),
         })
         .unwrap();
         assert_eq!(inspect_job(&cancelled).stage, "RUNNING");

@@ -228,6 +228,15 @@ jobs:
     with:
       plan: ${{ needs.plan.outputs.val }}
     secrets: inherit
+
+  custom-telemetry-contract:
+    needs:
+      - plan
+      - build-local-artifacts
+    uses: ./.github/workflows/telemetry-contract.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
   # Determines if we should publish/announce
   host:
     needs:
@@ -235,8 +244,9 @@ jobs:
       - build-local-artifacts
       - build-global-artifacts
       - custom-verify-build-channel
+      - custom-telemetry-contract
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

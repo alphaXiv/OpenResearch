@@ -12,11 +12,16 @@ use crate::error::{anyhow, Result};
 use crate::jobs::{localbox, BackendDescriptor};
 use crate::store::{now_ms, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_run`: submit, then print the summary.
+/// Submit a local controller and print its run directory.
 pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_run(args).await?;
+    let run = crate::compute::submit(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Local run started.");
+    let label = if backend.kind == "tinker_job" {
+        "Tinker"
+    } else {
+        "Local"
+    };
+    println!("\u{2713} {label} run started.");
     println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
     println!("  run  {}", run.id);
     println!(
@@ -26,27 +31,35 @@ pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
     Ok(())
 }
 
-/// Submit the local experiment's run as a detached process on this machine
-/// and detach a supervisor. Requires `--backend local`; there is nothing else
-/// to pick — the hardware is whatever this machine has.
-pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    crate::compute::submit(args).await
-}
-
 pub async fn submit_local_run_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
     run_id: String,
 ) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "local_job").await
+}
+
+pub async fn submit_tinker_run_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "tinker_job").await
+}
+
+async fn submit_controller_run(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+    kind: &str,
+) -> Result<StoredRun> {
+    let backend = kind.trim_end_matches("_job");
     if args.flavor.is_some() {
-        return Err(anyhow!(
-            "--backend local has no flavors — the hardware is whatever this machine has."
-        ));
+        return Err(anyhow!("--backend {backend} does not take --flavor."));
     }
     if args.image.is_some() {
         return Err(anyhow!(
-            "--image doesn't apply to --backend local — the run uses this machine's \
-             own environment."
+            "--image doesn't apply to --backend {backend} — the controller uses this machine's own environment."
         ));
     }
 
@@ -81,15 +94,28 @@ pub async fn submit_local_run_with_source(
     crate::local::shell_env::export_to(|key, value| {
         env.insert(key.to_string(), value.to_string_lossy().into_owned());
     });
+    let mut secret_env = HashMap::new();
+    // Every local controller inherits this key without persisting it in run.sh.
+    let tinker_key = if kind == "tinker_job" {
+        env.insert("ORX_RUN_ID".to_string(), run_id.clone());
+        Some(crate::jobs::tinker::resolve_api_key()?)
+    } else {
+        env.get(crate::jobs::tinker::API_KEY_ENV).cloned()
+    };
+    env.remove(crate::jobs::tinker::API_KEY_ENV);
+    if let Some(key) = tinker_key {
+        secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
+    }
 
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
         script,
         env,
+        secret_env,
     })?;
 
     let mut descriptor = BackendDescriptor {
-        kind: "local_job".to_string(),
+        kind: kind.to_string(),
         namespace: None,
         job_id: Some(dir.to_string_lossy().into_owned()),
         flavor: None,

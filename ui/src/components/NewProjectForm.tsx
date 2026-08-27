@@ -648,7 +648,7 @@ export function NewProjectForm({
                   {githubAction} <code className="font-mono text-[0.92em] font-medium text-text bg-panel border border-border-variant rounded-xs py-px px-[5px] wrap-anywhere">{githubRepository}</code>.
                 </span>
                 <span>Experiment branches will be pushed to the remote GitHub repository.</span>
-                {githubLogin === null && <span>Connect GitHub before creating the project.</span>}
+                {githubLogin === null && <span>Run <code className={MONO_CLASS_NAME}>gh auth login</code> before creating the project.</span>}
               </span>
             </label>
           )}

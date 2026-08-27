@@ -453,8 +453,9 @@ pub struct ExpRunArgs {
     /// (a batch job on your Slurm cluster, submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
-    /// `orx login`), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, and local are local
+    /// `orx login`), `tinker` (a local controller using remote Tinker model
+    /// compute), or `local` (a detached process on this machine). k8s,
+    /// ssh, slurm, ray, openresearch, tinker, and local are local
     /// experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
@@ -760,6 +761,11 @@ async fn main() {
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]
     if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
+        commands::app::hydrate_shell_env().await;
+        telemetry::set_flag(false);
+        let _session = telemetry::TelemetrySession::start_app();
+        // AppKit owns process shutdown; the durable outbox covers termination before delivery.
         commands::app::run().await;
         return;
     }
@@ -823,7 +829,9 @@ async fn main() {
     // (e.g. the "not logged in" path) are still counted. Opt out with
     // --no-telemetry or `orx telemetry off`.
     telemetry::set_flag(cli.no_telemetry);
-    let session = telemetry::TelemetrySession::start(command_name(&command));
+    let session = telemetry::TelemetrySession::start(
+        should_capture_command(&command).then(|| command_name(&command)),
+    );
 
     let result = dispatch(command).await;
     if let Some(warning) = warning {
@@ -836,6 +844,17 @@ async fn main() {
         eprintln!("{}", err);
         std::process::exit(1);
     }
+}
+
+fn should_capture_command(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Supervise(_)
+            | Command::Update(UpdateArgs {
+                background: true,
+                ..
+            })
+    )
 }
 
 /// A stable, PII-free event label for each command, decoupled from the enum
@@ -941,6 +960,25 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    #[test]
+    fn internal_commands_do_not_emit_command_telemetry() {
+        assert!(!should_capture_command(&Command::Supervise(
+            SuperviseArgs {
+                run_id: "run-1".into(),
+            }
+        )));
+        assert!(!should_capture_command(&Command::Update(UpdateArgs {
+            background: true,
+            dry_run: false,
+            force: false,
+        })));
+        assert!(should_capture_command(&Command::Update(UpdateArgs {
+            background: false,
+            dry_run: true,
+            force: false,
+        })));
+    }
 
     #[test]
     fn discover_parses_independent_retrieval_options() {

@@ -1,13 +1,10 @@
-// Brand marks for the compute backends, rendered inline (no image assets: the
-// UI is embedded via rust-embed and locked down by CSP, so inline SVG is the
-// only portable option). Modal/HF/K8s/Ray use their official logos in brand
-// colors and OpenResearch its own product mark (self-colored, so they read in
-// both light and dark mode); ssh is a protocol with no brand mark and gets a
-// neutral lucide glyph in `currentColor`, and slurm (whose official mark is a
-// complex raster) and local (this machine) get the same treatment.
+// Brand marks for the compute backends. Most are inline SVGs; Tinker uses the
+// supplied Thinking Machines raster mark.
 
-import { Boxes, Laptop, Server } from "lucide-react";
+import { Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
+import slurmLogo from "../assets/slurm-logo.svg";
+import thinkingMachinesLogo from "../assets/thinking-machines.png";
 import { MONO_CLASS_NAME } from "../styleClasses";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
@@ -29,6 +26,8 @@ function backendName(kind: string): string {
       return "OpenResearch";
     case "local_job":
       return "This machine";
+    case "tinker_job":
+      return "Tinker";
     default:
       return kind || "—";
   }
@@ -127,6 +126,24 @@ function OpenResearchLogo({ size = 16 }: { size?: number }) {
   );
 }
 
+function TinkerLogo({ size = 16 }: { size?: number }) {
+  return (
+    <img
+      className="tinker-logo block flex-none object-contain"
+      src={thinkingMachinesLogo}
+      width={size}
+      height={size}
+      style={{ transform: size >= 48 ? `translateX(${Math.round(size * 0.18)}px) scale(1.65)` : "scale(1.22)" }}
+      alt=""
+      aria-hidden="true"
+    />
+  );
+}
+
+function SlurmLogo({ size = 16 }: { size?: number }) {
+  return <img className="block flex-none object-contain" src={slurmLogo} width={size} height={size} alt="" aria-hidden="true" />;
+}
+
 // GitHub — official octocat mark (lucide dropped brand icons). Not a compute
 // backend, but this file is the home for inline brand SVGs. fill=currentColor
 // so it inherits hover styling like lucide siblings.
@@ -148,15 +165,17 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
     case "k8s_job":
       return <KubernetesLogo size={size} />;
     case "ssh_job":
-      return <Server size={size} />;
+      return <Server size={size} strokeWidth={1.5} />;
     case "slurm_job":
-      return <Boxes size={size} />;
+      return <SlurmLogo size={size} />;
     case "ray_job":
       return <RayLogo size={size} />;
     case "openresearch_job":
       return <OpenResearchLogo size={size} />;
+    case "tinker_job":
+      return <TinkerLogo size={size} />;
     case "local_job":
-      return <Laptop size={size} />;
+      return <Laptop size={size} strokeWidth={1.5} />;
     default:
       return <Server size={size} />;
   }

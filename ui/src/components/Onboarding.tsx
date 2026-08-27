@@ -58,7 +58,7 @@ const RESEARCH_AREAS = ["AI/ML", "Biology", "Physics", "Other"];
  * checks gate setup; the profile is saved best-effort so it never blocks
  * installation. The data-dir choice lives in
  * Settings → Storage (which can also *move* existing data); usage analytics is
- * opt-out via the CLI (`orx telemetry off`). */
+ * opt-out via Settings or `orx telemetry off`. */
 export function Onboarding({
   onDone,
   preferredAgent,

@@ -48,6 +48,7 @@ use crate::local::harness::claude::{
     write_plan_settings,
 };
 use crate::local::harness::{HarnessAuthState, PermissionMode};
+use crate::local::native_store::NativeStore;
 
 /// Ceiling on a control request's response wait. Control requests (`set_model`)
 /// are quick; a wedged child must never hold the respawn path for long.
@@ -126,6 +127,7 @@ pub struct SpawnConfig {
     pub permission_mode: Option<PermissionMode>,
     pub effort: Option<String>,
     pub model: Option<String>,
+    pub native_store: NativeStore,
     /// Whether the mcp-gate permission bridge was actually wired at spawn (plan
     /// mode + a bound `orx up` port + a successful config write). A plan turn
     /// that wanted the bridge but got `false` respawns next turn to try again.
@@ -544,6 +546,17 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         }
     }
     crate::local::chat::prepare_env(&mut cmd);
+    let native_store = spec.config.native_store;
+    let config_home = tokio::task::spawn_blocking(move || {
+        crate::local::native_store::prepare_claude(native_store)
+    })
+    .await
+    .map_err(|error| anyhow!("Claude config preparation failed: {error}"))??;
+    cmd.env("CLAUDE_CONFIG_DIR", config_home);
+    cmd.env(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        crate::local::native_store::claude_secure_storage_config_dir(),
+    );
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.
@@ -609,6 +622,7 @@ pub fn child_action(current: &SpawnConfig, wanted: &SpawnConfig) -> ChildAction 
     if current.permission_mode != wanted.permission_mode
         || current.effort != wanted.effort
         || current.bridge_active != wanted.bridge_active
+        || current.native_store != wanted.native_store
     {
         return ChildAction::Respawn;
     }
@@ -1117,6 +1131,7 @@ mod tests {
             permission_mode: mode,
             effort: effort.map(str::to_string),
             model: model.map(str::to_string),
+            native_store: NativeStore::Isolated,
             bridge_active: bridge,
         }
     }
@@ -1140,6 +1155,12 @@ mod tests {
                 ),
             ),
             ChildAction::Reuse
+        );
+        let mut legacy = cfg(None, None, None, false);
+        legacy.native_store = NativeStore::Legacy;
+        assert_eq!(
+            child_action(&cfg(None, None, None, false), &legacy),
+            ChildAction::Respawn
         );
         // Model-only change to a concrete value → set_model.
         assert_eq!(

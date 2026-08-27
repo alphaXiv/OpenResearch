@@ -1,12 +1,14 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   getHarnesses,
   harnessModelLabel,
   modelLabel,
   reasoningFor,
   reconcileReasoning,
+  reconcileServiceTier,
   REASONING_DEFAULT_ID,
+  serviceTiersFor,
   type Harness,
   type HarnessId,
   type OptionChoice,
@@ -49,6 +51,7 @@ export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
   return {
     harness: ready.id,
     model,
+    serviceTier: reconcileServiceTier(ready, model, null),
     permissionMode: ready.options?.defaultPermissionMode ?? null,
     reasoningLevel: reasoningFor(ready, model).defaultId,
   };
@@ -121,7 +124,7 @@ export function ModelPicker({
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "permissions">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions">("root");
 
   const close = () => {
     setOpen(false);
@@ -130,7 +133,7 @@ export function ModelPicker({
   };
 
   useEffect(() => {
-    if (open && (page === "reasoning" || page === "permissions")) {
+    if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
@@ -179,6 +182,11 @@ export function ModelPicker({
     onSelect({
       harness: harness.id,
       model,
+      serviceTier: reconcileServiceTier(
+        harness,
+        model,
+        sameHarness ? value?.serviceTier : null,
+      ),
       permissionMode: sameHarness
         ? value!.permissionMode
         : harness.options?.defaultPermissionMode ?? null,
@@ -211,6 +219,14 @@ export function ModelPicker({
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;
   const permissionLabel = permissionChoices.find((choice) => choice.id === effectivePermissionId)?.label;
   const reasoningAxisLabel = value?.harness === "opencode" ? "Variant" : "Effort";
+  const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
+  const speedChoices = serviceTiersFor(selectedHarness, value?.model);
+  const effectiveServiceTier = reconcileServiceTier(
+    selectedHarness,
+    value?.model,
+    value?.serviceTier,
+  );
+  const speedLabel = speedChoices.find((choice) => choice.id === effectiveServiceTier)?.label;
 
   const chooseReasoning = (id: string) => {
     onSelectReasoning?.(id);
@@ -219,6 +235,11 @@ export function ModelPicker({
 
   const choosePermission = (id: string) => {
     onSelectPermission?.(id);
+    close();
+  };
+
+  const chooseSpeed = (id: string) => {
+    if (value) onSelect({ ...value, serviceTier: id });
     close();
   };
 
@@ -288,7 +309,7 @@ export function ModelPicker({
         ref={triggerRef}
         type="button"
         className={`${COMPOSER_CONTROL_CLASS_NAME} composer-pill min-w-0 max-w-full gap-[5px] px-2 text-md text-text whitespace-nowrap`}
-        title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}`}
+        title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}${speedLabel ? ` · ${speedLabel}` : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
@@ -299,7 +320,12 @@ export function ModelPicker({
           }
         }}
       >
-        {value?.harness && <HarnessLogo harness={value.harness} size={14} />}
+        {effectiveServiceTier === "priority" ? (
+          <Zap size={14} fill="currentColor" aria-hidden="true" />
+        ) : value?.harness ? (
+          <HarnessLogo harness={value.harness} size={14} />
+        ) : null}
+        {effectiveServiceTier === "priority" && <span className="sr-only">Fast speed · </span>}
         <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
           {label}
           {reasoningLabel && <span className="model-picker-reasoning ml-1 text-muted">{reasoningLabel}</span>}
@@ -312,6 +338,7 @@ export function ModelPicker({
             <div className="model-root-menu p-1">
               {menuRow("Model", label, "models")}
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
+              {speedChoices.length > 0 && menuRow("Speed", speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow("Mode", permissionLabel, "permissions")}
             </div>
           )}
@@ -419,6 +446,12 @@ export function ModelPicker({
               {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
             </>
           )}
+          {page === "speed" && (
+            <>
+              {submenuHeader("Speed")}
+              {choiceList(speedChoices, effectiveServiceTier ?? undefined, "default", chooseSpeed)}
+            </>
+          )}
         </div>
       )}
     </div>
@@ -435,9 +468,12 @@ export function OptionPicker({
   defaultId,
   header,
   align = "left",
+  dropDown = false,
+  disabled = false,
   variant = "pill",
   title,
   numbered = false,
+  renderIcon,
   onSelect,
 }: {
   choices: OptionChoice[];
@@ -448,11 +484,14 @@ export function OptionPicker({
   /** Group header (e.g. "Mode"). */
   header?: string;
   align?: "left" | "right";
-  /** `pill` = boxed (permission mode); `bare` = text-only (reasoning). */
-  variant?: "pill" | "bare";
+  dropDown?: boolean;
+  disabled?: boolean;
+  /** `pill` = compact composer control; `bare` = text-only; `field` = settings input. */
+  variant?: "pill" | "bare" | "field";
   title?: string;
   /** Show 1-based number hints on the right (like the mode menu). */
   numbered?: boolean;
+  renderIcon?: (choice: OptionChoice) => ReactNode;
   onSelect: (id: string) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
@@ -479,30 +518,43 @@ export function OptionPicker({
   };
 
   return (
-    <div className="option-picker relative inline-flex" ref={ref}>
+    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
       <button
         type="button"
-        className={`${COMPOSER_CONTROL_CLASS_NAME} ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-md text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-md text-text"}`}
+        className={
+          variant === "field"
+            ? "inline-flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-3 text-sm font-normal text-text transition-colors duration-120 ease-standard hover:bg-surface disabled:opacity-45"
+            : `${COMPOSER_CONTROL_CLASS_NAME} ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-md text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-md text-text"}`
+        }
         title={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((v) => !v)}
       >
-        {label}
+        <span className="inline-flex min-w-0 items-center gap-2">
+          {current && renderIcon?.(current)}
+          <span className="truncate">{label}</span>
+        </span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${align === "right" ? "align-right" : ""}`}>
+        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
           {pinned && (
             <>
-              <button className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(pinned.id)}>
-                <span>
-                  {pinned.label}
-                  {/* An unnamed sentinel's label already IS "Default", so the
-                      usual marker would read "Default · Default" — say where
-                      the behavior comes from instead. A named one ("Adaptive")
-                      gets the standard marker. */}
-                  <span className="option-default text-muted font-normal">
-                    {pinned.label === "Default" ? " · CLI configuration" : " · Default"}
+              <button type="button" className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(pinned.id)}>
+                <span className="inline-flex items-center gap-2">
+                  {renderIcon?.(pinned)}
+                  <span>
+                    {pinned.label}
+                    {/* An unnamed sentinel's label already IS "Default", so the
+                        usual marker would read "Default · Default" — say where
+                        the behavior comes from instead. A named one ("Adaptive")
+                        gets the standard marker. */}
+                    <span className="option-default text-muted font-normal">
+                      {pinned.label === "Default" ? " · CLI configuration" : " · Default"}
+                    </span>
                   </span>
                 </span>
                 {effectiveId === pinned.id && <Check size={13} />}
@@ -511,22 +563,25 @@ export function OptionPicker({
             </>
           )}
           {rest.map((c, i) => (
-            <button key={c.id} className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(c.id)}>
-              <span className="flex min-w-0 flex-col items-start gap-0.5">
-                <span>
-                  {c.label}
-                  {/* A concrete default renders inline, in ramp order, with just
-                      the marker — it's one of the tiers, not a separate kind of
-                      choice like the pinned sentinel above. */}
-                  {!pinned && c.id === defaultId && (
-                    <span className="option-default text-muted font-normal"> · Default</span>
+            <button type="button" key={c.id} className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(c.id)}>
+              <span className="flex min-w-0 items-center gap-2">
+                {renderIcon?.(c)}
+                <span className="flex min-w-0 flex-col items-start gap-0.5">
+                  <span>
+                    {c.label}
+                    {/* A concrete default renders inline, in ramp order, with just
+                        the marker — it's one of the tiers, not a separate kind of
+                        choice like the pinned sentinel above. */}
+                    {!pinned && c.id === defaultId && (
+                      <span className="option-default text-muted font-normal"> · Default</span>
+                    )}
+                  </span>
+                  {c.description && (
+                    <span className="max-w-68 text-sm font-normal leading-snug text-muted">
+                      {c.description}
+                    </span>
                   )}
                 </span>
-                {c.description && (
-                  <span className="max-w-68 text-sm font-normal leading-snug text-muted">
-                    {c.description}
-                  </span>
-                )}
               </span>
               {effectiveId === c.id ? (
                 <Check size={13} />
