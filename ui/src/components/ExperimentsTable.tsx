@@ -1,6 +1,8 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
-import { runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
@@ -15,7 +17,7 @@ const EXPERIMENT_TABLE_ACTION_CLASS_NAME = [
   "[&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))]",
   "[&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red",
   "[&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))]",
-  "[@container((max-width:_560px))]:[&.danger]:ml-auto",
+  "[@container((max-width:_560px))]:[&.danger]:ms-auto",
 ].join(" ");
 
 export function ExperimentsTable({
@@ -56,7 +58,7 @@ export function ExperimentsTable({
   if (sortedExperiments.length === 0) {
     return (
       <div className="empty-state absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-6 text-center text-subtext [&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:leading-normal [&_p]:text-balance [&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext experiments-empty-state [&_p]:text-2xl">
-        <p>{emptyHint ?? "No experiments yet."}</p>
+        <p>{emptyHint ?? m.experiments_none_yet()}</p>
       </div>
     );
   }
@@ -80,10 +82,10 @@ export function ExperimentsTable({
     <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
       {cancelError && (
         <div className="experiments-table-error py-2 px-3 text-accent-red text-sm border-b border-b-border" role="alert">
-          Stop failed: {cancelError}
+          {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div className="experiments-table w-full text-md bg-background" role="list" aria-label="Experiments">
+      <div className="experiments-table w-full text-md bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {sortedExperiments.map((experiment) => {
           const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
           const latestRun = experimentRuns[0] ?? null;
@@ -118,7 +120,7 @@ export function ExperimentsTable({
               <div className="experiment-table-name [grid-area:name] self-start min-w-0">
                 <button
                   type="button"
-                  className="experiment-table-title block w-full overflow-hidden text-text font-semibold text-left text-ellipsis whitespace-nowrap"
+                  className="experiment-table-title block w-full overflow-hidden text-text font-semibold text-start text-ellipsis whitespace-nowrap"
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpen(experiment, intent),
                   { stopPropagation: true })}
@@ -135,18 +137,16 @@ export function ExperimentsTable({
                   <StatusBadge status={status} />
                 </div>
                 <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-xs font-medium">
-                  <span>
-                    {experimentRuns.length} {experimentRuns.length === 1 ? "run" : "runs"}
-                  </span>
+                  <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
                 </div>
                 <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-xs font-medium whitespace-nowrap">
-                  <span>{latestRun ? timeAgo(latestRun.createdAt) : "Not run yet"}</span>
+                  <span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
                 </div>
               </div>
               <div
                 className="experiment-table-actions [grid-area:actions] flex flex-wrap items-center justify-start gap-2 mt-3"
                 role="group"
-                aria-label={`Actions for ${experiment.title || experiment.slug}`}
+                aria-label={m.a11y_actions_for({ name: experiment.title || experiment.slug })}
                 onClick={(event) => event.stopPropagation()}
                 onDoubleClick={(event) => event.stopPropagation()}
                 onAuxClick={(event) => event.stopPropagation()}
@@ -154,33 +154,33 @@ export function ExperimentsTable({
                 <button
                   className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
                   disabled={!logsRun}
-                  title={logsRun ? "Open logs" : "No runs yet"}
+                  title={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
                     if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
                   }, { stopPropagation: true })}
                 >
                   <Terminal size={15} />
-                  Logs
+                  {m.experiments_table_logs()}
                 </button>
                 <button
                   className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
-                  title={`Browse code on ${experiment.branchName}`}
+                  title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpenCode(experiment.id, intent),
                   { stopPropagation: true })}
                 >
                   <FolderTree size={15} />
-                  Code
+                  {m.experiments_table_code()}
                 </button>
                 {liveRun && (
                   <button
-                    className="experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5 border border-border rounded-md bg-background text-text text-sm font-medium leading-none [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:border-border-strong [&:disabled]:text-muted [&:disabled]:cursor-default [&:disabled]:opacity-50 [&.danger]:border-[color-mix(in_oklab,_var(--accent-red)_42%,_var(--border))] [&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))] [&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red [&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))] [@container((max-width:_560px))]:[&.danger]:ml-auto danger"
+                    className="experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5 border border-border rounded-md bg-background text-text text-sm font-medium leading-none [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:border-border-strong [&:disabled]:text-muted [&:disabled]:cursor-default [&:disabled]:opacity-50 [&.danger]:border-[color-mix(in_oklab,_var(--accent-red)_42%,_var(--border))] [&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))] [&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red [&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))] [@container((max-width:_560px))]:[&.danger]:ms-auto danger"
                     disabled={cancelling}
-                    title={cancelling ? "Stop requested" : "Stop run"}
+                    title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
                     onClick={() => void requestCancel(liveRun.id)}
                   >
                     <CircleStop size={15} />
-                    {cancelling ? "Stopping…" : "Stop"}
+                    {cancelling ? m.common_stopping() : m.common_stop()}
                   </button>
                 )}
               </div>

@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 // Mirror of openresearch.sh's AgentFileView: one file from the project —
 // a branch's committed copy when the tab carries a ref, else the chat
 // session's worktree, else the hub clone, else the project's artifacts, with
@@ -101,12 +103,12 @@ function CopyableCommand({ command }: { command: string }) {
         className={ICON_BUTTON_CLASS_NAME}
         data-tip={
           state === "copied"
-            ? "Copied"
+            ? m.common_copied()
             : state === "select"
-              ? "Selected — press ⌘C"
-              : "Copy command"
+              ? m.file_viewer_selected_copy_shortcut()
+              : m.file_viewer_copy_command()
         }
-        aria-label="Copy install command"
+        aria-label={m.file_viewer_copy_install_command()}
         onClick={() => void copy()}
       >
         {state === "copied" ? <Check size={13} /> : <Copy size={13} />}
@@ -309,14 +311,14 @@ export function FileViewer({
     if (overleafConflicts > 0) setShowOverleaf(true);
   }, [overleafConflicts]);
   const overleafTip = overleaf.error
-    ? "Overleaf sync failed"
+    ? m.overleaf_sync_failed()
     : overleafConflicts > 0
-      ? "Changed here and on Overleaf — choose which copy to keep"
+      ? m.overleaf_conflict_tip()
       : overleaf.blocked
-        ? "Save this file to sync it with Overleaf"
+        ? m.overleaf_save_to_sync()
         : overleaf.link
-          ? "In step with Overleaf"
-          : "Send this paper to Overleaf";
+          ? m.overleaf_in_sync()
+          : m.overleaf_send_paper();
   const overleafColor =
     overleaf.error || overleafConflicts > 0
       ? "text-accent-red"
@@ -459,16 +461,14 @@ export function FileViewer({
   }, [data]);
 
   const notFoundCopy = (d: LoadedFile) => {
-    if (d.source === "absolute") return "File not found on disk.";
+    if (d.source === "absolute") return m.file_viewer_not_found_on_disk();
     if (isArtifacts)
-      return `File not found in the project's artifacts or the ${
-        sessionId ? "session's worktree" : "project clone"
-      }.`;
-    if (gitRef) return `File not found on branch ${gitRef}.`;
+      return m.file_viewer_not_found_artifacts_or_root({ root: sessionId ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() });
+    if (gitRef) return m.file_viewer_not_found_on_branch({ branch: ltr(gitRef) });
     if (sessionId && d.source === "checkout" && d.file.root === "clone")
-      return "This session's worktree isn't available, and the file isn't in the project clone or its artifacts.";
+      return m.file_viewer_worktree_unavailable_not_found();
     const root = d.source === "checkout" ? d.file.root : d.checkoutRoot;
-    return `File not found in the ${root === "worktree" ? "session's worktree" : "project clone"} or the project's artifacts.`;
+    return m.file_viewer_not_found_root_or_artifacts({ root: root === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() });
   };
 
   return (
@@ -479,7 +479,7 @@ export function FileViewer({
           {filePath}
         </code>
         {branchLabel && (
-          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 font-mono text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={`Branch: ${branchLabel}`}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 font-mono text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
@@ -487,16 +487,16 @@ export function FileViewer({
         {showingEditor && (saving || dirty || saveError) && (
           <span
             className={`file-view-save-status inline-flex items-center gap-1 text-xs shrink-0 ${saveError ? "text-accent-red" : "text-muted"}`}
-            title={saveError ?? (saving ? "Saving…" : "Unsaved — ⌘S or click away to save")}
+            title={saveError ?? (saving ? m.common_saving() : m.file_viewer_unsaved_tip())}
           >
             {saving ? (
               <>
-                <span className={SPINNER_CLASS_NAME} /> Saving…
+                <span className={SPINNER_CLASS_NAME} /> {m.file_viewer_saving()}
               </>
             ) : saveError ? (
-              "Save failed"
+              m.file_viewer_save_failed()
             ) : (
-              "Unsaved"
+              m.file_viewer_unsaved()
             )}
           </span>
         )}
@@ -505,13 +505,13 @@ export function FileViewer({
             className={`${ICON_BUTTON_CLASS_NAME} ${!latex.showPdf ? "active" : ""}`}
             data-tip={
               latex.stale && latex.showPdf
-                ? "Compiled PDF is out of date"
+                ? m.file_viewer_pdf_out_of_date()
                 : latex.showPdf
-                  ? "View source"
-                  : "Show compiled PDF"
+                  ? m.common_view_source()
+                  : m.file_viewer_show_compiled_pdf()
             }
             data-tip-align="end"
-            aria-label={latex.showPdf ? "View source" : "Show compiled PDF"}
+            aria-label={latex.showPdf ? m.common_view_source() : m.file_viewer_show_compiled_pdf()}
             onClick={() => latex.setShowPdf(!latex.showPdf)}
           >
             {latex.showPdf ? (
@@ -526,11 +526,11 @@ export function FileViewer({
             className={ICON_BUTTON_CLASS_NAME}
             data-tip={
               latex.stale
-                ? `Download ${compiledPdfName} (out of date — recompile first)`
-                : `Download ${compiledPdfName}`
+                ? m.file_viewer_download_stale_pdf({ name: ltr(compiledPdfName) })
+                : m.a11y_download_file({ name: ltr(compiledPdfName) })
             }
             data-tip-align="end"
-            aria-label={`Download ${compiledPdfName}`}
+            aria-label={m.a11y_download_file({ name: ltr(compiledPdfName) })}
             href={compiledPdfUrl}
             download={compiledPdfName}
           >
@@ -542,7 +542,7 @@ export function FileViewer({
             className={`${ICON_BUTTON_CLASS_NAME} ${showOverleaf ? "active" : ""}`}
             data-tip={overleafTip}
             data-tip-align="end"
-            aria-label={`Overleaf — ${overleafTip.toLowerCase()}`}
+            aria-label={m.a11y_overleaf_status({ status: overleafTip })}
             aria-expanded={showOverleaf}
             onClick={() => setShowOverleaf((open) => !open)}
           >
@@ -556,9 +556,9 @@ export function FileViewer({
         {isLatex && onDisk && (
           <button
             className={ICON_BUTTON_CLASS_NAME}
-            data-tip={latex.compiled ? "Recompile PDF" : "Compile PDF"}
+            data-tip={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             data-tip-align="end"
-            aria-label={latex.compiled ? "Recompile PDF" : "Compile PDF"}
+            aria-label={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             disabled={latex.compiling || !latex.engine}
             onClick={() => void compileFromDisk()}
           >
@@ -568,9 +568,9 @@ export function FileViewer({
         {isMarkdown && (
           <button
             className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
-            data-tip={showSource ? "Rendered view" : "View source"}
+            data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
-            aria-label={showSource ? "Rendered view" : "View source"}
+            aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
             onClick={() => setShowSource((s) => !s)}
           >
             <Code size={13} />
@@ -579,9 +579,9 @@ export function FileViewer({
         {onDisk && (
           <button
             className={ICON_BUTTON_CLASS_NAME}
-            data-tip={editorError ?? "Open in default editor"}
+            data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
             data-tip-align="end"
-            aria-label="Open in default editor"
+            aria-label={m.file_viewer_open_in_default_editor()}
             disabled={openingEditor}
             onClick={() => void openInEditor()}
           >
@@ -590,9 +590,9 @@ export function FileViewer({
         )}
         <button
           className={ICON_BUTTON_CLASS_NAME}
-          data-tip="Reload file"
+          data-tip={m.file_viewer_reload_file()}
           data-tip-align="end"
-          aria-label="Reload file"
+          aria-label={m.file_viewer_reload_file()}
           onClick={() => setNonce((n) => n + 1)}
         >
           {loading ? <span className={SPINNER_CLASS_NAME} /> : <RotateCw size={13} />}
@@ -602,8 +602,7 @@ export function FileViewer({
           editable, and the editor's `h-full` would push it out of view. */}
       {!error && viaCheckout && loaded?.source === "checkout" && (
         <div className="file-view-note py-2.5 px-4 text-sm text-muted border-b border-b-border-variant shrink-0">
-          Not in the project&apos;s artifacts — showing the copy from the{" "}
-          {loaded.file.root === "worktree" ? "session's worktree" : "project clone"}.
+          {m.file_viewer_not_in_artifacts_showing_root({ root: loaded.file.root === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
         </div>
       )}
       {(latex.error || latex.log) && (
@@ -616,14 +615,14 @@ export function FileViewer({
             >
               {latex.error ??
                 (latex.builtWithErrors
-                  ? "Compiled, but the engine reported errors — check the output below."
-                  : "Compile failed")}
+                  ? m.file_viewer_compiled_with_errors()
+                  : m.file_viewer_compile_failed())}
             </span>
             <button
               className={ICON_BUTTON_CLASS_NAME}
-              data-tip="Dismiss"
+              data-tip={m.file_viewer_dismiss()}
               data-tip-align="end"
-              aria-label="Dismiss compile message"
+              aria-label={m.file_viewer_dismiss_compile_message()}
               onClick={latex.dismiss}
             >
               <X size={13} />
@@ -639,8 +638,7 @@ export function FileViewer({
       {liveTex && overleaf.staleOnDisk && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 flex items-center flex-wrap gap-2 text-sm text-accent-amber">
           <span className="flex-1 min-w-0">
-            Overleaf&apos;s copy of this file was pulled while you had unsaved edits, so what you
-            see is no longer what is on disk. Saving now sends this draft to Overleaf instead.
+            {m.file_viewer_overleaf_apos_s_copy_of_this_file_was()}
           </span>
           <button
             className={BUTTON_CLASS_NAME}
@@ -649,7 +647,7 @@ export function FileViewer({
               setNonce((n) => n + 1);
             }}
           >
-            Discard my edits and reload
+            {m.file_viewer_discard_my_edits_and_reload()}
           </button>
         </div>
       )}
@@ -660,9 +658,9 @@ export function FileViewer({
           </span>
           <button
             className={ICON_BUTTON_CLASS_NAME}
-            data-tip="Dismiss"
+            data-tip={m.file_viewer_dismiss()}
             data-tip-align="end"
-            aria-label="Dismiss Overleaf message"
+            aria-label={m.file_viewer_dismiss_overleaf_message()}
             onClick={overleaf.dismiss}
           >
             <X size={13} />
@@ -687,7 +685,7 @@ export function FileViewer({
       )}
       {showingPdf && latex.stale && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2 px-4 text-sm text-subtext">
-          This PDF was compiled from an earlier version of the source — recompile to update it.
+          {m.file_viewer_this_pdf_was_compiled_from_an_earlier_version()}
         </div>
       )}
       <div
@@ -704,22 +702,21 @@ export function FileViewer({
       >
         {!showingEditor && !error && !isArtifacts && loaded?.source === "checkout" && !loaded.file.notFound && !gitRef && sessionId && loaded.file.root === "clone" && (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            This session&apos;s worktree isn&apos;t available — showing the project clone&apos;s copy.
+            {m.file_viewer_this_session_apos_s_worktree_isn_apos_t()}
           </div>
         )}
         {!showingEditor && !error && loaded?.source === "artifact" && !loaded.file.notFound && viaArtifacts && (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            Not in the {loaded.checkoutRoot === "worktree" ? "session's worktree" : "project clone"} —
-            showing the copy from the project&apos;s artifacts.
+            {m.file_viewer_artifact_fallback({ root: loaded.checkoutRoot === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
           </div>
         )}
         {error ? (
-          <div className="file-view-note py-2.5 px-4 text-sm text-muted">Failed to load file: {error}</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_failed_to_load_file()} {ltr(error)}</div>
         ) : data === null ? (
-          <div className="file-view-note py-2.5 px-4 text-sm text-muted">Loading…</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_loading()}</div>
         ) : data.notFound ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            {loaded ? notFoundCopy(loaded) : "File not found."}
+            {loaded ? notFoundCopy(loaded) : m.file_viewer_not_found()}
           </div>
         ) : mediaKind ? (
           <MediaPreview
@@ -729,7 +726,7 @@ export function FileViewer({
           />
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            Binary file — no inline preview. <a href={rawUrl} download={path.split("/").pop() ?? path}>Download</a>
+            {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
           </div>
         ) : showingPdf && pdfPaneUrl && compiledPdfName ? (
           <MediaPreview
@@ -786,7 +783,7 @@ export function FileViewer({
               onScrollRequestHandled={onLineScrollRequestHandled}
             />
             {data.truncated && (
-              <div className="file-view-note py-2.5 px-4 text-sm text-muted">File truncated — showing the first 512 KB.</div>
+              <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
             )}
           </>
         )}

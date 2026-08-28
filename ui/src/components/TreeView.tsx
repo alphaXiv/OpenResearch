@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import {
   Background,
   BackgroundVariant,
@@ -13,6 +15,7 @@ import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef } from "react";
 import {
   githubBranchUrl,
+  fmtNumber,
   runDisplayStatus,
   timeAgo,
   type Experiment,
@@ -22,7 +25,7 @@ import {
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
-import { StatusBadge } from "./StatusBadge";
+import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -181,7 +184,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
   const live = status === "running" || status === "starting" || status === "cancelling";
-  const kind = isBaseline ? "Baseline" : live ? "Running" : "Experiment";
+  const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
 
   // `data` is rebuilt on every experiments/runs change (a superset of the
@@ -194,7 +197,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node w-66 border border-border rounded-md bg-background py-2.5 px-3 shadow-[0_1px_2px_rgba(0,_0,_0,_0.04)] text-md transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-[0_2px_8px_rgba(0,_0,_0,_0.08)] [&.live]:border-accent-teal [&.live]:shadow-[0_2px_12px_rgba(32,_154,_132,_0.2)] [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-left [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-2xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:font-mono [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-2xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ml-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px] ${live ? "live" : ""}`}
+      className={`exp-node w-66 border border-border rounded-md bg-background py-2.5 px-3 shadow-[0_1px_2px_rgba(0,_0,_0,_0.04)] text-md transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-[0_2px_8px_rgba(0,_0,_0,_0.08)] [&.live]:border-accent-teal [&.live]:shadow-[0_2px_12px_rgba(32,_154,_132,_0.2)] [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-2xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:font-mono [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-2xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-xs [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px] ${live ? "live" : ""}`}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
     >
@@ -218,19 +221,19 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <div className="node-title">{exp.title || exp.description}</div>
         )}
         <div className="node-meta">
-          <span>Runs</span>
+          <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
             <span className="run-squares flex items-center gap-[3px]">
               {squares.map((run) => (
                 <span
                   key={run.id}
                   className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-[color-mix(in_oklab,_var(--accent-red)_55%,_transparent)] [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
-                  title={runDisplayStatus(run)}
+                  title={statusLabel(runDisplayStatus(run))}
                 />
               ))}
             </span>
           ) : (
-            <span>no runs</span>
+            <span>{m.tree_view_no_runs()}</span>
           )}
           <span style={{ flex: 1 }} />
           {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
@@ -241,30 +244,30 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         {runs.length > 0 && (
           <button
             className="node-action"
-            title="Open logs"
+            title={m.tree_view_open_logs()}
             {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
               onOpenView(exp.id, "terminal", intent),
             )}
           >
             <Terminal size={13} />
-            Logs
+            {m.tree_view_logs()}
           </button>
         )}
         <button
           className="node-action"
-          title={`Browse code on ${exp.branchName}`}
+          title={m.a11y_browse_code_on({ branch: ltr(exp.branchName) })}
           {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
             onOpenCode(exp.id, exp.branchName, "files", intent),
           )}
         >
           <FolderTree size={13} />
-          Code
+          {m.tree_view_code()}
         </button>
         {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
         {githubOwner && githubRepo && <a
           className="node-action node-action-ext"
-          title={`Open ${exp.branchName} on GitHub`}
-          aria-label={`Open ${exp.branchName} on GitHub`}
+          title={m.a11y_open_on_github({ name: ltr(exp.branchName) })}
+          aria-label={m.a11y_open_on_github({ name: ltr(exp.branchName) })}
           href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
           target="_blank"
           rel="noopener noreferrer"
@@ -303,10 +306,10 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   // body is a single action.
   return (
     <div
-      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-[color-mix(in_oklab,_var(--text)_3%,_transparent)] text-muted text-2xs font-medium text-left transition-[border-color,color] duration-120 ease-standard [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
+      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-[color-mix(in_oklab,_var(--text)_3%,_transparent)] text-muted text-2xs font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
-      title="Switch to Entire project to see all experiments"
+      title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
       onClick={onShowProjectScope}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -318,8 +321,8 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
       <Handle type="target" position={Position.Top} />
       <Ellipsis size={14} />
       <span className="elided-node-label">
-        {count} {count === 1 ? "experiment" : "experiments"}
-        <span className="elided-node-sub">other tasks</span>
+        {count === 1 ? m.tree_one_experiment() : m.tree_experiment_count({ count: fmtNumber(count) })}
+        <span className="elided-node-sub">{m.tree_view_other_tasks()}</span>
       </span>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -454,8 +457,8 @@ export function TreeView({
   if (experiments.length === 0) {
     return (
       <div className={EMPTY_STATE_CLASS_NAME}>
-        <p className="empty-state-title">No experiments yet</p>
-        <p className="empty-state-hint">Ask the agent in chat to create and run your first experiment.</p>
+        <p className="empty-state-title">{m.tree_view_no_experiments_yet()}</p>
+        <p className="empty-state-hint">{m.tree_view_ask_the_agent_in_chat_to_create_and()}</p>
       </div>
     );
   }
@@ -464,9 +467,9 @@ export function TreeView({
   if (nodes.length === 0 && agentSessionId) {
     return (
       <div className={EMPTY_STATE_CLASS_NAME}>
-        <p className="empty-state-title">No experiments from the current task yet</p>
+        <p className="empty-state-title">{m.tree_view_no_experiments_from_the_current_task_yet()}</p>
         <p className="empty-state-hint">
-          Ask in this task to create one, or switch to Entire project to see all experiments.
+          {m.tree_view_ask_in_this_task_to_create_one_or()}
         </p>
       </div>
     );

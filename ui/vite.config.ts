@@ -1,3 +1,4 @@
+import { paraglideVitePlugin } from "@inlang/paraglide-js";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
@@ -7,7 +8,18 @@ import { defineConfig } from "vite";
 const backend = process.env.ORX_BACKEND ?? "http://127.0.0.1:4791";
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    paraglideVitePlugin({
+      project: "./project.inlang",
+      outdir: "./src/paraglide",
+      outputStructure: "message-modules",
+      emitTsDeclarations: true,
+      localStorageKey: "orx:locale",
+      strategy: ["localStorage", "preferredLanguage", "baseLocale"],
+    }),
+    react(),
+    tailwindcss(),
+  ],
   build: { outDir: "dist" },
   server: {
     proxy: {

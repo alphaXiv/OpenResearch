@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { useEffect, useState } from "react";
 import type { FilePresentation } from "../api";
 
@@ -20,8 +22,8 @@ export function mediaPreviewKind(
 function DownloadFallback({ url, name }: { url: string; name: string }) {
   return (
     <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-      This browser can’t preview this media format.{" "}
-      <a href={url} download={name}>Download {name}</a>
+      {m.media_preview_this_browser_can_t_preview_this_media_format()}{" "}
+      <a href={url} download={name}>{m.media_preview_download()} {ltr(name)}</a>
     </div>
   );
 }
@@ -96,8 +98,8 @@ export function MediaPreview({
     <div className="flex h-full min-h-0 flex-col">
       {preview}
       {downloadBar && (
-        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-right text-xs">
-          <a href={url} download={name}>Download {name}</a>
+        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-end text-xs">
+          <a href={url} download={name}>{m.media_preview_download()} {name}</a>
         </div>
       )}
     </div>

@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 // Literature-source toggles shown inline in the composer chat-settings panel:
 // which sources discovery and paper reading may use. State lives in settings.json
 // (same `/api/settings/lit-sources` endpoint the CLI enforces).
@@ -38,7 +39,7 @@ export function LitSourcesList() {
       .finally(() => setSaving(false));
   };
 
-  if (!settings) return <div className="py-1.5 px-2 text-muted text-sm">Loading…</div>;
+  if (!settings) return <div className="py-1.5 px-2 text-muted text-sm">{m.lit_sources_picker_loading()}</div>;
 
   return (
     <div className="flex flex-col">

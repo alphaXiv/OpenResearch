@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getUpdateStatus, type UpdateStatus } from "../api";
@@ -54,12 +56,12 @@ export function UpdateBanner() {
     >
       <RefreshCw size={13} className="shrink-0 text-subtext" />
       <span className="min-w-0">
-        Updated to <strong className="font-semibold">{version}</strong>. Restart to use it.
+        {m.update_banner_complete({ version: ltr(version) })}
       </span>
       <button
         type="button"
-        className="ml-auto shrink-0 p-1 rounded-sm text-subtext hover:text-text hover:bg-highlight"
-        aria-label="Dismiss"
+        className="ms-auto shrink-0 p-1 rounded-sm text-subtext hover:text-text hover:bg-highlight"
+        aria-label={m.update_banner_dismiss()}
         onClick={() => setDismissed(version)}
       >
         <X size={13} />

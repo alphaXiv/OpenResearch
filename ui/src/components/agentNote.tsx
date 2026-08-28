@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 import { MONO_CLASS_NAME } from "../styleClasses";
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 
 /** A backtick command from an `agentNote`, rendered as a code pill with its own
  * copy button so the user can grab it without retyping. */
@@ -21,8 +23,8 @@ function CommandPill({ cmd }: { cmd: string }) {
             })
             .catch(() => {});
         }}
-        aria-label={copied ? "Copied" : `Copy ${cmd}`}
-        title={copied ? "Copied" : "Copy"}
+        aria-label={copied ? m.common_copied() : m.a11y_copy_value({ value: ltr(cmd) })}
+        title={copied ? m.common_copied() : m.md_copy()}
       >
         {copied ? <Check size={11} strokeWidth={3} /> : <Copy size={11} />}
       </button>

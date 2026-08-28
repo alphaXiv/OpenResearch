@@ -102,12 +102,12 @@ export function CodeEditor({
 
   // Both layers must reserve the scrollbar, or the textarea is narrower than the
   // overlay on classic-scrollbar platforms and the two wrap at different columns.
-  const layerClassName = `absolute inset-0 m-0 py-3.5 pr-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME} [scrollbar-gutter:stable]`;
+  const layerClassName = `absolute inset-0 m-0 py-3.5 pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME} [scrollbar-gutter:stable]`;
 
   return (
     <div className={`file-view-editwrap relative h-full min-h-0 ${CODE_TEXT_CLASS_NAME}`}>
       <div
-        className="absolute left-0 top-0 bottom-0 border-r border-r-border-variant pointer-events-none"
+        className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
         style={{ width: `${ruleCh}ch` }}
         aria-hidden="true"
       />
@@ -122,10 +122,10 @@ export function CodeEditor({
             /* The scroll target for `file:line` — measured, so it's on the row. */
             data-line={i + 1}
             className="relative"
-            style={{ paddingLeft: `${codeCh}ch` }}
+            style={{ paddingInlineStart: `${codeCh}ch` }}
           >
             <span
-              className={`${CODE_GUTTER_CLASS_NAME} absolute left-0 pr-[1ch]`}
+              className={`${CODE_GUTTER_CLASS_NAME} absolute start-0 pe-[1ch]`}
               style={{ width: `${ruleCh}ch` }}
             >
               {i + 1}
@@ -138,7 +138,7 @@ export function CodeEditor({
       <textarea
         ref={taRef}
         className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-[var(--text)] outline-none`}
-        style={{ paddingLeft: `${codeCh}ch` }}
+        style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         onScroll={syncScroll}

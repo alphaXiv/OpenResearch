@@ -6,6 +6,7 @@ import { backendDetail, backendKind, type Run } from "../api";
 import slurmLogo from "../assets/slurm-logo.svg";
 import thinkingMachinesLogo from "../assets/thinking-machines.png";
 import { MONO_CLASS_NAME } from "../styleClasses";
+import { m } from "../paraglide/messages.js";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
 function backendName(kind: string): string {
@@ -25,7 +26,7 @@ function backendName(kind: string): string {
     case "openresearch_job":
       return "OpenResearch";
     case "local_job":
-      return "This machine";
+      return m.compute_target_local();
     case "tinker_job":
       return "Tinker";
     default:
