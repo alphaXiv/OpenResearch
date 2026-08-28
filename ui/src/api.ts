@@ -1,5 +1,11 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import { m } from "./paraglide/messages.js";
+import { getLocale } from "./paraglide/runtime.js";
+import { fmtNumber } from "./i18n";
+
+export { fmtNumber } from "./i18n";
+
 export const DEMO_PROJECT_ID = "demo_nanochat_v1";
 // Bundled demo snapshots reserve this prefix so future demos inherit demo-only UI.
 export const isDemoProjectId = (id: string) => id.startsWith("demo_");
@@ -1213,7 +1219,7 @@ export function serviceTiersFor(
   const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
   if (!tiers?.length) return [];
   return [
-    { id: SERVICE_TIER_DEFAULT_ID, label: "Standard", description: "Default speed" },
+    { id: SERVICE_TIER_DEFAULT_ID, label: m.service_tier_standard(), description: m.service_tier_default_speed() },
     ...tiers,
   ];
 }
@@ -1721,23 +1727,24 @@ export function statusColor(status: string): string {
 
 export function timeAgo(ms: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  const format = new Intl.RelativeTimeFormat(getLocale(), { numeric: "always", style: "narrow" });
+  if (s < 60) return format.format(-s, "second");
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return format.format(-minutes, "minute");
+  const h = Math.floor(minutes / 60);
+  if (h < 24) return format.format(-h, "hour");
+  return format.format(-Math.floor(h / 24), "day");
 }
 
 /** "42s" / "18m" / "2h 28m" / "1d 4h" — an elapsed duration, not a timestamp. */
 export function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  if (s < 60) return m.duration_seconds({ value: fmtNumber(s) });
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return m.duration_minutes({ value: fmtNumber(minutes) });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return m.duration_hours_minutes({ hours: fmtNumber(hours), minutes: fmtNumber(minutes % 60) });
+  return m.duration_days_hours({ days: fmtNumber(Math.floor(hours / 24)), hours: fmtNumber(hours % 24) });
 }
 
 /** Compact byte size, e.g. "512 B", "2.0 KB", "5.3 MB". Mirrors the backend's
@@ -1750,20 +1757,16 @@ export function fmtBytes(n: number): string {
     v /= 1024;
     u += 1;
   }
-  return u === 0 ? `${n} B` : `${v.toFixed(1)} ${units[u]}`;
+  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: u === 0 ? 0 : 1, minimumFractionDigits: u === 0 ? 0 : 1 });
+  return `${number.format(u === 0 ? n : v)} ${units[u]}`;
 }
 
 /** Compact token count, e.g. 62300 → "62k", 1_200_000 → "1.2M", 940 → "940". */
 export function fmtTokens(n: number): string {
-  if (n < 1000) return `${Math.round(n)}`;
-  // One decimal, dropped when it's .0 ("31.4k", "200k", "1M"). The k branch
-  // stops where toFixed(1) would round to "1000.0" (e.g. 999_960 → "1M").
-  if (n < 999_950) return `${trimZero((n / 1000).toFixed(1))}k`;
-  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
-}
-
-function trimZero(s: string): string {
-  return s.endsWith(".0") ? s.slice(0, -2) : s;
+  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 1 });
+  if (n < 1000) return number.format(Math.round(n));
+  if (n < 999_950) return `${number.format(n / 1000)}k`;
+  return `${number.format(n / 1_000_000)}M`;
 }
 
 export function shortId(id: string): string {

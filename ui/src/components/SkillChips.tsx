@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import {
   Fragment,
   useEffect,
@@ -172,7 +173,7 @@ function ComposerSkillToken({
         tabIndex={0}
         aria-controls={cardId}
         aria-expanded={open}
-        aria-label={`Preview /${name} skill`}
+        aria-label={m.a11y_preview_skill({ name })}
         className="composer-chip group/skill pointer-events-auto relative z-1 cursor-text rounded-md bg-background text-[var(--skill-blue)]"
         onMouseEnter={show}
         onMouseLeave={scheduleClose}
@@ -222,7 +223,7 @@ function ComposerSkillToken({
             id={cardId}
             ref={cardRef}
             role="dialog"
-            aria-label={`${name} skill`}
+            aria-label={m.a11y_skill({ name })}
             style={{
               ...position,
               maxHeight: "min(28rem, calc(100vh - 2rem))",
@@ -242,7 +243,7 @@ function ComposerSkillToken({
             </div>
             <div className="p-4 text-sm text-text">
               {loading && content === null ? (
-                <span className="text-muted">Loading skill…</span>
+                <span className="text-muted">{m.skill_chips_loading_skill()}</span>
               ) : (
                 <Md text={content ?? skill.description} />
               )}
@@ -334,7 +335,7 @@ export function ComposerSkillChips({
   return (
     <div
       ref={mirrorRef}
-      className="composer-chips pointer-events-none absolute inset-y-0 left-0 z-2 box-border overflow-hidden whitespace-pre-wrap break-words border-solid border-transparent text-transparent select-none"
+      className="composer-chips pointer-events-none absolute inset-y-0 start-0 z-2 box-border overflow-hidden whitespace-pre-wrap break-words border-solid border-transparent text-transparent select-none"
     >
       {/* Hover padding is painted outside the mirrored text box so it cannot
         * shift the textarea's following glyphs. */}

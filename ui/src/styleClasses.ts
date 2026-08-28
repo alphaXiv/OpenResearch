@@ -4,7 +4,7 @@ export const ELEVATED_SURFACE_SHADOW_CLASS_NAME =
 export const ICON_BUTTON_BASE_CLASS_NAME = [
   "icon-btn relative inline-flex items-center justify-center",
   "text-subtext [&:hover]:text-text [&:hover]:bg-surface",
-  "[.chat-header.rail-hidden_>_&:first-child]:mr-3 [&.active]:text-primary",
+  "[.chat-header.rail-hidden_>_&:first-child]:me-3 [&.active]:text-primary",
   "[&.active]:bg-surface",
 ].join(" ");
 
@@ -25,7 +25,7 @@ export const COMPOSER_ICON_CONTROL_CLASS_NAME = [
 
 export const MODEL_ITEM_CLASS_NAME = [
   "model-item [&.danger]:text-accent-red [&.danger:hover]:text-accent-red flex",
-  "items-center justify-between gap-2 w-full text-left py-1.5 px-2",
+  "items-center justify-between gap-2 w-full text-start py-1.5 px-2",
   "text-md rounded-sm [&:hover]:bg-surface",
   "[&_.model-id]:block [&_.model-id]:font-mono [&_.model-id]:text-2xs",
   "[&_.model-id]:text-muted",
@@ -114,10 +114,10 @@ export const STATUS_BADGE_CLASS_NAME = [
 export const SETTINGS_SWITCH_CLASS_NAME = [
   "settings-switch relative flex-none w-9.5 h-5.5 border border-border rounded-full",
   "bg-surface transition-[background,border-color] duration-120 ease-standard",
-  "[&_span]:absolute [&_span]:top-[3px] [&_span]:left-[3px] [&_span]:w-3.5 [&_span]:h-3.5",
+  "[&_span]:absolute [&_span]:top-[3px] [&_span]:start-[3px] [&_span]:w-3.5 [&_span]:h-3.5",
   "[&_span]:rounded-full [&_span]:bg-muted [&_span]:transition-[translate,background]",
   "[&_span]:duration-120 [&_span]:ease-standard [&.on]:border-primary [&.on]:bg-primary",
-  "[&.on_span]:bg-background [&.on_span]:translate-x-4 [&:disabled]:opacity-45",
+  "[&.on_span]:bg-background [&.on_span]:translate-x-4 rtl:[&.on_span]:-translate-x-4 [&:disabled]:opacity-45",
   "[&:disabled]:cursor-default [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid",
   "[&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2",
 ].join(" ");

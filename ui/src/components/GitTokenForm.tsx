@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import { useState } from "react";
 import { BUTTON_CLASS_NAME } from "../styleClasses";
 
@@ -42,10 +43,10 @@ export function TokenForm<T>({
         autoComplete="off"
       />
       <button type="submit" className={BUTTON_CLASS_NAME} disabled={saving || !token.trim()}>
-        {saving ? "Saving…" : "Save"}
+        {saving ? m.common_saving() : m.common_save()}
       </button>
       <a href={createHref} target="_blank" rel="noreferrer">
-        Create a token ↗
+        {m.git_token_form_create_a_token()}
       </a>
       {error && <div className="error">{error}</div>}
     </form>

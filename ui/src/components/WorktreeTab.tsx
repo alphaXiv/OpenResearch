@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 // The pinned Files home for the active chat session's private worktree — what
 // the agent is changing right now, before any run/commit exists. The Code tab
 // remains committed-state only.
@@ -48,7 +50,7 @@ export function WorktreeTab({
   sessionId?: string;
   project: Project;
   /** Which segmented view is showing (lives on the tab def, so it survives the
-   * unmount/remount when another right-pane tab fronts this one). */
+   * unmount/remount when another end-pane tab fronts this one). */
   view: WorktreeView;
   /** Files-view dirs flipped away from their depth default (on the tab def). */
   toggled: ReadonlySet<string>;
@@ -180,11 +182,11 @@ export function WorktreeTab({
   const liveWorktree = sessionId && wt?.exists ? wt : null;
   const checkedOut =
     liveWorktree?.branch ??
-    (liveWorktree?.baselineBranch ? `detached @ ${liveWorktree.baselineBranch}` : "detached");
+    (liveWorktree?.baselineBranch ? m.worktree_detached_at({ branch: ltr(liveWorktree.baselineBranch) }) : m.settings_detached());
   const fileCount = liveWorktree?.files?.length ?? 0;
   const branchChip = liveWorktree
-    ? `Current worktree · ${checkedOut}${fileCount > 0 ? "*" : ""}`
-    : `Default branch · ${project.baselineBranch}`;
+    ? m.worktree_current({ branch: ltr(`${checkedOut}${fileCount > 0 ? "*" : ""}`) })
+    : m.worktree_default_branch({ branch: ltr(project.baselineBranch) });
   const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
 
   return (
@@ -200,19 +202,19 @@ export function WorktreeTab({
             ? githubBranchUrl(project.githubOwner, project.githubRepo, githubBranch)
             : undefined
         }
-        githubTitle={githubBranch ? `Open ${githubBranch} on GitHub` : undefined}
+        githubTitle={githubBranch ? m.a11y_open_branch_github({ branch: ltr(githubBranch) }) : undefined}
         refreshing={loading}
         onRefresh={load}
       />
-      {error && (wt || tree) && <div className={CODE_TAB_NOTE_CLASS_NAME}>Refresh failed: {error}</div>}
+      {error && (wt || tree) && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_refresh_failed()} {ltr(error)}</div>}
       {!tree || (sessionId && !wt) ? (
         <div className={CODE_TAB_BODY_CLASS_NAME}>
-          <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? `Failed to load: ${error}` : "Loading…"}</div>
+          <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}</div>
         </div>
       ) : liveWorktree && view === "changes" ? (
         <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes pt-0 px-4 pb-6 [&_>_:first-child]:mt-3.5`}>
           {fileCount === 0 || !liveWorktree.diff ? (
-            <div className="changes-note text-sm text-muted">No changes yet.</div>
+            <div className="changes-note text-sm text-muted">{m.worktree_tab_no_changes_yet()}</div>
           ) : (
             <>
               {liveWorktree.diff.truncated && (
@@ -231,12 +233,12 @@ export function WorktreeTab({
       ) : (
         <div className={CODE_TAB_BODY_CLASS_NAME}>
           {tree.truncated && (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>Listing truncated.</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_listing_truncated()}</div>
           )}
           {!filesTree ? (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>Loading…</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_loading()}</div>
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
+            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_no_files()}</div>
           ) : (
             <div className="file-tree py-1.5 px-0 text-md">
               <TreeLevel

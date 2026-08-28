@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { getChatMessages, type ChatMessage, type ChatPart } from "../api";
 import { onChatEvent } from "../events";
@@ -133,7 +134,7 @@ export function SubagentTab({
     return (
       <div className={TAB_BODY_CLASS_NAME}>
         <div className={PANE_CONTENT_CLASS_NAME}>
-          <div className="subagent-empty py-[3px] px-1 text-md text-muted">Loading…</div>
+          <div className="subagent-empty py-[3px] px-1 text-md text-muted">{m.subagent_tab_loading()}</div>
         </div>
       </div>
     );
@@ -168,7 +169,7 @@ export function SubagentTab({
               onOpenSubagent={onOpenSubagent}
             />
           ) : (
-            <div className="subagent-empty py-[3px] px-1 text-md text-muted">This sub-agent is no longer available.</div>
+            <div className="subagent-empty py-[3px] px-1 text-md text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
           )}
         </div>
       </div>

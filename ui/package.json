@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && tsc --noEmit && vite build",
+    "lint:i18n": "node scripts/check-i18n.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
     "@clo/react-markdown": "jsr:1.1.1",
+    "@inlang/paraglide-js": "^2.25.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.6.0",

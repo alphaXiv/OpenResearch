@@ -1,3 +1,6 @@
+import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
+import { ltr } from "../i18n";
 // Floating detail card shown while hovering an experiment node in the tree.
 // Rendered through a portal at a fixed viewport position (never inside the
 // ReactFlow node: the canvas transform would scale it with zoom, and growing
@@ -13,6 +16,7 @@ import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
   fmtDuration,
+  fmtNumber,
   getRunDiff,
   runDisplayStatus,
   timeAgo,
@@ -110,7 +114,7 @@ function fmtCreated(ms: number): string {
     d.getFullYear() === new Date().getFullYear()
       ? { month: "short", day: "numeric" }
       : { month: "short", day: "numeric", year: "numeric" };
-  return d.toLocaleDateString(undefined, opts);
+  return d.toLocaleDateString(getLocale(), opts);
 }
 
 export function ExpHoverCard({
@@ -265,7 +269,7 @@ export function ExpHoverCard({
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenLogs)}
           >
             <Terminal size={13} />
-            Logs
+            {m.exp_hover_card_logs()}
           </button>
         )}
         <button
@@ -273,7 +277,7 @@ export function ExpHoverCard({
           {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
         >
           <FolderTree size={13} />
-          Code
+          {m.exp_hover_card_code()}
         </button>
       </div>
       {body && (
@@ -283,17 +287,19 @@ export function ExpHoverCard({
       )}
       {body && (clamped || expanded) && (
         <button type="button" className="hc-toggle" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? m.common_show_less() : m.common_show_more()}
         </button>
       )}
       {failureNote && <div className="hc-failure">{failureNote}</div>}
       <div className="hc-stats">
         <span>
-          {runs.length === 1 ? "1 run" : `${runs.length} runs`}
-          {counts.done > 0 && ` · ${counts.done} done`}
-          {counts.failed > 0 && ` · ${counts.failed} failed`}
-          {counts.cancelled > 0 && ` · ${counts.cancelled} cancelled`}
-          {counts.live > 0 && ` · ${counts.live} live`}
+          {new Intl.ListFormat(getLocale(), { style: "short" }).format([
+            runs.length === 1 ? m.hover_one_run() : m.hover_run_count({ count: fmtNumber(runs.length) }),
+            ...(counts.done > 0 ? [m.hover_done_count({ count: fmtNumber(counts.done) })] : []),
+            ...(counts.failed > 0 ? [m.hover_failed_count({ count: fmtNumber(counts.failed) })] : []),
+            ...(counts.cancelled > 0 ? [m.hover_cancelled_count({ count: fmtNumber(counts.cancelled) })] : []),
+            ...(counts.live > 0 ? [m.hover_live_count({ count: fmtNumber(counts.live) })] : []),
+          ])}
         </span>
         {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
         {duration && <span>{duration}</span>}
@@ -307,14 +313,16 @@ export function ExpHoverCard({
           </span>
           {parentSlug && (
             <span>
-              from <span className="hc-mono">{parentSlug}</span>
+              {m.exp_hover_card_from()} <span className="hc-mono">{parentSlug}</span>
             </span>
           )}
         </div>
         {diffStat && diffStat.fileCount > 0 && (
           <div
             className="hc-git-row"
-            title={`Committed changes vs ${parentSlug ?? "parent"}${diffStat.truncated ? " (diff truncated — counts are lower bounds)" : ""}`}
+            title={diffStat.truncated
+              ? m.a11y_committed_changes_truncated({ parent: ltr(parentSlug ?? "parent") })
+              : m.a11y_committed_changes({ parent: ltr(parentSlug ?? "parent") })}
           >
             <span>
               {diffStat.truncated && "≥ "}
@@ -322,15 +330,15 @@ export function ExpHoverCard({
               <span className="diff-stat-del text-accent-red">−{diffStat.deletions}</span>
               {" · "}
               {diffStat.fileCount === 1 && !diffStat.truncated
-                ? "1 file"
-                : `${diffStat.fileCount}${diffStat.truncated ? "+" : ""} files`}
+                ? m.hover_one_file()
+                : diffStat.truncated ? m.hover_files_at_least({ count: fmtNumber(diffStat.fileCount) }) : m.hover_file_count({ count: fmtNumber(diffStat.fileCount) })}
             </span>
           </div>
         )}
       </div>
       <div className="hc-foot">
         <span className="hc-mono">$ {exp.runCommand}</span>
-        <span>created {fmtCreated(exp.createdAt)}</span>
+        <span>{m.exp_hover_card_created()} {fmtCreated(exp.createdAt)}</span>
       </div>
     </div>,
     document.body,

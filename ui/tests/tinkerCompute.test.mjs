@@ -9,7 +9,7 @@ test("Tinker is always visible in compute and environment settings", async () =>
     source("../src/components/SettingsPage.tsx"),
     source("../src/components/BackendLogos.tsx"),
   ]);
-  assert.match(settings, /tinker: "Tinker"/);
+  assert.match(settings, /tinker: m\.compute_target_tinker/);
   assert.match(settings, /target\.id === "tinker"/);
   assert.match(settings, /"TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"/);
   assert.match(logos, /case "tinker_job":\s+return <TinkerLogo/);

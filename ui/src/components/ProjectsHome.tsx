@@ -1,8 +1,11 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { Plus, Trash2 } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { useEffect, useRef, useState } from "react";
 import {
   deleteProject,
+  fmtNumber,
   listProjectActivity,
   timeAgo,
   type Project,
@@ -90,7 +93,7 @@ export function NewProjectDialog({
         aria-labelledby="new-project-dialog-title"
         tabIndex={-1}
       >
-        <h2 id="new-project-dialog-title">New project</h2>
+        <h2 id="new-project-dialog-title">{m.projects_home_new_project()}</h2>
         <NewProjectForm onCancel={onClose} onCreated={onCreated} />
       </div>
     </div>
@@ -175,21 +178,20 @@ function DeleteProjectDialog({
         aria-describedby="delete-project-dialog-description"
         tabIndex={-1}
       >
-        <h2 id="delete-project-dialog-title" className="mt-0 mb-3 text-xl">Delete project?</h2>
+        <h2 id="delete-project-dialog-title" className="mt-0 mb-3 text-xl">{m.projects_home_delete_project()}</h2>
         <div id="delete-project-dialog-description" className="flex flex-col gap-2 text-md leading-normal text-subtext">
           <p className="m-0">
-            Delete <strong className="font-semibold text-text">{project.name}</strong> from OpenResearch?
-            Its experiments, runs, and chats will be permanently removed.
+            {m.projects_delete_from_app({ name: project.name })}
           </p>
           <p className="m-0">
-            The local folder{hasSyncedRepository ? " and linked GitHub repository are" : " is"} kept.
+            {hasSyncedRepository ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}
           </p>
           {error && <p className="m-0 text-accent-red" role="alert">{error}</p>}
         </div>
         <div className="mt-5 flex justify-end gap-2">
-          <button className={BUTTON_CLASS_NAME} disabled={deleting} onClick={onClose}>Cancel</button>
+          <button className={BUTTON_CLASS_NAME} disabled={deleting} onClick={onClose}>{m.projects_home_cancel()}</button>
           <button className={`${BUTTON_CLASS_NAME} danger`} disabled={deleting} onClick={onConfirm}>
-            {deleting ? "Deleting…" : "Delete project"}
+            {deleting ? m.projects_home_deleting() : m.projects_home_delete_project_action()}
           </button>
         </div>
       </div>
@@ -271,24 +273,24 @@ export function ProjectsHome({
     <div className="home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas">
       <div className="home-inner max-w-290 my-0 mx-auto pt-12 px-6 pb-16 [@media((max-width:_960px))]:pt-6 [@media((max-width:_960px))]:px-4">
         <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-4xl [&_h2]:tracking-[-0.02em] [@media((max-width:_520px))]:items-start [@media((max-width:_520px))]:flex-col">
-          <h2>Projects</h2>
+          <h2>{m.projects_home_projects()}</h2>
           <button
             className={BUTTON_CLASS_NAME}
             onClick={() => setModalOpen(true)}
           >
-            <Plus size={15} /> New project
+            <Plus size={15} /> {m.projects_home_new_project()}
           </button>
         </div>
         <div className="home-list overflow-hidden rounded-lg border border-border bg-background">
           <div>
-            <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 pl-4 pr-2 text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
-              <span>Project</span>
-              <span>Agents</span>
-              <span>Experiments</span>
-              <span>Repository</span>
+            <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 ps-4 pe-2 text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
+              <span>{m.projects_home_project()}</span>
+              <span>{m.projects_home_agents()}</span>
+              <span>{m.projects_home_experiments()}</span>
+              <span>{m.projects_home_repository()}</span>
             </div>
             {projects.length === 0 ? (
-              <div className="py-8 px-4 text-sm text-muted">No projects yet — create one to get started.</div>
+              <div className="py-8 px-4 text-sm text-muted">{m.projects_home_no_projects_yet_create_one_to_get_started()}</div>
             ) : (
               [...projects].sort((a, b) => {
                 const aActivity = activityByProject[a.id]?.lastMessageAt ?? a.createdAt;
@@ -309,46 +311,46 @@ export function ProjectsHome({
                         .replace(/^https?:\/\/github\.com\//, "")
                         .replace(/\.git$/, "")
                         .replace(/\/$/, "")
-                  : "Local";
+                  : m.projects_local();
                 const agentsLabel = summary
                   ? summary.activeAgents > 0
-                    ? `${summary.activeAgents} active`
-                    : "Idle"
+                    ? m.projects_active_count({ count: fmtNumber(summary.activeAgents) })
+                    : m.projects_idle()
                   : "—";
                 const agentTotal = summary
-                  ? `${summary.totalAgents} total agent${summary.totalAgents === 1 ? "" : "s"}`
+                  ? summary.totalAgents === 1 ? m.projects_one_agent() : m.projects_agents_count({ count: fmtNumber(summary.totalAgents) })
                   : "—";
                 const experimentLabel = !summary
                   ? "—"
                   : summary.runningExperiments > 0
-                    ? `${summary.runningExperiments} running`
+                    ? m.projects_running_count({ count: fmtNumber(summary.runningExperiments) })
                     : summary.totalExperiments === 0
-                      ? "None"
-                      : `${summary.totalExperiments} total`;
+                      ? m.settings_none()
+                      : m.projects_total_count({ count: fmtNumber(summary.totalExperiments) });
                 const experimentTotal =
                   summary && summary.runningExperiments > 0
-                    ? `${summary.totalExperiments} total`
+                    ? m.projects_total_count({ count: fmtNumber(summary.totalExperiments) })
                     : null;
                 return (
                   <div
                     key={p.id}
-                    className="group project-row relative grid cursor-pointer grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border-variant py-4 pl-4 pr-2 text-left transition-colors duration-120 ease-standard last:border-b-0 hover:bg-surface-bright focus-within:bg-surface-bright [@media((max-width:_960px))]:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)] [@media((max-width:_960px))]:items-start [@media((max-width:_960px))]:gap-x-4 [@media((max-width:_960px))]:gap-y-3 [@media((max-width:_960px))]:py-4 [@media((max-width:_960px))]:px-4 [@media((max-width:_600px))]:grid-cols-2"
+                    className="group project-row relative grid cursor-pointer grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border-variant py-4 ps-4 pe-2 text-start transition-colors duration-120 ease-standard last:border-b-0 hover:bg-surface-bright focus-within:bg-surface-bright [@media((max-width:_960px))]:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)] [@media((max-width:_960px))]:items-start [@media((max-width:_960px))]:gap-x-4 [@media((max-width:_960px))]:gap-y-3 [@media((max-width:_960px))]:py-4 [@media((max-width:_960px))]:px-4 [@media((max-width:_600px))]:grid-cols-2"
                   >
                     <button
                       className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
-                      aria-label={`Open ${p.name}`}
+                      aria-label={m.a11y_open_item({ name: p.name })}
                       onClick={() => onOpen(p.id)}
                     />
                     {/* Cells stay click-transparent so the stretched button owns row navigation. */}
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
                       <span className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
                       <span className="relative z-2 flex items-center gap-1.5 text-xs text-muted [@media((max-width:_960px))]:flex-wrap">
-                        <span>Created {timeAgo(p.createdAt)}</span>
+                        <span>{m.projects_home_created()} {timeAgo(p.createdAt)}</span>
                         {p.paperId && <span aria-hidden="true">·</span>}
-                        {p.paperId && <span>arXiv paper ID: {p.paperId}</span>}
+                        {p.paperId && <span>{m.projects_home_ar_xiv_paper_id()} {ltr(p.paperId)}</span>}
                         <button
                           className="project-row-secondary project-row-delete inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm leading-0 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface hover:text-accent-red group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto focus:opacity-100 focus:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-text"
-                          aria-label={`Delete ${p.name}`}
+                          aria-label={m.a11y_delete_item({ name: p.name })}
                           disabled={deleting === p.id}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -361,7 +363,7 @@ export function ProjectsHome({
                       </span>
                     </div>
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">Agents</span>
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_agents()}</span>
                       <span className="inline-flex items-center gap-2 text-md text-text">
                         {summary && summary.activeAgents > 0 && (
                           <LiveDot />
@@ -371,7 +373,7 @@ export function ProjectsHome({
                       <span className="text-xs text-muted">{agentTotal}</span>
                     </div>
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">Experiments</span>
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_experiments()}</span>
                       <span className="inline-flex items-center gap-2 text-md text-text">
                         {summary && summary.runningExperiments > 0 && (
                           <LiveDot />
@@ -381,17 +383,17 @@ export function ProjectsHome({
                       {experimentTotal && <span className="text-xs text-muted">{experimentTotal}</span>}
                     </div>
                     <div className="relative z-1 min-w-0 pointer-events-none [@media((max-width:_600px))]:col-span-2">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:mb-1 [@media((max-width:_960px))]:block">Repository</span>
+                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:mb-1 [@media((max-width:_960px))]:block">{m.projects_home_repository()}</span>
                       {githubUrl ? (
                         <a
                           className="project-row-secondary inline-flex max-w-full items-center gap-2 text-sm text-text no-underline pointer-events-auto hover:underline underline-offset-2"
                           href={githubUrl}
                           target="_blank"
                           rel="noreferrer"
-                          aria-label={`Open ${p.name} on GitHub`}
+                          aria-label={m.a11y_open_on_github({ name: p.name })}
                         >
                           <span className="inline-flex shrink-0"><GitHubMark size={14} /></span>
-                          <span className="overflow-hidden text-ellipsis whitespace-nowrap [@media((max-width:_960px))]:whitespace-normal [@media((max-width:_960px))]:break-all">{githubState}</span>
+                          <span className="overflow-hidden text-ellipsis whitespace-nowrap [@media((max-width:_960px))]:whitespace-normal [@media((max-width:_960px))]:break-all">{githubUrl ? ltr(githubState) : githubState}</span>
                         </a>
                       ) : (
                         <span className="text-sm text-text pointer-events-none">{githubState}</span>

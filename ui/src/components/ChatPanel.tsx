@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import {
   ArrowUpRight,
   Blocks,
@@ -52,6 +54,7 @@ import {
   DEMO_MAIN_SESSION_ID,
   DEMO_PROJECT_ID,
   forkChatTurn,
+  fmtNumber,
   getChatMessages,
   getSkills,
   interruptChat,
@@ -560,17 +563,18 @@ function AnnotationEntries({
       key={annotation.id}
       className={`annotation-item grid gap-2 py-2 px-1 [&+&]:border-t [&+&]:border-border-variant ${onRemove ? "grid-cols-[24px_minmax(0,_1fr)_24px]" : "grid-cols-[24px_minmax(0,_1fr)]"}`}
     >
-      <span className="text-sm text-muted text-right">{index + 1}.</span>
+      <span className="text-sm text-muted text-end">{index + 1}.</span>
       <div className="min-w-0">
-        <div className="text-sm text-muted mb-1">Selected text:</div>
+        <div className="text-sm text-muted mb-1">{m.chat_panel_selected_text()}</div>
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
         <button
           type="button"
+          data-annotation-remove
           className="inline-flex items-center justify-center w-6 h-6 rounded-sm text-muted [&:hover]:bg-surface [&:hover]:text-text"
-          title="Remove annotation"
-          aria-label={`Remove annotation ${index + 1}`}
+          title={m.chat_panel_remove_annotation()}
+          aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
           onClick={() => onRemove(annotation.id)}
         >
           <X size={13} />
@@ -615,7 +619,7 @@ function AnnotationsPopover({
   const removeAnnotation = (id: string) => {
     onRemove?.(id);
     window.requestAnimationFrame(() => {
-      const next = dialogRef.current?.querySelector<HTMLButtonElement>("button[aria-label^='Remove annotation']");
+      const next = dialogRef.current?.querySelector<HTMLButtonElement>("button[data-annotation-remove]");
       (next ?? dialogRef.current ?? triggerRef.current)?.focus();
     });
   };
@@ -636,21 +640,21 @@ function AnnotationsPopover({
         <button
           ref={triggerRef}
           type="button"
-          className={`inline-flex items-center gap-1.5 py-1 text-sm font-medium text-text [&:hover]:bg-surface ${sent ? "px-2.5" : "pl-2 pr-1.5"}`}
+          className={`inline-flex items-center gap-1.5 py-1 text-sm font-medium text-text [&:hover]:bg-surface ${sent ? "px-2.5" : "ps-2 pe-1.5"}`}
           aria-expanded={popover.open}
           aria-haspopup="dialog"
           aria-controls={dialogId}
           onClick={toggleFromTrigger}
         >
           <MessageSquareQuote size={sent ? 13 : 14} className="text-muted" />
-          {annotations.length} {annotations.length === 1 ? "annotation" : "annotations"}
+          {annotations.length === 1 ? m.chat_one_annotation() : m.chat_annotation_count({ count: fmtNumber(annotations.length) })}
         </button>
         {onClear && (
           <button
             type="button"
-            className="inline-flex items-center justify-center self-stretch w-6.5 text-muted border-l border-border [&:hover]:bg-surface [&:hover]:text-text"
-            title="Clear annotations"
-            aria-label="Clear annotations"
+            className="inline-flex items-center justify-center self-stretch w-6.5 text-muted border-s border-border [&:hover]:bg-surface [&:hover]:text-text"
+            title={m.chat_panel_clear_annotations()}
+            aria-label={m.chat_panel_clear_annotations()}
             onClick={onClear}
           >
             <X size={13} />
@@ -662,9 +666,9 @@ function AnnotationsPopover({
           id={dialogId}
           ref={dialogRef}
           tabIndex={-1}
-          className={`annotation-menu absolute bottom-[calc(100%_+_8px)] z-50 w-[min(440px,_calc(100vw_-_48px))] max-h-80 overflow-y-auto overscroll-contain bg-background border border-border rounded-lg shadow-[0_4px_16px_rgba(0,_0,_0,_0.10)] p-2 text-left ${sent ? "right-0 after:absolute after:top-full after:left-0 after:right-0 after:h-2 after:content-['']" : "left-3"}`}
+          className={`annotation-menu absolute bottom-[calc(100%_+_8px)] z-50 w-[min(440px,_calc(100vw_-_48px))] max-h-80 overflow-y-auto overscroll-contain bg-background border border-border rounded-lg shadow-[0_4px_16px_rgba(0,_0,_0,_0.10)] p-2 text-start ${sent ? "end-0 after:absolute after:top-full after:start-0 after:end-0 after:h-2 after:content-['']" : "start-3"}`}
           role="dialog"
-          aria-label="Selected chat text"
+          aria-label={m.chat_panel_selected_chat_text()}
         >
           <AnnotationEntries annotations={annotations} onRemove={onRemove ? removeAnnotation : undefined} />
         </div>
@@ -686,7 +690,7 @@ const PROMPT_COLLAPSED_CLASS_NAME = [
 ].join(" ");
 
 const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
-  "prompt-collapsed-body mt-1.5 pl-3 border-l-2 border-l-border",
+  "prompt-collapsed-body mt-1.5 ps-3 border-s-2 border-s-border",
   "text-md text-subtext",
 ].join(" ");
 
@@ -929,13 +933,13 @@ function reducer(state: ChatState, action: Action): ChatState {
 
 function relTime(ts: number | undefined): string {
   if (!ts) return "";
-  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return "now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  return `${Math.floor(h / 24)}d`;
+  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (seconds < 60) return m.relative_now_short();
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return m.relative_minutes_short({ value: fmtNumber(minutes) });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return m.relative_hours_short({ value: fmtNumber(hours) });
+  return m.relative_days_short({ value: fmtNumber(Math.floor(hours / 24)) });
 }
 
 /** The last path segment, for compact display ("src/a/b.rs" → "b.rs"). */
@@ -965,7 +969,6 @@ interface ToolActivity {
   searchPattern?: string;
   filePath?: string;
   fileRef?: string;
-  labelPrefix?: string;
   labelTarget?: string;
   litCall?: NonNullable<ReturnType<typeof parseOrxLit>>;
   runIds?: string[];
@@ -1613,15 +1616,15 @@ function toolActivity(part: ChatPart): ToolActivity {
     const query = arrayInputString(normalizedInput, "search_query", "q");
     const imageQuery = arrayInputString(normalizedInput, "image_query", "q");
     const pattern = arrayInputString(normalizedInput, "find", "pattern");
-    if (query) return { kind: "web", label: `Searched the web for “${query}”` };
-    if (imageQuery) return { kind: "web", label: `Searched images for “${imageQuery}”` };
-    if (pattern) return { kind: "web", label: `Searched a web page for “${pattern}”` };
-    if (Array.isArray(normalizedInput.open)) return { kind: "web", label: "Opened web pages" };
-    if (Array.isArray(normalizedInput.weather)) return { kind: "web", label: "Checked the weather" };
-    if (Array.isArray(normalizedInput.finance)) return { kind: "web", label: "Checked market data" };
-    if (Array.isArray(normalizedInput.sports)) return { kind: "web", label: "Checked sports data" };
-    if (Array.isArray(normalizedInput.time)) return { kind: "web", label: "Checked local times" };
-    return { kind: "web", label: "Browsed the web" };
+    if (query) return { kind: "web", label: m.activity_searched_web({ query }) };
+    if (imageQuery) return { kind: "web", label: m.activity_searched_images({ query: imageQuery }) };
+    if (pattern) return { kind: "web", label: m.activity_searched_web_page({ pattern }) };
+    if (Array.isArray(normalizedInput.open)) return { kind: "web", label: m.chat_panel_opened_web_pages() };
+    if (Array.isArray(normalizedInput.weather)) return { kind: "web", label: m.chat_panel_checked_the_weather() };
+    if (Array.isArray(normalizedInput.finance)) return { kind: "web", label: m.chat_panel_checked_market_data() };
+    if (Array.isArray(normalizedInput.sports)) return { kind: "web", label: m.chat_panel_checked_sports_data() };
+    if (Array.isArray(normalizedInput.time)) return { kind: "web", label: m.chat_panel_checked_local_times() };
+    return { kind: "web", label: m.chat_panel_browsed_the_web() };
   }
   const normalizedTool = new Map([
     ["read_file", "read"],
@@ -1636,7 +1639,7 @@ function toolActivity(part: ChatPart): ToolActivity {
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
     case "bash": {
-      if (!rawCommand && !commandArgv?.length) return { kind: "command", label: "Ran a command" };
+      if (!rawCommand && !commandArgv?.length) return { kind: "command", label: m.chat_panel_ran_a_command() };
       const command = meaningfulCommand(rawCommand ?? commandArgv?.join(" ") ?? "");
       const shellSegments = shellCommandSegments(command);
       let literatureInputs: Array<string | readonly string[]> = shellSegments.map((segment) => segment.raw);
@@ -1658,24 +1661,24 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (litCall && !hasNonLiteratureOrx) {
         const discoveryLabel = litCall.kind === "discover"
           ? {
-              keyword: "Searched alphaXiv full text",
-              embedding: "Searched alphaXiv semantically",
-              openalex: "Searched OpenAlex",
-              biorxiv: "Searched bioRxiv",
+              keyword: m.activity_searched_alphaxiv_full_text(),
+              embedding: m.activity_searched_alphaxiv_semantically(),
+              openalex: m.activity_searched_openalex(),
+              biorxiv: m.activity_searched_biorxiv(),
             }[litCall.strategy]
           : null;
         const label = litCall.kind === "discover"
             ? litCall.query
-              ? `${discoveryLabel} for “${litCall.query}”`
-              : discoveryLabel ?? "Searched the literature"
-            : litCall.id ? `Read ${litCall.id}` : "Read a paper";
+              ? m.activity_for_query({ activity: discoveryLabel ?? m.activity_searched_literature(), query: litCall.query })
+              : discoveryLabel ?? m.activity_searched_literature()
+            : litCall.id ? m.activity_read_target({ target: ltr(litCall.id) }) : m.activity_read_paper();
         return { kind: litCall.kind === "paper" ? "read" : "search", label, litCall };
       }
 
       if (commandInvokesOrx(command, "agent\\s+spawn")) {
         return {
           kind: "agent",
-          label: "Delegated a task to a new agent",
+          label: m.chat_panel_delegated_a_task_to_a_new_agent(),
           spawnedSessionIds: spawnedSessionIds(toolOutput),
           litCall: litCall ?? undefined,
         };
@@ -1689,23 +1692,23 @@ function toolActivity(part: ChatPart): ToolActivity {
           (token) => token === "--set" || token.startsWith("--set=") || token === "--stdin",
         );
       });
-      const notesLabel = updatesExperimentNotes ? "Updated experiment notes" : "Read experiment notes";
+      const notesLabel = updatesExperimentNotes ? m.activity_updated_experiment_notes() : m.activity_read_experiment_notes();
       const combinedLabel = updatesExperimentNotes
-        ? "Checked experiment status and updated notes"
-        : "Reviewed experiment status and notes";
+        ? m.activity_checked_status_updated_notes()
+        : m.activity_reviewed_status_notes();
       if (commandInvokesOrx(command, "logs")) {
         const runIds = commandRunIds(command, toolOutput, resourceRunIds, legacyTargetIds);
-        const label = runIds.length === 1 ? "Reviewed run log" : "Reviewed run logs";
+        const label = runIds.length === 1 ? m.activity_reviewed_run_log() : m.activity_reviewed_run_logs();
         return { kind: "project", label, runIds, litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+run")) {
-        return { kind: "project", label: "Started an experiment run", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_started_an_experiment_run(), litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+wait")) {
-        return { kind: "project", label: "Waited for an experiment run", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_waited_for_an_experiment_run(), litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "exp\\s+cancel")) {
-        return { kind: "project", label: "Cancelled an experiment run", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_cancelled_an_experiment_run(), litCall: litCall ?? undefined };
       }
       const readsProject = commandInvokesOrx(command, "project\\s+view");
       if (readsProject && readsExperimentStatus && readsExperimentNotes) {
@@ -1727,13 +1730,13 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (readsProject && readsExperimentStatus) {
         return {
           kind: "project",
-          label: "Checked experiment status",
+          label: m.chat_panel_checked_experiment_status(),
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
           litCall: litCall ?? undefined,
         };
       }
       if (readsProject) {
-        return { kind: "project", label: "Read project details", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_read_project_details(), litCall: litCall ?? undefined };
       }
       if (readsExperimentStatus && readsExperimentNotes) {
         return {
@@ -1746,7 +1749,7 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (readsExperimentStatus) {
         return {
           kind: "project",
-          label: "Checked experiment status",
+          label: m.chat_panel_checked_experiment_status(),
           experimentIds: commandExperimentIds(command, toolOutput, resourceExperimentIds, legacyTargetIds),
           litCall: litCall ?? undefined,
         };
@@ -1760,13 +1763,13 @@ function toolActivity(part: ChatPart): ToolActivity {
         };
       }
       if (commandInvokesOrx(command, "runs?")) {
-        return { kind: "project", label: "Listed project runs", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_listed_project_runs(), litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "projects")) {
-        return { kind: "project", label: "Listed projects", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_listed_projects(), litCall: litCall ?? undefined };
       }
       if (commandInvokesOrx(command, "compute")) {
-        return { kind: "project", label: "Checked compute options", litCall: litCall ?? undefined };
+        return { kind: "project", label: m.chat_panel_checked_compute_options(), litCall: litCall ?? undefined };
       }
 
       const gitShowTarget = shellInvocations
@@ -1776,10 +1779,9 @@ function toolActivity(part: ChatPart): ToolActivity {
         const skillName = skillNameFromPath(gitShowTarget.path);
         return {
           kind: skillName ? "skill" : "read",
-          label: skillName ? `Read ${skillName} skill` : `Read ${baseName(gitShowTarget.path)}`,
+          label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(gitShowTarget.path)) }),
           filePath: gitShowTarget.path,
           fileRef: gitShowTarget.ref,
-          labelPrefix: "Read ",
           labelTarget: skillName ? `${skillName} skill` : baseName(gitShowTarget.path),
         };
       }
@@ -1801,9 +1803,8 @@ function toolActivity(part: ChatPart): ToolActivity {
         const skillName = skillNameFromPath(readPath);
         return {
           kind: skillName ? "skill" : "read",
-          label: skillName ? `Read ${skillName} skill` : `Read ${baseName(readTarget)}`,
+          label: skillName ? m.activity_read_skill({ name: ltr(skillName) }) : m.activity_read_target({ target: ltr(baseName(readTarget)) }),
           filePath: readPath,
-          labelPrefix: "Read ",
           labelTarget: skillName ? `${skillName} skill` : baseName(readTarget),
         };
       }
@@ -1812,7 +1813,7 @@ function toolActivity(part: ChatPart): ToolActivity {
         || invocation?.name === "ls"
         || (invocation?.name === "rg" && invocation.args.includes("--files")),
       )) {
-        return { kind: "search", label: "Listed files" };
+        return { kind: "search", label: m.chat_panel_listed_files() };
       }
       const searchSegmentIndex = shellInvocations.findIndex((invocation) =>
         invocation?.name === "rg" || invocation?.name === "grep",
@@ -1821,7 +1822,7 @@ function toolActivity(part: ChatPart): ToolActivity {
         const pattern = commandSearchPattern(shellSegments[searchSegmentIndex].raw);
         return {
           kind: "search",
-          label: pattern ? `Searched code for “${pattern}”` : "Searched code",
+          label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
           searchPattern: pattern ?? undefined,
         };
       }
@@ -1831,33 +1832,32 @@ function toolActivity(part: ChatPart): ToolActivity {
         const pattern = gitInvocation?.args.slice(1).find((arg) => !arg.startsWith("-"));
         return {
           kind: "search",
-          label: pattern ? `Searched code for “${pattern}”` : "Searched code",
+          label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
           searchPattern: pattern,
         };
       }
-      if (gitAction === "status") return { kind: "command", label: "Checked Git status" };
-      if (gitAction === "diff") return { kind: "command", label: "Reviewed code changes" };
-      if (gitAction === "log") return { kind: "command", label: "Read Git history" };
+      if (gitAction === "status") return { kind: "command", label: m.chat_panel_checked_git_status() };
+      if (gitAction === "diff") return { kind: "command", label: m.chat_panel_reviewed_code_changes() };
+      if (gitAction === "log") return { kind: "command", label: m.chat_panel_read_git_history() };
       const packageAction = (action: string) => shellInvocations.some((invocation) => {
         if (!invocation || !["cargo", "pnpm", "npm", "yarn"].includes(invocation.name)) return false;
         return invocation.args[0] === action || (invocation.args[0] === "run" && invocation.args[1] === action);
       });
-      if (packageAction("test")) return { kind: "command", label: "Ran tests" };
+      if (packageAction("test")) return { kind: "command", label: m.chat_panel_ran_tests() };
       if (shellInvocations.some((invocation) => invocation?.name === "tsc") || packageAction("typecheck")) {
-        return { kind: "command", label: "Checked types" };
+        return { kind: "command", label: m.chat_panel_checked_types() };
       }
-      if (packageAction("lint")) return { kind: "command", label: "Checked code style" };
-      if (packageAction("build")) return { kind: "command", label: "Built the project" };
-      return { kind: "command", label: `Ran ${command}` };
+      if (packageAction("lint")) return { kind: "command", label: m.chat_panel_checked_code_style() };
+      if (packageAction("build")) return { kind: "command", label: m.chat_panel_built_the_project() };
+      return { kind: "command", label: m.activity_ran_command({ command: ltr(command) }) };
     }
     case "skill": {
       const skillName = inputString(normalizedInput, "skill", "name");
       const filePath = skillName ? nativeOrxSkillPath(tool, skillName) : null;
       return {
         kind: "skill",
-        label: skillName ? `Loaded ${skillName} skill` : "Loaded a skill",
+        label: skillName ? m.activity_loaded_skill({ name: ltr(skillName) }) : m.activity_loaded_a_skill(),
         filePath: filePath ?? undefined,
-        labelPrefix: filePath ? "Loaded " : undefined,
         labelTarget: filePath && skillName ? `${skillName} skill` : undefined,
       };
     }
@@ -1867,15 +1867,14 @@ function toolActivity(part: ChatPart): ToolActivity {
       if (skillName) {
         return {
           kind: "skill",
-          label: `Read ${skillName} skill`,
+          label: m.activity_read_skill({ name: ltr(skillName) }),
           filePath: filePath ?? undefined,
-          labelPrefix: "Read ",
           labelTarget: `${skillName} skill`,
         };
       }
       return target
-        ? { kind: "read", label: `Read ${target}`, filePath: filePath ?? undefined, labelPrefix: "Read ", labelTarget: target }
-        : { kind: "read", label: "Read a file" };
+        ? { kind: "read", label: m.activity_read_target({ target: ltr(target) }), filePath: filePath ?? undefined, labelTarget: target }
+        : { kind: "read", label: m.chat_panel_read_a_file() };
     }
     case "edit":
     case "write":
@@ -1883,46 +1882,52 @@ function toolActivity(part: ChatPart): ToolActivity {
       const change = editChange(normalizedInput);
       const resolvedPath = filePath ?? change?.path ?? null;
       const target = resolvedPath ? baseName(resolvedPath) : null;
-      const verb = change?.type === "add" ? "Created" : change?.type === "delete" ? "Deleted" : "Edited";
+      const label = target
+        ? change?.type === "add"
+          ? m.activity_created_target({ target: ltr(target) })
+          : change?.type === "delete"
+            ? m.activity_deleted_target({ target: ltr(target) })
+            : m.activity_edited_target({ target: ltr(target) })
+        : null;
       return target
-        ? { kind: "edit", label: `${verb} ${target}`, filePath: resolvedPath ?? undefined, labelPrefix: `${verb} `, labelTarget: target }
-        : { kind: "edit", label: "Edited a file" };
+        ? { kind: "edit", label: label ?? m.chat_panel_edited_a_file(), filePath: resolvedPath ?? undefined, labelTarget: target }
+        : { kind: "edit", label: m.chat_panel_edited_a_file() };
     }
     case "grep": {
       const pattern = inputString(normalizedInput, "pattern");
       return {
         kind: "search",
-        label: pattern ? `Searched code for “${pattern}”` : "Searched code",
+        label: pattern ? m.activity_searched_code_for({ pattern: ltr(pattern) }) : m.activity_searched_code(),
         searchPattern: pattern ?? undefined,
       };
     }
     case "glob": {
       const pattern = inputString(normalizedInput, "pattern");
-      return { kind: "search", label: pattern ? `Listed files matching ${pattern}` : "Listed files" };
+      return { kind: "search", label: pattern ? m.activity_listed_files_matching({ pattern: ltr(pattern) }) : m.chat_panel_listed_files() };
     }
     case "websearch": {
       const query = inputString(normalizedInput, "query");
       const url = inputString(normalizedInput, "url");
       const pattern = inputString(normalizedInput, "pattern");
-      if (query) return { kind: "web", label: `Searched the web for “${query}”` };
-      if (pattern && url) return { kind: "web", label: `Searched “${pattern}” on a page` };
-      if (url) return { kind: "web", label: `Opened ${url}` };
-      return { kind: "web", label: description ?? "Browsed the web" };
+      if (query) return { kind: "web", label: m.activity_searched_web({ query }) };
+      if (pattern && url) return { kind: "web", label: m.activity_searched_on_page({ pattern }) };
+      if (url) return { kind: "web", label: m.activity_opened_target({ target: ltr(url) }) };
+      return { kind: "web", label: description ?? m.chat_panel_browsed_the_web() };
     }
     case "webfetch": {
       const url = inputString(normalizedInput, "url");
-      return { kind: "web", label: url ? `Read ${url}` : description ?? "Read a web page" };
+      return { kind: "web", label: url ? m.activity_read_target({ target: ltr(url) }) : description ?? m.activity_read_web_page() };
     }
     case "task":
       // Always the task description — the row is the sub-agent's identity;
       // liveness is the shimmer, and the current step lives in its tab.
-      return { kind: "agent", label: description ?? "Ran a subagent" };
+      return { kind: "agent", label: description ?? m.activity_ran_subagent() };
     case "subagent":
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
-      return { kind: "command", label: "Tool failed" };
+      return { kind: "command", label: m.chat_panel_tool_failed() };
     case "interrupted":
-      return { kind: "command", label: "Tool was interrupted" };
+      return { kind: "command", label: m.chat_panel_tool_was_interrupted() };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
@@ -1936,38 +1941,36 @@ function toolActivity(part: ChatPart): ToolActivity {
  * Claude rows show the task description — with the generic verb phrasing as
  * the fallback. */
 function subagentLine(input: Record<string, unknown>): string {
-  const trim = (s: string) => (s.length > 60 ? `${s.slice(0, 60)}…` : s);
-  const prompt = typeof input.prompt === "string" && input.prompt ? ` — “${trim(input.prompt)}”` : "";
   const nickname = typeof input.nickname === "string" && input.nickname
     ? input.nickname.replace(/[_-]+/g, " ")
     : "";
   // Sentence-cased for label-initial use; the bare snake_case name stays
   // lowercase when composed mid-sentence ("Sent input to audit experiments").
   const nickLabel = nickname && nickname.charAt(0).toUpperCase() + nickname.slice(1);
-  // collabAgentToolCall carries `tool`; subAgentActivity carries `kind`.
+  if (nickLabel) return nickLabel;
   switch (typeof input.tool === "string" ? input.tool : "") {
     case "spawnAgent":
-      return nickLabel || `Spawned agent${prompt}`;
+      return m.activity_spawned_agent();
     case "sendInput":
-      return nickname ? `Sent input to ${nickname}` : `Sent input to agent${prompt}`;
+      return m.activity_sent_input_to_agent();
     case "resumeAgent":
-      return nickname ? `Resumed ${nickname}` : "Resumed agent";
+      return m.activity_resumed_agent();
     case "wait":
-      return `Waiting on ${nickname || "agent"}`;
+      return m.activity_waiting_on_agent();
     case "closeAgent":
-      return `Closed ${nickname || "agent"}`;
+      return m.activity_closed_agent();
   }
   switch (typeof input.kind === "string" ? input.kind : "") {
     case "started":
-      return nickLabel || "Sub-agent started";
+      return m.activity_subagent_started();
     case "interacted":
       // Codex's cross-agent interaction marker — in practice, the agent
       // handing its report up when it finishes.
-      return nickname ? `${nickLabel} reported back` : "Agent reported back";
+      return m.activity_agent_reported_back();
     case "interrupted":
-      return nickname ? `${nickLabel} interrupted` : "Sub-agent interrupted";
+      return m.activity_subagent_interrupted();
   }
-  return nickLabel || "Sub-agent";
+  return m.activity_subagent();
 }
 
 function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity; className?: string }) {
@@ -2050,7 +2053,7 @@ function ToolTargetOverflow({
       <button
         className="tool-target-more"
         aria-expanded={open}
-        aria-label={open ? `Hide additional ${targetType}` : `Show ${items.length} more ${targetType}`}
+        aria-label={open ? m.a11y_hide_additional({ target: targetType }) : m.a11y_show_more_targets({ count: fmtNumber(items.length), target: targetType })}
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -2058,7 +2061,7 @@ function ToolTargetOverflow({
           setOpen((value) => !value);
         }}
       >
-        {open ? "show less" : `+ ${items.length} more`}
+        {open ? m.common_show_less() : m.common_more_count({ count: fmtNumber(items.length) })}
       </button>
     </span>
   );
@@ -2082,23 +2085,7 @@ function ToolActivityLabel({
   experimentName?: (experimentId: string) => string;
 }) {
   if (activity.searchPattern) {
-    const patternStart = activity.label.indexOf(activity.searchPattern);
-    const prefix = patternStart >= 0 ? activity.label.slice(0, patternStart) : "Searched code for “";
-    const suffix = patternStart >= 0
-      ? activity.label.slice(patternStart + activity.searchPattern.length)
-      : "”";
-    return (
-      <>
-        {prefix}
-        {activity.searchPattern.split(/([|/_-])/).map((segment, index) => (
-          <span key={`${index}-${segment}`}>
-            {segment}
-            {/^[|/_-]$/.test(segment) && <wbr />}
-          </span>
-        ))}
-        {suffix}
-      </>
-    );
+    return activity.label;
   }
   if (activity.litCall?.kind === "paper" && activity.litCall.id) {
     return (
@@ -2109,52 +2096,48 @@ function ToolActivityLabel({
         rel="noopener noreferrer"
       >
         {activity.label}
-        <ArrowUpRight className="inline ml-1 opacity-50" size={13} aria-hidden="true" />
+        <ArrowUpRight className="inline ms-1 opacity-50" size={13} aria-hidden="true" />
       </a>
     );
   }
   if (activity.filePath && activity.labelTarget && onOpenFile) {
     const filePath = activity.filePath;
     return (
-      <>
-        {activity.labelPrefix}
-        <span
-          className="tool-target"
-          role="button"
-          tabIndex={0}
-          {...tabOpenGestureHandlers<HTMLSpanElement>((intent) =>
-            onOpenFile(filePath, undefined, undefined, activity.fileRef, intent),
-          { stopPropagation: true })}
-        >
-          {activity.labelTarget}
-        </span>
-      </>
+      <span
+        className="tool-target"
+        role="button"
+        tabIndex={0}
+        {...tabOpenGestureHandlers<HTMLSpanElement>((intent) =>
+          onOpenFile(filePath, undefined, undefined, activity.fileRef, intent),
+        { stopPropagation: true })}
+      >
+        {activity.label}
+      </span>
     );
   }
   if (activity.spawnedSessionIds?.length && onOpenSpawnedSession) {
     const sessionIds = activity.spawnedSessionIds;
-    const single = sessionIds.length === 1;
     const visibleSessionIds = sessionIds.slice(0, 3);
     const hiddenSessions = sessionIds.slice(visibleSessionIds.length).map((sessionId, index) => ({
       id: sessionId,
-      label: `agent ${visibleSessionIds.length + index + 1}`,
+      label: m.chat_agent_number({ number: fmtNumber(visibleSessionIds.length + index + 1) }),
     }));
     return (
       <>
-        {single ? "Delegated a task to " : "Delegated tasks to "}
+        {activity.label}{" — "}
         {visibleSessionIds.map((sessionId, index) => (
           <span key={sessionId}>
             {index > 0 && ", "}
             <button
               className="tool-target"
-              title="Open the session this agent spawned"
+              title={m.chat_panel_open_the_session_this_agent_spawned()}
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 onOpenSpawnedSession(sessionId);
               }}
             >
-              {single ? "a new agent" : `agent ${index + 1}`}
+              {m.chat_agent_number({ number: fmtNumber(index + 1) })}
             </button>
           </span>
         ))}
@@ -2164,7 +2147,7 @@ function ToolActivityLabel({
             <ToolTargetOverflow
               items={hiddenSessions}
               onSelect={onOpenSpawnedSession}
-              targetType="agent sessions"
+              targetType={m.chat_agent_sessions()}
             />
           </>
         )}
@@ -2176,37 +2159,36 @@ function ToolActivityLabel({
       ? activity.runIds.filter((runId) => Boolean(runExperimentName(runId)))
       : activity.runIds;
     if (runIds.length === 0) return activity.label;
-    const multiple = runIds.length > 1;
     const visibleRunIds = runIds.slice(0, 3);
     const hiddenRuns = runIds.slice(visibleRunIds.length).map((runId) => ({
       id: runId,
-      label: runExperimentName?.(runId) || "Experiment",
+      label: runExperimentName?.(runId) || m.tree_experiment(),
     }));
     return (
       <>
-        {multiple ? "Reviewed run logs for " : "Reviewed run log "}
+        {activity.label}{" — "}
         {visibleRunIds.map((runId, index) => (
           <span key={runId}>
             {index > 0 && ", "}
             {onOpenRun ? (
               <button
                 className="tool-target"
-                title={`Open logs for run ${runId}`}
+                title={m.a11y_open_logs_for_run({ run: ltr(runId) })}
                 {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                   onOpenRun(runId, intent),
                 { stopPropagation: true })}
               >
-                {runExperimentName?.(runId) || "Experiment"}
+                {runExperimentName?.(runId) || m.tree_experiment()}
               </button>
             ) : (
-              <span>{runExperimentName?.(runId) || "Experiment"}</span>
+              <span>{runExperimentName?.(runId) || m.tree_experiment()}</span>
             )}
           </span>
         ))}
         {hiddenRuns.length > 0 && (
           <>
             {", "}
-            <ToolTargetOverflow items={hiddenRuns} onOpen={onOpenRun} targetType="run logs" />
+            <ToolTargetOverflow items={hiddenRuns} onOpen={onOpenRun} targetType={m.chat_run_logs()} />
           </>
         )}
       </>
@@ -2220,32 +2202,32 @@ function ToolActivityLabel({
     const visibleExperimentIds = experimentIds.slice(0, 3);
     const hiddenExperiments = experimentIds.slice(visibleExperimentIds.length).map((experimentId) => ({
       id: experimentId,
-      label: experimentName?.(experimentId) || "Experiment",
+      label: experimentName?.(experimentId) || m.tree_experiment(),
     }));
     return (
       <>
-        {activity.label} for {visibleExperimentIds.map((experimentId, index) => (
+        {activity.label}{" — "}{visibleExperimentIds.map((experimentId, index) => (
           <span key={experimentId}>
             {index > 0 && ", "}
             {onOpenExperiment ? (
               <button
                 className="tool-target"
-                title={`Open experiment ${experimentName?.(experimentId) || ""}`.trim()}
+                title={m.a11y_open_experiment({ name: experimentName?.(experimentId) || ltr(experimentId) })}
                 {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                   onOpenExperiment(experimentId, intent),
                 { stopPropagation: true })}
               >
-                {experimentName?.(experimentId) || "Experiment"}
+                {experimentName?.(experimentId) || m.tree_experiment()}
               </button>
             ) : (
-              <span>{experimentName?.(experimentId) || "Experiment"}</span>
+              <span>{experimentName?.(experimentId) || m.tree_experiment()}</span>
             )}
           </span>
         ))}
         {hiddenExperiments.length > 0 && (
           <>
             {", "}
-            <ToolTargetOverflow items={hiddenExperiments} onOpen={onOpenExperiment} targetType="experiments" />
+            <ToolTargetOverflow items={hiddenExperiments} onOpen={onOpenExperiment} targetType={m.chat_experiments()} />
           </>
         )}
       </>
@@ -2254,62 +2236,21 @@ function ToolActivityLabel({
   return activity.label;
 }
 
-function summarizeToolGroup(activities: ToolActivity[]): string {
-  const count = (kind: ToolActivityKind) => activities.filter((activity) => activity.kind === kind).length;
-  const clauses: string[] = [];
-  const paperReads = activities.filter((activity) => activity.litCall?.kind === "paper").length;
-  const literatureSearches = activities.filter((activity) => activity.litCall?.kind === "discover").length;
-  const reads = activities.filter((activity) => activity.kind === "read" && activity.litCall?.kind !== "paper").length;
-  const searches = activities.filter((activity) => activity.kind === "search" && activity.litCall?.kind !== "discover").length;
-  const edits = count("edit");
-  const projects = count("project");
-  const web = count("web");
-  const commands = count("command");
-  const agents = count("agent");
-  const skillActions = activities
-    .filter((activity) => activity.kind === "skill")
-    .map((activity) => `${activity.label[0].toLowerCase()}${activity.label.slice(1)}`);
-
-  if (skillActions.length) clauses.push(skillActions.join(skillActions.length === 2 ? " and " : ", "));
-  if (reads) clauses.push(reads === 1 ? "read a file" : "read files");
-  if (paperReads) clauses.push(paperReads === 1 ? "read a paper" : "read papers");
-  if (searches) clauses.push("searched code");
-  if (literatureSearches) clauses.push("searched literature");
-  if (edits) clauses.push(edits === 1 ? "edited a file" : "edited files");
-  if (projects) clauses.push("reviewed project data");
-  if (web) clauses.push("browsed the web");
-  if (commands) clauses.push(commands === 1 ? "ran a command" : "ran commands");
-  if (agents) clauses.push(agents === 1 ? "worked with a subagent" : "worked with subagents");
-  const summary = clauses.join(", ");
-  return summary ? `${summary[0].toUpperCase()}${summary.slice(1)}` : "Used tools";
+function summarizeToolGroup(_activities: ToolActivity[]): string {
+  return m.chat_panel_used_tools();
 }
 
 function activityInProgress(activity: ToolActivity): ToolActivity {
-  const replacements: Array<[RegExp, string]> = [
-    [/^Reviewed run logs?/, activity.label.startsWith("Reviewed run logs") ? "Reading run logs" : "Reading run log"],
-    [/^Reviewed /, "Reviewing "],
-    [/^Read /, "Reading "],
-    [/^Searched /, "Searching "],
-    [/^Listed /, "Listing "],
-    [/^Edited /, "Editing "],
-    [/^Updated /, "Updating "],
-    [/^Created /, "Creating "],
-    [/^Deleted /, "Deleting "],
-    [/^Loaded /, "Loading "],
-    [/^Ran /, "Running "],
-    [/^Started /, "Starting "],
-    [/^Waited /, "Waiting "],
-    [/^Checked /, "Checking "],
-    [/^Built /, "Building "],
-    [/^Cancelled /, "Cancelling "],
-    [/^Delegated /, "Delegating "],
-  ];
-  let label = activity.label;
-  for (const [pattern, replacement] of replacements) {
-    if (!pattern.test(label)) continue;
-    label = label.replace(pattern, replacement);
-    break;
-  }
+  const label = {
+    skill: m.activity_loading(),
+    read: m.activity_reading(),
+    search: m.activity_searching(),
+    edit: m.activity_editing(),
+    project: m.activity_reviewing(),
+    web: m.activity_browsing(),
+    agent: m.activity_delegating(),
+    command: m.activity_running(),
+  }[activity.kind];
   return { ...activity, label };
 }
 
@@ -2320,49 +2261,23 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     tool,
     state: { status: "running", input },
   });
-  const replacements: Array<[RegExp, string]> = [
-    [/^Reviewed /, "Review "],
-    [/^Searched /, "Search "],
-    [/^Listed /, "List "],
-    [/^Edited /, "Edit "],
-    [/^Updated /, "Update "],
-    [/^Created /, "Create "],
-    [/^Deleted /, "Delete "],
-    [/^Loaded /, "Load "],
-    [/^Delegated /, "Delegate "],
-    [/^Ran /, "Run "],
-    [/^Started /, "Start "],
-    [/^Waited /, "Wait "],
-    [/^Checked /, "Check "],
-    [/^Built /, "Build "],
-    [/^Cancelled /, "Cancel "],
-  ];
-  for (const [pattern, replacement] of replacements) {
-    if (pattern.test(activity.label)) return activity.label.replace(pattern, replacement);
-  }
-  return activity.label;
+  return {
+    skill: m.activity_load(),
+    read: m.activity_read(),
+    search: m.activity_search(),
+    edit: m.activity_edit(),
+    project: m.activity_review(),
+    web: m.activity_browse(),
+    agent: m.activity_delegate(),
+    command: m.activity_run(),
+  }[activity.kind];
 }
 
 function resolvedActivityLabel(
   activity: ToolActivity,
-  runExperimentName?: (runId: string) => string,
-  experimentName?: (experimentId: string) => string,
+  _runExperimentName?: (runId: string) => string,
+  _experimentName?: (experimentId: string) => string,
 ): string {
-  const summarizedNames = (names: string[]) => {
-    const visible = names.slice(0, 3);
-    const remaining = names.length - visible.length;
-    return `${visible.join(", ")}${remaining > 0 ? `, + ${remaining} more` : ""}`;
-  };
-  if (activity.runIds?.length) {
-    const names = activity.runIds.map((runId) => runExperimentName?.(runId) || "").filter(Boolean);
-    if (names.length === 0) return activity.label;
-    return `${activity.label}${names.length > 1 ? " for " : " "}${summarizedNames(names)}`;
-  }
-  if (activity.experimentIds?.length) {
-    const names = activity.experimentIds.map((experimentId) => experimentName?.(experimentId) || "").filter(Boolean);
-    if (names.length === 0) return activity.label;
-    return `${activity.label} for ${summarizedNames(names)}`;
-  }
   return activity.label;
 }
 
@@ -2439,7 +2354,7 @@ function groupIconActivity(activities: ToolActivity[]): ToolActivity {
     const activity = activities.find((candidate) => candidate.kind === kind);
     if (activity) return activity;
   }
-  return activities[0] ?? { kind: "command", label: "Used tools" };
+  return activities[0] ?? { kind: "command", label: m.chat_panel_used_tools() };
 }
 
 interface SquashedToolPart {
@@ -2513,8 +2428,8 @@ function TurnStatusRow({
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
   if ((action !== "retry" && action !== "continue") || !turnId) return null;
-  const label = action === "retry" ? "Retry" : "Continue";
-  const errorMessage = cleanToolError(part.state?.error || "This turn did not finish.");
+  const label = action === "retry" ? m.app_retry() : m.chat_continue();
+  const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
     <div className="turn-recovery-row flex items-center justify-between gap-2 py-1.5 px-2.5 border border-border rounded-md bg-background">
       <span className="min-w-0 truncate text-sm text-accent-red" title={errorMessage}>
@@ -2526,7 +2441,7 @@ function TurnStatusRow({
         disabled={busy || recovering}
         onClick={() => onRecover?.(turnId, action)}
       >
-        {recovering ? "Starting…" : label}
+        {recovering ? m.chat_starting() : label}
       </button>
     </div>
   );
@@ -2562,7 +2477,7 @@ function ToolRow({
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
   const line = (
     <>
-      {failed && <span className="sr-only">Failed: </span>}
+      {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {failed ? (
         <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon shrink-0 text-accent-red self-start mt-[5px]" aria-hidden="true" />
       ) : (
@@ -2579,7 +2494,7 @@ function ToolRow({
           experimentName={experimentName}
         />
         {repeatCount > 1 && (
-          <span className="tool-repeat-count ml-1 text-muted font-normal" title={`${repeatCount} consecutive identical calls`}>
+          <span className="tool-repeat-count ms-1 text-muted font-normal" title={m.a11y_identical_calls({ count: fmtNumber(repeatCount) })}>
             ×{repeatCount}
           </span>
         )}
@@ -2600,14 +2515,14 @@ function ToolRow({
           className="tool-row-detail-toggle shrink-0 inline-flex items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
           aria-expanded={detailOpen}
           aria-controls={detailId}
-          aria-label={`${detailOpen ? "Hide" : "Show"} error details for ${activity.label}`}
+          aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
           onClick={() => setDetailOpen((current) => !current)}
         >
           <ChevronRight size={12} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
       </div>
       {detailOpen && (
-        <div className="tool-detail mt-1 mr-0 mb-1 ml-6" id={detailId}>
+        <div className="tool-detail mt-1 me-0 mb-1 ms-6" id={detailId}>
           <div className="tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">
             {errorMessage.slice(0, 20000)}
           </div>
@@ -2646,10 +2561,10 @@ function ToolGroup({
     ? (tailPart && activityInProgress(toolActivity(tailPart))) ?? null
     : null;
   // A running call is unclassified while its input hasn't streamed in (or its
-  // command is still blank) — its label would be a generic "Running a command"
+  // command is still blank) — its generic label would immediately re-resolve,
   // that re-resolves moments later, so the header holds the prior label instead.
   const tailUnclassified = !!tailPart && tailPart.state?.status === "running" &&
-    (emptyToolInput(tailPart.state?.input) || rawPending?.label === "Running a command");
+    (emptyToolInput(tailPart.state?.input) || (rawPending?.kind === "command" && !inputString(tailPart.state?.input ?? {}, "command", "cmd")));
   const pendingActivity = useDwelledActivity(rawPending, tailUnclassified);
   const shimmering = useDelayedToolShimmer(pendingActivity != null);
   const summary = summarizeToolGroup(activities);
@@ -2699,7 +2614,7 @@ function ToolGroup({
   const expanded = open;
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-lg text-subtext text-left">
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-lg text-subtext text-start">
         <ToolActivityIcon activity={iconActivity} className={`${shimmering ? "tool-running-shimmer-icon" : "text-muted"} mt-[5px]`} />
         {pendingActivity ? (
           <span
@@ -2719,7 +2634,7 @@ function ToolGroup({
         ) : (
           <button
             type="button"
-            className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-left"
+            className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
             onClick={() => setOpen((value) => !value)}
             aria-expanded={expanded}
           >
@@ -2731,7 +2646,7 @@ function ToolGroup({
           className="tool-group-chevron-button inline-flex items-center justify-center self-center shrink-0 p-px cursor-pointer rounded-sm"
           onClick={() => setOpen((value) => !value)}
           aria-expanded={expanded}
-          aria-label={expanded ? "Collapse tool activity" : "Expand tool activity"}
+            aria-label={expanded ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
           <ChevronRight size={16} className={`tool-chevron text-muted transition-[transform,color] duration-120 ease-standard [&.open]:rotate-90 ${expanded ? "open" : ""}`} />
         </button>
@@ -2742,7 +2657,7 @@ function ToolGroup({
         inert={!expanded}
       >
         <div className="tool-group-disclosure-inner">
-          <div className="tool-group-rows flex flex-col gap-px mt-0.5 mr-0 mb-1 ml-6">
+          <div className="tool-group-rows flex flex-col gap-px mt-0.5 me-0 mb-1 ms-6">
             {displayParts.map(({ part, count }) => (
               <ToolRow
                 key={part.id}
@@ -2793,24 +2708,24 @@ function PromptCard({
     if (p.kind === "permission") return null;
     if (p.kind === "plan") {
       const outcome = p.approved === true
-        ? { label: "Plan approved", icon: Check, iconClass: "text-accent-green" }
+        ? { label: m.chat_panel_plan_approved(), icon: Check, iconClass: "text-accent-green" }
         : p.approved === false && p.note
-          ? { label: "Plan revision requested", icon: Pencil, iconClass: "text-accent-amber" }
+          ? { label: m.chat_panel_plan_revision_requested(), icon: Pencil, iconClass: "text-accent-amber" }
           : p.approved === false
-            ? { label: "Plan rejected", icon: X, iconClass: "text-accent-red" }
-            : { label: "Plan resolved", icon: FileText, iconClass: "text-muted" };
+            ? { label: m.chat_panel_plan_rejected(), icon: X, iconClass: "text-accent-red" }
+            : { label: m.chat_panel_plan_resolved(), icon: FileText, iconClass: "text-muted" };
       const OutcomeIcon = outcome.icon;
       return (
         <details className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
             <span className="plan-resolved-label text-lg font-[375] wrap-anywhere">
-              {p.synthesized ? "Plan" : "Proposed plan"}
+              {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
             </span>
             <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
             <span className="plan-resolved-label prompt-outcome text-lg font-[375] wrap-anywhere">{outcome.label}</span>
-            <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
+            <ChevronRight size={12} className="rtl-mirror plan-chevron shrink-0 text-muted" />
           </summary>
-          <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ml-6`}>
+          <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
             {p.note && <div className="prompt-collapsed-note mt-1.5 italic">{p.note}</div>}
           </div>
@@ -2830,14 +2745,14 @@ function PromptCard({
         {annotations.length > 0 && <AnnotationsPopover annotations={annotations} variant="sent" />}
         <details className={PROMPT_COLLAPSED_CLASS_NAME}>
           <summary>
-            <span className="prompt-collapsed-title font-[375] wrap-anywhere">{p.header || p.question || "Question"}</span>
-            <span className={`prompt-outcome font-[375] text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || "Resolved"}</span>
+            <span className="prompt-collapsed-title font-[375] wrap-anywhere">{p.header || p.question || m.chat_question()}</span>
+            <span className={`prompt-outcome font-[375] text-subtext wrap-anywhere [&.approved]:text-accent-green [&.chosen]:text-accent-green [&.approved::before]:content-['✓_'] [&.chosen::before]:content-['✓_'] [&.revised]:text-accent-amber [&.rejected]:text-accent-amber ${chosen ? "chosen" : ""}`}>{chosen || m.chat_resolved()}</span>
           </summary>
           <div className={PROMPT_COLLAPSED_BODY_CLASS_NAME}>
             {/* The summary title already shows the question when there's no header. */}
             {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
             {(p.options ?? []).length > 0 && (
-              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 pl-4.5 [&_.sel]:text-text [&_.sel]:font-semibold">
+              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-semibold">
                 {(p.options ?? []).map((o) => (
                   <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
                     {o.label}
@@ -2861,9 +2776,9 @@ function PromptCard({
     // harness-agnostic permission-mode wire ids).
     const docked = !!onOpenPlan;
     return (
-      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-l-[3px] border-l-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-l-accent-blue [&.permission]:border-l-accent-amber [&.question]:border-l-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
+      <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
         <div className="prompt-head text-lg font-semibold text-text">
-          {p.synthesized ? "Plan mode — ready to proceed?" : "Proposed plan"}
+          {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
         <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
           <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
@@ -2875,7 +2790,7 @@ function PromptCard({
               onOpenPlan(p.plan ?? "", part.id, intent),
             )}
           >
-            View full plan
+            {m.chat_panel_view_full_plan()}
           </button>
         )}
         {/* Strip-less fallback (unreachable in the main app — App always
@@ -2883,13 +2798,13 @@ function PromptCard({
         {!done && !docked && (
           <div className={PROMPT_ACTIONS_CLASS_NAME}>
             <button className="btn-primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
-              Accept and auto mode
+              {m.chat_panel_accept_and_auto_mode()}
             </button>
             <button className="btn-ghost" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
-              Accept and bypass all
+              {m.chat_panel_accept_and_bypass_all()}
             </button>
             <button className="btn-ghost" onClick={() => respond({ approve: false })}>
-              Reject
+              {m.chat_panel_reject()}
             </button>
           </div>
         )}
@@ -2919,7 +2834,7 @@ function PromptCard({
           <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent-amber-subtle text-accent-amber">
             <TriangleAlert size={15} strokeWidth={1.8} aria-hidden="true" />
           </span>
-          <span id={headingId} className="text-base font-semibold text-text">Approval required</span>
+          <span id={headingId} className="text-base font-semibold text-text">{m.chat_panel_approval_required()}</span>
         </div>
         <div className="flex flex-col gap-3 px-3.5 py-3">
           <div className="prompt-sub text-base font-normal leading-normal text-text wrap-anywhere">{explanation}</div>
@@ -2938,13 +2853,13 @@ function PromptCard({
                 className="rounded-sm border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-subtext transition-[background,color] duration-80 ease-standard hover:bg-surface hover:text-text"
                 onClick={() => respond({ approve: false })}
               >
-                Deny
+                {m.chat_panel_deny()}
               </button>
               <button
                 className="rounded-sm border border-text bg-text px-3 py-1.5 text-sm font-semibold text-background transition-opacity duration-80 ease-standard hover:opacity-85"
                 onClick={() => respond({ approve: true })}
               >
-                Allow
+                {m.chat_panel_allow()}
               </button>
             </div>
           )}
@@ -2963,7 +2878,7 @@ function PromptCard({
         : [label],
     );
   return (
-    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-l-[3px] border-l-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-l-accent-blue [&.permission]:border-l-accent-amber [&.question]:border-l-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
+    <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 question ${done ? "readonly" : ""}`}>
       {p.header && <div className={PROMPT_HEAD_CLASS_NAME}>{p.header}</div>}
       {p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
       <div className="prompt-options flex flex-col gap-1.5">
@@ -2972,7 +2887,7 @@ function PromptCard({
           return (
             <button
               key={o.label}
-              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-left border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
+              className={`prompt-option flex flex-col items-start gap-0.5 w-full py-2 px-[11px] text-start border border-border rounded-sm bg-background text-text cursor-pointer transition-[border-color,background] duration-80 ease-standard [&:hover:not(:disabled)]:border-border-strong [&:hover:not(:disabled)]:bg-surface [&.sel]:border-primary [&.sel]:bg-primary-subtle [&:disabled]:cursor-default ${sel ? "sel" : ""}`}
               disabled={done}
               onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
             >
@@ -2989,7 +2904,7 @@ function PromptCard({
             disabled={picked.length === 0}
             onClick={() => respond({ answers: picked })}
           >
-            Submit
+            {m.chat_panel_submit()}
           </button>
         </div>
       )}
@@ -3095,31 +3010,31 @@ function ForkControls({
         <>
           <button
             className={FORK_BUTTON_CLASS_NAME}
-            title="Previous version"
-            aria-label="Previous version"
+            title={m.chat_panel_previous_version()}
+            aria-label={m.chat_panel_previous_version()}
             disabled={pagerDisabled || !prevId}
             onClick={() => prevId && onSelect(prevId)}
           >
-            <ChevronLeft size={14} />
+            <ChevronLeft size={14} className="rtl-mirror" />
           </button>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
           <button
             className={FORK_BUTTON_CLASS_NAME}
-            title="Next version"
-            aria-label="Next version"
+            title={m.chat_panel_next_version()}
+            aria-label={m.chat_panel_next_version()}
             disabled={pagerDisabled || !nextId}
             onClick={() => nextId && onSelect(nextId)}
           >
-            <ChevronRight size={14} />
+            <ChevronRight size={14} className="rtl-mirror" />
           </button>
         </>
       )}
       <button
         className={FORK_BUTTON_CLASS_NAME}
-        title="Edit and re-send"
-        aria-label="Edit and re-send"
+        title={m.chat_panel_edit_and_re_send()}
+        aria-label={m.chat_panel_edit_and_re_send()}
         disabled={editDisabled}
         onClick={onEdit}
       >
@@ -3225,7 +3140,7 @@ const Message = memo(function Message({
           <div className="msg-user-edit w-full bg-surface rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
               className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
-              aria-label="Edit message"
+              aria-label={m.chat_panel_edit_message()}
               value={editDraft}
               autoFocus
               onChange={(e) => setEditDraft(e.target.value)}
@@ -3241,14 +3156,14 @@ const Message = memo(function Message({
             />
             <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end`}>
               <button className="btn-ghost" onClick={() => setEditDraft(null)}>
-                Cancel
+                {m.chat_panel_cancel()}
               </button>
               <button
                 className="btn-primary"
                 onClick={submit}
                 disabled={forkDisabled || !editDraft.trim()}
               >
-                Send
+                {m.chat_panel_send()}
               </button>
             </div>
           </div>
@@ -3260,13 +3175,13 @@ const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:mr-0.5 [&_.skill-chip]:align-baseline">
+        <div className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:me-0.5 [&_.skill-chip]:align-baseline">
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
               {images.map((a, i) => (
                 <a key={i} href={a.src} target="_blank" rel="noreferrer">
-                  <img src={a.src} alt="attachment" />
+                  <img src={a.src} alt={m.chat_attachment_alt()} />
                 </a>
               ))}
             </div>
@@ -3445,8 +3360,8 @@ function renderParts(
         <div
           key={part.id}
           role="note"
-          aria-label="You, mid-task"
-          className="msg-steer my-2 ml-auto w-fit max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
+          aria-label={m.chat_panel_you_mid_task()}
+          className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
         >
           {part.text}
         </div>,
@@ -3488,7 +3403,7 @@ function spawnFinalReport(part: ChatPart): string {
 }
 
 /** Find a part by id anywhere in a parts tree (depth-first). Used by the
- * right-pane sub-agent tab to locate a spawn part across a session's messages. */
+ * end-pane sub-agent tab to locate a spawn part across a session's messages. */
 export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
   for (const part of parts) {
     if (part.id === id) return part;
@@ -3498,7 +3413,7 @@ export function findPartById(parts: ChatPart[], id: string): ChatPart | null {
   return null;
 }
 
-/** The sub-agent's transcript, rendered standalone in the right-pane tab (the
+/** The sub-agent's transcript, rendered standalone in the end-pane tab (the
  * only place the transcript is shown — the inline row just opens this). Reuses
  * `renderParts`, so nested sub-agents are themselves click-to-open rows. */
 export function SubagentTranscript({
@@ -3545,14 +3460,14 @@ export function SubagentTranscript({
   const finalReport = hasProseChild ? "" : spawnFinalReport(spawn);
   return (
     <div className="msg-assistant text-lg leading-[1.62] text-text min-w-0">
-      {errored && <span className="sr-only">Failed: </span>}
+      {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
         <div className="tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">
           {errorMessage.slice(0, 20000)}
         </div>
       )}
       {rendered.length === 0 && !finalReport && !errorMessage ? (
-        <div className="subagent-empty py-[3px] px-1 text-md text-muted">{running ? "Working…" : "No activity"}</div>
+        <div className="subagent-empty py-[3px] px-1 text-md text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
       ) : (
         <>
           {rendered}
@@ -3589,7 +3504,7 @@ function SubagentBlock({
   const inert = (part.children?.length ?? 0) === 0 && !errored && !spawnFinalReport(part);
   const line = (
     <>
-      {errored && <span className="sr-only">Failed: </span>}
+      {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
         <CircleX size={16} strokeWidth={1.75} className="subagent-icon shrink-0 text-accent-red" aria-hidden="true" />
       ) : (
@@ -3605,22 +3520,22 @@ function SubagentBlock({
   // children — offering a transcript there opens an empty pane.
   if (inert) {
     return (
-      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-lg text-left rounded-sm [&_.tool-line]:text-lg">
+      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-lg text-start rounded-sm [&_.tool-line]:text-lg">
         {line}
       </div>
     );
   }
   return (
     <button
-      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-lg text-left rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-lg"
-      title={errored && errorMessage ? errorMessage : "Open sub-agent transcript"}
+      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-lg text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-lg"
+      title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
       )}
       disabled={!onOpenSubagent}
     >
       {line}
-      <ChevronRight size={12} className="subagent-row-chevron shrink-0 text-muted" />
+      <ChevronRight size={12} className="rtl-mirror subagent-row-chevron shrink-0 text-muted" />
     </button>
   );
 }
@@ -3703,7 +3618,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (!previous.current || previous.current.transcript !== transcript) {
       previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
       setAnnouncement((current) => ({
-        text: pendingPermission ? `Approval required: ${pendingPermission.label}` : "",
+        text: pendingPermission ? m.announcement_approval_required({ label: pendingPermission.label }) : "",
         sequence: current.sequence + 1,
       }));
       return;
@@ -3714,7 +3629,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
     if (pendingPermission && pendingPermission.path !== previousPermissionPath) {
       setAnnouncement((current) => ({
-        text: `Approval required: ${pendingPermission.label}`,
+        text: m.announcement_approval_required({ label: pendingPermission.label }),
         sequence: current.sequence + 1,
       }));
       return;
@@ -3723,14 +3638,14 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (turnStatus?.id === "turn-recovery") {
       const action = parseRecoveryAction(turnStatus.state?.input?.recoveryAction);
       setAnnouncement((current) => ({
-        text: `Turn did not finish.${action ? ` ${action === "retry" ? "Retry" : "Continue"} is available.` : ""}`,
+        text: `${m.announcement_turn_incomplete()}${action ? ` ${action === "retry" ? m.announcement_retry_available() : m.announcement_continue_available()}` : ""}`,
         sequence: current.sequence + 1,
       }));
       return;
     }
     if (turnStatus?.id === "turn-retry") {
       setAnnouncement((current) => ({
-        text: "The CLI is retrying the turn.",
+        text: m.announcement_cli_retrying(),
         sequence: current.sequence + 1,
       }));
       return;
@@ -3739,7 +3654,9 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (failures.length > 0) {
       const labels = failures.slice(0, 2).map(([, state]) => toolActivity(state.part).label).join(", ");
       setAnnouncement((current) => ({
-        text: `${failures.length === 1 ? "Tool activity failed" : `${failures.length} tool activities failed`}: ${labels}`,
+        text: failures.length === 1
+          ? m.announcement_tool_failed({ labels })
+          : m.announcement_tools_failed({ count: fmtNumber(failures.length), labels }),
         sequence: current.sequence + 1,
       }));
       return;
@@ -3748,13 +3665,13 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (running.length > 0) {
       const part = running.at(-1)?.[1].part;
       setAnnouncement((current) => ({
-        text: part ? activityInProgress(toolActivity(part)).label : "Running a tool",
+        text: part ? activityInProgress(toolActivity(part)).label : m.announcement_running_tool(),
         sequence: current.sequence + 1,
       }));
       return;
     }
     if (changes.some(([, state]) => state.status === "completed")) {
-      setAnnouncement((current) => ({ text: "Tool activity completed", sequence: current.sequence + 1 }));
+      setAnnouncement((current) => ({ text: m.announcement_tool_completed(), sequence: current.sequence + 1 }));
     }
   }, [messages]);
   return announcement;
@@ -3894,10 +3811,10 @@ const matchesFilter = (filter: SessionFilter, archived: boolean) =>
   filter === "all" ? true : filter === "archived" ? archived : !archived;
 
 /** Menu label + rail section heading per filter — "Recents" for the default view. */
-const SESSION_FILTERS: { id: SessionFilter; label: string; railLabel: string }[] = [
-  { id: "active", label: "Active", railLabel: "Recents" },
-  { id: "archived", label: "Archived", railLabel: "Archived" },
-  { id: "all", label: "All", railLabel: "All sessions" },
+const SESSION_FILTERS: { id: SessionFilter; label: () => string; railLabel: () => string }[] = [
+  { id: "active", label: m.chat_panel_active, railLabel: m.chat_recents },
+  { id: "archived", label: m.chat_panel_archived, railLabel: m.chat_panel_archived },
+  { id: "all", label: m.chat_panel_all, railLabel: m.chat_all_sessions },
 ];
 
 /** Filter control beside the "Recents" label: Active (default) / Archived / All. */
@@ -3913,14 +3830,14 @@ function SessionFilterMenu({
     <div className="rail-filter relative inline-flex" ref={ref}>
       <button
         className={`${ICON_BUTTON_BASE_CLASS_NAME} rail-filter-btn w-6 h-6 rounded-sm ${value !== "active" ? "active" : ""}`}
-        title="Filter sessions"
-        aria-label="Filter sessions"
+        title={m.chat_panel_filter_sessions()}
+        aria-label={m.chat_panel_filter_sessions()}
         onClick={() => setOpen((v) => !v)}
       >
         <SlidersHorizontal size={13} />
       </button>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           {SESSION_FILTERS.map((f) => (
             <button
               key={f.id}
@@ -3930,7 +3847,7 @@ function SessionFilterMenu({
                 setOpen(false);
               }}
             >
-              <span>{f.label}</span>
+              <span>{f.label()}</span>
               {value === f.id && <Check size={13} />}
             </button>
           ))}
@@ -4046,11 +3963,11 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-left py-[7px] px-2.5 rounded-md text-md text-text cursor-pointer select-none [&:hover]:bg-surface [&.active]:bg-surface [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-2xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-md text-text cursor-pointer select-none [&:hover]:bg-surface [&.active]:bg-surface [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-2xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
       }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
-        session.parentSessionId ? " · Spawned by another agent" : ""
+        session.parentSessionId ? m.chat_spawned_by_agent() : ""
       }`}
       onClick={() => {
         // While editing, a body click is a no-op; blur/Enter/Esc drive it.
@@ -4088,7 +4005,7 @@ function SessionRow({
         <input
           ref={inputRef}
           className="session-title-input"
-          aria-label="Session title"
+          aria-label={m.chat_panel_session_title()}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onClick={(e) => e.stopPropagation()}
@@ -4116,8 +4033,8 @@ function SessionRow({
       <span className="session-time">{relTime(session.updatedAt)}</span>
       <button
         className="session-menu-btn"
-        title="Session options"
-        aria-label="Session options"
+        title={m.chat_panel_session_options()}
+        aria-label={m.chat_panel_session_options()}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((v) => !v);
@@ -4126,7 +4043,7 @@ function SessionRow({
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
           <button
             className={MODEL_ITEM_CLASS_NAME}
             onClick={(e) => {
@@ -4135,7 +4052,7 @@ function SessionRow({
               startEditing();
             }}
           >
-            <span>Rename</span>
+            <span>{m.chat_panel_rename()}</span>
           </button>
           <button
             className={MODEL_ITEM_CLASS_NAME}
@@ -4145,7 +4062,7 @@ function SessionRow({
               onSetArchived(!session.archived);
             }}
           >
-            <span>{session.archived ? "Unarchive" : "Archive"}</span>
+            <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
           </button>
           <button
             className={`${MODEL_ITEM_CLASS_NAME} danger`}
@@ -4155,7 +4072,7 @@ function SessionRow({
               onDelete();
             }}
           >
-            <span>Delete</span>
+            <span>{m.chat_panel_delete()}</span>
           </button>
         </div>
       )}
@@ -4403,11 +4320,11 @@ export function ChatPanel({
     for (const file of files) {
       if (!/^(image\/(png|jpeg|gif|webp)|application\/pdf)$/.test(file.type)) continue;
       if (file.size > MAX_BYTES) {
-        setAttachError(`${file.name} is too large — each attachment must be under 30 MB.`);
+        setAttachError(m.chat_attachment_too_large({ name: ltr(file.name) }));
         continue;
       }
       if (total + file.size > TOTAL_BYTES) {
-        setAttachError("Attachments exceed the 40 MB total limit — remove one and try again.");
+        setAttachError(m.chat_attachments_total_too_large());
         continue;
       }
       total += file.size;
@@ -4597,7 +4514,7 @@ export function ChatPanel({
           delete next.permissionMode;
           return next;
         });
-        setSettingsError("Could not update permissions. Try again.");
+        setSettingsError(m.chat_update_permissions_failed());
       });
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
@@ -4648,7 +4565,7 @@ export function ChatPanel({
     try {
       await setIndependentPlanMode(false);
     } catch {
-      setSettingsError("Could not exit Plan mode. Try again.");
+      setSettingsError(m.chat_exit_plan_failed());
     }
   }
 
@@ -4660,10 +4577,10 @@ export function ChatPanel({
       } else if (opts?.planActivation === "command") {
         await setIndependentPlanMode(nextPlanMode);
       } else {
-        throw new Error("The selected harness is unavailable");
+        throw new Error(m.chat_selected_harness_unavailable());
       }
     } catch {
-      setSettingsError("Could not toggle Plan mode. Try again.");
+      setSettingsError(m.chat_toggle_plan_failed());
     }
   }
 
@@ -5198,10 +5115,10 @@ export function ChatPanel({
         } else if (opts?.planActivation === "command") {
           await setIndependentPlanMode(toggledPlanMode);
         } else {
-          throw new Error("The selected harness is unavailable");
+          throw new Error(m.chat_selected_harness_unavailable());
         }
       } catch {
-        setSettingsError("Could not toggle Plan mode. Try again.");
+        setSettingsError(m.chat_toggle_plan_failed());
         restoreComposer();
       }
       return;
@@ -5363,7 +5280,7 @@ export function ChatPanel({
       dispatch({
         type: "optimisticUser",
         sessionId: sid,
-        text: text || "Asked about selected text",
+        text: text || m.chat_asked_about_selection(),
         attachments: pending.map((a) => ({ url: a.dataUrl, mediaType: a.mediaType, name: a.name })),
         annotations: pendingAnnotations,
       });
@@ -5392,7 +5309,7 @@ export function ChatPanel({
         name: a.name,
       }));
       const targetSessionId = sid;
-      if (!targetSessionId) throw new Error("chat session was not created");
+      if (!targetSessionId) throw new Error(m.chat_session_not_created());
       const sendTurn = () =>
         sendChatMessage(
           targetSessionId,
@@ -5434,14 +5351,14 @@ export function ChatPanel({
         }
       }
       dispatch({ type: "busy", sessionId: sid, busy: false });
-      dispatch({ type: "localError", sessionId: sid, text: `Message not sent: ${msg}` });
+      dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
     }
   }
 
   function stop() {
     if (!activeId) return;
     void interruptChat(activeId).catch(() => {
-      setSettingsError("Could not stop the turn. Try again.");
+      setSettingsError(m.chat_stop_failed());
     });
   }
 
@@ -5464,7 +5381,7 @@ export function ChatPanel({
         if (response.turn.existing) await reseedSession(sessionId);
         setRecoveryOverrides({});
       } catch {
-        setSettingsError("Could not recover this turn. Try again.");
+        setSettingsError(m.chat_recover_failed());
       } finally {
         recoveringTurnRef.current = false;
         setRecoveringTurnId(null);
@@ -5482,7 +5399,7 @@ export function ChatPanel({
       void queueSessionMutation(() => forkChatTurn(sid, messageId, text)).catch((err) => {
         dispatch({ type: "busy", sessionId: sid, busy: false });
         const detail = err instanceof Error ? err.message : String(err);
-        dispatch({ type: "localError", sessionId: sid, text: `Could not re-send: ${detail}` });
+        dispatch({ type: "localError", sessionId: sid, text: m.chat_resend_failed({ error: ltr(detail) }) });
       });
     },
     [activeId, busy, activeHarness?.agentReady, queueSessionMutation],
@@ -5505,7 +5422,7 @@ export function ChatPanel({
         // the next message somewhere other than what is on screen.
         dispatch({ type: "activeLeaf", sessionId: sid, leafId: previous });
         const detail = err instanceof Error ? err.message : String(err);
-        dispatch({ type: "localError", sessionId: sid, text: `Could not switch fork: ${detail}` });
+        dispatch({ type: "localError", sessionId: sid, text: m.chat_switch_fork_failed({ error: ltr(detail) }) });
       });
     },
     [activeId, busy, queueSessionMutation],
@@ -5521,7 +5438,7 @@ export function ChatPanel({
         if (!removed) return;
         return reseedSession(sid);
       })
-      .catch(() => setSettingsError("Could not remove the queued message. Try again."));
+      .catch(() => setSettingsError(m.chat_remove_queued_failed()));
   }
 
   async function retryQueued(itemId: string) {
@@ -5533,7 +5450,7 @@ export function ChatPanel({
       await retryQueuedMessage(sid, itemId);
       await reseedSession(sid);
     } catch {
-      setSettingsError("Could not retry the queued message. Try again.");
+      setSettingsError(m.chat_retry_queued_failed());
     } finally {
       setRetryingQueuedId(null);
     }
@@ -5611,14 +5528,12 @@ export function ChatPanel({
   }
 
   async function removeSession(session: ChatSession) {
-    const title = session.title?.trim() || "Untitled";
-    if (!window.confirm(`Delete "${title}"?\n\nIts transcript is permanently removed.`)) return;
+    const title = session.title?.trim() || m.chat_untitled();
+    if (!window.confirm(m.chat_delete_session_confirm({ title }))) return;
     try {
       await deleteChatSession(session.id);
     } catch (err) {
-      window.alert(
-        `Failed to delete "${title}": ${err instanceof Error ? err.message : String(err)}`,
-      );
+      window.alert(m.chat_delete_session_failed({ title, error: ltr(err instanceof Error ? err.message : String(err)) }));
       return;
     }
     forgetSession(session.id);
@@ -5708,43 +5623,43 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className={`session-rail w-68 shrink-0 flex flex-col mt-5 mr-3.5 mb-5 ml-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg overflow-visible ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`}>
+    <aside className={`session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg overflow-visible ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`}>
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${filesActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${filesActive ? "active" : ""}`}
           onClick={onOpenWorktree}
         >
           <FolderOpen size={15} />
-          Files
+          {m.chat_panel_files()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${artifactsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${artifactsActive ? "active" : ""}`}
           data-onboarding="nav-artifacts"
           onClick={onOpenArtifacts}
         >
           <Package size={15} />
-          Artifacts
+          {m.chat_panel_artifacts()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${experimentsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${experimentsActive ? "active" : ""}`}
           onClick={onOpenExperiments}
         >
           <FlaskConical size={15} />
-          Experiments
+          {m.chat_panel_experiments()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView === "skills" ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView === "skills" ? "active" : ""}`}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
-          Customize
+          {m.chat_panel_customize()}
         </button>
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-left [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -5753,9 +5668,9 @@ export function ChatPanel({
           </button>
         ))}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pr-2.5 pb-1.5 pl-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-1.5 ps-4.5">
         <div className="rail-section-label p-0 text-md font-medium text-subtext">
-          {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel ?? "Recents"}
+          {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel() ?? m.chat_recents()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
           <button
@@ -5766,7 +5681,7 @@ export function ChatPanel({
             onClick={startNewTask}
           >
             <Plus size={13} />
-            Task
+            {m.chat_panel_task()}
           </button>
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} />
         </div>
@@ -5800,10 +5715,10 @@ export function ChatPanel({
         {visibleSessions.length === 0 && (
           <div className="rail-empty py-1.5 px-2.5 text-md text-muted">
             {sessionFilter === "archived"
-              ? "No archived sessions"
+              ? m.chat_no_archived_sessions()
               : sessions.length > 0
-                ? "No active sessions"
-                : "No sessions yet"}
+                ? m.chat_no_active_sessions()
+                : m.chat_no_sessions_yet()}
           </div>
         )}
       </div>
@@ -5814,12 +5729,12 @@ export function ChatPanel({
   // (Claude-desktop style): the reopen toggle sits in the window's top-left
   // corner with the title beside it, instead of riding the centered readable
   // column.
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&.rail-hidden]:max-w-none [&.rail-hidden]:py-0 [&.rail-hidden]:px-0.5 [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:left-0 [&::after]:right-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none${railOpen ? "" : " rail-hidden"}`;
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&.rail-hidden]:max-w-none [&.rail-hidden]:py-0 [&.rail-hidden]:px-0.5 [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none${railOpen ? "" : " rail-hidden"}`;
   const railReopen = !railOpen && (
     <button
       className={ICON_BUTTON_CLASS_NAME}
-      title="Show sidebar"
-      aria-label="Show sidebar"
+      title={m.chat_panel_show_sidebar()}
+      aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
     >
       <PanelLeft size={15} />
@@ -5842,29 +5757,29 @@ export function ChatPanel({
     <>
       {railOpen && rail}
       <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-      {/* Header — session title on the left, right-pane view switchers on the
+      {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
         <div
           className={PAPER_TITLE_CLASS_NAME}
-          title={activeSession ? activeSession.title?.trim() || "Untitled" : "New session"}
+          title={activeSession ? activeSession.title?.trim() || m.chat_untitled() : m.chat_new_session()}
         >
           {activeSession ? (
             <TitleReveal
               key={activeTitleReveal ?? "static"}
-              title={activeSession.title?.trim() || "Untitled"}
+              title={activeSession.title?.trim() || m.chat_untitled()}
               animate={activeTitleReveal !== undefined}
             />
           ) : (
-            "New session"
+            m.chat_new_session()
           )}
         </div>
         {onOpenDemoWelcome && (
           <button
             className={ICON_BUTTON_CLASS_NAME}
-            data-tip="About this demo"
-            aria-label="About this demo"
+            data-tip={m.chat_panel_about_this_demo()}
+            aria-label={m.chat_panel_about_this_demo()}
             onClick={onOpenDemoWelcome}
           >
             <HelpCircle size={15} />
@@ -5875,14 +5790,14 @@ export function ChatPanel({
       {historyLoading ? (
         <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
           <span className={SPINNER_CLASS_NAME} />
-          <span>Loading conversation…</span>
+          <span>{m.chat_panel_loading_conversation()}</span>
         </div>
       ) : !threadMounted ? (
         <div className="chat-empty flex-1 flex flex-col items-center justify-center text-text p-8 text-center [&_h2]:m-0 [&_h2]:text-5xl [&_h2]:font-medium [&_h2]:tracking-[-0.015em] [&_h2]:text-text">
           <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
             <BrandMark />
           </div>
-          <h2>What should we research?</h2>
+          <h2>{m.chat_panel_what_should_we_research()}</h2>
           <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-semibold">
             <FolderOpen size={19} />
             <span>{projectName}</span>
@@ -5921,10 +5836,10 @@ export function ChatPanel({
             />
             {busy &&
               (awaitingInput ? (
-                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">Waiting for your input…</div>
+                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
               ) : (
                 <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic">
-                  <span className={SPINNER_CLASS_NAME} /> {hasPendingTailTool ? "Working…" : "Thinking…"}
+                  <span className={SPINNER_CLASS_NAME} /> {hasPendingTailTool ? m.chat_working() : m.chat_thinking()}
                 </div>
               ))}
           </div>
@@ -5944,13 +5859,13 @@ export function ChatPanel({
           onClick={transcriptSelection.add}
         >
           <MessageSquareQuote size={14} />
-          Ask about this
+          {m.chat_panel_ask_about_this()}
         </button>
       )}
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer py-5 px-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:left-0 [&::before]:right-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+      <div className="composer py-5 px-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:start-0 [&::before]:end-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}
@@ -5963,7 +5878,7 @@ export function ChatPanel({
           <PlanStrip
             synthesized={pendingPlan.synthesized}
             agentLabel={
-              activeSession ? HARNESS_LABELS[activeSession.harness] : "The agent"
+              activeSession ? HARNESS_LABELS[activeSession.harness] : m.chat_the_agent()
             }
             showResumeModes={activeSession?.harness === "claude-code"}
             onView={(intent) => openPlan?.(pendingPlan.plan, pendingPlan.promptId, intent)}
@@ -6003,37 +5918,37 @@ export function ChatPanel({
                   <span className="shrink-0 text-xs text-muted">
                     {q.dispatchState === "retrying"
                       ? queuedRetryLabel(q.nextRetryAt, queueClock)
-                      : "Queued"}
+                      : m.chat_queued()}
                   </span>
                 )}
                 {q.dispatchState === "blocked" ? (
                   <>
                     <button
                       onClick={() => void retryQueued(q.id)}
-                      aria-label={`Retry queued message: ${q.text}`}
+                      aria-label={m.a11y_retry_queued_message({ text: q.text })}
                       disabled={retryingQueuedId !== null}
                       className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-xs text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
                     >
-                      {retryingQueuedId === q.id ? "Retrying…" : "Retry"}
+                      {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
                     </button>
                     <button
                       onClick={() => cancelQueued(q.id)}
-                      aria-label={`Remove queued message: ${q.text}`}
+                      aria-label={m.a11y_remove_queued_message({ text: q.text })}
                       disabled={retryingQueuedId !== null}
                       className="shrink-0 px-1.5 py-0.5 border-0 text-xs text-muted bg-transparent cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:text-text"
                     >
-                      Remove
+                      {m.chat_panel_remove()}
                     </button>
                     {index === firstBlockedQueueIndex && index < queued.length - 1 && (
-                      <span className="basis-full pl-5 text-xs text-muted">
-                        Later queued messages will wait until this is retried or removed.
+                      <span className="basis-full ps-5 text-xs text-muted">
+                        {m.chat_panel_later_queued_messages_will_wait_until_this_is()}
                       </span>
                     )}
                   </>
                 ) : (
                   <button
-                    title="Remove queued message"
-                    aria-label="Remove queued message"
+                    title={m.chat_panel_remove_queued_message()}
+                    aria-label={m.chat_panel_remove_queued_message()}
                     onClick={() => cancelQueued(q.id)}
                     className="shrink-0 inline-flex items-center justify-center w-4 h-4 p-0 border-0 rounded-full text-muted cursor-pointer [&:hover]:bg-text [&:hover]:text-background"
                   >
@@ -6047,8 +5962,8 @@ export function ChatPanel({
         <div className={`composer-box relative flex flex-col border border-border rounded-lg bg-background ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`} data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
             <div className="composer-harness-warning py-2 px-3 text-subtext text-xs leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-              <strong>{activeHarness.name} is unavailable.</strong>{" "}
-              {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : "Re-check its setup."}
+              <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
+              {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : m.chat_recheck_setup()}
             </div>
           )}
           {skillMenuOpen && (
@@ -6084,14 +5999,14 @@ export function ChatPanel({
                   <div key={i} className="attachment-file [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background relative inline-flex items-center gap-2 max-w-55 py-2 px-2.5 border border-border rounded-sm text-text bg-surface [&_svg]:shrink-0 [&_svg]:text-muted" title={a.name}>
                     <FileText size={22} />
                     <span className="attachment-file-name overflow-hidden text-ellipsis whitespace-nowrap text-sm">{a.name ?? "document.pdf"}</span>
-                    <button title="Remove file" aria-label="Remove file" onClick={remove}>
+                    <button title={m.chat_panel_remove_file()} aria-label={m.chat_panel_remove_file()} onClick={remove}>
                       <X size={11} />
                     </button>
                   </div>
                 ) : (
                   <div key={i} className="attachment-thumb relative [&_img]:w-13 [&_img]:h-13 [&_img]:object-cover [&_img]:border [&_img]:border-border [&_img]:rounded-sm [&_img]:block [&_button]:absolute [&_button]:-top-[5px] [&_button]:-right-[5px] [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:w-4 [&_button]:h-4 [&_button]:p-0 [&_button]:border [&_button]:border-border [&_button]:rounded-full [&_button]:bg-surface [&_button]:text-text [&_button]:cursor-pointer [&_button:hover]:bg-text [&_button:hover]:text-background">
-                    <img src={a.dataUrl} alt="pasted" />
-                    <button title="Remove image" aria-label="Remove image" onClick={remove}>
+                    <img src={a.dataUrl} alt={m.chat_pasted_image()} />
+                    <button title={m.chat_panel_remove_image()} aria-label={m.chat_panel_remove_image()} onClick={remove}>
                       <X size={11} />
                     </button>
                   </div>
@@ -6123,14 +6038,14 @@ export function ChatPanel({
                 // Otherwise follow `composerSelection` so the name tracks the
                 // picker for a new session and the open session once one exists.
                 pendingQuestion
-                  ? "Type a custom answer…"
+                  ? m.chat_type_custom_answer()
                   : steering && activeHarness
-                    ? `Steer ${HARNESS_LABELS[activeHarness.id]}… (${queueChord} to queue)`
+                    ? m.chat_steer_placeholder({ harness: HARNESS_LABELS[activeHarness.id], shortcut: queueChord })
                     : composerSelection
                       ? activeHarness?.agentReady
-                        ? `Message ${HARNESS_LABELS[composerSelection.harness]}… (/ for commands and skills)`
-                        : `${HARNESS_LABELS[composerSelection.harness]} is unavailable — open the model picker`
-                      : "Ask the research agent… (/ for commands and skills)"
+                        ? m.chat_message_harness({ harness: HARNESS_LABELS[composerSelection.harness] })
+                        : m.chat_harness_unavailable({ harness: HARNESS_LABELS[composerSelection.harness] })
+                      : m.chat_ask_agent_placeholder()
               }
               rows={2}
               onPaste={onComposerPaste}
@@ -6234,8 +6149,8 @@ export function ChatPanel({
               <button
                 type="button"
                 className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-bare`}
-                title="Data sources"
-                aria-label="Data sources"
+                title={m.chat_panel_data_sources()}
+                aria-label={m.chat_panel_data_sources()}
                 aria-haspopup="dialog"
                 aria-expanded={dataSources.open}
                 onClick={() => dataSources.setOpen((open) => !open)}
@@ -6243,8 +6158,8 @@ export function ChatPanel({
                 <ToggleRight size={16} />
               </button>
               {dataSources.open && (
-                <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] left-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-[0_10px_26px_rgba(0,_0,_0,_0.16)]">
-                  <span className="px-1 text-sm font-medium text-muted">Data sources</span>
+                <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-[0_10px_26px_rgba(0,_0,_0,_0.16)]">
+                  <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
                   <LitSourcesList />
                 </div>
               )}
@@ -6263,8 +6178,8 @@ export function ChatPanel({
             <button
               type="button"
               className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-attach`}
-              title="Attach a PDF or image"
-              aria-label="Attach a PDF or image"
+              title={m.chat_panel_attach_a_pdf_or_image()}
+              aria-label={m.chat_panel_attach_a_pdf_or_image()}
               onClick={() => fileInputRef.current?.click()}
             >
               <Paperclip size={16} />
@@ -6273,15 +6188,15 @@ export function ChatPanel({
               <button
                 type="button"
                 className={`${COMPOSER_CONTROL_CLASS_NAME} plan-indicator group shrink-0 gap-1.5 bg-surface px-2 text-sm text-muted hover:text-text focus-visible:text-text`}
-                title="Exit Plan mode"
-                aria-label="Exit Plan mode"
+                title={m.chat_panel_exit_plan_mode()}
+                aria-label={m.chat_panel_exit_plan_mode()}
                 onClick={() => void exitPlanMode()}
               >
                 <span className="relative size-4" aria-hidden="true">
                   <Lightbulb className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
                   <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
                 </span>
-                <span>Plan</span>
+                <span>{m.chat_panel_plan()}</span>
               </button>
             )}
             <div className="min-w-0 flex-1" />
@@ -6309,14 +6224,14 @@ export function ChatPanel({
               // (their cards are the affordance; send() can't service them).
               // Send stays only when it actually works: idle, or a held
               // QUESTION card that owns typed text.
-              <button className="send-btn inline-flex shrink-0 items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))] stop" title="Stop" aria-label="Stop" onClick={stop}>
+              <button className="send-btn inline-flex shrink-0 items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))] stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
                 <X size={16} />
               </button>
             ) : (
               <button
                 className="send-btn inline-flex shrink-0 items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))]"
-                title="Send"
-                aria-label="Send"
+                title={m.chat_panel_send()}
+                aria-label={m.chat_panel_send()}
                 onClick={() => void send()}
                 disabled={
                   !activeHarness?.agentReady ||

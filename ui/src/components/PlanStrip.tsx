@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import { ChevronDown, CornerDownLeft, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -28,10 +29,10 @@ const PROMPT_ACTIONS_CLASS_NAME = [
   "[&_.plan-strip-primary:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--text)_85%,_var(--base))]",
   "[&_.plan-strip-primary:hover:not(:disabled)]:border-text",
   "[&_.plan-strip-primary:hover:not(:disabled)]:text-background",
-  "[&_.plan-strip-caret]:rounded-tl-none [&_.plan-strip-caret]:rounded-bl-none",
+  "[&_.plan-strip-caret]:rounded-ss-none [&_.plan-strip-caret]:rounded-es-none",
   "[&_.plan-strip-caret]:py-0 [&_.plan-strip-caret]:px-1.5 [&_.plan-strip-caret]:flex",
   "[&_.plan-strip-caret]:items-center",
-  "[&_.plan-strip-caret]:border-l [&_.plan-strip-caret]:border-l-[color-mix(in_oklab,_var(--base)_35%,_var(--text))]",
+  "[&_.plan-strip-caret]:border-s [&_.plan-strip-caret]:border-s-[color-mix(in_oklab,_var(--base)_35%,_var(--text))]",
 ].join(" ");
 
 /** Docked strip above the composer while a plan awaits the user's decision.
@@ -48,7 +49,7 @@ const PROMPT_ACTIONS_CLASS_NAME = [
  *    default accept action. The caret menu holds Accept and bypass all
  *    (skip every gate, not just Auto's). No plain Accept edits tier here —
  *    the app has no story for partial (edits-only) approval.
- *  - Open plan: link in the title row → the right-pane plan tab. */
+ *  - Open plan: link in the title row → the end-pane plan tab. */
 export function PlanStrip({
   synthesized,
   agentLabel,
@@ -105,17 +106,17 @@ export function PlanStrip({
   };
 
   return (
-    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-l-[3px] border-l-accent-blue rounded-md bg-surface shadow-[0_2px_10px_rgb(0_0_0_/_6%)]">
+    <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-surface shadow-[0_2px_10px_rgb(0_0_0_/_6%)]">
       <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
         <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
         <span className="plan-strip-title text-md font-semibold whitespace-nowrap">
           {synthesized ? `${agentLabel} is ready to proceed` : `${agentLabel} proposed a plan`}
         </span>
         <button
-          className="plan-strip-open ml-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
+          className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
           {...tabOpenGestureHandlers<HTMLButtonElement>(onView)}
         >
-          Open plan
+          {m.plan_strip_open_plan()}
         </button>
       </div>
       {revising ? (
@@ -123,7 +124,7 @@ export function PlanStrip({
           <textarea
             ref={textareaRef}
             className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-[9px] px-[11px] text-md font-[inherit] bg-background text-text [&:focus]:border-accent-blue"
-            placeholder="What should change? (optional)"
+            placeholder={m.plan_strip_what_should_change_optional()}
             rows={2}
             value={note}
             onChange={(e) => setNote(e.target.value)}
@@ -146,11 +147,11 @@ export function PlanStrip({
                 setRevising(false);
               }}
             >
-              Back
+              {m.plan_strip_back()}
             </button>
             <span className="plan-strip-spacer flex-1" />
             <button className="btn-primary plan-strip-primary" onClick={submitRevision}>
-              Revise
+              {m.plan_strip_revise()}
               <CornerDownLeft size={13} />
             </button>
           </div>
@@ -158,40 +159,40 @@ export function PlanStrip({
       ) : (
         <div className={PROMPT_ACTIONS_CLASS_NAME}>
           <button className="btn-ghost" onClick={onReject}>
-            Reject
+            {m.plan_strip_reject()}
           </button>
           <button className="btn-ghost" onClick={() => setRevising(true)}>
-            Revise…
+            {m.plan_strip_revise_05bacc9()}
           </button>
           <span className="plan-strip-spacer flex-1" />
           {showResumeModes ? (
             <div className="plan-strip-approve relative flex [&_.btn-primary:first-child]:rounded-tr-none [&_.btn-primary:first-child]:rounded-br-none" ref={menuRef}>
               <button className="btn-primary plan-strip-primary" onClick={() => onApprove("auto")}>
-                Accept and auto mode
+                {m.plan_strip_accept_and_auto_mode()}
               </button>
               <button
                 className="btn-primary plan-strip-primary plan-strip-caret"
-                aria-label="More approval options"
+                aria-label={m.plan_strip_more_approval_options()}
                 onClick={() => setMenuOpen((o) => !o)}
               >
                 <ChevronDown size={13} />
               </button>
               {menuOpen && (
-                <div className="plan-strip-menu absolute right-0 bottom-[calc(100%_+_4px)] flex flex-col min-w-47.5 p-1 border border-border rounded-md bg-surface shadow-[0_6px_20px_rgb(0_0_0_/_12%)] z-6 [&_button]:text-left [&_button]:py-[7px] [&_button]:px-[9px] [&_button]:border-0 [&_button]:rounded-sm [&_button]:bg-transparent [&_button]:text-text [&_button]:text-md [&_button]:cursor-pointer [&_button:hover]:bg-[var(--surface-2,_rgb(0_0_0_/_5%))]">
+                <div className="plan-strip-menu absolute end-0 bottom-[calc(100%_+_4px)] flex flex-col min-w-47.5 p-1 border border-border rounded-md bg-surface shadow-[0_6px_20px_rgb(0_0_0_/_12%)] z-6 [&_button]:text-start [&_button]:py-[7px] [&_button]:px-[9px] [&_button]:border-0 [&_button]:rounded-sm [&_button]:bg-transparent [&_button]:text-text [&_button]:text-md [&_button]:cursor-pointer [&_button:hover]:bg-[var(--surface-2,_rgb(0_0_0_/_5%))]">
                   <button
                     onClick={() => {
                       setMenuOpen(false);
                       onApprove("bypassPermissions");
                     }}
                   >
-                    Accept and bypass all
+                    {m.plan_strip_accept_and_bypass_all()}
                   </button>
                 </div>
               )}
             </div>
           ) : (
             <button className="btn-primary plan-strip-primary" onClick={() => onApprove()}>
-              Accept plan
+              {m.plan_strip_accept_plan()}
             </button>
           )}
         </div>

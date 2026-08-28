@@ -18,6 +18,15 @@
   mix-blend-mode: screen;
 }
 
+:root[dir="rtl"] :where(pre, code:not(.path-front-ellipsis), .font-mono, .xterm, .file-view, .openresearch-diff) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+:root[dir="rtl"] :where(.rtl-mirror, .lucide-arrow-left, .lucide-arrow-right, .lucide-arrow-up-right, .lucide-panel-left, .lucide-panel-right, .lucide-panel-left-close, .lucide-panel-right-close, .lucide-corner-down-left) {
+  scale: -1 1;
+}
+
 @theme inline {
   --color-*: initial;
   --color-transparent: transparent;

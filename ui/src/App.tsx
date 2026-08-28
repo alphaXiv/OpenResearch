@@ -1,3 +1,5 @@
+import { m } from "./paraglide/messages.js";
+import { getLocale, getTextDirection } from "./paraglide/runtime.js";
 import {
   ChartSpline,
   Check,
@@ -408,7 +410,7 @@ const PANEL_MIN_WIDTH = 360;
 const PANEL_MARGIN = 10;
 // Space the rest of the layout needs beside the panel: the 272px rail, the
 // chat column's minimum, and the gutters/margins between the three columns
-// (app-body padding 14×2, rail inner margin 14, right-pane inner margin 14).
+// (app-body padding 14×2, rail inner margin 14, end-pane inner margin 14).
 const RAIL_WIDTH = 272;
 const CHAT_MIN_SPACE = 380;
 const LAYOUT_CHROME = RAIL_WIDTH + 14 * 4;
@@ -830,16 +832,16 @@ export default function App() {
             : projectsResult.value[0]?.id ?? null,
         );
       } else {
-        errors.push("projects");
+        errors.push(m.app_projects());
       }
       if (uiStateResult.status === "fulfilled") {
         persistedPreferredAgent.current = uiStateResult.value.preferredAgent;
         setUiState(uiStateResult.value);
       } else {
-        errors.push("settings");
+        errors.push(m.app_settings());
       }
       if (errors.length > 0) {
-        setStartupError(`Couldn't load OpenResearch ${errors.join(" and ")}.`);
+        setStartupError(m.app_startup_load_failed({ items: new Intl.ListFormat(getLocale()).format(errors) }));
       }
     });
   }, []);
@@ -1060,14 +1062,14 @@ export default function App() {
   );
 
   const nextExperimentNames = useMemo(
-    () => new Map(experiments.map((experiment) => [experiment.id, experiment.title?.trim() || experiment.slug || "Experiment"])),
+    () => new Map(experiments.map((experiment) => [experiment.id, experiment.title?.trim() || experiment.slug || m.tree_experiment()])),
     [experiments],
   );
   const experimentNames = useStableStringMap(nextExperimentNames);
   const nextRunExperimentNames = useMemo(() => {
     const names = new Map<string, string>();
     for (const run of runs) {
-      names.set(run.id, experimentNames.get(run.experimentId) ?? "Experiment");
+      names.set(run.id, experimentNames.get(run.experimentId) ?? m.tree_experiment());
     }
     return names;
   }, [experimentNames, runs]);
@@ -1458,6 +1460,7 @@ export default function App() {
     const startedMaximized = panelMax;
     const startX = e.clientX;
     const startWidth = panelWidth;
+    const rtl = getTextDirection(getLocale()) === "rtl";
     let restoredFromMax = false;
     function stop() {
       window.removeEventListener("pointermove", onMove);
@@ -1467,7 +1470,7 @@ export default function App() {
     }
     function onMove(ev: PointerEvent) {
       if (startedMaximized) {
-        const distance = ev.clientX - startX;
+        const distance = (ev.clientX - startX) * (rtl ? -1 : 1);
         if (restoredFromMax || distance < FULLSCREEN_RESTORE_DRAG) return;
         restoredFromMax = true;
         setPanelMax(false);
@@ -1484,7 +1487,7 @@ export default function App() {
         window.removeEventListener("pointermove", onMove);
         return;
       }
-      const w = Math.round(window.innerWidth - ev.clientX - PANEL_MARGIN);
+      const w = Math.round(rtl ? ev.clientX - PANEL_MARGIN : window.innerWidth - ev.clientX - PANEL_MARGIN);
       const max = panelMaxWidth();
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.
@@ -1609,7 +1612,7 @@ export default function App() {
         <ClosableTab
           key={rightTabKey(tab)}
           active={planTab !== null && planTab.promptId === tab.promptId}
-          label="Plan"
+          label={m.chat_plan()}
           icon={<ScrollText size={12} style={{ flexShrink: 0 }} />}
           preview={isPreviewTab(tab)}
           onSelect={() => selectRightTab(tab)}
@@ -1623,7 +1626,7 @@ export default function App() {
         <ClosableTab
           key={rightTabKey(tab)}
           active={subagentTab !== null && subagentTab.spawnPartId === tab.spawnPartId}
-          label={spawnMeta[tab.spawnPartId]?.label ?? tab.label ?? "Sub-agent"}
+          label={spawnMeta[tab.spawnPartId]?.label ?? tab.label ?? m.app_subagent()}
           shimmer={spawnMeta[tab.spawnPartId]?.running ?? false}
           icon={<Users size={12} style={{ flexShrink: 0 }} />}
           preview={isPreviewTab(tab)}
@@ -1653,7 +1656,7 @@ export default function App() {
       <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
           <p>{startupError}</p>
-          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={loadInitialState}>Retry</button>
+          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={loadInitialState}>{m.app_retry()}</button>
         </div>
       </div>
     );
@@ -1778,22 +1781,22 @@ export default function App() {
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 mr-0 mb-5 ml-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg overflow-hidden ${ELEVATED_SURFACE_SHADOW_CLASS_NAME} ${panelMax ? "max" : ""}`}
+          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg overflow-hidden ${ELEVATED_SURFACE_SHADOW_CLASS_NAME} ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
           <div
-            className={`panel-resizer absolute left-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
-            title={panelMax ? "Drag right to restore panel" : "Drag to resize panel"}
+            className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
+            title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
             onPointerDown={resizePanel}
           />
-          <div className="tabs flex items-end gap-0 pt-1 pr-1.5 pb-0 pl-2 h-10 border-b border-b-border bg-background shrink-0">
+          <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
             <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {leadingFileTabs.map(renderFileTab)}
               {filesTabOpen && (
                 <ClosableTab
                   active={rightTab === "files"}
-                  label="Files"
+                  label={m.app_files()}
                   icon={<FolderOpen size={12} style={{ flexShrink: 0 }} />}
                   onSelect={() => selectRightTab("files")}
                   onClose={() => closeHomeTab("files")}
@@ -1802,7 +1805,7 @@ export default function App() {
               {artifactsTabOpen && (
                 <ClosableTab
                   active={rightTab === "artifacts"}
-                  label="Artifacts"
+                  label={m.app_artifacts()}
                   icon={<Package size={12} style={{ flexShrink: 0 }} />}
                   onSelect={() => selectRightTab("artifacts")}
                   onClose={() => closeHomeTab("artifacts")}
@@ -1811,7 +1814,7 @@ export default function App() {
               {experimentsTabOpen && (
                 <ClosableTab
                   active={rightTab === "experiments"}
-                  label="Experiments"
+                  label={m.app_experiments()}
                   icon={<FlaskConical size={12} style={{ flexShrink: 0 }} />}
                   onSelect={() => selectRightTab("experiments")}
                   onClose={() => closeHomeTab("experiments")}
@@ -1822,16 +1825,16 @@ export default function App() {
             <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
               <button
                 className={ICON_BUTTON_CLASS_NAME}
-                title={panelMax ? "Restore panel" : "Expand panel"}
-                aria-label={panelMax ? "Restore panel" : "Expand panel"}
+                title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
                 onClick={() => setPanelMax((m) => !m)}
               >
                 {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
               </button>
               <button
                 className={ICON_BUTTON_CLASS_NAME}
-                title="Close panel"
-                aria-label="Close panel"
+                title={m.app_close_panel()}
+                aria-label={m.app_close_panel()}
                 onClick={() => {
                   pendingExperimentsAutoOpenRef.current = false;
                   setPanelOpen(false);
@@ -1864,24 +1867,24 @@ export default function App() {
                     <button
                       ref={scopeTriggerRef}
                       className={`${ICON_BUTTON_BASE_CLASS_NAME} experiment-scope-trigger w-6.5 h-6.5 rounded-sm${effectiveScope === "agent" ? " active" : ""}`}
-                      title={`Experiment filter: ${effectiveScope === "agent" ? "Current task" : "Entire project"}`}
-                      aria-label="Filter experiments"
+                      title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
+                      aria-label={m.app_filter_experiments()}
                       aria-expanded={scopeMenuOpen}
                       onClick={() => setScopeMenuOpen((open) => !open)}
                     >
                       <Filter size={16} strokeWidth={2.5} />
                     </button>
                     {scopeMenuOpen && (
-                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
                         <button
                           className={MODEL_ITEM_CLASS_NAME}
                           aria-pressed={effectiveScope === "agent"}
                           disabled={!activeSessionId || !allExperimentsAttributed}
                           title={
                             !activeSessionId
-                              ? "Open a task to filter to its experiments"
+                              ? m.app_open_task_to_filter()
                               : !allExperimentsAttributed
-                                ? "Current task filtering is unavailable for unattributed experiments"
+                                ? m.app_filter_unavailable_unattributed()
                                 : undefined
                           }
                           onClick={() => {
@@ -1889,7 +1892,7 @@ export default function App() {
                             setScopeMenuOpen(false);
                           }}
                         >
-                          <span>Current task</span>
+                          <span>{m.app_current_task()}</span>
                           {effectiveScope === "agent" && <Check size={13} />}
                         </button>
                         <button
@@ -1900,7 +1903,7 @@ export default function App() {
                             setScopeMenuOpen(false);
                           }}
                         >
-                          <span>Entire project</span>
+                          <span>{m.app_entire_project()}</span>
                           {effectiveScope === "project" && <Check size={13} />}
                         </button>
                       </div>
@@ -1909,21 +1912,21 @@ export default function App() {
                   <div
                     className="seg inline-flex items-center gap-0.5 rounded-md bg-[color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:font-semibold [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
                     role="group"
-                    aria-label="Experiment view"
+                    aria-label={m.app_experiment_view()}
                   >
                     <button
                       className={view === "table" ? "active" : ""}
                       aria-pressed={view === "table"}
                       onClick={() => setView("table")}
                     >
-                      Table
+                      {m.app_table()}
                     </button>
                     <button
                       className={view === "tree" ? "active" : ""}
                       aria-pressed={view === "tree"}
                       onClick={() => setView("tree")}
                     >
-                      Tree
+                      {m.app_tree()}
                     </button>
                   </div>
                 </div>
@@ -1946,7 +1949,7 @@ export default function App() {
                     runs={scopedRuns}
                     emptyHint={
                       effectiveScope === "agent" && experiments.length > 0
-                        ? "No experiments from the current task yet. Switch to Entire project to see all experiments."
+                        ? m.app_no_task_experiments()
                         : undefined
                     }
                     experiments={scopedExperiments}
@@ -2000,7 +2003,7 @@ export default function App() {
                   <div className={CODE_TAB_BODY_CLASS_NAME}>
                     <div className="wt-empty flex flex-col items-center gap-2.5 py-12 px-6 text-center text-muted [&_>_svg]:text-subtext [&_p]:m-0 [&_p]:max-w-80 [&_p]:text-sm">
                       <FolderGit2 size={22} />
-                      <p>Select a project to browse its files.</p>
+                      <p>{m.app_select_a_project_to_browse_its_files()}</p>
                     </div>
                   </div>
                 </div>

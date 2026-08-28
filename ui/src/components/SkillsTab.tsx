@@ -1,9 +1,12 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { Download, FileUp, Trash2, Upload } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   deleteLatexTemplate,
   deleteUserSkill,
   fmtBytes,
+  fmtNumber,
   importHarnessSkill,
   listHarnessSkills,
   listLatexTemplates,
@@ -58,7 +61,7 @@ function isAcceptedName(name: string): boolean {
 }
 
 const SCOPE_BUTTON_CLASS_NAME =
-  "flex-1 flex flex-col gap-0.5 py-2.5 px-3 border rounded-md text-left text-sm font-medium cursor-pointer transition-[border-color,background] duration-120 disabled:opacity-50 disabled:cursor-not-allowed";
+  "flex-1 flex flex-col gap-0.5 py-2.5 px-3 border rounded-md text-start text-sm font-medium cursor-pointer transition-[border-color,background] duration-120 disabled:opacity-50 disabled:cursor-not-allowed";
 
 function ScopePicker({
   scope,
@@ -85,20 +88,20 @@ function ScopePicker({
         className={cls(scope === "global")}
         onClick={() => onScope("global")}
       >
-        Global
-        <span className="text-2xs font-normal text-muted">Every project</span>
+        {m.skills_tab_global()}
+        <span className="text-2xs font-normal text-muted">{m.skills_tab_every_project()}</span>
       </button>
       <button
         type="button"
         aria-pressed={scope === "project"}
         className={cls(scope === "project")}
         disabled={!project}
-        title={project ? undefined : "Open a project to scope this to one project"}
+        title={project ? undefined : m.skills_open_project_to_scope()}
         onClick={() => onScope("project")}
       >
-        This project
+        {m.skills_tab_this_project()}
         <span className="text-2xs font-normal text-muted">
-          {project ? project.name : "No project open"}
+          {project ? project.name : m.skills_no_project_open()}
         </span>
       </button>
     </div>
@@ -164,14 +167,14 @@ function DropZone({
       {busy ? (
         <>
           <span className={SPINNER_CLASS_NAME} />
-          <span>Uploading…</span>
+          <span>{m.skills_tab_uploading()}</span>
         </>
       ) : (
         <>
           <Upload size={20} strokeWidth={1.5} />
           <span>{prompt}</span>
           <span className="inline-flex items-center gap-1.5 text-2xs text-subtext">
-            <FileUp size={12} /> Adding to{" "}
+            <FileUp size={12} /> {m.skills_tab_adding_to()}{" "}
             <strong className="text-text font-semibold">{destination}</strong>
           </span>
         </>
@@ -198,7 +201,7 @@ function SkillRow({
         <code className={SKILL_NAME_CLASS_NAME}>/{skill.name}</code>
         <p className={SKILL_DESC_CLASS_NAME}>{skill.description}</p>
       </div>
-      <div className="shrink-0 text-right whitespace-nowrap pt-0.5">
+      <div className="shrink-0 text-end whitespace-nowrap pt-0.5">
         <div className="text-2xs text-subtext">{fmtBytes(skill.bytes)}</div>
         {skill.updatedAt > 0 && (
           <div className="text-2xs text-muted">{timeAgo(skill.updatedAt)}</div>
@@ -206,12 +209,12 @@ function SkillRow({
       </div>
       <button
         className={ICON_BUTTON_CLASS_NAME}
-        data-tip="Delete skill"
+        data-tip={m.skills_tab_delete_skill()}
         data-tip-align="end"
-        aria-label={`Delete skill ${skill.name}`}
+        aria-label={m.skills_delete_skill_label({ name: ltr(skill.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(`Delete the "${skill.name}" skill?`)) return;
+          if (!window.confirm(m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
           setBusy(true);
           deleteUserSkill({
             scope: skill.scope,
@@ -251,7 +254,7 @@ function SkillList({
       <h3>{title}</h3>
       <p className={CARD_SUB_CLASS_NAME}>{hint}</p>
       {skills.length === 0 ? (
-        <div className="text-muted text-sm">No skills yet.</div>
+        <div className="text-muted text-sm">{m.skills_tab_no_skills_yet()}</div>
       ) : (
         <div className="flex flex-col">
           {skills.map((s) => (
@@ -293,7 +296,7 @@ function HarnessSkillRow({
       <button
         className={SMALL_BUTTON_CLASS_NAME}
         disabled={busy}
-        title={`Import into ${scopeLabel}`}
+        title={m.a11y_import_into({ name: scopeLabel })}
         onClick={async () => {
           setBusy(true);
           try {
@@ -304,7 +307,7 @@ function HarnessSkillRow({
         }}
       >
         {busy ? <span className={SPINNER_CLASS_NAME} /> : <Download size={13} />}
-        {alreadyImported ? "Re-import" : "Import"}
+        {alreadyImported ? m.skills_reimport() : m.skills_import()}
       </button>
     </div>
   );
@@ -347,11 +350,11 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
       setError(null);
       const lower = file.name.toLowerCase();
       if (!lower.endsWith(".tex") && !lower.endsWith(".zip")) {
-        setError("Upload a .tex file or a .zip of a template folder.");
+        setError(m.skills_upload_template_error());
         return;
       }
       if (file.size > MAX_UPLOAD_BYTES) {
-        setError("File too large (max 20 MB).");
+        setError(m.skills_file_too_large());
         return;
       }
       busyRef.current = true;
@@ -378,25 +381,18 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
 
   return (
     <section className={CARD_CLASS_NAME}>
-      <h3>LaTeX templates</h3>
+      <h3>{m.skills_tab_la_te_x_templates()}</h3>
       <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text`}>
-        A conference class or house style the agent writes papers into instead of its default
-        preamble. Upload a <code>.tex</code>, or a <code>.zip</code> carrying its{" "}
-        <code>.cls</code> and <code>.sty</code> files. With exactly one template available the
-        agent uses it without asking.
+        {m.skills_templates_description()}
       </p>
 
-      <ScopePicker scope={scope} onScope={setScope} project={project} label="Template scope" />
+      <ScopePicker scope={scope} onScope={setScope} project={project} label={m.skills_template_scope()} />
 
       <DropZone
         accept=".tex,.zip"
         busy={busy}
-        destination={scope === "global" ? "Global" : (project?.name ?? "")}
-        prompt={
-          <>
-            Drop a <code>.tex</code> or <code>.zip</code> here, or click to choose
-          </>
-        }
+        destination={scope === "global" ? m.skills_global_destination() : (project?.name ?? "")}
+        prompt={m.skills_drop_template()}
         onFile={(file) => void upload(file)}
       />
 
@@ -404,14 +400,14 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
 
       {templates === null ? (
         <div className="flex items-center gap-2 text-subtext text-md pt-3">
-          <span className={SPINNER_CLASS_NAME} /> Loading templates…
+          <span className={SPINNER_CLASS_NAME} /> {m.skills_tab_loading_templates()}
         </div>
       ) : loadError ? (
         <div className="text-accent-red text-sm pt-3">
-          Could not load templates: {loadError}
+          {m.skills_tab_could_not_load_templates()} {loadError}
         </div>
       ) : applicable.length === 0 ? (
-        <div className="text-muted text-sm pt-3">No templates yet.</div>
+        <div className="text-muted text-sm pt-3">{m.skills_tab_no_templates_yet()}</div>
       ) : (
         <div className="flex flex-col mt-1">
           {applicable.map((t) => (
@@ -448,15 +444,15 @@ function LatexTemplateRow({
         <div className="flex items-center gap-2">
           <code className={SKILL_NAME_CLASS_NAME}>{template.name}</code>
           <span className={BADGE_CLASS_NAME}>
-            {template.scope === "global" ? "Global" : "This project"}
+            {template.scope === "global" ? m.skills_tab_global() : m.skills_tab_this_project()}
           </span>
         </div>
         <p className={SKILL_DESC_CLASS_NAME}>
           {template.entry}
-          {support > 0 && ` + ${support} file${support === 1 ? "" : "s"}`}
+          {support > 0 && (support === 1 ? m.skills_one_support_file() : m.skills_support_files({ count: fmtNumber(support) }))}
         </p>
       </div>
-      <div className="shrink-0 text-right whitespace-nowrap pt-0.5">
+      <div className="shrink-0 text-end whitespace-nowrap pt-0.5">
         <div className="text-2xs text-subtext">{fmtBytes(template.bytes)}</div>
         {template.updatedAt > 0 && (
           <div className="text-2xs text-muted">{timeAgo(template.updatedAt)}</div>
@@ -464,12 +460,12 @@ function LatexTemplateRow({
       </div>
       <button
         className={ICON_BUTTON_CLASS_NAME}
-        data-tip="Delete template"
+        data-tip={m.skills_tab_delete_template()}
         data-tip-align="end"
-        aria-label={`Delete template ${template.name}`}
+        aria-label={m.skills_delete_template_label({ name: ltr(template.name) })}
         disabled={busy}
         onClick={() => {
-          if (!window.confirm(`Delete the "${template.name}" template?`)) return;
+          if (!window.confirm(m.skills_delete_template_confirm({ name: ltr(template.name) }))) return;
           setBusy(true);
           deleteLatexTemplate({
             scope: template.scope,
@@ -529,11 +525,11 @@ export function SkillsTab({ project }: { project: Project | null }) {
       if (busyRef.current) return; // ignore a second drop/pick mid-upload
       setError(null);
       if (!isAcceptedName(file.name)) {
-        setError("Upload a SKILL.md file or a .zip of a skill folder.");
+        setError(m.skills_upload_skill_error());
         return;
       }
       if (file.size > MAX_UPLOAD_BYTES) {
-        setError("File too large (max 20 MB).");
+        setError(m.skills_file_too_large());
         return;
       }
       busyRef.current = true;
@@ -577,7 +573,7 @@ export function SkillsTab({ project }: { project: Project | null }) {
 
   const globalSkills = (skills ?? []).filter((s) => s.scope === "global");
   const projectSkills = (skills ?? []).filter((s) => s.scope === "project");
-  const scopeLabel = scope === "global" ? "Global" : (project?.name ?? "this project");
+  const scopeLabel = scope === "global" ? m.skills_tab_global() : (project?.name ?? m.skills_tab_this_project());
   // Names present in the scope an import would target — for the "Re-import" hint.
   const existingInScope = new Set(
     (skills ?? []).filter((s) => s.scope === scope).map((s) => s.name),
@@ -585,29 +581,23 @@ export function SkillsTab({ project }: { project: Project | null }) {
 
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl">
-      <h1>Customize</h1>
+      <h1>{m.skills_tab_customize()}</h1>
       <p className="mt-0 mx-0 mb-5 text-muted text-md leading-normal [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text">
-        What the agent brings to every session: LaTeX templates it writes papers into, and{" "}
-        <code>SKILL.md</code> skills it discovers automatically and you invoke with{" "}
-        <code>/name</code> in chat. Both apply everywhere, or to just this project.
+        {m.skills_overview_description()}
       </p>
 
       <LatexTemplatesCard project={project} />
 
       <section className={CARD_CLASS_NAME}>
-        <h3>Add a skill</h3>
+        <h3>{m.skills_tab_add_a_skill()}</h3>
 
-        <ScopePicker scope={scope} onScope={setScope} project={project} label="Skill scope" />
+        <ScopePicker scope={scope} onScope={setScope} project={project} label={m.skills_skill_scope()} />
 
         <DropZone
           accept=".md,.markdown,.zip"
           busy={busy}
-          destination={scope === "global" ? "Global" : (project?.name ?? "")}
-          prompt={
-            <>
-              Drop a <code>SKILL.md</code> or <code>.zip</code> here, or click to choose
-            </>
-          }
+          destination={scope === "global" ? m.skills_global_destination() : (project?.name ?? "")}
+          prompt={m.skills_drop_skill()}
           onFile={(file) => void upload(file)}
         />
 
@@ -616,10 +606,10 @@ export function SkillsTab({ project }: { project: Project | null }) {
 
       {harnessSkills.length > 0 && (
         <section className={CARD_CLASS_NAME}>
-          <h3>Import from your agent</h3>
+          <h3>{m.skills_tab_import_from_your_agent()}</h3>
           <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text [&_strong]:text-text [&_strong]:font-semibold`}>
-            Skills already installed in your coding agents. Import a copy into{" "}
-            <strong>{scopeLabel}</strong> so it's managed here and invocable with <code>/name</code>.
+            {m.skills_tab_skills_already_installed_in_your_coding_agents_import()}{" "}
+            <strong>{scopeLabel}</strong> {m.skills_tab_so_it_s_managed_here_and_invocable_with()} <code>/name</code>.
           </p>
           <div className="flex flex-col">
             {harnessSkills.map((s) => (
@@ -637,21 +627,21 @@ export function SkillsTab({ project }: { project: Project | null }) {
 
       {skills === null ? (
         <div className="flex items-center gap-2 text-subtext text-md p-3">
-          <span className={SPINNER_CLASS_NAME} /> Loading skills…
+          <span className={SPINNER_CLASS_NAME} /> {m.skills_tab_loading_skills()}
         </div>
       ) : (
         <>
           <SkillList
-            title="Global skills"
-            hint="Available to the agent in every project."
+            title={m.skills_tab_global_skills()}
+            hint={m.skills_global_hint()}
             skills={globalSkills}
             onChanged={refresh}
             onError={setError}
           />
           {project && (
             <SkillList
-              title={`${project.name} skills`}
-              hint="Available only in this project's sessions. Shadows a global skill of the same name."
+              title={m.a11y_named_skills({ name: project.name })}
+              hint={m.skills_project_hint()}
               skills={projectSkills}
               projectId={project.id}
               onChanged={refresh}

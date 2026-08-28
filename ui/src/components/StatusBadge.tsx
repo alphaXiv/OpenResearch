@@ -3,6 +3,7 @@
 // coloring across the table, graph and drawer.
 
 import { STATUS_BADGE_CLASS_NAME } from "../styleClasses";
+import { m } from "../paraglide/messages.js";
 
 export interface StatusStyle {
   className: string;
@@ -24,7 +25,20 @@ export function statusStyle(status: string): StatusStyle {
   return STATUS_STYLES[status] ?? STATUS_STYLES.idle;
 }
 
-function sentenceCase(s: string): string {
+const STATUS_LABELS: Record<string, () => string> = {
+  done: m.status_done,
+  failed: m.status_failed,
+  running: m.status_running,
+  starting: m.status_starting,
+  cancelling: m.status_cancelling,
+  cancelled: m.status_cancelled,
+  editing: m.status_editing,
+  idle: m.status_idle,
+};
+
+function statusLabel(s: string): string {
+  const localized = STATUS_LABELS[s];
+  if (localized) return localized();
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
@@ -33,7 +47,7 @@ export function StatusBadge({ status, label }: { status: string; label?: string 
   return (
     <span className={`${STATUS_BADGE_CLASS_NAME} ${style.className}${style.live ? " live" : ""}`}>
       <span className="dot" />
-      {label ?? sentenceCase(status)}
+      {label ?? statusLabel(status)}
     </span>
   );
 }

@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
@@ -25,7 +26,7 @@ export function DemoWelcomeModal({
       setSaving(true);
       setError(null);
       void action()
-        .catch(() => setError("Couldn't save your progress. Try again."))
+        .catch(() => setError(m.tour_save_error()))
         .finally(() => setSaving(false));
     },
     [saving],
@@ -89,45 +90,43 @@ export function DemoWelcomeModal({
         tabIndex={-1}
       >
         <button
-          className={`${ICON_BUTTON_CLASS_NAME} !absolute top-3.5 right-3.5`}
-          aria-label="Close"
+          className={`${ICON_BUTTON_CLASS_NAME} !absolute top-3.5 end-3.5`}
+          aria-label={m.tour_close()}
           onClick={() => run(onClose)}
           disabled={saving}
         >
           <X size={16} />
         </button>
-        <div className="mb-5 flex items-center gap-3 pr-8">
+        <div className="mb-5 flex items-center gap-3 pe-8">
           <span className="block h-9 w-9 shrink-0 [&_svg]:block [&_svg]:h-full [&_svg]:w-full">
             <BrandMark />
           </span>
           <div>
             <div className="mb-0.5 text-xs font-semibold tracking-[0.08em] text-primary uppercase">
-              Demo project
+              {m.tour_demo_project()}
             </div>
             <h2
               id="demo-welcome-title"
               className="m-0 text-3xl leading-tight tracking-[-0.02em]"
             >
-              Welcome to OpenResearch
+              {m.tour_welcome_to_open_research()}
             </h2>
           </div>
         </div>
         <div className="text-base leading-relaxed text-text [&_p]:m-0 [&_p_+_p]:mt-3">
           <p>
-            This is a demo project showing how OpenResearch works. This demo uses Andrej
-            Karpathy&apos;s{" "}
+            {m.tour_this_is_a_demo_project_showing_how_open()}{" "}
             <a
               href="https://github.com/karpathy/nanochat"
               target="_blank"
               rel="noreferrer"
               className="font-semibold text-primary underline decoration-border-strong underline-offset-3 hover:decoration-primary"
             >
-              nanochat
-            </a>, a repo for training a mini-GPT from scratch.
+              {m.tour_nanochat()}
+            </a>{m.tour_a_repo_for_training_a_mini_gpt_from()}
           </p>
           <p>
-            Look through the agent conversations, experiments, runs, and artifacts to see how a
-            project on OpenResearch comes together.
+            {m.tour_look_through_the_agent_conversations_experiments_runs_and()}
           </p>
         </div>
         {error && <p className="mt-3 mb-0 text-sm text-accent-red">{error}</p>}
@@ -137,14 +136,14 @@ export function DemoWelcomeModal({
             onClick={() => run(onCreateProject)}
             disabled={saving}
           >
-            Create a new project
+            {m.tour_create_a_new_project()}
           </button>
           <button
             className={PRIMARY_BUTTON_CLASS_NAME}
             onClick={() => run(onClose)}
             disabled={saving}
           >
-            {saving ? "Saving…" : "Explore the demo"}
+            {saving ? m.common_saving() : m.tour_explore_demo()}
           </button>
         </div>
       </div>

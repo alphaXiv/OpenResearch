@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  ArrowRight,
   ChevronDown,
   Cpu,
   ExternalLink,
@@ -19,6 +20,7 @@ import {
   deleteOverleafToken,
   fmtBytes,
   fmtDuration,
+  fmtNumber,
   getComputeSettings,
   getEnvVars,
   getProjectGitStatus,
@@ -92,6 +94,9 @@ import {
 import { onDataDirMove, onHarnessAuth } from "../events";
 import { useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { getLocale, isLocale, setLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
@@ -123,7 +128,7 @@ const COMPUTE_DETAILS_CLASS_NAME = [
 ].join(" ");
 
 const COMPUTE_DIAGNOSTIC_CLASS_NAME =
-  "mt-3 mx-0 mb-0 pl-3 border-l-2 border-l-accent-red font-sans text-md leading-relaxed text-text whitespace-pre-wrap";
+  "mt-3 mx-0 mb-0 ps-3 border-s-2 border-s-accent-red font-sans text-md leading-relaxed text-text whitespace-pre-wrap";
 
 const SETTINGS_NOTE_CLASS_NAME = [
   "settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5",
@@ -142,7 +147,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-control]:overflow-hidden [&_.folder-picker-control]:bg-background",
   "[&_.folder-picker-control]:border [&_.folder-picker-control]:border-border",
   "[&_.folder-picker-control]:rounded-md [&_.folder-picker-control]:cursor-pointer",
-  "[&_.folder-picker-control]:text-left",
+  "[&_.folder-picker-control]:text-start",
   "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
   "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
   "[&_.folder-picker-control:hover:not(:disabled)]:shadow-[0_2px_8px_rgb(0_0_0_/_5%)]",
@@ -163,7 +168,7 @@ const FORM_CLASS_NAME = [
   "[&_.project-field-label]:text-base [&_.project-field-label]:font-semibold",
   "[&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65",
   "[&_.paper-destination]:flex [&_.paper-destination]:items-center",
-  "[&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pr-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:pl-3",
+  "[&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pe-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:ps-3",
   "[&_.paper-destination]:border [&_.paper-destination]:border-border [&_.paper-destination]:rounded-md",
   "[&_.paper-destination]:bg-background [&_.paper-destination_code]:flex-1",
   "[&_.paper-destination_code]:min-w-0 [&_.paper-destination_code]:overflow-hidden",
@@ -184,7 +189,7 @@ const FORM_CLASS_NAME = [
   "[&_.paper-results_button]:py-2 [&_.paper-results_button]:px-2.5 [&_.paper-results_button]:bg-none [&_.paper-results_button]:bg-transparent",
   "[&_.paper-results_button]:border-0",
   "[&_.paper-results_button]:border-b [&_.paper-results_button]:border-b-border-variant",
-  "[&_.paper-results_button]:text-left [&_.paper-results_button]:[font:inherit]",
+  "[&_.paper-results_button]:text-start [&_.paper-results_button]:[font:inherit]",
   "[&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer",
   "[&_.paper-results_button:last-child]:border-b-0",
   "[&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-md",
@@ -203,7 +208,7 @@ const FORM_CLASS_NAME = [
   "[&_select]:font-sans [&_select]:text-sm [&_select]:font-normal [&_select]:text-text",
   "[&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end",
   "[&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start",
-  "[&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ml-auto",
+  "[&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ms-auto",
   "[&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap",
   "settings-form mt-3.5 pt-3.5 border-t border-t-border",
 ].join(" ");
@@ -255,19 +260,19 @@ type Tab = SettingsTab;
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; label: string } {
-  if (h.agentReady) return { cls: "ok", label: "Signed in" };
+  if (h.agentReady) return { cls: "ok", label: m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
-  if (!h.installed) return { cls: "warn", label: "Not installed" };
-  if (h.installBroken) return { cls: "warn", label: "Install broken" };
-  if (h.authState === "unknown") return { cls: "warn", label: "Unable to verify" };
-  if (h.authState === "unsupported") return { cls: "warn", label: "Update required" };
-  return { cls: "warn", label: "Not signed in" };
+  if (!h.installed) return { cls: "warn", label: m.settings_page_not_installed() };
+  if (h.installBroken) return { cls: "warn", label: m.settings_page_install_broken() };
+  if (h.authState === "unknown") return { cls: "warn", label: m.settings_page_unable_to_verify() };
+  if (h.authState === "unsupported") return { cls: "warn", label: m.settings_page_update_required() };
+  return { cls: "warn", label: m.settings_page_not_signed_in() };
 }
 
 function AuthLabel({ h }: { h: Harness }) {
   if (!h.authMethod) return <>—</>;
-  return <>{h.authMethod === "oauth" ? "OAuth (subscription login)" : "API key"}</>;
+  return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
 function HarnessesTab() {
@@ -289,11 +294,9 @@ function HarnessesTab() {
 
   return (
     <>
-      <h2>Harnesses</h2>
+      <h2>{m.settings_page_harnesses()}</h2>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Coding-agent setups detected on this machine. The research agent chat is served by
-        OpenCode; Claude Code and Codex accounts surface their models in the composer's model
-        picker.
+        {m.settings_page_coding_agent_setups_detected_on_this_machine_the()}
       </p>
       <div className="harness-tabs flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-md [&_button]:font-semibold [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
         {(harnesses ?? []).map((x) => (
@@ -309,7 +312,7 @@ function HarnessesTab() {
       </div>
       {!harnesses ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Detecting harnesses…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_detecting_harnesses()}
         </div>
       ) : !h ? null : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
@@ -317,44 +320,41 @@ function HarnessesTab() {
             <span className={`${BADGE_CLASS_NAME} ${harnessStatus(h).cls}`}>{harnessStatus(h).label}</span>
             <div className="spacer" style={{ flex: 1 }} />
             <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+              <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
             </button>
           </div>
           <div className={KV_CLASS_NAME}>
-            <span className="k">Binary</span>
-            <span className="v">{h.binPath ?? "not found on PATH"}</span>
-            <span className="k">Version</span>
+            <span className="k">{m.settings_page_binary()}</span>
+            <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
+            <span className="k">{m.settings_page_version()}</span>
             <span className="v">{h.version ?? "—"}</span>
-            <span className="k">Auth</span>
+            <span className="k">{m.settings_page_auth()}</span>
             <span className="v">
               <AuthLabel h={h} />
             </span>
             {h.account && (
               <>
-                <span className="k">{h.id === "opencode" ? "Providers" : "Account"}</span>
+                <span className="k">{h.id === "opencode" ? m.settings_providers() : m.settings_page_account()}</span>
                 <span className="v">{h.account}</span>
               </>
             )}
             {h.org && (
               <>
-                <span className="k">Org</span>
+                <span className="k">{m.settings_page_org()}</span>
                 <span className="v">{h.org}</span>
               </>
             )}
             {h.plan && (
               <>
-                <span className="k">Plan</span>
+                <span className="k">{m.settings_page_plan()}</span>
                 <span className="v">{h.plan}</span>
               </>
             )}
-            <span className="k">Agent models</span>
+            <span className="k">{m.settings_page_agent_models()}</span>
             <span className="v">
               {h.models.length > 0
-                ? `${h.models.length} available — ${h.models
-                    .slice(0, 4)
-                    .map((m) => harnessModelLabel(m))
-                    .join(", ")}${h.models.length > 4 ? ", …" : ""}`
-                : "none"}
+                ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => harnessModelLabel(model))) })
+                : m.settings_none()}
             </span>
           </div>
           {!h.agentReady && h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{h.agentNote}</p>}
@@ -367,12 +367,12 @@ function HarnessesTab() {
 // --- compute (kubernetes) -------------------------------------------------------
 
 function K8sHealthBadge({ s }: { s: K8sSettings }) {
-  if (!s.configured) return <span className={BADGE_CLASS_NAME}>Not configured</span>;
+  if (!s.configured) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_configured()}</span>;
   const p = s.preflight;
-  if (!p.kubectlFound) return <span className={ERROR_BADGE_CLASS_NAME}>kubectl not found</span>;
-  if (!p.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>Cluster unreachable</span>;
-  if (!p.canCreateJobs) return <span className={ERROR_BADGE_CLASS_NAME}>No job-create permission</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>Connected</span>;
+  if (!p.kubectlFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_kubectl_not_found()}</span>;
+  if (!p.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_cluster_unreachable()}</span>;
+  if (!p.canCreateJobs) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_job_create_permission()}</span>;
+  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
 }
 
 function K8sSection() {
@@ -420,12 +420,12 @@ function K8sSection() {
         <div className="error">{loadError}</div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Checking kubectl…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_kubectl()}
         </div>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">Cluster</span>
+            <span className="k">{m.settings_page_cluster()}</span>
             <span className="v">
               <K8sHealthBadge s={settings} />
             </span>
@@ -436,15 +436,15 @@ function K8sSection() {
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <div className="row2">
               <label>
-                Context
+                {m.settings_page_context()}
                 <OptionPicker
                   choices={[
                     {
                       id: "",
-                      label: `kubectl default${settings.currentContext ? ` (${settings.currentContext})` : ""}`,
+                        label: settings.currentContext ? m.settings_kubectl_default_context({ context: ltr(settings.currentContext) }) : m.settings_kubectl_default(),
                     },
                     ...(context && !settings.contexts.includes(context)
-                      ? [{ id: context, label: `${context} (not in kubeconfig)` }]
+                      ? [{ id: context, label: m.settings_not_in_kubeconfig({ context: ltr(context) }) }]
                       : []),
                     ...settings.contexts.map((item) => ({ id: item, label: item })),
                   ]}
@@ -456,12 +456,12 @@ function K8sSection() {
                 />
               </label>
               <label>
-                Namespace
+                {m.settings_page_namespace()}
                 <input
                   type="text"
                   value={namespace}
                   onChange={(e) => setNamespace(e.target.value)}
-                  placeholder="default"
+                  placeholder={m.settings_page_default()}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -470,16 +470,14 @@ function K8sSection() {
             {error && <div className="error">{error}</div>}
             <div className="actions">
               <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
-                {saving ? "Saving…" : "Save"}
+                {saving ? m.common_saving() : m.common_save()}
               </button>
             </div>
           </form>
           <section className="mt-7">
-            <h3 className="mt-0 mx-0 mb-1.5 text-md font-semibold text-text">Run manifest</h3>
+            <h3 className="mt-0 mx-0 mb-1.5 text-md font-semibold text-text">{m.settings_page_run_manifest()}</h3>
             <p className="m-0 font-sans text-md leading-relaxed text-text">
-              The manifest must define one Job. orx injects the run script, environment, labels,
-              and timeout. Use <code>{"{{ORX_RUN}}"}</code> in resource names, or override the
-              default path with <code>--manifest &lt;path&gt;</code>.
+              {m.settings_manifest_description({ placeholder: ltr("{{ORX_RUN}}"), command: ltr("--manifest <path>") })}
             </p>
           </section>
         </>
@@ -490,19 +488,19 @@ function K8sSection() {
 
 // --- compute (modal) ------------------------------------------------------------
 
-const MODAL_TOKEN_LABELS: Record<ModalTokenSource, string> = {
-  env: "MODAL_TOKEN_ID env var",
-  syncedEnv: "~/.openresearch/env",
-  modalToml: "~/.modal.toml (modal token new)",
+const MODAL_TOKEN_LABELS: Record<ModalTokenSource, () => string> = {
+  env: m.settings_modal_token_env,
+  syncedEnv: m.settings_modal_token_synced,
+  modalToml: m.settings_modal_token_file,
 };
 
 function ModalBadge({ s }: { s: ModalSettings }) {
-  if (s.ready) return <span className={SUCCESS_BADGE_CLASS_NAME}>Connected</span>;
-  if (!s.tokenConfigured && !s.modalImportable) return <span className={BADGE_CLASS_NAME}>Not set up</span>;
+  if (s.ready) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
+  if (!s.tokenConfigured && !s.modalImportable) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_set_up()}</span>;
   if (!s.modalImportable)
-    return <span className={ERROR_BADGE_CLASS_NAME}>{s.envProvisioned ? "Env broken" : "Env not built"}</span>;
-  if (!s.tokenConfigured) return <span className={ERROR_BADGE_CLASS_NAME}>No token</span>;
-  return <span className={BADGE_CLASS_NAME}>Unknown</span>;
+    return <span className={ERROR_BADGE_CLASS_NAME}>{s.envProvisioned ? m.settings_env_broken() : m.settings_env_not_built()}</span>;
+  if (!s.tokenConfigured) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_token()}</span>;
+  return <span className={BADGE_CLASS_NAME}>{m.settings_page_unknown()}</span>;
 }
 
 function ModalSection() {
@@ -536,33 +534,31 @@ function ModalSection() {
         <div className="error">{loadError}</div>
       ) : !s ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Checking Modal…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_modal()}
         </div>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">Status</span>
+            <span className="k">{m.settings_page_status()}</span>
             <span className="v">
               <ModalBadge s={s} />
             </span>
-            <span className="k">Environment</span>
+            <span className="k">{m.settings_page_environment()}</span>
             <span className="v">
               {s.modalImportable
-                ? "Ready"
+                ? m.settings_page_ready()
                 : s.envProvisioned
-                  ? "Provisioned (modal import failing)"
-                  : "Not built yet"}
+                  ? m.settings_modal_import_failing()
+                  : m.settings_not_built_yet()}
             </span>
-            <span className="k">Token</span>
+            <span className="k">{m.settings_page_token()}</span>
             <span className="v">
-              {s.tokenSource ? MODAL_TOKEN_LABELS[s.tokenSource] : "Not configured"}
+              {s.tokenSource ? MODAL_TOKEN_LABELS[s.tokenSource]() : m.settings_page_not_configured()}
             </span>
           </div>
           {!s.tokenConfigured && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
-              No Modal token found. Run <code>modal token new</code>, or add{" "}
-              <code>MODAL_TOKEN_ID</code> and <code>MODAL_TOKEN_SECRET</code> in the Environment
-              tab.
+              {m.settings_modal_token_help({ command: ltr("modal token new"), id: ltr("MODAL_TOKEN_ID"), secret: ltr("MODAL_TOKEN_SECRET") })}
             </p>
           )}
           {s.error && s.envProvisioned && !s.modalImportable && (
@@ -572,7 +568,7 @@ function ModalSection() {
           {!s.modalImportable && (
             <div className="mt-6 flex justify-end">
               <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void provision()} disabled={provisioning}>
-                {provisioning ? "Setting up… (~30–60s)" : "Set up environment"}
+                {provisioning ? m.settings_setting_up_environment() : m.settings_set_up_environment()}
               </button>
             </div>
           )}
@@ -587,22 +583,22 @@ function ModalSection() {
 type HostTest = "testing" | SshPreflight;
 
 function HostTestCell({ test }: { test: HostTest | undefined }) {
-  if (test === undefined) return <span className="block text-left text-[12px] text-text">Not checked</span>;
+  if (test === undefined) return <span className="block text-start text-[12px] text-text">{m.settings_page_not_checked()}</span>;
   if (test === "testing")
     return (
       <span className="inline-flex items-center gap-1.5 text-text text-xs" role="status">
-        <span className={SPINNER_CLASS_NAME} aria-hidden="true" /> Testing…
+        <span className={SPINNER_CLASS_NAME} aria-hidden="true" /> {m.settings_page_testing()}
       </span>
     );
   const missingTools = test.missingTools ?? [];
   const badge = !test.reachable ? (
-    <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>
+    <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>
   ) : !test.toolsFound ? (
     <span className={ERROR_BADGE_CLASS_NAME}>
-      {missingTools.length === 1 ? `Needs ${missingTools[0]}` : "Needs tools"}
+      {missingTools.length === 1 ? m.settings_needs_tool({ tool: ltr(missingTools[0]) }) : m.settings_needs_tools()}
     </span>
   ) : (
-    <span className={SUCCESS_BADGE_CLASS_NAME}>Ready</span>
+    <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_ready()}</span>
   );
   return (
     <div role="status">
@@ -652,10 +648,10 @@ function SshSection() {
     <>
       {hosts === null ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Reading ~/.ssh/config…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_reading_ssh_config()}
         </div>
       ) : hosts.length === 0 ? (
-        <p className="settings-empty text-muted text-md mt-1 mx-0 mb-0">No hosts found in ~/.ssh/config.</p>
+        <p className="settings-empty text-muted text-md mt-1 mx-0 mb-0">{m.settings_page_no_hosts_found_in_ssh_config()}</p>
       ) : (
         <div className="border-y border-border-variant divide-y divide-border-variant">
           {hosts.map((h) => {
@@ -676,7 +672,7 @@ function SshSection() {
                       type="button"
                       className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
                       aria-expanded={open}
-                      aria-label={`${open ? "Collapse" : "Expand"} ${h.host}`}
+                      aria-label={open ? m.a11y_collapse_item({ name: ltr(h.host) }) : m.a11y_expand_item({ name: ltr(h.host) })}
                       onClick={(event) => {
                         event.stopPropagation();
                         toggle(h.host, open);
@@ -693,7 +689,7 @@ function SshSection() {
                     </div>
                   </div>
                   <div className="grid flex-none grid-cols-[6rem_5rem] items-center gap-x-[clamp(1rem,2vw,2.5rem)]">
-                    <div className="text-left">
+                    <div className="text-start">
                       <HostTestCell test={hostTest} />
                     </div>
                     <button
@@ -705,20 +701,20 @@ function SshSection() {
                       }}
                       disabled={testing}
                     >
-                      {testing ? "Testing…" : hostTest ? "Retest" : "Test"}
+                      {testing ? m.settings_testing() : hostTest ? m.settings_retest() : m.settings_test()}
                     </button>
                   </div>
                 </div>
                 {open && (
-                  <div className="border-t border-t-border-variant py-3 pr-2 pl-10">
+                  <div className="border-t border-t-border-variant py-3 pe-2 ps-10">
                     <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
-                      <dt className="text-sm font-medium text-subtext">Identity</dt>
+                      <dt className="text-sm font-medium text-subtext">{m.settings_page_identity()}</dt>
                       <dd className={`m-0 text-sm text-text wrap-anywhere${h.identityFile ? " font-mono" : ""}`}>
-                        {h.identityFile ?? "SSH defaults"}
+                        {h.identityFile ?? m.settings_ssh_defaults()}
                       </dd>
                       {hostTest !== "testing" && hostTest?.error && (
                         <>
-                          <dt className="text-sm font-medium text-subtext">Last error</dt>
+                          <dt className="text-sm font-medium text-subtext">{m.settings_page_last_error()}</dt>
                           <dd className="m-0 text-sm leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
                             {hostTest.error}
                           </dd>
@@ -741,11 +737,11 @@ function SshSection() {
 /** First failing check wins, like K8sHealthBadge. */
 function SlurmTestBadge({ test }: { test: "testing" | SlurmPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <span className={BADGE_CLASS_NAME}>Testing…</span>;
-  if (!test.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>;
-  if (!test.slurmFound) return <span className={ERROR_BADGE_CLASS_NAME}>No Slurm CLI</span>;
-  if (!test.toolsFound) return <span className={ERROR_BADGE_CLASS_NAME}>Missing bash/tar</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>Ready</span>;
+  if (test === "testing") return <span className={BADGE_CLASS_NAME}>{m.settings_page_testing()}</span>;
+  if (!test.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>;
+  if (!test.slurmFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_slurm_cli()}</span>;
+  if (!test.toolsFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_missing_bash_tar()}</span>;
+  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_ready()}</span>;
 }
 
 function SlurmSection() {
@@ -823,24 +819,24 @@ function SlurmSection() {
         <div className="error">{loadError}</div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading slurm settings…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_slurm_settings()}
         </div>
       ) : (
         <>
           {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           {preflight && preflight.partitions.length > 0 && (
             <div className={COMPUTE_DETAILS_CLASS_NAME}>
-              <span className="k">Partitions</span>
+              <span className="k">{m.settings_page_partitions()}</span>
               <span className="v">{preflight.partitions.join(", ")}</span>
             </div>
           )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <div className="row2">
               <label>
-                Login node
+                {m.settings_page_login_node()}
                 <OptionPicker
                   choices={[
-                    { id: "", label: "Not set (pass --host per launch)" },
+                    { id: "", label: m.settings_page_not_set_pass_host_per_launch() },
                     ...(host && !settings.hosts.some((item) => item.host === host)
                       ? [{ id: host, label: `${host} (not in ~/.ssh/config)` }]
                       : []),
@@ -857,13 +853,13 @@ function SlurmSection() {
                 />
               </label>
               <label>
-                Partition
+                {m.settings_page_partition()}
                 <input
                   type="text"
                   list="slurm-partitions"
                   value={partition}
                   onChange={(e) => setPartition(e.target.value)}
-                  placeholder="cluster default"
+                  placeholder={m.settings_page_cluster_default()}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -874,23 +870,23 @@ function SlurmSection() {
             </div>
             <div className="row2">
               <label>
-                Account
+                {m.settings_page_account()}
                 <input
                   type="text"
                   value={account}
                   onChange={(e) => setAccount(e.target.value)}
-                  placeholder="cluster default"
+                  placeholder={m.settings_page_cluster_default()}
                   autoComplete="off"
                   spellCheck={false}
                 />
               </label>
               <label>
-                Time limit
+                {m.settings_page_time_limit()}
                 <input
                   type="text"
                   value={timeLimit}
                   onChange={(e) => setTimeLimit(e.target.value)}
-                  placeholder="cluster default (e.g. 4h, 30m)"
+                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -899,16 +895,16 @@ function SlurmSection() {
             {error && <div className="error">{error}</div>}
             <div className="actions">
               <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
-                {saving ? "Saving…" : "Save"}
+                {saving ? m.common_saving() : m.common_save()}
               </button>
               <button
                 type="button"
                 className={BUTTON_CLASS_NAME}
                 onClick={() => void runPreflight(host)}
                 disabled={!host || test === "testing"}
-                title={host ? undefined : "Pick a login node first"}
+                title={host ? undefined : m.settings_pick_login_node()}
               >
-                Test connection
+                {m.settings_page_test_connection()}
               </button>
               <SlurmTestBadge test={test} />
             </div>
@@ -975,18 +971,18 @@ function RaySection() {
         <div className="error">{loadError}</div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading Ray settings…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_ray_settings()}
         </div>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">Effective URL</span>
+            <span className="k">{m.settings_page_effective_url()}</span>
             <span className="v">{settings.resolvedAddress}</span>
-            <span className="k">Source</span>
+            <span className="k">{m.settings_page_source()}</span>
             <span className="v">{settings.source}</span>
             {preflight?.reachable && preflight.rayVersion && (
               <>
-                <span className="k">Ray version</span>
+                <span className="k">{m.settings_page_ray_version()}</span>
                 <span className="v">{preflight.rayVersion}</span>
               </>
             )}
@@ -994,7 +990,7 @@ function RaySection() {
           {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <label>
-              Jobs / Dashboard URL
+              {m.settings_page_jobs_dashboard_url()}
               <input
                 type="text"
                 value={address}
@@ -1010,7 +1006,7 @@ function RaySection() {
             {error && <div className="error">{error}</div>}
             <div className="actions">
               <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
-                {saving ? "Saving…" : "Save"}
+                {saving ? m.common_saving() : m.common_save()}
               </button>
               <button
                 type="button"
@@ -1018,7 +1014,7 @@ function RaySection() {
                 onClick={() => void runPreflight()}
                 disabled={test === "testing"}
               >
-                Test connection
+                {m.settings_page_test_connection()}
               </button>
               <RayTestBadge test={test} />
             </div>
@@ -1031,9 +1027,9 @@ function RaySection() {
 
 function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <span className={BADGE_CLASS_NAME}>Testing…</span>;
-  if (test.reachable) return <span className={SUCCESS_BADGE_CLASS_NAME}>Reachable</span>;
-  return <span className={ERROR_BADGE_CLASS_NAME}>Failed</span>;
+  if (test === "testing") return <span className={BADGE_CLASS_NAME}>{m.settings_page_testing()}</span>;
+  if (test.reachable) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_reachable()}</span>;
+  return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>;
 }
 
 // --- compute (local) --------------------------------------------------------------
@@ -1054,13 +1050,13 @@ function LocalSection() {
         <div className="error">{loadError}</div>
       ) : !hw ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Detecting hardware…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_detecting_hardware()}
         </div>
       ) : (
         <div className={COMPUTE_DETAILS_CLASS_NAME}>
-          <span className="k">Hostname</span>
+          <span className="k">{m.settings_page_hostname()}</span>
           <span className="v">{hw.hostname}</span>
-          <span className="k">System</span>
+          <span className="k">{m.settings_page_system()}</span>
           <span className="v">
             {hw.os}/{hw.arch}
             {hw.chip ? ` — ${hw.chip}` : ""}
@@ -1104,57 +1100,55 @@ function OpenResearchSection() {
         <div className="error">{loadError}</div>
       ) : !s ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Checking credentials…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_credentials()}
         </div>
       ) : !s.loggedIn ? (
         <p className={SETTINGS_NOTE_CLASS_NAME}>
-          Not signed in. Run <code>orx login</code> in a terminal to connect your OpenResearch
-          account.
+          {m.settings_login_help({ command: ltr("orx login") })}
         </p>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">Status</span>
+            <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              <span className={SUCCESS_BADGE_CLASS_NAME}>Signed in</span>
+              <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_signed_in()}</span>
             </span>
-            <span className="k">Orgs</span>
+            <span className="k">{m.settings_page_orgs()}</span>
             <span className="v">{s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
-            <span className="k">SSH key</span>
+            <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
               {s.sshKeyStatus === "matched" ? (
-                <span className={SUCCESS_BADGE_CLASS_NAME}>On this computer</span>
+                <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_on_this_computer()}</span>
               ) : s.sshKeyStatus === "no_local_match" ? (
-                <span className={WARNING_BADGE_CLASS_NAME}>Not on this computer</span>
+                <span className={WARNING_BADGE_CLASS_NAME}>{m.settings_page_not_on_this_computer()}</span>
               ) : s.sshKeyStatus === "none_registered" ? (
-                <span className={ERROR_BADGE_CLASS_NAME}>None registered</span>
+                <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_none_registered()}</span>
               ) : (
-                <span className={BADGE_CLASS_NAME}>Unknown</span>
+                <span className={BADGE_CLASS_NAME}>{m.settings_page_unknown()}</span>
               )}
             </span>
           </div>
           {s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p className={SETTINGS_NOTE_CLASS_NAME}>
-                Add one with <code>orx ssh-key add {s.sshKeyPath}</code>.
+                {m.settings_page_add_one_with()} <code>orx ssh-key add {s.sshKeyPath}</code>.
               </p>
             ) : (
               <p className={SETTINGS_NOTE_CLASS_NAME}>
-                No key on this computer yet — create one with{" "}
-                <code>ssh-keygen -t ed25519</code>, then add it with{" "}
+                {m.settings_page_no_key_on_this_computer_yet_create_one()}{" "}
+                <code>ssh-keygen -t ed25519</code>{m.settings_page_then_add_it_with()}{" "}
                 <code>orx ssh-key add</code>.
               </p>
             ))}
           {s.sshKeyStatus === "no_local_match" &&
             (s.sshKeyPath ? (
               <p className={SETTINGS_NOTE_CLASS_NAME}>
-                Register this computer with <code>orx ssh-key add {s.sshKeyPath}</code>,
-                or load a registered key with <code>ssh-add</code>.
+                {m.settings_register_computer_help({ register: ltr(`orx ssh-key add ${s.sshKeyPath}`), load: ltr("ssh-add") })}
               </p>
             ) : (
               <p className={SETTINGS_NOTE_CLASS_NAME}>
-                No key on this computer to register — load a registered key with{" "}
-                <code>ssh-add</code>, or create one with{" "}
+                {m.settings_page_no_key_on_this_computer_to_register_load()}{" "}
+                <code>ssh-add</code>{m.settings_page_or_create_one_with()}{" "}
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
@@ -1167,28 +1161,28 @@ function OpenResearchSection() {
 
 // --- compute -----------------------------------------------------------------
 
-const TARGET_LABELS: Record<ComputeTargetId, string> = {
-  local: "This machine",
-  tinker: "Tinker",
-  hf: "HF Jobs",
-  modal: "Modal",
-  k8s: "Kubernetes",
-  ssh: "SSH",
-  slurm: "Slurm",
-  ray: "Ray",
-  openresearch: "OpenResearch",
+const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
+  local: m.compute_target_local,
+  tinker: m.compute_target_tinker,
+  hf: m.compute_target_hf,
+  modal: m.compute_target_modal,
+  k8s: m.compute_target_k8s,
+  ssh: m.compute_target_ssh,
+  slurm: m.compute_target_slurm,
+  ray: m.compute_target_ray,
+  openresearch: m.compute_target_openresearch,
 };
 
-const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, string> = {
-  local: "Runs directly on this computer",
-  ssh: "Runs on a host from your SSH config",
-  tinker: "Runs through Tinker's remote compute",
-  hf: "Runs as a remote Hugging Face Job",
-  modal: "Runs in a remote Modal sandbox",
-  k8s: "Runs as a Job on your Kubernetes cluster",
-  slurm: "Runs as a scheduled job on your Slurm cluster",
-  ray: "Runs on the connected Ray cluster",
-  openresearch: "Runs on an ephemeral OpenResearch box",
+const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
+  local: m.compute_description_local,
+  ssh: m.compute_description_ssh,
+  tinker: m.compute_description_tinker,
+  hf: m.compute_description_hf,
+  modal: m.compute_description_modal,
+  k8s: m.compute_description_k8s,
+  slurm: m.compute_description_slurm,
+  ray: m.compute_description_ray,
+  openresearch: m.compute_description_openresearch,
 };
 
 /** Kind strings from the runs table — reuses the instances-table logos. */
@@ -1204,48 +1198,48 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   openresearch: "openresearch_job",
 };
 
-const TARGET_USAGE: Record<ComputeTargetId, string> = {
-  local: "The experiment runs as a supervised process on this computer and uses its CPU, memory, and GPUs.",
-  ssh: "The project is copied to the selected SSH host and runs there. Logs and status return to this dashboard.",
-  tinker: "A controller runs on this computer while the Tinker SDK sends model operations to Tinker's remote compute. This computer must stay awake and online.",
-  hf: "A Hugging Face Job runs remotely in your account using the selected hardware. Usage is billed by Hugging Face.",
-  modal: "A Modal sandbox runs remotely in your account using the selected hardware and scales to zero after the run.",
-  k8s: "A Kubernetes Job is created in the selected context and namespace from the project's .orx/k8s.yaml manifest.",
-  slurm: "The login node receives an sbatch job using the saved partition, account, and time limit; the cluster schedules the work.",
-  ray: "The run is submitted to the Ray Jobs endpoint, and the connected Ray cluster executes it.",
-  openresearch: "An ephemeral OpenResearch box runs the experiment, is billed to your organization, and is deleted when the run ends.",
+const TARGET_USAGE: Record<ComputeTargetId, () => string> = {
+  local: m.compute_usage_local,
+  ssh: m.compute_usage_ssh,
+  tinker: m.compute_usage_tinker,
+  hf: m.compute_usage_hf,
+  modal: m.compute_usage_modal,
+  k8s: m.compute_usage_k8s,
+  slurm: m.compute_usage_slurm,
+  ray: m.compute_usage_ray,
+  openresearch: m.compute_usage_openresearch,
 };
 
 function targetConnection(target: ComputeTargetSummary): string {
   switch (target.id) {
     case "local":
-      return "No credentials required; this computer is always available.";
+      return m.compute_connection_local();
     case "ssh":
-      return `SSH config and keys — ${target.summary}`;
+      return m.compute_connection_ssh({ summary: ltr(target.summary) });
     case "tinker":
-      return `TINKER_API_KEY — ${target.summary}`;
+      return m.compute_connection_tinker({ summary: ltr(target.summary) });
     case "hf":
-      return `Hugging Face token — ${target.summary}`;
+      return m.compute_connection_hf({ summary: ltr(target.summary) });
     case "modal":
-      return `Modal token — ${target.summary}`;
+      return m.compute_connection_modal({ summary: ltr(target.summary) });
     case "k8s":
-      return `Kubeconfig — ${target.summary}`;
+      return m.compute_connection_k8s({ summary: ltr(target.summary) });
     case "slurm":
-      return `SSH config — ${target.summary}`;
+      return m.compute_connection_slurm({ summary: ltr(target.summary) });
     case "ray":
-      return `Ray Jobs endpoint — ${target.summary}`;
+      return m.compute_connection_ray({ summary: ltr(target.summary) });
     case "openresearch":
-      return `OpenResearch login and SSH key — ${target.summary}`;
+      return m.compute_connection_openresearch({ summary: ltr(target.summary) });
   }
 }
 
 function BackendOverview({ target }: { target: ComputeTargetSummary }) {
   return (
     <dl className="m-0 mt-8 grid grid-cols-[9rem_minmax(0,1fr)] gap-x-5 gap-y-4 font-sans">
-      <dt className="text-md font-medium text-subtext">How it connects</dt>
+      <dt className="text-md font-medium text-subtext">{m.settings_page_how_it_connects()}</dt>
       <dd className="m-0 text-md leading-relaxed text-text">{targetConnection(target)}</dd>
-      <dt className="text-md font-medium text-subtext">What happens</dt>
-      <dd className="m-0 text-md leading-relaxed text-text">{TARGET_USAGE[target.id]}</dd>
+      <dt className="text-md font-medium text-subtext">{m.settings_page_what_happens()}</dt>
+      <dd className="m-0 text-md leading-relaxed text-text">{TARGET_USAGE[target.id]()}</dd>
     </dl>
   );
 }
@@ -1294,15 +1288,15 @@ function DefaultDestinationEditor({
   const flavorSuggestions = FLAVOR_SUGGESTIONS[backend] ?? [];
   const unchanged =
     backend === savedBackend && (!flavored || flavor.trim() === savedFlavor);
-  const destination = backend === "local" ? "this machine" : TARGET_LABELS[backend];
+  const destination = TARGET_LABELS[backend]();
   const helperText =
     saving
-      ? "Updating default destination…"
+      ? m.settings_updating_default_destination()
       : flavorRequired && !flavor.trim()
-        ? `Choose a flavor to use ${destination} for new runs.`
+        ? m.settings_choose_flavor_for_runs({ destination })
         : backend === "ssh"
-          ? "New runs use SSH; choose a host when launching."
-          : `New runs use ${destination} unless another backend is specified.`;
+          ? m.settings_new_runs_use_ssh()
+          : m.settings_new_runs_use_destination({ destination });
 
   useEffect(() => {
     setBackend(savedBackend);
@@ -1355,7 +1349,7 @@ function DefaultDestinationEditor({
 
   return (
     <section className="mb-8">
-      <h2 className="mt-0 mx-0 mb-2 text-lg">Default destination</h2>
+      <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_default_destination()}</h2>
       <div>
         <form
           className="grid grid-cols-[minmax(12rem,18rem)_minmax(12rem,18rem)] items-start gap-3"
@@ -1367,7 +1361,7 @@ function DefaultDestinationEditor({
           <OptionPicker
             choices={choices.map((choice) => ({
               id: choice.id,
-              label: TARGET_LABELS[choice.id],
+              label: TARGET_LABELS[choice.id](),
             }))}
             value={backend}
             variant="field"
@@ -1384,7 +1378,7 @@ function DefaultDestinationEditor({
               {customFlavor ? (
                 <div className="relative">
                   <input
-                    className="h-9 w-full rounded-md border border-border bg-background py-0 pr-10 pl-3 font-sans text-sm text-text outline-none focus:border-text"
+                    className="h-9 w-full rounded-md border border-border bg-background py-0 pe-10 ps-3 font-sans text-sm text-text outline-none focus:border-text"
                     type="text"
                     value={flavor}
                     onChange={(event) => setFlavor(event.target.value)}
@@ -1398,7 +1392,7 @@ function DefaultDestinationEditor({
                       }
                       if (!unchanged) void save(backend, flavor);
                     }}
-                    placeholder="Custom flavor"
+                    placeholder={m.settings_page_custom_flavor()}
                     autoFocus
                     autoComplete="off"
                     spellCheck={false}
@@ -1406,9 +1400,9 @@ function DefaultDestinationEditor({
                   />
                   <button
                     type="button"
-                    className="absolute inset-y-0 right-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
-                    aria-label="Choose a preset flavor"
-                    title="Choose a preset flavor"
+                    className="absolute inset-y-0 end-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
+                    aria-label={m.settings_page_choose_a_preset_flavor()}
+                    title={m.settings_page_choose_a_preset_flavor()}
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => setCustomFlavor(false)}
                   >
@@ -1420,16 +1414,16 @@ function DefaultDestinationEditor({
                   choices={[
                     {
                       id: "",
-                      label: flavorRequired ? "Choose a flavor" : "No default flavor",
+                      label: flavorRequired ? m.settings_choose_flavor() : m.settings_no_default_flavor(),
                     },
                     ...(flavor && !flavorSuggestions.includes(flavor)
-                      ? [{ id: flavor, label: `${flavor} (custom)` }]
+                      ? [{ id: flavor, label: m.settings_custom_value({ value: ltr(flavor) }) }]
                       : []),
                     ...flavorSuggestions.map((suggestion) => ({
                       id: suggestion,
                       label: suggestion,
                     })),
-                    { id: CUSTOM_FLAVOR_ID, label: "Custom flavor…" },
+                    { id: CUSTOM_FLAVOR_ID, label: m.settings_page_custom_flavor_1c8a207() },
                   ]}
                   value={flavor}
                   variant="field"
@@ -1444,7 +1438,7 @@ function DefaultDestinationEditor({
         {error && <div className="error mt-2.5">{error}</div>}
         {target && !target.configured && (
           <p className={SETTINGS_NOTE_CLASS_NAME}>
-            This saved destination is not configured. Set it up below or choose another backend.
+            {m.settings_page_this_saved_destination_is_not_configured_set_it()}
           </p>
         )}
       </div>
@@ -1463,33 +1457,33 @@ function TargetTile({
   onOpen: () => void;
 }) {
   const setupLabel = target.unverified
-    ? "Check setup"
+    ? m.settings_check_setup()
     : target.id === "openresearch"
-      ? "Sign in"
+      ? m.settings_sign_in()
       : target.id === "ray"
-        ? "Connect"
-        : "Set up";
+        ? m.settings_connect()
+        : m.settings_set_up();
 
   return (
     <button
       type="button"
-      className="group flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-left font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface disabled:cursor-default disabled:opacity-52"
+      className="group flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface disabled:cursor-default disabled:opacity-52"
       onClick={onOpen}
       disabled={!target.enabled}
     >
       <span className="flex h-16 w-40 flex-none items-center justify-start">
         <BackendLogo kind={TARGET_KIND[target.id]} size={48} />
       </span>
-      <span className="mt-5 text-lg font-semibold text-text">{TARGET_LABELS[target.id]}</span>
+      <span className="mt-5 text-lg font-semibold text-text">{TARGET_LABELS[target.id]()}</span>
       <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-subtext">
-        {TARGET_CARD_DESCRIPTIONS[target.id]}
+        {TARGET_CARD_DESCRIPTIONS[target.id]()}
       </span>
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-md">
         <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
-          {isDefault ? "Default" : target.configured ? "View settings" : setupLabel}
+          {isDefault ? m.settings_page_default_808d7dc() : target.configured ? m.settings_view_settings() : setupLabel}
         </span>
-        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
-          →
+        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5 rtl:group-hover:-translate-x-0.5" aria-hidden="true">
+          <ArrowRight className="rtl-mirror" size={16} />
         </span>
       </span>
     </button>
@@ -1512,18 +1506,18 @@ function BackendDetailPage({
         className="settings-back mb-10 inline-flex items-center gap-2 text-md font-medium text-subtext hover:text-text"
         onClick={onBack}
       >
-        <ArrowLeft size={16} /> Back to Compute
+        <ArrowLeft size={16} /> {m.settings_page_back_to_compute()}
       </button>
       <div className="flex items-center justify-between gap-6">
         <div className={`flex min-w-0 items-center ${target.id === "tinker" ? "gap-8" : "gap-5"}`}>
           <span className="flex h-20 w-24 flex-none items-center justify-start">
             <BackendLogo kind={TARGET_KIND[target.id]} size={72} />
           </span>
-          <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]}</h1>
+          <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
           <span className="inline-flex flex-none items-center rounded-sm border border-primary bg-primary-subtle py-px px-2 text-xs font-medium text-primary">
-            Default
+            {m.settings_page_default_808d7dc()}
           </span>
         )}
       </div>
@@ -1629,16 +1623,16 @@ function ComputeTab({
 
   return (
     <>
-      <h1>Compute</h1>
+      <h1>{m.settings_page_compute()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Connect compute backends and choose where new runs execute.
+        {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Checking compute targets…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_compute_targets()}
         </div>
       ) : (
         <>
@@ -1649,14 +1643,14 @@ function ComputeTab({
             onSaved={apply}
           />
           <section className="mb-8">
-            <h2 className="mt-0 mx-0 mb-2 text-lg">Ready to use</h2>
+            <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               {configuredTargets.map(renderTarget)}
             </div>
           </section>
           {availableTargets.length > 0 && (
             <section className="mb-3.5">
-              <h2 className="mt-0 mx-0 mb-2 text-lg">More compute options</h2>
+              <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_more_compute_options()}</h2>
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                 {availableTargets.map(renderTarget)}
               </div>
@@ -1670,25 +1664,25 @@ function ComputeTab({
 
 // --- environment ---------------------------------------------------------------
 
-const SOURCE_LABELS: Record<HfTokenSource, string> = {
-  env: "HF_TOKEN env var",
-  openresearchEnv: "~/.openresearch/env",
-  hfCache: "~/.cache/huggingface/token (hf auth login)",
+const SOURCE_LABELS: Record<HfTokenSource, () => string> = {
+  env: m.settings_hf_source_env,
+  openresearchEnv: m.settings_hf_source_openresearch,
+  hfCache: m.settings_hf_source_cache,
 };
 
 function HfStatusBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured) return <span className={BADGE_CLASS_NAME}>Not configured</span>;
-  if (!settings.valid) return <span className={ERROR_BADGE_CLASS_NAME}>Invalid token</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>Connected</span>;
+  if (!settings.configured) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_configured()}</span>;
+  if (!settings.valid) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_invalid_token()}</span>;
+  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
 }
 
 /** Jobs-permission detail only — configured/valid state is HfStatusBadge's job. */
 function HfJobsBadge({ settings }: { settings: HfSettings }) {
   if (!settings.configured || !settings.valid) return null;
-  if (settings.jobsWrite === true) return <span className={SUCCESS_BADGE_CLASS_NAME}>Jobs: write OK</span>;
+  if (settings.jobsWrite === true) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_jobs_write_ok()}</span>;
   if (settings.jobsWrite === false)
-    return <span className={ERROR_BADGE_CLASS_NAME}>No job.write permission</span>;
-  return <span className={BADGE_CLASS_NAME}>Jobs permission unknown</span>;
+    return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_job_write_permission()}</span>;
+  return <span className={BADGE_CLASS_NAME}>{m.settings_page_jobs_permission_unknown()}</span>;
 }
 
 function HfSection() {
@@ -1736,24 +1730,24 @@ function HfSection() {
         <div className="error">{loadError}</div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading status…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_status()}
         </div>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">Status</span>
+            <span className="k">{m.settings_page_status()}</span>
             <span className="v">
               <HfStatusBadge settings={settings} />
             </span>
-            <span className="k">Account</span>
+            <span className="k">{m.settings_page_account()}</span>
             <span className="v">{settings.username ?? "—"}</span>
-            <span className="k">Token</span>
+            <span className="k">{m.settings_page_token()}</span>
             <span className="v">{settings.maskedToken ?? "—"}</span>
-            <span className="k">Source</span>
+            <span className="k">{m.settings_page_source()}</span>
             <span className="v">
-              {settings.source ? SOURCE_LABELS[settings.source] : "Not configured"}
+              {settings.source ? SOURCE_LABELS[settings.source]() : m.settings_page_not_configured()}
             </span>
-            <span className="k">Jobs</span>
+            <span className="k">{m.settings_page_jobs()}</span>
             <span className="v">
               <HfJobsBadge settings={settings} />
               {(!settings.configured || !settings.valid) && "—"}
@@ -1761,37 +1755,31 @@ function HfSection() {
           </div>
           {settings.source === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
-              HF_TOKEN is set in the environment and overrides any token saved here.
+              {m.settings_page_hf_token_is_set_in_the_environment_and()}
             </p>
           )}
           {settings.valid && settings.jobsWrite === null && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
-              This token is valid but doesn&apos;t report whether it can launch Jobs — OAuth
-              tokens from <code>hf auth login</code> never do. Launches may still work; for a
-              definitive check, save a write-scoped token from{" "}
-              <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noreferrer">
-                huggingface.co/settings/tokens
-              </a>
-              .
+              {m.settings_hf_token_help({ login: ltr("hf auth login"), url: ltr("huggingface.co/settings/tokens") })}
             </p>
           )}
         </>
       )}
       <form className={FORM_CLASS_NAME} onSubmit={submit}>
         <label>
-          {settings?.configured ? "Replace token" : "New token"}
+          {settings?.configured ? m.settings_replace_token() : m.settings_new_token()}
           <input
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            placeholder="hf_…"
+            placeholder={m.settings_page_hf()}
             autoComplete="off"
           />
         </label>
         {error && <div className="error">{error}</div>}
         <div className="actions">
           <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={!token.trim() || saving}>
-            {saving ? "Validating…" : "Save"}
+            {saving ? m.settings_validating() : m.common_save()}
           </button>
         </div>
       </form>
@@ -1811,8 +1799,8 @@ function HfHintRow() {
       {/* colSpan tracks the EnvRow/AddVarRow column count */}
       <td colSpan={3}>
         <p className={SETTINGS_NOTE_CLASS_NAME}>
-          This value looks like a Hugging Face token — compute runs only read it from{" "}
-          <code>HF_TOKEN</code>. Save it under that key if it&apos;s meant for HF Jobs.
+          {m.settings_page_this_value_looks_like_a_hugging_face_token()}{" "}
+          <code>HF_TOKEN</code>{m.settings_page_save_it_under_that_key_if_it_apos()}
         </p>
       </td>
     </tr>
@@ -1875,7 +1863,7 @@ function EnvRow({
           {entry ? (
             <>
               {entry.maskedValue}
-              {entry.inProcessEnv && <span className={BADGE_CLASS_NAME}>Overridden by env</span>}
+              {entry.inProcessEnv && <span className={BADGE_CLASS_NAME}>{m.settings_page_overridden_by_env()}</span>}
             </>
           ) : (
             <input
@@ -1890,8 +1878,8 @@ function EnvRow({
                 }
                 if (e.key === "Escape" && !saving) setValue("");
               }}
-              placeholder="value"
-              aria-label={`Value for ${name}`}
+              placeholder={m.settings_page_value()}
+              aria-label={m.a11y_value_for({ name })}
               autoComplete="new-password"
               disabled={saving}
             />
@@ -1901,8 +1889,8 @@ function EnvRow({
           {entry ? (
             <button
               className={ICON_BUTTON_CLASS_NAME}
-              title={`Delete ${name}`}
-              aria-label={`Delete ${name}`}
+              title={m.a11y_delete_item({ name })}
+              aria-label={m.a11y_delete_item({ name })}
               onClick={() => void remove()}
               disabled={saving}
             >
@@ -1911,7 +1899,7 @@ function EnvRow({
           ) : (
             value.trim() && (
               <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => void save()} disabled={saving}>
-                {saving ? "Saving…" : "Save"}
+                {saving ? m.common_saving() : m.common_save()}
               </button>
             )
           )}
@@ -1969,7 +1957,7 @@ function AddVarRow({
             onChange={(e) => setKey(e.target.value)}
             onKeyDown={onKeyDown}
             placeholder="MY_API_KEY"
-            aria-label="New variable key"
+            aria-label={m.settings_page_new_variable_key()}
             autoComplete="off"
             spellCheck={false}
             disabled={saving}
@@ -1982,8 +1970,8 @@ function AddVarRow({
             value={value}
             onChange={(e) => setValue(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="value"
-            aria-label="New variable value"
+            placeholder={m.settings_page_value()}
+            aria-label={m.settings_page_new_variable_value()}
             autoComplete="new-password"
             disabled={saving}
           />
@@ -1994,12 +1982,12 @@ function AddVarRow({
             onClick={() => void save()}
             disabled={saving || !key.trim() || !value.trim()}
           >
-            {saving ? "Saving…" : "Save"}
+            {saving ? m.common_saving() : m.common_save()}
           </button>
           <button
             className={ICON_BUTTON_CLASS_NAME}
-            title="Cancel"
-            aria-label="Cancel new variable"
+            title={m.settings_page_cancel()}
+            aria-label={m.settings_page_cancel_new_variable()}
             onClick={onDone}
             disabled={saving}
           >
@@ -2038,30 +2026,27 @@ function EnvVarsSection() {
   return (
     <div className={SETTINGS_CARD_CLASS_NAME}>
       <div className="settings-card-head flex items-center gap-2.5 mb-3">
-        <h3>Environment variables</h3>
+        <h3>{m.settings_page_environment_variables()}</h3>
         <div className="spacer" style={{ flex: 1 }} />
         <button
           className={SMALL_BUTTON_CLASS_NAME}
           onClick={() => setAdding(true)}
           disabled={adding || vars === null}
         >
-          <Plus size={12} /> Add variable
+          <Plus size={12} /> {m.settings_page_add_variable()}
         </button>
       </div>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Stored in <code>~/.openresearch/env</code> and passed to runs and the research agent.{" "}
-        <code>TINKER_API_KEY</code>, <code>HF_TOKEN</code>, and <code>WANDB_API_KEY</code> are
-        always listed since runs typically need them. Variables set in orx&apos;s own environment
-        win on conflicts.
+        {m.settings_environment_help({ path: ltr("~/.openresearch/env"), tinker: ltr("TINKER_API_KEY"), hf: ltr("HF_TOKEN"), wandb: ltr("WANDB_API_KEY") })}
       </p>
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : vars === null ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
         </div>
       ) : (
-        <table className="env-table w-full border-collapse text-md table-fixed [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ml-2 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:p-0 [&_input:focus]:shadow-[0_1px_0_0_var(--text)] [&_td]:h-9 [&_td]:pt-0 [&_td]:pr-2.5 [&_td]:pb-0 [&_td]:pl-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-right [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-left [&_.icon-btn]:ml-2 [&_.icon-btn]:align-middle [&_.icon-btn:hover]:text-accent-red">
+        <table className="env-table w-full border-collapse text-md table-fixed [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:p-0 [&_input:focus]:shadow-[0_1px_0_0_var(--text)] [&_td]:h-9 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle [&_.icon-btn:hover]:text-accent-red">
           <tbody>
             {names.map((name) => (
               <EnvRow
@@ -2092,9 +2077,15 @@ const THEME_OPTIONS: {
   label: string;
   icon: typeof Monitor;
 }[] = [
-  { value: "system", label: "System", icon: Monitor },
-  { value: "light", label: "Light", icon: Sun },
-  { value: "dark", label: "Dark", icon: Moon },
+  { value: "system", label: m.settings_theme_system(), icon: Monitor },
+  { value: "light", label: m.settings_theme_light(), icon: Sun },
+  { value: "dark", label: m.settings_theme_dark(), icon: Moon },
+];
+
+const LOCALE_CHOICES: { id: Locale; label: string }[] = [
+  { id: "en", label: "English" },
+  { id: "zh-CN", label: "简体中文" },
+  { id: "fa", label: "فارسی" },
 ];
 
 function AppearanceTab() {
@@ -2124,18 +2115,18 @@ function AppearanceTab() {
 
   return (
     <>
-      <h2>Appearance</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">How the interface looks on this device.</p>
+      <h2>{m.settings_appearance_heading()}</h2>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">{m.settings_appearance_description()}</p>
       <div className={SETTINGS_CARD_CLASS_NAME}>
         <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
           <div>
-            <div className="project-default-title text-md font-semibold">Theme</div>
-            <p>System follows your operating system's light or dark setting.</p>
+            <div className="project-default-title text-md font-semibold">{m.settings_theme_heading()}</div>
+            <p>{m.settings_theme_description()}</p>
           </div>
           <div
             className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
             role="radiogroup"
-            aria-label="Theme"
+            aria-label={m.settings_theme_heading()}
             onKeyDown={onKeyDown}
           >
             {THEME_OPTIONS.map(({ value, label, icon: Icon }) => (
@@ -2154,6 +2145,23 @@ function AppearanceTab() {
             ))}
           </div>
         </div>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div>
+            <div className="project-default-title text-md font-semibold">{m.settings_language_heading()}</div>
+            <p>{m.settings_language_description()}</p>
+          </div>
+          <div className="w-52 flex-none">
+            <OptionPicker
+              choices={LOCALE_CHOICES}
+              value={getLocale()}
+              variant="field"
+              dropDown
+              onSelect={(next) => {
+                if (isLocale(next)) setLocale(next);
+              }}
+            />
+          </div>
+        </div>
       </div>
     </>
   );
@@ -2161,20 +2169,20 @@ function AppearanceTab() {
 
 // --- updates -----------------------------------------------------------------
 
-const CHANNEL_LABELS: Record<InstallChannel, string> = {
-  installer: "Installed with the orx installer",
-  "app-bundle": "macOS app",
-  cargo: "Installed with cargo",
-  homebrew: "Installed with Homebrew",
-  nix: "Managed by Nix",
-  unknown: "Unknown install",
+const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
+  installer: m.updates_channel_installer,
+  "app-bundle": m.updates_channel_app,
+  cargo: m.updates_channel_cargo,
+  homebrew: m.updates_channel_homebrew,
+  nix: m.updates_channel_nix,
+  unknown: m.updates_channel_unknown,
 };
 
 /** What to do about updates when orx can't do them itself. */
-const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, string>> = {
-  cargo: "Re-run your cargo install to update.",
-  homebrew: "Run brew upgrade to update.",
-  nix: "Update it through your Nix configuration.",
+const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
+  cargo: m.updates_hint_cargo,
+  homebrew: m.updates_hint_homebrew,
+  nix: m.updates_hint_nix,
 };
 
 function UpdatesTab() {
@@ -2187,14 +2195,14 @@ function UpdatesTab() {
   if (!status) {
     return (
       <>
-        <h2>Updates</h2>
+        <h2>{m.settings_page_updates()}</h2>
         {loadError ? (
           <div className={SETTINGS_CARD_CLASS_NAME}>
             <div className="error">{loadError}</div>
           </div>
         ) : (
           <div className={SETTINGS_LOADING_CLASS_NAME}>
-            <span className={SPINNER_CLASS_NAME} /> Loading…
+            <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
           </div>
         )}
       </>
@@ -2217,29 +2225,28 @@ function UpdatesTab() {
 
   return (
     <>
-      <h2>Updates</h2>
+      <h2>{m.settings_page_updates()}</h2>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Keeping this copy of orx on the latest release.
+        {m.settings_page_keeping_this_copy_of_orx_on_the_latest()}
       </p>
       <div className={SETTINGS_CARD_CLASS_NAME}>
         <div className={KV_CLASS_NAME}>
-          <div className="k">Version</div>
+          <div className="k">{m.settings_page_version()}</div>
           <div className="v">{status.current}</div>
-          <div className="k">Latest</div>
+          <div className="k">{m.settings_page_latest()}</div>
           <div className="v">{status.latest ?? "—"}</div>
-          <div className="k">Install</div>
-          <div className="v">{CHANNEL_LABELS[status.channel]}</div>
+          <div className="k">{m.settings_page_install()}</div>
+          <div className="v">{CHANNEL_LABELS[status.channel]()}</div>
         </div>
 
         {status.restartRequired && (
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
               <div className="project-default-title text-md font-semibold">
-                Restart to finish updating
+                {m.settings_page_restart_to_finish_updating()}
               </div>
               <p>
-                Version {status.installedVersion} is installed. This window is still running{" "}
-                {status.current}.
+                {m.settings_restart_version({ installed: ltr(status.installedVersion ?? "—"), current: ltr(status.current ?? status.installedVersion ?? "—") })}
               </p>
             </div>
           </div>
@@ -2250,20 +2257,19 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-md font-semibold">
-                  Install updates automatically
+                  {m.settings_page_install_updates_automatically()}
                 </div>
                 <p>
-                  New releases are downloaded and installed in the background. Turning this off
-                  keeps the notice but leaves the install to you.
+                  {m.settings_page_new_releases_are_downloaded_and_installed_in_the()}
                   {status.envDisabled &&
-                    " Updates are switched off for this environment by ORX_NO_UPDATE_CHECK, so this setting has no effect."}
+                    m.settings_updates_disabled_by_env()}
                 </p>
               </div>
               <button
                 type="button"
                 role="switch"
                 aria-checked={status.autoUpdate}
-                aria-label="Install updates automatically"
+                aria-label={m.settings_page_install_updates_automatically()}
                 className={`${SETTINGS_SWITCH_CLASS_NAME} ${status.autoUpdate ? "on" : ""}`}
                 disabled={busy !== null}
                 onClick={() =>
@@ -2276,12 +2282,12 @@ function UpdatesTab() {
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
                 <div className="project-default-title text-md font-semibold">
-                  {status.updateAvailable ? `Update to ${status.latest}` : "Check for updates"}
+                  {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
                   {status.updateAvailable
-                    ? "Install the new release now instead of waiting for the background update."
-                    : "orx checks a few times a day on its own."}
+                    ? m.settings_install_release_now()
+                    : m.settings_checks_automatically()}
                 </p>
               </div>
               <button
@@ -2291,10 +2297,10 @@ function UpdatesTab() {
                 onClick={() => void run("apply", () => applyUpdate().then(apply))}
               >
                 {busy === "apply"
-                  ? "Working…"
+                  ? m.chat_working()
                   : status.updateAvailable
-                    ? "Update now"
-                    : "Check now"}
+                    ? m.settings_update_now()
+                    : m.settings_check_now()}
               </button>
             </div>
           </>
@@ -2302,11 +2308,11 @@ function UpdatesTab() {
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
               <div className="project-default-title text-md font-semibold">
-                orx can't update this install
+                {m.settings_page_orx_can_t_update_this_install()}
               </div>
               <p>
-                {MANUAL_UPDATE_HINT[status.channel] ??
-                  "Reinstall with the orx installer to get automatic updates."}
+                {MANUAL_UPDATE_HINT[status.channel]?.() ??
+                  m.settings_reinstall_for_updates()}
               </p>
             </div>
           </div>
@@ -2342,25 +2348,25 @@ function TelemetryTab() {
 
   return (
     <>
-      <h2>Usage analytics</h2>
+      <h2>{m.settings_page_usage_analytics()}</h2>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Share anonymous product usage linked only to a random installation ID.
+        {m.settings_page_share_anonymous_product_usage_linked_only_to_a()}
       </p>
       {!settings ? (
-        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
+        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
       ) : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">Anonymous usage analytics</div>
-              <p>No code, prompts, file contents, or account identifiers are sent.</p>
-              {!settings.enabled && settings.reason && <p>Currently off: {settings.reason}.</p>}
+              <div className="project-default-title text-md font-semibold">{m.settings_page_anonymous_usage_analytics()}</div>
+              <p>{m.settings_page_no_code_prompts_file_contents_or_account_identifiers()}</p>
+              {!settings.enabled && settings.reason && <p>{m.settings_page_currently_off()} {settings.reason}.</p>}
             </div>
             <button
               type="button"
               role="switch"
               aria-checked={settings.preferenceEnabled}
-              aria-label="Anonymous usage analytics"
+              aria-label={m.settings_page_anonymous_usage_analytics()}
               className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.preferenceEnabled ? "on" : ""}`}
               disabled={saving}
               onClick={toggle}
@@ -2408,18 +2414,18 @@ function InstallCliRow({
     <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
       <div>
         <div className="project-default-title text-md font-semibold">
-          Install the <code>orx</code> command
+          {m.settings_install_cli_title({ command: ltr("orx") })}
         </div>
         {result ? (
           <p>
-            {result.alreadyCurrent ? "Already linked at " : "Linked "}
-            <code>{result.link}</code>.
-            {!result.onPath && ` Add ${result.dir} to your PATH to use it.`}
+            {result.alreadyCurrent
+              ? m.settings_cli_already_linked({ link: ltr(result.link) })
+              : m.settings_cli_linked({ link: ltr(result.link) })}
+            {!result.onPath && m.settings_add_to_path({ directory: ltr(result.dir) })}
           </p>
         ) : (
           <p>
-            Adds <code>orx</code> to your terminal, pointing at this app — so the CLI and the app
-            are always the same version.
+            {m.settings_install_cli_description({ command: ltr("orx") })}
           </p>
         )}
       </div>
@@ -2429,7 +2435,7 @@ function InstallCliRow({
         disabled={busy !== null}
         onClick={() => install(needsForce)}
       >
-        {busy === "cli" ? "Working…" : needsForce ? "Replace anyway" : result ? "Re-link" : "Install"}
+        {busy === "cli" ? m.chat_working() : needsForce ? m.settings_replace_anyway() : result ? m.settings_relink() : m.settings_install()}
       </button>
     </div>
   );
@@ -2463,32 +2469,30 @@ function ProjectDefaultsTab() {
 
   return (
     <>
-      <h2>General</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">Defaults applied when you create a project.</p>
+      <h2>{m.settings_page_general()}</h2>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">{m.settings_page_defaults_applied_when_you_create_a_project()}</p>
       {!settings ? (
-        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
+        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
       ) : (
         <div className="settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5 [&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0">
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <h3>GitHub publishing</h3>
+            <h3>{m.settings_page_git_hub_publishing()}</h3>
             <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : settings.ghInstalled ? "warn" : "err"}`}>
-              {settings.githubAuthenticated ? "Connected via GitHub CLI" : "Not connected"}
+              {settings.githubAuthenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}
             </span>
           </div>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">Enable GitHub syncing for new projects</div>
+              <div className="project-default-title text-md font-semibold">{m.settings_page_enable_git_hub_syncing_for_new_projects()}</div>
               <p>
-                When enabled, each new project gets a private GitHub repository. Experiment
-                branches are pushed automatically for collaborator visibility. Compute always
-                uses direct source snapshots.
+                {m.settings_page_when_enabled_each_new_project_gets_a_private()}
               </p>
             </div>
             <button
               type="button"
               role="switch"
               aria-checked={settings.githubForNewProjects}
-              aria-label="Enable GitHub syncing for new projects"
+              aria-label={m.settings_page_enable_git_hub_syncing_for_new_projects()}
               className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.githubForNewProjects ? "on" : ""}`}
               disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
               onClick={toggle}
@@ -2524,9 +2528,7 @@ function GitHubCliHelp({
   return (
     <>
       <p className="git-card-helper text-subtext text-sm m-0">
-        {renderNote(ghInstalled
-          ? "Run `gh auth login` in your terminal."
-          : "Install GitHub CLI, then run `gh auth login` in your terminal.")}
+        {renderNote(ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login())}
       </p>
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
@@ -2536,11 +2538,11 @@ function GitHubCliHelp({
             target="_blank"
             rel="noreferrer"
           >
-            Install GitHub CLI <ExternalLink size={12} />
+            {m.settings_page_install_git_hub_cli()} <ExternalLink size={12} />
           </a>
         )}
         <button type="button" className={`${BUTTON_CLASS_NAME} ${ghInstalled ? "text-accent-amber border-accent-amber" : ""}`} disabled={checking} onClick={check}>
-          {checking ? "Checking…" : "Check again"}
+          {checking ? m.common_checking() : m.settings_check_again()}
         </button>
       </div>
     </>
@@ -2562,20 +2564,17 @@ function OverleafCard() {
 
   return (
     <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
-      <h3>Overleaf</h3>
+      <h3>{m.settings_page_overleaf()}</h3>
       <div className={KV_CLASS_NAME}>
-        <span className="k">Git token</span>
+        <span className="k">{m.settings_page_git_token()}</span>
         <span className="v">
           <span className={`${BADGE_CLASS_NAME} ${hasToken ? "ok" : ""}`}>
-            {hasToken === null ? (error ? "Unavailable" : "Checking…") : hasToken ? "Saved" : "Not set"}
+            {hasToken === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasToken ? m.settings_saved() : m.settings_not_set()}
           </span>
         </span>
       </div>
       <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
-        With a token saved, a paper opened in the dashboard can be kept in step with an Overleaf
-        project, in both directions. Overleaf&apos;s Git integration comes with a paid Overleaf
-        plan; without one, a paper can still be uploaded to Overleaf as a new project. The token
-        stays on this machine and is not sent to compute backends.
+        {m.settings_page_with_a_token_saved_a_paper_opened_in()}
       </p>
       {hasToken ? (
         <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
@@ -2591,14 +2590,14 @@ function OverleafCard() {
                 .finally(() => setSaving(false));
             }}
           >
-            {saving ? "Removing…" : "Remove token"}
+            {saving ? m.settings_removing() : m.settings_remove_token()}
           </button>
         </div>
       ) : (
         <TokenForm
           save={saveOverleafToken}
           onSaved={(result) => setHasToken(result.hasToken)}
-          placeholder="Overleaf Git authentication token"
+          placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
         />
       )}
@@ -2648,13 +2647,13 @@ function GitTab({
   const syncErrorMessage = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     if (message.toLowerCase().includes("archived")) {
-      return "GitHub rejected the push because this repository is archived and read-only. The local project is still available. Unarchive the repository on GitHub, then enable syncing here.";
+      return m.settings_github_archived_error();
     }
     if (message.includes("(fetch first)") || message.includes("non-fast-forward")) {
-      return "GitHub contains changes that are not in this local project. Pull the latest GitHub changes and resolve any conflicts in Git, then try enabling syncing again.";
+      return m.settings_github_fetch_first_error();
     }
     if (message.includes("403") || message.toLowerCase().includes("permission denied")) {
-      return "GitHub rejected the push. Make sure your connected account has write access to this repository, then try again.";
+      return m.settings_github_permission_error();
     }
     return message;
   };
@@ -2690,38 +2689,37 @@ function GitTab({
 
   return (
     <>
-      <h1>Repository</h1>
+      <h1>{m.settings_page_repository()}</h1>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Git and GitHub settings for <strong>{project?.name ?? "the current project"}</strong>.
-        Local Git powers experiments; publishing is optional.
+        {m.settings_repository_description({ project: project?.name ?? m.settings_current_project() })}
       </p>
       {!project ? (
-        <div className={SETTINGS_CARD_CLASS_NAME}><p className={SETTINGS_NOTE_CLASS_NAME}>Open a project to inspect its repository and GitHub publication state.</p></div>
+        <div className={SETTINGS_CARD_CLASS_NAME}><p className={SETTINGS_NOTE_CLASS_NAME}>{m.settings_page_open_a_project_to_inspect_its_repository_and()}</p></div>
       ) : error && !status ? (
         <div className="error">{error}</div>
       ) : !status ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
         </div>
       ) : (
         <>
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
-            <h3>Local repository</h3>
+            <h3>{m.settings_page_local_repository()}</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">Path</span><span className={`v ${MONO_CLASS_NAME}`}>{status.path}</span>
-              <span className="k">Git</span><span className="v">{status.gitVersion ?? "not found"}</span>
-              <span className="k">State</span><span className="v">{status.initialized ? `${status.currentBranch ?? "detached"} · ${status.clean ? "clean" : "has changes"}` : "not initialized"}</span>
-              <span className="k">Baseline</span><span className={`v ${MONO_CLASS_NAME}`}>{status.baselineBranch}</span>
-              <span className="k">Remotes</span><span className="v">{status.remotes.length ? status.remotes.map((remote) => `${remote.name}: ${remote.url}`).join(" · ") : "none"}</span>
+              <span className="k">{m.settings_page_path()}</span><span className={`v ${MONO_CLASS_NAME}`}>{status.path}</span>
+              <span className="k">Git</span><span className="v">{status.gitVersion ?? m.onboarding_not_found()}</span>
+              <span className="k">{m.settings_page_state()}</span><span className="v">{status.initialized ? m.settings_git_state({ branch: ltr(status.currentBranch ?? m.settings_detached()), state: status.clean ? m.settings_clean() : m.settings_has_changes() }) : m.settings_not_initialized()}</span>
+              <span className="k">{m.settings_page_baseline()}</span><span className={`v ${MONO_CLASS_NAME}`}>{status.baselineBranch}</span>
+              <span className="k">{m.settings_page_remotes()}</span><span className="v">{status.remotes.length ? status.remotes.map((remote) => `${remote.name}: ${remote.url}`).join(" · ") : m.settings_none()}</span>
             </div>
-            {!status.initialized && <div className={GIT_CARD_ACTIONS_CLASS_NAME}><button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>Initialize Git</button></div>}
+            {!status.initialized && <div className={GIT_CARD_ACTIONS_CLASS_NAME}><button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</button></div>}
           </div>
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">Authentication</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : status.github.ghInstalled ? "warn" : "err"}`}>{status.github.authenticated ? "Connected via GitHub CLI" : "Not connected"}</span></span>
-              <span className="k">Project</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">Syncing off</span>}</> : <span className={BADGE_CLASS_NAME}>Local only</span>}</span>
-              {status.github.enabled && <><span className="k">Sync</span><span className="v">{status.github.syncStatus}</span></>}
+              <span className="k">{m.settings_page_authentication()}</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : status.github.ghInstalled ? "warn" : "err"}`}>{status.github.authenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}</span></span>
+              <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">{m.settings_page_syncing_off()}</span>}</> : <span className={BADGE_CLASS_NAME}>{m.settings_page_local_only()}</span>}</span>
+              {status.github.enabled && <><span className="k">{m.settings_page_sync()}</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
@@ -2732,24 +2730,23 @@ function GitTab({
               <>
                 <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
                   {hasGithubRepository
-                    ? "Use this repository for automatic experiment-branch pushes when your connected account can write to it. Otherwise, OpenResearch creates a separate private repository for collaboration."
-                    : "Create a private repository and automatically push experiment branches for collaborator visibility."}
+                    ? m.settings_use_existing_github_repository()
+                    : m.settings_create_private_github_repository()}
                 </p>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-                  {hasGithubRepository && status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">Open on GitHub <ExternalLink size={12} /></a>}
-                  <button className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving} onClick={enableSync}>{saving ? "Enabling…" : "Enable GitHub syncing"}</button>
+                  {hasGithubRepository && status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></a>}
+                  <button className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving} onClick={enableSync}>{saving ? m.repository_enabling() : m.repository_enable_syncing()}</button>
                 </div>
               </>
             )}
             {status.github.enabled && (
               <>
                 <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
-                  Disabling syncing stops automatic pushes. Compute continues to use direct source
-                  snapshots. This does not delete the GitHub repository or code already pushed.
+                  {m.settings_page_disabling_syncing_stops_automatic_pushes_compute_continues_to()}
                 </p>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-                  {status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">Open on GitHub <ExternalLink size={12} /></a>}
-                  <button className={BUTTON_CLASS_NAME} disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? "Updating…" : "Disable syncing"}</button>
+                  {status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></a>}
+                  <button className={BUTTON_CLASS_NAME} disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</button>
                 </div>
               </>
             )}
@@ -2768,19 +2765,17 @@ function GitTab({
             aria-labelledby="github-default-title"
             onClick={(event) => event.stopPropagation()}
           >
-            <h2 id="github-default-title">Make GitHub syncing the default?</h2>
+            <h2 id="github-default-title">{m.settings_page_make_git_hub_syncing_the_default()}</h2>
             <p>
-              This is useful when collaborators follow project changes on GitHub. New projects
-              will enable syncing automatically, creating a private repository when needed and
-              pushing experiment branches for visibility.
+              {m.settings_page_this_is_useful_when_collaborators_follow_project_changes()}
             </p>
             {defaultPromptError && <div className="error">{defaultPromptError}</div>}
             <div className="github-default-actions flex justify-end gap-2.5 mt-5.5">
               <button className={BUTTON_CLASS_NAME} disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(false)}>
-                Not now
+                {m.settings_page_not_now()}
               </button>
               <button className={PRIMARY_BUTTON_CLASS_NAME} disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(true)}>
-                {defaultPromptSaving ? "Saving…" : "Make default"}
+                {defaultPromptSaving ? m.common_saving() : m.settings_make_default()}
               </button>
             </div>
           </div>
@@ -2792,12 +2787,20 @@ function GitTab({
 
 // --- storage (data directory) ------------------------------------------------
 
-const DATA_DIR_SOURCE_LABEL: Record<DataDirSettings["source"], string> = {
-  env: "ORX_DATA_DIR environment variable",
-  config: "your saved setting",
-  xdg: "XDG_DATA_HOME",
-  default: "default location",
+const DATA_DIR_SOURCE_LABEL: Record<DataDirSettings["source"], () => string> = {
+  env: m.storage_source_env,
+  config: m.storage_source_saved,
+  xdg: m.storage_source_xdg,
+  default: m.storage_source_default,
 };
+
+const MOVE_PHASE_LABELS: Record<string, () => string> = {
+  preparing: m.storage_preparing,
+  copying: m.storage_copying,
+  verifying: m.storage_verifying,
+  finalizing: m.storage_finalizing,
+};
+const movePhaseLabel = (phase: string) => MOVE_PHASE_LABELS[phase]?.() ?? phase;
 
 type MoveState =
   | { kind: "idle" }
@@ -2880,10 +2883,7 @@ function StorageTab() {
     // Confirm — this relocates all projects' data. Same-disk moves are atomic;
     // cross-disk moves copy and leave the old folder for you to remove.
     if (
-      !window.confirm(
-        `Move all orx data to:\n${trimmed}\n\nThe store is copied to the new location and ` +
-          `activated there. Active runs or chats will block the move.`,
-      )
+      !window.confirm(m.storage_move_confirm({ path: ltr(trimmed) }))
     )
       return;
     setMove({ kind: "moving", phase: "preparing", copied: 0, total: validation?.treeBytes ?? 0 });
@@ -2899,11 +2899,9 @@ function StorageTab() {
 
   return (
     <>
-      <h2>Storage</h2>
+      <h2>{m.settings_page_storage()}</h2>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        Where orx keeps everything on this machine — the local database, run logs, artifacts, and
-        chat attachments for <strong>all</strong> projects. Moving it copies the whole store to the
-        new location and activates it there.
+        {m.settings_storage_description()}
       </p>
       {loadError ? (
         <div className={SETTINGS_CARD_CLASS_NAME}>
@@ -2911,23 +2909,23 @@ function StorageTab() {
         </div>
       ) : !settings ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
         </div>
       ) : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <h3>Data directory</h3>
+            <h3>{m.settings_page_data_directory()}</h3>
             <div className="spacer" style={{ flex: 1 }} />
-            <span className={BADGE_CLASS_NAME}>{settings.isDefault ? "Default" : "Custom"}</span>
+            <span className={BADGE_CLASS_NAME}>{settings.isDefault ? m.settings_page_default_808d7dc() : m.settings_page_custom_flavor_1c8a207()}</span>
           </div>
           <div className={KV_CLASS_NAME}>
-            <span className="k">Current</span>
+            <span className="k">{m.settings_page_current()}</span>
             <span className={`v ${MONO_CLASS_NAME}`}>{settings.current}</span>
-            <span className="k">Source</span>
-            <span className="v">{DATA_DIR_SOURCE_LABEL[settings.source]}</span>
+            <span className="k">{m.settings_page_source()}</span>
+            <span className="v">{DATA_DIR_SOURCE_LABEL[settings.source]()}</span>
             {!settings.isDefault && (
               <>
-                <span className="k">Default</span>
+                <span className="k">{m.settings_page_default_808d7dc()}</span>
                 <span className={`v ${MONO_CLASS_NAME}`}>{settings.defaultPath}</span>
               </>
             )}
@@ -2935,13 +2933,12 @@ function StorageTab() {
 
           {envForced ? (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
-              The data directory is pinned by the <code>ORX_DATA_DIR</code> environment variable,
-              which overrides this setting. Unset it to choose a location here.
+              {m.settings_data_dir_forced({ variable: ltr("ORX_DATA_DIR") })}
             </p>
           ) : (
             <form className={FORM_CLASS_NAME} onSubmit={startMove}>
               <label>
-                New location
+                {m.settings_page_new_location()}
                 <input
                   className={MONO_CLASS_NAME}
                   type="text"
@@ -2959,9 +2956,9 @@ function StorageTab() {
 
               {validation && !validation.error && validation.ok && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
-                  Ready to move {fmtBytes(validation.treeBytes ?? 0)}
-                  {validation.freeBytes != null && ` — ${fmtBytes(validation.freeBytes)} free at target`}
-                  {validation.sameFilesystem ? " (same disk, instant)" : ""}.
+                  {m.settings_page_ready_to_move()} {fmtBytes(validation.treeBytes ?? 0)}
+                  {validation.freeBytes != null && ` — ${m.storage_free_at_target({ size: fmtBytes(validation.freeBytes) })}`}
+                  {validation.sameFilesystem ? m.storage_same_disk() : ""}.
                 </p>
               )}
               {validation && validation.ok === false && validation.error && (
@@ -2973,7 +2970,7 @@ function StorageTab() {
                 <ProgressBar
                   value={move.copied}
                   max={move.total}
-                  label={`${move.phase.charAt(0).toUpperCase()}${move.phase.slice(1)}…`}
+                  label={movePhaseLabel(move.phase)}
                   caption={
                     move.total > 0 ? (
                       <span className={MONO_CLASS_NAME}>
@@ -2985,17 +2982,16 @@ function StorageTab() {
               )}
               {move.kind === "done" && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
-                  Moved. orx is now using the new location.
+                  {m.settings_page_moved_orx_is_now_using_the_new_location()}
                   {move.oldPathLeft && (
                     <>
                       {" "}
-                      The old copy was left at <code>{move.oldPathLeft}</code> (different disk) — you
-                      can delete it once you&apos;ve confirmed everything works.
+                      {m.settings_old_copy_left({ path: ltr(move.oldPathLeft) })}
                     </>
                   )}
                 </p>
               )}
-              {move.kind === "error" && <div className="error">Move failed: {move.message}</div>}
+              {move.kind === "error" && <div className="error">{m.settings_page_move_failed()} {move.message}</div>}
 
               <div className="actions">
                 <button
@@ -3004,14 +3000,14 @@ function StorageTab() {
                   onClick={check}
                   disabled={checking || !trimmed || unchanged || move.kind === "moving"}
                 >
-                  {checking ? "Checking…" : "Check"}
+                  {checking ? m.common_checking() : m.settings_check()}
                 </button>
                 <button
                   type="submit"
                   className={PRIMARY_BUTTON_CLASS_NAME}
                   disabled={!trimmed || unchanged || move.kind === "moving"}
                 >
-                  {move.kind === "moving" ? "Moving…" : "Move data here"}
+                  {move.kind === "moving" ? m.storage_moving() : m.storage_move_here()}
                 </button>
               </div>
             </form>
@@ -3042,13 +3038,13 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
   }
   return (
     <div className="instances-table-wrap overflow-x-auto">
-      <table className="runs-table w-full border-collapse text-md bg-background [&_th]:text-left [&_th]:text-text [&_th]:text-xs [&_th]:font-semibold [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-[color-mix(in_oklab,_var(--text)_6%,_transparent)] [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
+      <table className="runs-table w-full border-collapse text-md bg-background [&_th]:text-start [&_th]:text-text [&_th]:text-xs [&_th]:font-semibold [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-[color-mix(in_oklab,_var(--text)_6%,_transparent)] [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
         <thead>
           <tr>
-            <th>Backend</th>
-            <th>Status</th>
-            <th>Started</th>
-            <th>Runtime</th>
+            <th>{m.settings_page_backend()}</th>
+            <th>{m.settings_page_status()}</th>
+            <th>{m.settings_page_started()}</th>
+            <th>{m.settings_page_runtime()}</th>
           </tr>
         </thead>
         <tbody>
@@ -3066,8 +3062,8 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                         href={url}
                         target="_blank"
                         rel="noreferrer"
-                        title="Open job page"
-                        aria-label="Open job page"
+                        title={m.settings_page_open_job_page()}
+                        aria-label={m.settings_page_open_job_page()}
                         onClick={(e) => e.stopPropagation()}
                       >
                         <ExternalLink size={12} />
@@ -3131,25 +3127,25 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
       <div className="compute-activity-head flex items-start justify-between gap-5 mb-3.5 [&_h2]:flex [&_h2]:items-center [&_h2]:gap-2 [&_h2]:m-0 [&_h2]:text-lg [@media((max-width:_640px))]:items-stretch [@media((max-width:_640px))]:flex-col">
         <div>
           <h2>
-            Running instances
+            {m.settings_page_running_instances()}
             {running && running.length > 0 && <span className="count-badge">{running.length}</span>}
           </h2>
         </div>
         <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-            <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+            <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
           </button>
           <button className={SMALL_BUTTON_CLASS_NAME} onClick={onViewHistory}>
-            {`View history${past?.length ? ` (${past.length})` : ""}`}
+            {past?.length ? m.instances_view_history_count({ count: fmtNumber(past.length) }) : m.instances_view_history()}
           </button>
         </div>
       </div>
       {error && <div className="error">{error}</div>}
       {!running || !past ? (
         <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> Loading…
+          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
         </div>
-      ) : <InstancesTable instances={running} emptyLabel={projectId ? "Nothing running right now." : "Select a project to see its runs."} />}
+      ) : <InstancesTable instances={running} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
     </section>
   );
 }
@@ -3187,19 +3183,19 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
   return (
     <>
       <button type="button" className="settings-back inline-flex items-center gap-1.5 mt-0 mx-0 mb-4.5 text-subtext text-sm font-medium [&:hover]:text-text" onClick={onBack}>
-        <ArrowLeft size={14} /> Back to Compute
+        <ArrowLeft size={14} /> {m.settings_page_back_to_compute()}
       </button>
       <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h1]:m-0">
-        <h1>Instance history</h1>
+        <h1>{m.settings_page_instance_history()}</h1>
         <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-          <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> Refresh
+          <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
         </button>
       </div>
       {error && <div className="error">{error}</div>}
       {!instances ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> Loading…</div>
+        <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
       ) : (
-        <InstancesTable instances={instances} emptyLabel={projectId ? "No instances yet." : "Select a project to see its history."} />
+        <InstancesTable instances={instances} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
       )}
     </>
   );
@@ -3220,14 +3216,14 @@ const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
 export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     id: "compute",
-    label: "Compute",
+    label: m.settings_page_compute(),
     icon: <Cpu size={15} />,
     activeTabs: ["compute", "instances"],
   },
-  { id: "environment", label: "Environment", icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
+  { id: "environment", label: m.settings_page_environment(), icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
   {
     id: "settings",
-    label: "Settings",
+    label: m.settings_page_settings(),
     icon: <Settings size={15} />,
     activeTabs: ["settings", ...SETTINGS_SECTIONS],
   },
@@ -3257,7 +3253,7 @@ export function SettingsView({
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
-          <h1>Settings</h1>
+          <h1>{m.settings_page_settings()}</h1>
           <div className="settings-stack mt-4.5">
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
@@ -3291,9 +3287,9 @@ export function SettingsView({
       )}
       {tab === "environment" && (
         <>
-          <h1>Environment</h1>
+          <h1>{m.settings_page_environment()}</h1>
           <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-            Variables available to runs and the research agent (API keys, tokens).
+            {m.settings_page_variables_available_to_runs_and_the_research_agent()}
           </p>
           <EnvVarsSection />
         </>
