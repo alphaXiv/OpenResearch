@@ -173,9 +173,9 @@ function DropZone({
         <>
           <Upload size={20} strokeWidth={1.5} />
           <span>{prompt}</span>
-          <span className="inline-flex items-center gap-1.5 text-2xs text-subtext">
+          <span dir="auto" className="inline-flex items-center gap-1.5 text-2xs text-subtext">
             <FileUp size={12} /> {m.skills_tab_adding_to()}{" "}
-            <strong className="text-text font-semibold">{destination}</strong>
+            <strong dir="auto" className="text-text font-semibold">{destination}</strong>
           </span>
         </>
       )}
@@ -607,7 +607,7 @@ export function SkillsTab({ project }: { project: Project | null }) {
       {harnessSkills.length > 0 && (
         <section className={CARD_CLASS_NAME}>
           <h3>{m.skills_tab_import_from_your_agent()}</h3>
-          <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text [&_strong]:text-text [&_strong]:font-semibold`}>
+          <p dir="auto" className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text [&_strong]:text-text [&_strong]:font-semibold`}>
             {m.skills_tab_skills_already_installed_in_your_coding_agents_import()}{" "}
             <strong>{scopeLabel}</strong> {m.skills_tab_so_it_s_managed_here_and_invocable_with()} <code>/name</code>.
           </p>

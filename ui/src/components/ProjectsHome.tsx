@@ -1,5 +1,5 @@
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { autoDir, ltr } from "../i18n";
 import { Plus, Trash2 } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { useEffect, useRef, useState } from "react";
@@ -181,7 +181,7 @@ function DeleteProjectDialog({
         <h2 id="delete-project-dialog-title" className="mt-0 mb-3 text-xl">{m.projects_home_delete_project()}</h2>
         <div id="delete-project-dialog-description" className="flex flex-col gap-2 text-md leading-normal text-subtext">
           <p className="m-0">
-            {m.projects_delete_from_app({ name: project.name })}
+            {m.projects_delete_from_app({ name: autoDir(project.name) })}
           </p>
           <p className="m-0">
             {hasSyncedRepository ? m.projects_home_local_and_github_kept() : m.projects_home_local_folder_kept()}
@@ -338,19 +338,19 @@ export function ProjectsHome({
                   >
                     <button
                       className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
-                      aria-label={m.a11y_open_item({ name: p.name })}
+                      aria-label={m.a11y_open_item({ name: autoDir(p.name) })}
                       onClick={() => onOpen(p.id)}
                     />
                     {/* Cells stay click-transparent so the stretched button owns row navigation. */}
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
-                      <span className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
+                      <span dir="auto" className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
                       <span className="relative z-2 flex items-center gap-1.5 text-xs text-muted [@media((max-width:_960px))]:flex-wrap">
                         <span>{m.projects_home_created()} {timeAgo(p.createdAt)}</span>
                         {p.paperId && <span aria-hidden="true">·</span>}
                         {p.paperId && <span>{m.projects_home_ar_xiv_paper_id()} {ltr(p.paperId)}</span>}
                         <button
                           className="project-row-secondary project-row-delete inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm leading-0 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface hover:text-accent-red group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto focus:opacity-100 focus:pointer-events-auto focus-visible:outline focus-visible:outline-2 focus-visible:outline-text"
-                          aria-label={m.a11y_delete_item({ name: p.name })}
+                          aria-label={m.a11y_delete_item({ name: autoDir(p.name) })}
                           disabled={deleting === p.id}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -390,10 +390,10 @@ export function ProjectsHome({
                           href={githubUrl}
                           target="_blank"
                           rel="noreferrer"
-                          aria-label={m.a11y_open_on_github({ name: p.name })}
+                          aria-label={m.a11y_open_on_github({ name: autoDir(p.name) })}
                         >
                           <span className="inline-flex shrink-0"><GitHubMark size={14} /></span>
-                          <span className="overflow-hidden text-ellipsis whitespace-nowrap [@media((max-width:_960px))]:whitespace-normal [@media((max-width:_960px))]:break-all">{githubUrl ? ltr(githubState) : githubState}</span>
+                          <span className="overflow-hidden text-ellipsis whitespace-nowrap [@media((max-width:_960px))]:whitespace-normal [@media((max-width:_960px))]:break-all">{ltr(githubState)}</span>
                         </a>
                       ) : (
                         <span className="text-sm text-text pointer-events-none">{githubState}</span>

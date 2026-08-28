@@ -27,6 +27,8 @@ const MIRRORED_PROPERTIES = [
   "letter-spacing",
   "word-spacing",
   "text-transform",
+  "direction",
+  "unicode-bidi",
   "tab-size",
   "padding-top",
   "padding-right",
@@ -238,7 +240,7 @@ function ComposerSkillToken({
             <div className="sticky top-0 z-1 flex items-center gap-2 border-b border-border-variant bg-background px-4 py-3">
               <span className="text-md font-medium text-muted">/{name}</span>
               <span className="inline-flex h-4 items-center rounded-full border border-border-variant bg-canvas px-1.5 text-2xs font-semibold tracking-[0.05em] text-muted">
-                SKILL
+                {m.skill_chips_badge()}
               </span>
             </div>
             <div className="p-4 text-sm text-text">
@@ -317,7 +319,7 @@ export function ComposerSkillChips({
     const observer = new ResizeObserver(sync);
     observer.observe(textarea);
     return () => observer.disconnect();
-  }, [textareaRef]);
+  }, [text, textareaRef]);
 
   // The chips ride the textarea's own scrolling — caret-driven (no scroll event
   // on the frame the text changes) as well as user-driven.

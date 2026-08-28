@@ -117,7 +117,7 @@ export const SETTINGS_SWITCH_CLASS_NAME = [
   "[&_span]:absolute [&_span]:top-[3px] [&_span]:start-[3px] [&_span]:w-3.5 [&_span]:h-3.5",
   "[&_span]:rounded-full [&_span]:bg-muted [&_span]:transition-[translate,background]",
   "[&_span]:duration-120 [&_span]:ease-standard [&.on]:border-primary [&.on]:bg-primary",
-  "[&.on_span]:bg-background [&.on_span]:translate-x-4 rtl:[&.on_span]:-translate-x-4 [&:disabled]:opacity-45",
+  "[&.on_span]:bg-background [&.on_span]:translate-x-4 [&:disabled]:opacity-45",
   "[&:disabled]:cursor-default [&:focus-visible]:outline-2 [&:focus-visible]:outline-solid",
   "[&:focus-visible]:outline-text [&:focus-visible]:outline-offset-2",
 ].join(" ");

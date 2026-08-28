@@ -25,7 +25,7 @@ import {
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
-import { StatusBadge } from "./StatusBadge";
+import { statusLabel, StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const EMPTY_STATE_CLASS_NAME = [
@@ -228,7 +228,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
                 <span
                   key={run.id}
                   className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-[color-mix(in_oklab,_var(--accent-red)_55%,_transparent)] [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
-                  title={runDisplayStatus(run)}
+                  title={statusLabel(runDisplayStatus(run))}
                 />
               ))}
             </span>

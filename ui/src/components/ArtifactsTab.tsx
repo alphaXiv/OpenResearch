@@ -1,6 +1,6 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { getLocale, getTextDirection } from "../paraglide/runtime.js";
+import { getLocale } from "../paraglide/runtime.js";
 import {
   Check,
   ChevronRight,
@@ -273,7 +273,7 @@ function PreviewPane({
       </div>
     );
   } else if (error) {
-    body = <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.artifacts_tab_failed_to_load()} {error}</div>;
+    body = <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.artifacts_tab_failed_to_load()} {ltr(error)}</div>;
   } else if (text === null) {
     body = (
       <div className={SETTINGS_LOADING_CLASS_NAME}>
@@ -291,10 +291,10 @@ function PreviewPane({
     <div className="fpreview flex-1 min-w-0 bg-background file-view flex flex-col h-full min-h-0">
       <div className="fpreview-head h-10 flex items-center gap-2 py-0 px-3.5 border-b border-b-border-variant text-subtext shrink-0">
         <FileText size={13} style={{ flexShrink: 0 }} />
-        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={entry.path}>
+        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={ltr(entry.path)}>
           {entry.path}
         </code>
-        <span className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
+        <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
           {m.artifacts_tab_modified()}{" "}
           {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
             dateStyle: "medium",
@@ -465,7 +465,7 @@ function TreeRows({
 function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5" title={dir}>
+    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5" title={ltr(dir)}>
       <code className="path-front-ellipsis">{dir}</code>
       <button
         className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
@@ -533,11 +533,10 @@ export function ArtifactsTab({
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     const rect = treeRef.current?.getBoundingClientRect();
-    const rtl = getTextDirection(getLocale()) === "rtl";
     const prevUserSelect = document.body.style.userSelect;
     document.body.style.userSelect = "none";
     const onMove = (ev: PointerEvent) => {
-      const w = Math.round(rtl ? (rect?.right ?? 0) - ev.clientX : ev.clientX - (rect?.left ?? 0));
+      const w = Math.round(ev.clientX - (rect?.left ?? 0));
       const clamped = Math.min(Math.max(w, TREE_MIN_WIDTH), TREE_MAX_WIDTH);
       setTreeWidth(clamped);
       try {

@@ -1,5 +1,5 @@
 import { m } from "./paraglide/messages.js";
-import { getLocale, getTextDirection } from "./paraglide/runtime.js";
+import { getLocale } from "./paraglide/runtime.js";
 import {
   ChartSpline,
   Check,
@@ -1460,7 +1460,6 @@ export default function App() {
     const startedMaximized = panelMax;
     const startX = e.clientX;
     const startWidth = panelWidth;
-    const rtl = getTextDirection(getLocale()) === "rtl";
     let restoredFromMax = false;
     function stop() {
       window.removeEventListener("pointermove", onMove);
@@ -1470,7 +1469,7 @@ export default function App() {
     }
     function onMove(ev: PointerEvent) {
       if (startedMaximized) {
-        const distance = (ev.clientX - startX) * (rtl ? -1 : 1);
+        const distance = ev.clientX - startX;
         if (restoredFromMax || distance < FULLSCREEN_RESTORE_DRAG) return;
         restoredFromMax = true;
         setPanelMax(false);
@@ -1487,7 +1486,7 @@ export default function App() {
         window.removeEventListener("pointermove", onMove);
         return;
       }
-      const w = Math.round(rtl ? ev.clientX - PANEL_MARGIN : window.innerWidth - ev.clientX - PANEL_MARGIN);
+      const w = Math.round(window.innerWidth - ev.clientX - PANEL_MARGIN);
       const max = panelMaxWidth();
       // Drag past the usable max by the slop threshold → snap to fullscreen.
       // Dragging back below it drops out of fullscreen to the clamped width.

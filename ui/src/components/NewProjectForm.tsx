@@ -547,7 +547,7 @@ export function NewProjectForm({
               <span className={path ? MONO_CLASS_NAME : "placeholder"}>
                 {pickingFolder ? m.new_project_choosing() : path || m.new_project_choose_existing_folder()}
               </span>
-              <ChevronRight className="rtl-mirror folder-picker-chevron" size={15} />
+              <ChevronRight className="folder-picker-chevron" size={15} />
             </button>
           ) : name.trim() ? (
             <label className="project-location-field">

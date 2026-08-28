@@ -1,4 +1,5 @@
 import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { ChevronDown, CornerDownLeft, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -109,8 +110,10 @@ export function PlanStrip({
     <div className="plan-strip relative w-full mt-0 mx-0 mb-2.5 py-[11px] px-[13px] flex flex-col items-stretch gap-2.5 border border-border border-s-[3px] border-s-accent-blue rounded-md bg-surface shadow-[0_2px_10px_rgb(0_0_0_/_6%)]">
       <div className="plan-strip-info flex items-baseline gap-2 min-w-0">
         <ScrollText size={14} className="plan-strip-icon text-accent-blue shrink-0 self-center" />
-        <span className="plan-strip-title text-md font-semibold whitespace-nowrap">
-          {synthesized ? `${agentLabel} is ready to proceed` : `${agentLabel} proposed a plan`}
+        <span dir="auto" className="plan-strip-title text-md font-semibold whitespace-nowrap">
+          {synthesized
+            ? m.plan_strip_agent_ready({ agent: ltr(agentLabel) })
+            : m.plan_strip_agent_proposed({ agent: ltr(agentLabel) })}
         </span>
         <button
           className="plan-strip-open ms-auto p-0 border-0 bg-none bg-transparent text-accent-blue text-md cursor-pointer whitespace-nowrap shrink-0 [&:hover]:underline"
@@ -122,6 +125,7 @@ export function PlanStrip({
       {revising ? (
         <>
           <textarea
+            dir="auto"
             ref={textareaRef}
             className="plan-strip-revise-input w-full resize-none border border-border rounded-md py-[9px] px-[11px] text-md font-[inherit] bg-background text-text [&:focus]:border-accent-blue"
             placeholder={m.plan_strip_what_should_change_optional()}

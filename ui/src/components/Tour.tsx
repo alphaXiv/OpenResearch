@@ -114,9 +114,10 @@ export function DemoWelcomeModal({
           </div>
         </div>
         <div className="text-base leading-relaxed text-text [&_p]:m-0 [&_p_+_p]:mt-3">
-          <p>
+          <p dir="auto">
             {m.tour_this_is_a_demo_project_showing_how_open()}{" "}
             <a
+              dir="ltr"
               href="https://github.com/karpathy/nanochat"
               target="_blank"
               rel="noreferrer"
@@ -125,7 +126,7 @@ export function DemoWelcomeModal({
               {m.tour_nanochat()}
             </a>{m.tour_a_repo_for_training_a_mini_gpt_from()}
           </p>
-          <p>
+          <p dir="auto">
             {m.tour_look_through_the_agent_conversations_experiments_runs_and()}
           </p>
         </div>

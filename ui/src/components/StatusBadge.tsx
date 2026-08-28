@@ -36,7 +36,7 @@ const STATUS_LABELS: Record<string, () => string> = {
   idle: m.status_idle,
 };
 
-function statusLabel(s: string): string {
+export function statusLabel(s: string): string {
   const localized = STATUS_LABELS[s];
   if (localized) return localized();
   return s.charAt(0).toUpperCase() + s.slice(1);

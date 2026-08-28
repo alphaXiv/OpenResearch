@@ -711,7 +711,7 @@ export function FileViewer({
           </div>
         )}
         {error ? (
-          <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_failed_to_load_file()} {error}</div>
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_failed_to_load_file()} {ltr(error)}</div>
         ) : data === null ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_loading()}</div>
         ) : data.notFound ? (

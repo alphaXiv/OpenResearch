@@ -12,10 +12,10 @@ import { useState } from "react";
 import { ExternalLink } from "lucide-react";
 import type { OverleafSync } from "../useOverleafSync";
 import { getLocale } from "../paraglide/runtime.js";
-import { ltr } from "../i18n";
+import { autoDir, ltr } from "../i18n";
 import { BUTTON_CLASS_NAME, GHOST_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
 
-const list = (paths: string[]) => new Intl.ListFormat(getLocale()).format(paths.map(ltr));
+const list = (paths: string[]) => autoDir(new Intl.ListFormat(getLocale()).format(paths.map(ltr)));
 
 /** What the last sync did. A failure outranks everything below it, so the line
  * never reads "in step" above a red one saying otherwise; conflicts carry their

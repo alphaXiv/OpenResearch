@@ -1,4 +1,5 @@
 import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { useEffect, useState } from "react";
 import { getExperimentDiff, type DiffPayload, type Experiment } from "../api";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
@@ -39,7 +40,7 @@ export function BranchChanges({
   return (
     <div className={`${CODE_TAB_BODY_CLASS_NAME} branch-changes [&_>_.changes-note]:my-3.5 [&_>_.changes-note]:mx-4 [&_>_.openresearch-diff]:mt-3.5 [&_>_.openresearch-diff]:mx-4 [&_>_.openresearch-diff]:mb-0 [&_>_.truncated-notice]:mt-3.5 [&_>_.truncated-notice]:mx-4 [&_>_.truncated-notice]:mb-0 [&_>_.diff-explorer]:mt-3.5 [&_>_.diff-explorer]:mx-4 [&_>_.diff-explorer]:mb-0`}>
       {error ? (
-        <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.branch_changes_failed_to_load_changes()} {error}</div>
+        <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.branch_changes_failed_to_load_changes()} {ltr(error)}</div>
       ) : !diff ? (
         <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.branch_changes_loading_changes()}</div>
       ) : !diff.diff.trim() ? (

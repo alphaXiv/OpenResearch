@@ -259,7 +259,7 @@ export function ModelPicker({
     >
       <span className="flex-1">{title}</span>
       {detail && <span className="max-w-36 truncate text-sm text-muted">{detail}</span>}
-      <ChevronRight size={14} className="rtl-mirror shrink-0 text-muted" />
+      <ChevronRight size={14} className="shrink-0 text-muted" />
     </button>
   );
 
@@ -273,7 +273,7 @@ export function ModelPicker({
         setFilter("");
       }}
     >
-      <ChevronLeft size={15} className="rtl-mirror" />
+      <ChevronLeft size={15} />
       {title}
     </button>
   );

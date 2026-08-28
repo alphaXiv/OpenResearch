@@ -1,5 +1,5 @@
 import { m } from "../paraglide/messages.js";
-import { ltr } from "../i18n";
+import { autoDir, ltr } from "../i18n";
 import {
   ArrowUpRight,
   Blocks,
@@ -2723,7 +2723,7 @@ function PromptCard({
             </span>
             <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
             <span className="plan-resolved-label prompt-outcome text-lg font-[375] wrap-anywhere">{outcome.label}</span>
-            <ChevronRight size={12} className="rtl-mirror plan-chevron shrink-0 text-muted" />
+            <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
           </summary>
           <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
             <Md text={p.plan ?? ""} onOpenFile={onOpenFile} />
@@ -3015,7 +3015,7 @@ function ForkControls({
             disabled={pagerDisabled || !prevId}
             onClick={() => prevId && onSelect(prevId)}
           >
-            <ChevronLeft size={14} className="rtl-mirror" />
+            <ChevronLeft size={14} />
           </button>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
@@ -3027,7 +3027,7 @@ function ForkControls({
             disabled={pagerDisabled || !nextId}
             onClick={() => nextId && onSelect(nextId)}
           >
-            <ChevronRight size={14} className="rtl-mirror" />
+            <ChevronRight size={14} />
           </button>
         </>
       )}
@@ -3139,6 +3139,7 @@ const Message = memo(function Message({
         <div className="msg-user-group self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
           <div className="msg-user-edit w-full bg-surface rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
+              dir="auto"
               className="w-full bg-transparent text-base text-text resize-none outline-none field-sizing-content min-h-16"
               aria-label={m.chat_panel_edit_message()}
               value={editDraft}
@@ -3175,7 +3176,7 @@ const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:me-0.5 [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:me-0.5 [&_.skill-chip]:align-baseline">
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -3359,6 +3360,7 @@ function renderParts(
       rendered.push(
         <div
           key={part.id}
+          dir="auto"
           role="note"
           aria-label={m.chat_panel_you_mid_task()}
           className="msg-steer my-2 ms-auto w-fit max-w-[88%] bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere"
@@ -3535,7 +3537,7 @@ function SubagentBlock({
       disabled={!onOpenSubagent}
     >
       {line}
-      <ChevronRight size={12} className="rtl-mirror subagent-row-chevron shrink-0 text-muted" />
+      <ChevronRight size={12} className="subagent-row-chevron shrink-0 text-muted" />
     </button>
   );
 }
@@ -3618,7 +3620,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     if (!previous.current || previous.current.transcript !== transcript) {
       previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
       setAnnouncement((current) => ({
-        text: pendingPermission ? m.announcement_approval_required({ label: pendingPermission.label }) : "",
+        text: pendingPermission ? m.announcement_approval_required({ label: autoDir(pendingPermission.label) }) : "",
         sequence: current.sequence + 1,
       }));
       return;
@@ -3629,7 +3631,7 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     previous.current = { transcript, messageId, states, permissionPath: pendingPermission?.path ?? null };
     if (pendingPermission && pendingPermission.path !== previousPermissionPath) {
       setAnnouncement((current) => ({
-        text: m.announcement_approval_required({ label: pendingPermission.label }),
+        text: m.announcement_approval_required({ label: autoDir(pendingPermission.label) }),
         sequence: current.sequence + 1,
       }));
       return;
@@ -5529,11 +5531,11 @@ export function ChatPanel({
 
   async function removeSession(session: ChatSession) {
     const title = session.title?.trim() || m.chat_untitled();
-    if (!window.confirm(m.chat_delete_session_confirm({ title }))) return;
+    if (!window.confirm(m.chat_delete_session_confirm({ title: autoDir(title) }))) return;
     try {
       await deleteChatSession(session.id);
     } catch (err) {
-      window.alert(m.chat_delete_session_failed({ title, error: ltr(err instanceof Error ? err.message : String(err)) }));
+      window.alert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }));
       return;
     }
     forgetSession(session.id);
@@ -6026,6 +6028,7 @@ export function ChatPanel({
           )}
           <div className="composer-input relative flex overflow-hidden [&_textarea]:flex-1">
             <textarea
+              dir="auto"
               ref={composerRef}
               // Native prose stays visible; the aligned mirror paints only skill tokens.
               className="relative z-1 bg-transparent"
@@ -6040,11 +6043,11 @@ export function ChatPanel({
                 pendingQuestion
                   ? m.chat_type_custom_answer()
                   : steering && activeHarness
-                    ? m.chat_steer_placeholder({ harness: HARNESS_LABELS[activeHarness.id], shortcut: queueChord })
+                    ? m.chat_steer_placeholder({ harness: ltr(HARNESS_LABELS[activeHarness.id]), shortcut: ltr(queueChord) })
                     : composerSelection
                       ? activeHarness?.agentReady
-                        ? m.chat_message_harness({ harness: HARNESS_LABELS[composerSelection.harness] })
-                        : m.chat_harness_unavailable({ harness: HARNESS_LABELS[composerSelection.harness] })
+                        ? m.chat_message_harness({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
+                        : m.chat_harness_unavailable({ harness: ltr(HARNESS_LABELS[composerSelection.harness]) })
                       : m.chat_ask_agent_placeholder()
               }
               rows={2}

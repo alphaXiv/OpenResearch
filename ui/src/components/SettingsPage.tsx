@@ -353,7 +353,7 @@ function HarnessesTab() {
             <span className="k">{m.settings_page_agent_models()}</span>
             <span className="v">
               {h.models.length > 0
-                ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => harnessModelLabel(model))) })
+                ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
                 : m.settings_none()}
             </span>
           </div>
@@ -1130,11 +1130,11 @@ function OpenResearchSection() {
           </div>
           {s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
-              <p className={SETTINGS_NOTE_CLASS_NAME}>
+              <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_page_add_one_with()} <code>orx ssh-key add {s.sshKeyPath}</code>.
               </p>
             ) : (
-              <p className={SETTINGS_NOTE_CLASS_NAME}>
+              <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_page_no_key_on_this_computer_yet_create_one()}{" "}
                 <code>ssh-keygen -t ed25519</code>{m.settings_page_then_add_it_with()}{" "}
                 <code>orx ssh-key add</code>.
@@ -1142,17 +1142,17 @@ function OpenResearchSection() {
             ))}
           {s.sshKeyStatus === "no_local_match" &&
             (s.sshKeyPath ? (
-              <p className={SETTINGS_NOTE_CLASS_NAME}>
+              <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_register_computer_help({ register: ltr(`orx ssh-key add ${s.sshKeyPath}`), load: ltr("ssh-add") })}
               </p>
             ) : (
-              <p className={SETTINGS_NOTE_CLASS_NAME}>
+              <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_page_no_key_on_this_computer_to_register_load()}{" "}
                 <code>ssh-add</code>{m.settings_page_or_create_one_with()}{" "}
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {s.error && <p className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>}
+          {s.error && <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>}
         </>
       )}
     </>
@@ -1482,8 +1482,8 @@ function TargetTile({
         <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
           {isDefault ? m.settings_page_default_808d7dc() : target.configured ? m.settings_view_settings() : setupLabel}
         </span>
-        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5 rtl:group-hover:-translate-x-0.5" aria-hidden="true">
-          <ArrowRight className="rtl-mirror" size={16} />
+        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
+          <ArrowRight size={16} />
         </span>
       </span>
     </button>
@@ -1798,7 +1798,7 @@ function HfHintRow() {
     <tr>
       {/* colSpan tracks the EnvRow/AddVarRow column count */}
       <td colSpan={3}>
-        <p className={SETTINGS_NOTE_CLASS_NAME}>
+        <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
           {m.settings_page_this_value_looks_like_a_hugging_face_token()}{" "}
           <code>HF_TOKEN</code>{m.settings_page_save_it_under_that_key_if_it_apos()}
         </p>
@@ -1879,7 +1879,7 @@ function EnvRow({
                 if (e.key === "Escape" && !saving) setValue("");
               }}
               placeholder={m.settings_page_value()}
-              aria-label={m.a11y_value_for({ name })}
+              aria-label={m.a11y_value_for({ name: ltr(name) })}
               autoComplete="new-password"
               disabled={saving}
             />
@@ -1889,8 +1889,8 @@ function EnvRow({
           {entry ? (
             <button
               className={ICON_BUTTON_CLASS_NAME}
-              title={m.a11y_delete_item({ name })}
-              aria-label={m.a11y_delete_item({ name })}
+              title={m.a11y_delete_item({ name: ltr(name) })}
+              aria-label={m.a11y_delete_item({ name: ltr(name) })}
               onClick={() => void remove()}
               disabled={saving}
             >
@@ -2074,12 +2074,12 @@ function EnvVarsSection() {
 
 const THEME_OPTIONS: {
   value: ThemePreference;
-  label: string;
+  label: () => string;
   icon: typeof Monitor;
 }[] = [
-  { value: "system", label: m.settings_theme_system(), icon: Monitor },
-  { value: "light", label: m.settings_theme_light(), icon: Sun },
-  { value: "dark", label: m.settings_theme_dark(), icon: Moon },
+  { value: "system", label: m.settings_theme_system, icon: Monitor },
+  { value: "light", label: m.settings_theme_light, icon: Sun },
+  { value: "dark", label: m.settings_theme_dark, icon: Moon },
 ];
 
 const LOCALE_CHOICES: { id: Locale; label: string }[] = [
@@ -2118,7 +2118,7 @@ function AppearanceTab() {
       <h2>{m.settings_appearance_heading()}</h2>
       <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">{m.settings_appearance_description()}</p>
       <div className={SETTINGS_CARD_CLASS_NAME}>
-        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+        <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} pb-3.5`}>
           <div>
             <div className="project-default-title text-md font-semibold">{m.settings_theme_heading()}</div>
             <p>{m.settings_theme_description()}</p>
@@ -2140,7 +2140,7 @@ function AppearanceTab() {
                 onClick={() => setPreference(value)}
               >
                 <Icon size={14} />
-                {label}
+                {label()}
               </button>
             ))}
           </div>
@@ -2957,7 +2957,7 @@ function StorageTab() {
               {validation && !validation.error && validation.ok && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
                   {m.settings_page_ready_to_move()} {fmtBytes(validation.treeBytes ?? 0)}
-                  {validation.freeBytes != null && ` — ${m.storage_free_at_target({ size: fmtBytes(validation.freeBytes) })}`}
+                  {validation.freeBytes != null && ` — ${m.storage_free_at_target({ size: ltr(fmtBytes(validation.freeBytes)) })}`}
                   {validation.sameFilesystem ? m.storage_same_disk() : ""}.
                 </p>
               )}

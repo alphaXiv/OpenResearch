@@ -1,4 +1,5 @@
 import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import { fmtTokens, type ContextUsage } from "../api";
 import {
@@ -79,8 +80,8 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
             <span>{m.context_meter_context_window()}</span>
             <span className="context-meter-value text-text tabular-nums">
               {pct === null
-                ? m.context_meter_tokens({ value: fmtTokens(usedTokens) })
-                : m.context_meter_usage({ used: fmtTokens(usedTokens), total: fmtTokens(contextWindow!), percent })}
+                ? m.context_meter_tokens({ value: ltr(fmtTokens(usedTokens)) })
+                : m.context_meter_usage({ used: ltr(fmtTokens(usedTokens)), total: ltr(fmtTokens(contextWindow!)), percent: ltr(percent) })}
             </span>
           </div>
           {pct !== null && (

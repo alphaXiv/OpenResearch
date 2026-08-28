@@ -1,4 +1,5 @@
 import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { useEffect, useState } from "react";
 import type { FilePresentation } from "../api";
 
@@ -22,7 +23,7 @@ function DownloadFallback({ url, name }: { url: string; name: string }) {
   return (
     <div className="file-view-note py-2.5 px-4 text-sm text-muted">
       {m.media_preview_this_browser_can_t_preview_this_media_format()}{" "}
-      <a href={url} download={name}>{m.media_preview_download()} {name}</a>
+      <a href={url} download={name}>{m.media_preview_download()} {ltr(name)}</a>
     </div>
   );
 }

@@ -20,7 +20,7 @@
           document.documentElement.dataset.theme = "light";
         }
       })();
-      // Resolve language direction before first paint; src/main.tsx confirms it at runtime.
+      // Resolve language before first paint; keep supported in sync with project.inlang/settings.json.
       (function () {
         var saved = null;
         try { saved = localStorage.getItem("orx:locale"); } catch (e) {}
@@ -41,7 +41,7 @@
         }
         locale = locale || "en";
         document.documentElement.lang = locale;
-        document.documentElement.dir = locale === "fa" ? "rtl" : "ltr";
+        document.documentElement.dir = "ltr";
       })();
     </script>
     <style>
