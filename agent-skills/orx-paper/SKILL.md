@@ -109,6 +109,12 @@ moves.
 
 ## Figures and tables
 
+Read the `orx-figures` module before making a figure. A default matplotlib plot
+dropped into a paper is a defect a reviewer will name: wrong physical size,
+titled where the caption belongs, and rasterized where the document wants
+vector. That module also covers method diagrams in TikZ, which compile in this
+tree exactly like the paper does.
+
 Reference image files that actually exist in the tree, by path relative to the
 `.tex`:
 
