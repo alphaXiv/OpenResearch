@@ -94,6 +94,8 @@ def load(path):
         # for a run that stopped early and narrow the band around it.
         first = max(curve[0][0] for curve in curves)
         last = min(curve[-1][0] for curve in curves)
+        if first > last:
+            raise ValueError(f"{variant}: seeds cover no common range of steps")
         grid = grid[(grid >= first) & (grid <= last)]
         runs = np.stack([
             np.interp(grid, [s for s, _ in curve], [v for _, v in curve]) for curve in curves

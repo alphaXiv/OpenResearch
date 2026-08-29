@@ -143,7 +143,7 @@ recall = np.divide(counts, support, out=np.full(counts.shape, np.nan), where=sup
 
 fig, ax = figure(width=COLUMN, ratio=0.95)
 cmap = mpl.colormaps[SEQUENTIAL].with_extremes(bad=MUTED)
-image = ax.imshow(recall, cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
+image = ax.imshow(recall, cmap=cmap, vmin=0, vmax=1, interpolation="nearest", aspect="equal")
 annotate_matrix(ax, recall, fmt="{:.2f}")
 ax.set_xticks(range(len(classes)), classes)
 ax.set_yticks(range(len(classes)), classes)

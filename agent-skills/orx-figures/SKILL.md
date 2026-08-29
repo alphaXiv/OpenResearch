@@ -18,7 +18,9 @@ gets remade the week before the deadline.
    to a 3.25-inch column has 3pt tick labels. Pick the width from the document
    (`COLUMN`, `TEXT`, `WIDE` in the style module), then include it with
    `width=\linewidth`, which scales by 1.0 once the size is right (see *Where
-   the figure goes*). Never build big and rescale to fit.
+   the figure goes*). Never build big and rescale to fit. A `WIDE` figure only
+   gets a 6.75-inch `\linewidth` inside a `figure*` — in a plain `figure` in a
+   two-column paper it silently scales to about a half.
 2. **Vector out.** Write PDF for `\includegraphics` and SVG alongside it for
    preview. A rasterized *plot* — axes, lines, text — is a defect: it blurs
    under the zoom every reviewer uses. PNG is correct only for genuinely
@@ -54,8 +56,8 @@ reproducible after this session ends:
 mkdir -p figs && orx skill figures/assets/orx_figstyle.py > figs/orx_figstyle.py
 ```
 
-(That works from any directory. `cp assets/orx_figstyle.py figs/` also works
-when your cwd is this module's install directory.)
+(That works from any directory. Check the file is non-empty before importing
+it — the redirect creates the target before the lookup runs.)
 
 Then find an interpreter that has matplotlib, in this order — do not install
 into the project's environment without asking:
@@ -88,14 +90,15 @@ artifacts directory: a chat file link resolves against exactly those two roots
 and nothing else. Pulling logs or intermediate data into `/tmp` is fine — the
 figure, and the script that made it, are not intermediate.
 
-Keep the generating script beside its output (`figs/loss_curve.py` →
-`figs/loss_curve.pdf`, `figs/loss_curve.svg`). A figure whose script is gone
+Keep the generating script beside its output, in whichever of the two
+destinations you chose (`figs/loss_curve.py` → `figs/loss_curve.pdf`,
+`figs/loss_curve.svg`). A figure whose script is gone
 cannot be corrected when a reviewer asks for one more seed.
 
 Build the figure at the column width, **and** still write `width=\linewidth`:
 
 ```latex
-\begin{figure}[t]
+\begin{figure}[t]          % figure* for a WIDE figure in a two-column paper
   \centering
   \includegraphics[width=\linewidth]{figs/loss_curve.pdf}
   \caption{Validation loss over training, mean of 5 seeds with 95\% intervals.}
@@ -180,8 +183,9 @@ Pick by the question the figure answers, not by the shape you have in mind.
 | What is the method, architecture, or pipeline? | [references/diagram.md](references/diagram.md) |
 
 Every reference's template writes to `figs/`, which is the paper destination.
-For a report or a chat answer, change the `save()` stem to the artifacts
-directory before running, and cite it with the `artifacts/` prefix.
+For a report or a chat answer, put both the script and its `save()` stem under
+the artifacts directory — they stay together either way — and cite the output
+with the `artifacts/` prefix.
 
 Do not read references for figures you are not making. If an installed
 reference cannot be read, `orx skill figures/<name>` prints it.

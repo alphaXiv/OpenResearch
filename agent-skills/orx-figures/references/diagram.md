@@ -24,7 +24,7 @@ and the same palette the plots use. The path is relative to this module's
 anywhere. Copy it as the head of the figure's `.tex`:
 
 ```sh
-mkdir -p figs && cp assets/orx-tikz-preamble.tex figs/method.tex
+mkdir -p figs && orx skill figures/assets/orx-tikz-preamble.tex > figs/method.tex
 ```
 
 A `.tex` in the working tree compiles where it sits, so `figs/method.tex`
@@ -129,10 +129,10 @@ as every other figure here:
 \end{figure}
 ```
 
-To put the picture inline instead, move the `\definecolor`, `\tikzset`, **and
-`\familydefault`** lines into the paper's preamble and `\input` the
-`tikzpicture` body. Carry the `\familydefault` line across or the diagram
-silently reverts to the body font and stops matching the plots beside it.
+To put the picture inline instead, move the `\definecolor` and `\tikzset`
+blocks into the paper's preamble and `\input` the `tikzpicture` body. The sans
+face rides in the `orx`, `edgelbl`, and `stagelbl` styles, so it travels with
+them and touches nothing outside the picture.
 
 ## Checklist
 

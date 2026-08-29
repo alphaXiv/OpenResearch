@@ -14,7 +14,9 @@ reproducible after the session that made it ends.
 from __future__ import annotations
 
 import math
+import os
 import sys
+import warnings
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -255,8 +257,8 @@ def _text_collisions(fig) -> list[str]:
     a figure that satisfies every other rule is still unusable, and it is
     invisible until the figure is drawn.
     """
+    fig.canvas.draw()
     try:
-        fig.canvas.draw()
         renderer = fig.canvas.get_renderer()
     except AttributeError:
         return ["text could not be inspected: no Agg-family canvas — call use_style() first"]
@@ -274,7 +276,15 @@ def _text_collisions(fig) -> list[str]:
                     offscreen.update({id(tick.label1), id(tick.label2)})
 
     boxes = []
-    hidden = {id(t) for ax in fig.axes if not ax.axison for t in ax.findobj(mpl.text.Text)}
+    hidden = set()
+    for ax in fig.axes:
+        if ax.axison:
+            continue
+        # Its axis artists still exist and still carry positions, but nothing
+        # draws them. The axes' own text is a different matter — on an axis-off
+        # axes that text is the figure.
+        for part in (ax.xaxis, ax.yaxis):
+            hidden.update(id(t) for t in part.findobj(mpl.text.Text))
     for text in fig.findobj(mpl.text.Text):
         if id(text) in offscreen or id(text) in hidden:
             continue
@@ -323,14 +333,19 @@ def save(fig, stem: str, formats=("pdf", "svg"), close: bool = True) -> list[str
     """
     # Write first: the audit inspects a live canvas and must never be the
     # reason a finished figure is lost.
+    parent = os.path.dirname(stem)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     paths = []
     for ext in formats:
         path = f"{stem}.{ext}"
         fig.savefig(path, format=ext)
         paths.append(path)
-    problems = _audit(fig)
-    if close:
-        plt.close(fig)
+    try:
+        problems = _audit(fig)
+    finally:
+        if close:
+            plt.close(fig)
     # Printed, not raised: a hard failure mid-analysis loses the figure, but a
     # silent pass is how an unpublishable figure reaches the paper.
     if problems:
@@ -355,6 +370,10 @@ def mean_ci(runs, confidence: float = 0.95):
     n = runs.shape[0]
     mean = runs.mean(axis=0)
     if n < 2:
+        warnings.warn(
+            "one seed: the band is a line, not an interval — say 'single seed' in the caption",
+            stacklevel=2,
+        )
         return mean, mean, mean
     sem = runs.std(axis=0, ddof=1) / math.sqrt(n)
     crit = _t95(n - 1)
@@ -413,6 +432,10 @@ def diff_ci(treatment, baseline):
     delta = treatment.mean() - baseline.mean()
     n_t, n_b = treatment.size, baseline.size
     if n_t < 2 or n_b < 2:
+        warnings.warn(
+            "one seed per arm: the difference has no interval — say so in the caption",
+            stacklevel=2,
+        )
         return delta, delta, delta
     var_t = treatment.var(ddof=1) / n_t
     var_b = baseline.var(ddof=1) / n_b
@@ -521,7 +544,7 @@ def annotate_matrix(ax, values, fmt: str = "{:.2f}", image=None, threshold: floa
     """Write each cell's value on a heatmap, in whichever of black or white
     stays legible against that cell."""
     values = np.asarray(values, dtype=float)
-    image = image or ax.images[-1]
+    image = ax.images[-1] if image is None else image
     norm, cmap = image.norm, image.cmap
     for (row, col), value in np.ndenumerate(values):
         if not np.isfinite(value):

@@ -14,11 +14,9 @@
 
 % Diagram text is sans, matching the matplotlib figures next to it — figure
 % text is its own typographic register and should be consistent across the
-% paper's figures, not with the body text.
-\renewcommand{\familydefault}{\sfdefault}
-% For a diagram that must instead match a Times-set body font, drop the line
-% above and uncomment:
-% \usepackage{newtxtext,newtxmath}
+% paper's figures, not with the body text. The face is set per style below,
+% never with \familydefault, which would follow this preamble into a paper and
+% turn its body text sans too.
 
 \definecolor{orxblue}{HTML}{0072B2}
 \definecolor{orxorange}{HTML}{E69F00}
@@ -29,7 +27,7 @@
 \tikzset{
   % Every picture starts from this: one arrow tip, one line weight, one font.
   orx/.style={
-    font=\footnotesize,
+    font=\sffamily\footnotesize,
     >={Stealth[round, length=4pt, width=3pt]},
     line width=0.5pt,
     node distance=6mm and 14mm,  % wide enough for a shape label on the edge
@@ -53,8 +51,8 @@
   % A gradient, stop-gradient, or otherwise non-forward path.
   backflow/.style={->, draw=orxorange, dashed},
   % Shapes, losses, and other annotations that ride on an edge.
-  edgelbl/.style={font=\scriptsize, text=black!60, inner sep=1.5pt, fill=white},
+  edgelbl/.style={font=\sffamily\scriptsize, text=black!60, inner sep=1.5pt, fill=white},
   % A named stage grouping several blocks.
   stage/.style={draw=black!25, dashed, rounded corners=2pt, inner sep=4pt},
-  stagelbl/.style={font=\scriptsize\itshape, text=black!55},
+  stagelbl/.style={font=\sffamily\scriptsize\itshape, text=black!55},
 }

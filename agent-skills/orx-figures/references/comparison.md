@@ -30,7 +30,8 @@ re-sorting per group destroys that.
 
 **Label every bar with its value.** It makes the figure do the results table's
 job as well, and a reader quoting your numbers does not have to squint at the
-axis. This is the one place type may go below the 7pt tick size, down to the 5pt floor: the label
+axis. This is the one place type may go below the 7pt tick size, down to the
+5pt floor: the label
 is redundant with the bar's height, so a reader who cannot read it still
 recovers the value from the axis. Around 5pt at full text width; if bars get
 so dense the labels collide, that is the signal to drop a method or split the
@@ -159,7 +160,8 @@ def main():
     ax.set_ylabel("Accuracy (%)")
     # Derived, never hardcoded: a bar clipped at the axes edge no longer
     # encodes its value, which is the failure this whole reference is about.
-    top = 10 * math.ceil(max(v for row in scores.values() for v in row.values()) * 1.12 / 10)
+    highest = max(v for row in scores.values() for v in row.values())
+    top = max(10, 10 * math.ceil(highest * 1.12 / 10))
     ax.set_ylim(0, top)
     ax.set_yticks(range(0, top + 1, 10))
     ax.tick_params(axis="x", length=0)
