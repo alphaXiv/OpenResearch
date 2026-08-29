@@ -183,6 +183,7 @@ export interface NewProject {
   runCommand?: string;
   paperId?: string;
   cloneUrl?: string;
+  forkUrl?: string;
   createFolder?: boolean;
   requireNewFolder?: boolean;
   initializeGit?: boolean;

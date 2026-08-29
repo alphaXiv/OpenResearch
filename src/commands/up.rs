@@ -1101,6 +1101,9 @@ struct CreateProjectReq {
     run_command: Option<String>,
     paper_id: Option<String>,
     clone_url: Option<String>,
+    /// Fork a public GitHub repo under the authenticated account, then clone the
+    /// fork into the project. Takes precedence over `clone_url`.
+    fork_url: Option<String>,
     #[serde(default)]
     create_folder: bool,
     #[serde(default)]
@@ -1128,7 +1131,24 @@ async fn create_project(
     let create_folder = req.create_folder;
     let require_new_folder = req.require_new_folder;
     let initialize_git = req.initialize_git;
+    let fork_url = req.fork_url.filter(|url| !url.trim().is_empty());
     let clone_url = req.clone_url.filter(|url| !url.trim().is_empty());
+    // Forking a public GitHub repo takes priority: create the fork under the
+    // authenticated account and clone that fork, keeping the original as
+    // `upstream` so experiment branches push to the user's own fork.
+    let (clone_url, upstream_url) = match fork_url {
+        Some(url) => {
+            let (fork_owner, fork_repo) = local::github::fork_public_repo(&url)
+                .await
+                .map_err(bad_request)?;
+            let upstream = local::github::canonical_repo_url(&url);
+            (
+                Some(format!("https://github.com/{fork_owner}/{fork_repo}")),
+                upstream,
+            )
+        }
+        None => (clone_url, None),
+    };
     let paper_id = req
         .paper_id
         .map(|paper_id| paper_id.trim().to_string())
@@ -1164,6 +1184,7 @@ async fn create_project(
                 require_new_folder,
                 initialize_git,
                 clone_url,
+                upstream_url,
                 shallow_clone,
                 run_command,
                 paper_id,
