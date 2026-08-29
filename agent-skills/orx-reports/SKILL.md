@@ -12,7 +12,7 @@ output without relying on its directory, for example:
 
 - `<artifacts-dir>/scaling-analysis.md`
 - `<artifacts-dir>/benchmark-results.csv`
-- `<artifacts-dir>/ablation-comparison.png`
+- `<artifacts-dir>/ablation-comparison.pdf`
 
 Read the `orx-figures` module before writing any figure; a default
 matplotlib plot does not meet the bar the reports are held to.

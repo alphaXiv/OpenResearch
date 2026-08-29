@@ -640,11 +640,10 @@ mod tests {
         assert!(style.content.contains("\"pdf.fonttype\": 42"));
         // Every rule the audit enforces is one an agent would otherwise skip.
         for check in [
-            "_text_collisions",
-            "overlapping text",
-            "runs off the canvas",
-            "below the 5pt floor",
-            "duplicates the caption",
+            "problems.append(f\"overlapping text:",
+            "text runs off the canvas and will be clipped",
+            "text below the 5pt floor",
+            "duplicates the caption \u{2014} delete it",
         ] {
             assert!(
                 style.content.contains(check),

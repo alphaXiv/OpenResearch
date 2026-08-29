@@ -56,7 +56,7 @@ is a transformation of the evidence:
 | Y-axis truncated so a small gap looks decisive | Include the range that matters; if you zoom, say so in the caption |
 | Log-scale axis without saying so | Say so on the label. Use log-y when the metric spans more than an order of magnitude or the claim is about a ratio; a bounded loss that moves from 4.7 to 1.6 reads better linear |
 | Legend covering the region of interest | Direct-label the lines at their right end (`label_ends`); a legend is a lookup table |
-| 8 curves in one panel | Show the 3 that carry the claim; the rest belong in an appendix table |
+| Too many curves in one panel | Show the 4 that carry the claim; the rest belong in an appendix table |
 | The baseline drawn in a palette color | Baselines and chance level are grey (`BASELINE`) — color is for the things being compared |
 | Curves cut at different x extents without comment | Say why one stopped early (diverged, out of budget) |
 
@@ -88,7 +88,13 @@ def load(path):
     for variant, seeds in raw.items():
         curves = [sorted(points) for points in seeds.values()]
         grid = np.array([step for step, _ in curves[0]])
-        # Seeds log on slightly different grids; interpolate before averaging.
+        # Seeds log on slightly different grids, so interpolate before
+        # averaging — but only across the range every seed actually reached.
+        # np.interp clamps outside its input, which would invent a flat tail
+        # for a run that stopped early and narrow the band around it.
+        first = max(curve[0][0] for curve in curves)
+        last = min(curve[-1][0] for curve in curves)
+        grid = grid[(grid >= first) & (grid <= last)]
         runs = np.stack([
             np.interp(grid, [s for s, _ in curve], [v for _, v in curve]) for curve in curves
         ])
@@ -109,8 +115,8 @@ def main():
 
     ax.set_xlabel("Tokens seen")
     ax.set_ylabel("Validation loss")
-    si_ticks(ax, "x")
     label_ends(ax, lines, labels)
+    si_ticks(ax, "x")  # after label_ends, which moves the right limit
 
     save(fig, "figs/loss_curve")
 
@@ -124,5 +130,5 @@ if __name__ == "__main__":
 - [ ] The x-axis is fair for the runs being compared, and labelled with units.
 - [ ] Mean over ≥3 seeds with a 95% band, and n is in the caption.
 - [ ] Any smoothing is named in the caption and the raw series is visible.
-- [ ] The baseline is grey; at most ~4 colored curves.
+- [ ] The baseline is grey; at most 4 colored curves.
 - [ ] The y-range is honest, or the zoom is declared.

@@ -19,7 +19,7 @@ symmetric (a confusion or correlation matrix at any size).
 
 | The data is | Use | Because |
 | --- | --- | --- |
-| A magnitude with a natural low end (loss, accuracy, count) | `viridis` / `cividis` (`SEQUENTIAL`) | Perceptually uniform: equal color steps mean equal value steps, and it survives greyscale |
+| A magnitude with a natural low end (loss, accuracy, count) | `viridis` (`SEQUENTIAL`) | Perceptually uniform: equal color steps mean equal value steps, and it survives greyscale |
 | A signed difference, correlation, or delta to a baseline | `RdBu_r` (`DIVERGING`) with limits symmetric about zero | The midpoint color must land on zero, or the sign is unreadable |
 | Anything at all | Never `jet`, `rainbow`, `hsv` | They have bright bands at arbitrary values, inventing edges the data does not have |
 
@@ -77,7 +77,8 @@ DATA = "figs/sweep.csv"
 
 
 def load(path):
-    rows = list(csv.DictReader(open(path)))
+    with open(path) as handle:
+        rows = list(csv.DictReader(handle))
     lrs = sorted({float(row["lr"]) for row in rows}, reverse=True)
     batches = sorted({int(row["batch_size"]) for row in rows})
     grid = np.full((len(lrs), len(batches)), np.nan)
@@ -102,6 +103,8 @@ def main():
     image = ax.imshow(grid, cmap=cmap, interpolation="nearest", aspect="auto")
     annotate_matrix(ax, grid, fmt="{:.3f}")
 
+    if np.isnan(grid).all():
+        raise ValueError("every cell is empty: nothing to plot")
     row, col = np.unravel_index(np.nanargmin(grid), grid.shape)
     ax.add_patch(
         Rectangle((col - 0.5, row - 0.5), 1, 1, fill=False, edgecolor="white", linewidth=1.4)
@@ -126,17 +129,21 @@ if __name__ == "__main__":
 Same style module, row-normalized and square:
 
 ```python
+import matplotlib as mpl
 import numpy as np
-from orx_figstyle import COLUMN, SEQUENTIAL, annotate_matrix, figure, save, use_style
+from orx_figstyle import COLUMN, MUTED, SEQUENTIAL, annotate_matrix, figure, save, use_style
 
 counts = np.load("figs/confusion.npy")  # (n_classes, n_classes), true x predicted
 classes = ["ent", "neut", "contra"]
 
 use_style()
-recall = counts / counts.sum(axis=1, keepdims=True)
+support = counts.sum(axis=1, keepdims=True)
+# A class with no examples is undefined, not zero recall.
+recall = np.divide(counts, support, out=np.full(counts.shape, np.nan), where=support > 0)
 
 fig, ax = figure(width=COLUMN, ratio=0.95)
-image = ax.imshow(recall, cmap=SEQUENTIAL, vmin=0, vmax=1, interpolation="nearest")
+cmap = mpl.colormaps[SEQUENTIAL].with_extremes(bad=MUTED)
+image = ax.imshow(recall, cmap=cmap, vmin=0, vmax=1, interpolation="nearest")
 annotate_matrix(ax, recall, fmt="{:.2f}")
 ax.set_xticks(range(len(classes)), classes)
 ax.set_yticks(range(len(classes)), classes)

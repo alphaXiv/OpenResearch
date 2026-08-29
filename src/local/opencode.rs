@@ -610,12 +610,6 @@ impl AgentHost {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn playbook_directs_figure_work_to_the_figures_skill() {
-        // Without this the agent plots with raw matplotlib and never loads the
-        // module, which is what shipped the first unusable figures.
-        assert!(super::SYSTEM_PROMPT.contains("Load\n  `orx-figures` before writing plotting code"));
-    }
 
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
@@ -759,6 +753,14 @@ mod tests {
         assert!(compute.content.contains("Wake-up is opt-in"));
         assert!(!md.contains("`orx exp wake <expId>`"));
         assert!(!md.contains("OpenResearch injects an `[orx]` message"));
+    }
+
+    #[test]
+    fn playbook_directs_figure_work_to_the_figures_skill() {
+        // Without this the agent plots with raw matplotlib and never loads the
+        // module, which is what shipped the first unusable figures.
+        let md = sample_playbook();
+        assert!(md.contains("`orx-figures` before writing plotting code"));
     }
 
     #[test]

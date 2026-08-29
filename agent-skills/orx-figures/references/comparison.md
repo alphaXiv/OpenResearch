@@ -30,7 +30,7 @@ re-sorting per group destroys that.
 
 **Label every bar with its value.** It makes the figure do the results table's
 job as well, and a reader quoting your numbers does not have to squint at the
-axis. This is the one place type below the 7pt floor is acceptable: the label
+axis. This is the one place type may go below the 7pt tick size, down to the 5pt floor: the label
 is redundant with the bar's height, so a reader who cannot read it still
 recovers the value from the axis. Around 5pt at full text width; if bars get
 so dense the labels collide, that is the signal to drop a method or split the
@@ -87,6 +87,7 @@ chart. See the `orx-paper` module for table formatting.
 """Accuracy across benchmarks. Regenerate: python figs/benchmarks.py"""
 
 import csv
+import math
 from collections import defaultdict
 
 import numpy as np
@@ -151,13 +152,16 @@ def main():
             edgecolor="black",
             linewidth=0.4,
         )
-        # Redundant with the bar height, so it may sit below the 7pt floor.
+        # Redundant with the bar height, so it may sit at the 5pt floor.
         ax.bar_label(bars, fmt="%.1f", fontsize=5, padding=1.5)
 
-    ax.set_xticks(x, BENCHMARKS, fontsize=9)
+    ax.set_xticks(x, BENCHMARKS)
     ax.set_ylabel("Accuracy (%)")
-    ax.set_ylim(0, 90)
-    ax.set_yticks(range(0, 91, 10))
+    # Derived, never hardcoded: a bar clipped at the axes edge no longer
+    # encodes its value, which is the failure this whole reference is about.
+    top = 10 * math.ceil(max(v for row in scores.values() for v in row.values()) * 1.12 / 10)
+    ax.set_ylim(0, top)
+    ax.set_yticks(range(0, top + 1, 10))
     ax.tick_params(axis="x", length=0)
     ax.legend(
         ncol=2, loc="upper left", fontsize=6.5,

@@ -16,13 +16,14 @@ gets remade the week before the deadline.
 
 1. **Build at the final printed size.** A figure drawn 8 inches wide and shrunk
    to a 3.25-inch column has 3pt tick labels. Pick the width from the document
-   (`COLUMN`, `TEXT`, `WIDE` in the style module) and never rescale on import.
+   (`COLUMN`, `TEXT`, `WIDE` in the style module), then include it with
+   `width=\linewidth`, which scales by 1.0 once the size is right (see *Where
+   the figure goes*). Never build big and rescale to fit.
 2. **Vector out.** Write PDF for `\includegraphics` and SVG alongside it for
    preview. A rasterized *plot* — axes, lines, text — is a defect: it blurs
    under the zoom every reviewer uses. PNG is correct only for genuinely
    raster content: a photograph, a sample image grid, an attention map at
-   pixel resolution. Roughly half the graphics in current papers are PNG, so
-   this is a bar the field often misses rather than one it sets.
+   pixel resolution.
 3. **Every number comes from a run.** Read metrics with `orx logs` (see the
    `orx-evidence` module). Never plot a remembered, rounded, or plausible
    number, and never leave synthetic demo data in a script that ships.
@@ -50,11 +51,11 @@ Vendor the style module next to the figure scripts so a figure stays
 reproducible after this session ends:
 
 ```sh
-mkdir -p figs && cp assets/orx_figstyle.py figs/
+mkdir -p figs && orx skill figures/assets/orx_figstyle.py > figs/orx_figstyle.py
 ```
 
-(`assets/orx_figstyle.py` is relative to this `SKILL.md`. If it cannot be read,
-`orx skill figures/assets/orx_figstyle.py` prints it.)
+(That works from any directory. `cp assets/orx_figstyle.py figs/` also works
+when your cwd is this module's install directory.)
 
 Then find an interpreter that has matplotlib, in this order — do not install
 into the project's environment without asking:
@@ -178,6 +179,10 @@ Pick by the question the figure answers, not by the shape you have in mind.
 | What does this 2D grid, confusion matrix, or sweep look like? | [references/matrix.md](references/matrix.md) |
 | What is the method, architecture, or pipeline? | [references/diagram.md](references/diagram.md) |
 
+Every reference's template writes to `figs/`, which is the paper destination.
+For a report or a chat answer, change the `save()` stem to the artifacts
+directory before running, and cite it with the `artifacts/` prefix.
+
 Do not read references for figures you are not making. If an installed
 reference cannot be read, `orx skill figures/<name>` prints it.
 
@@ -191,6 +196,9 @@ grid, a map — still obeys the non-negotiables above and the style module.
   the 5pt floor, text that overlaps other text, and text running off the
   canvas. `clean` is the bar; anything else is a defect to fix, not a warning
   to note and move past.
+- One audit finding is not yours to fix: if it reports no publication font on
+  the machine, say so when you hand the figure over rather than installing
+  fonts, which is a change to the environment you should ask about first.
 - A label placed at a reference line or a data point is the usual source of an
   overlap — it lands on a tick label at some data ranges and not others. Move
   it, or give it `backgroundcolor="white"` so it masks what it covers.

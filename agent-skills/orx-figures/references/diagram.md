@@ -9,19 +9,19 @@ edit rather than a redraw. Keep the division clean: **TikZ for schematics,
 matplotlib for data.** A bar chart in pgfplots is a second plotting stack to
 maintain for no gain.
 
-Be aware this is a recommendation, not the prevailing habit: most ML papers
-ship diagrams exported from a drawing tool, and TikZ appears in a minority of
-submissions. An exported diagram is acceptable when it is genuinely vector
-(PDF, not a PNG of a canvas) and built at the width it will print at — the same
-two rules every figure here obeys. Choose the drawing tool if the diagram is
-heavily illustrative; choose TikZ when it is boxes, arrows, and symbols, which
-is most method figures.
+Whatever draws it, the diagram must be genuinely vector (a PDF, not a PNG of a
+canvas) and built at the width it will print at — the same two rules every
+figure here obeys. Within that, TikZ is a recommendation rather than the
+prevailing habit: most ML papers ship diagrams exported from a drawing tool.
+Choose the drawing tool when the diagram is heavily illustrative; choose TikZ
+when it is boxes, arrows, and symbols, which is most method figures.
 
 ## Build it from the shared scaffold
 
-`assets/orx-tikz-preamble.tex` (beside this reference) defines the block, data,
-arrow, and stage styles and the same palette the plots use. Copy it as the head
-of the figure's `.tex`:
+`assets/orx-tikz-preamble.tex` defines the block, data, arrow, and stage styles
+and the same palette the plots use. The path is relative to this module's
+`SKILL.md`; `orx skill figures/assets/orx-tikz-preamble.tex` prints it from
+anywhere. Copy it as the head of the figure's `.tex`:
 
 ```sh
 mkdir -p figs && cp assets/orx-tikz-preamble.tex figs/method.tex
@@ -58,9 +58,10 @@ collide. `transform shape` scales text too — and then the text is smaller than
 the caption, which is the thing you were told not to do.
 
 Build the diagram at the width it will be printed. If it comes out too wide,
-shorten labels, stack the layout, or drop a stage — do not scale it down and do
-not `\includegraphics[width=\linewidth]` a diagram that was drawn wider. Check
-the compiled PDF's actual width before including it.
+shorten labels, stack the layout, or drop a stage. Do not scale it down, and do
+not lean on `width=\linewidth` to shrink a diagram drawn wider — that is the
+rescue-by-scaling this whole rule exists to prevent. Check the compiled PDF's
+actual width before including it.
 
 ## Label the edges
 
@@ -115,21 +116,23 @@ replaces a sentence in Section 3.
 \end{document}
 ```
 
-Include it at its natural size, and let the caption do the explaining:
+Build it at the target width and include it with `width=\linewidth`, exactly
+as every other figure here:
 
 ```latex
 \begin{figure}[t]
   \centering
-  \includegraphics{figs/method.pdf}
+  \includegraphics[width=\linewidth]{figs/method.pdf}
   \caption{The router replaces the fixed gate in the decoder trunk; gradients
   reach it through the standard cross-entropy path.}
   \label{fig:method}
 \end{figure}
 ```
 
-To put the picture inline instead, move the `\definecolor` and `\tikzset`
-blocks into the paper's preamble and `\input` the `tikzpicture` body — the
-diagram then inherits the paper's fonts exactly.
+To put the picture inline instead, move the `\definecolor`, `\tikzset`, **and
+`\familydefault`** lines into the paper's preamble and `\input` the
+`tikzpicture` body. Carry the `\familydefault` line across or the diagram
+silently reverts to the body font and stops matching the plots beside it.
 
 ## Checklist
 

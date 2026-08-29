@@ -119,7 +119,7 @@ Reference image files that actually exist in the tree, by path relative to the
 `.tex`:
 
 ```latex
-\includegraphics[width=0.8\linewidth]{figs/loss_curve.png}
+\includegraphics[width=\linewidth]{figs/loss_curve.pdf}
 ```
 
 Write the extension out, and confirm the file exists before referencing it — a

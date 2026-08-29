@@ -116,7 +116,12 @@ def bootstrap_alpha(n, loss, draws=200, seed=0):
         idx = rng.integers(0, len(n), len(n))
         if len(set(idx.tolist())) < 3:
             continue
-        alphas.append(fit_power_law(n[idx], loss[idx])[2])
+        try:
+            alphas.append(fit_power_law(n[idx], loss[idx])[2])
+        except ValueError:
+            continue  # a degenerate resample is not a reason to lose the figure
+    if len(alphas) < draws // 4:
+        raise ValueError(f"only {len(alphas)}/{draws} resamples fit; too few runs for an interval")
     return np.percentile(alphas, [2.5, 97.5])
 
 
@@ -141,7 +146,11 @@ def main():
     ax.plot(beyond, curve(beyond), color=BASELINE, linestyle="--", zorder=1)
     ax.axvspan(n[fitted].max(), PREDICT_TO, color=BASELINE, alpha=0.08, linewidth=0)
 
-    for marker, name in zip(("o", "s", "^"), sorted(set(family))):
+    markers = ("o", "s", "^", "v", "P", "X")
+    families = sorted(set(family))
+    if len(families) > len(markers):
+        raise ValueError(f"{len(families)} families, {len(markers)} markers: add more")
+    for marker, name in zip(markers, families):
         pick = family == name
         ax.scatter(n[pick & fitted], loss[pick & fitted], marker=marker,
                    color=PALETTE["blue"], label=name, zorder=2)

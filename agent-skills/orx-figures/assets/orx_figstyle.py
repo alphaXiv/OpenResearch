@@ -3,12 +3,12 @@
 Vendor this file next to the figure scripts that import it, so a figure stays
 reproducible after the session that made it ends.
 
-    from orx_figstyle import use_style, figure, save, PALETTE
+    from orx_figstyle import COLUMN, PALETTE, figure, save, use_style
 
     use_style()
     fig, ax = figure(width=COLUMN)
     ax.plot(x, y, color=PALETTE["blue"])
-    save(fig, "figs/loss-curve")
+    save(fig, "figs/loss_curve")
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ DIVERGING = "RdBu_r"
 _T95 = {
     1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
     8: 2.306, 9: 2.262, 10: 2.228, 12: 2.179, 15: 2.131, 20: 2.086, 30: 2.042,
+    40: 2.021, 60: 2.000, 120: 1.980,
 }
 
 
@@ -78,7 +79,7 @@ SERIF = ["STIXGeneral", "TeX Gyre Termes", "Nimbus Roman", "Times New Roman", "D
 _resolved_font: str | None = None
 
 
-def available_font(stack) -> str | None:
+def _available_font(stack) -> str | None:
     """The first font in `stack` this machine actually has."""
     import matplotlib.font_manager as fm
 
@@ -98,7 +99,7 @@ def use_style(family: str = "sans") -> None:
     # exists; picking Agg up front avoids a backend failure at import.
     mpl.use("Agg")
     global _resolved_font
-    _resolved_font = available_font(SERIF if family == "serif" else SANS)
+    _resolved_font = _available_font(SERIF if family == "serif" else SANS)
     mpl.rcParams.update({
         "font.family": "serif" if family == "serif" else "sans-serif",
         "font.serif": SERIF,
@@ -203,6 +204,8 @@ def _audit(fig) -> list[str]:
         )
 
     for ax in fig.axes:
+        if not ax.axison:
+            continue
         if ax.get_title():
             problems.append(f"axes title {ax.get_title()!r} duplicates the caption — delete it")
         if getattr(ax, "_colorbar", None) is not None:
@@ -219,9 +222,16 @@ def _audit(fig) -> list[str]:
             ):
                 continue
             # Categorical ticks (benchmark or variant names) label themselves;
-            # an axis title over them just repeats the tick text.
+            # an axis title over them just repeats the tick text. Only a linear
+            # axis can be categorical — a log axis is quantitative by
+            # construction, and its formatter emits mathtext that no numeric
+            # test would accept.
             ticks = [t.get_text() for t in axis.get_ticklabels() if t.get_text().strip()]
-            if ticks and not all(_looks_numeric(t) for t in ticks):
+            if (
+                axis.get_scale() == "linear"
+                and ticks
+                and not all(_looks_numeric(t) for t in ticks)
+            ):
                 continue
             problems.append(f"an axes has no {name} label")
 
@@ -245,8 +255,11 @@ def _text_collisions(fig) -> list[str]:
     a figure that satisfies every other rule is still unusable, and it is
     invisible until the figure is drawn.
     """
-    fig.canvas.draw()
-    renderer = fig.canvas.get_renderer()
+    try:
+        fig.canvas.draw()
+        renderer = fig.canvas.get_renderer()
+    except AttributeError:
+        return ["text could not be inspected: no Agg-family canvas — call use_style() first"]
 
     # A locator can emit ticks just past the view limits; their label artists
     # exist and carry a position but are never drawn. Exclude them by tick
@@ -261,8 +274,9 @@ def _text_collisions(fig) -> list[str]:
                     offscreen.update({id(tick.label1), id(tick.label2)})
 
     boxes = []
+    hidden = {id(t) for ax in fig.axes if not ax.axison for t in ax.findobj(mpl.text.Text)}
     for text in fig.findobj(mpl.text.Text):
-        if id(text) in offscreen:
+        if id(text) in offscreen or id(text) in hidden:
             continue
         if not text.get_visible() or not text.get_text().strip():
             continue
@@ -293,7 +307,6 @@ def _text_collisions(fig) -> list[str]:
             overlap = mpl.transforms.Bbox.intersection(box_a, box_b)
             if overlap is None:
                 continue
-            # Ignore a shave along one edge; flag a real intersection.
             if overlap.width > tolerance and overlap.height > tolerance:
                 hits.append(f"{text_a.get_text()[:22]!r} over {text_b.get_text()[:22]!r}")
     if hits:
@@ -308,12 +321,14 @@ def save(fig, stem: str, formats=("pdf", "svg"), close: bool = True) -> list[str
     No `bbox_inches="tight"`: trimming to content changes the physical width
     and defeats building at the final size.
     """
-    problems = _audit(fig)
+    # Write first: the audit inspects a live canvas and must never be the
+    # reason a finished figure is lost.
     paths = []
     for ext in formats:
         path = f"{stem}.{ext}"
         fig.savefig(path, format=ext)
         paths.append(path)
+    problems = _audit(fig)
     if close:
         plt.close(fig)
     # Printed, not raised: a hard failure mid-analysis loses the figure, but a
@@ -379,11 +394,11 @@ def pareto_front(x, y, minimize_x: bool = True, maximize_y: bool = True):
 
 
 def _t95(df: int) -> float:
-    if df in _T95:
-        return _T95[df]
-    if df <= 30:
-        return _T95[min(_T95, key=lambda k: abs(k - df))]
-    return 1.96
+    # Round the degrees of freedom down, never to the nearest key: a smaller df
+    # gives a larger t, so the interval errs wide rather than overstating how
+    # well a handful of seeds resolves the mean.
+    covered = [k for k in _T95 if k <= df]
+    return _T95[max(covered)] if covered else _T95[1]
 
 
 def diff_ci(treatment, baseline):
@@ -402,6 +417,8 @@ def diff_ci(treatment, baseline):
     var_t = treatment.var(ddof=1) / n_t
     var_b = baseline.var(ddof=1) / n_b
     sem = math.sqrt(var_t + var_b)
+    if sem == 0:
+        return delta, delta, delta  # every seed identical: the interval is a point
     df = (var_t + var_b) ** 2 / (var_t**2 / (n_t - 1) + var_b**2 / (n_b - 1))
     half = _t95(int(df)) * sem
     return delta, delta - half, delta + half
@@ -427,9 +444,13 @@ def label_ends(ax, lines, labels, pad: float = 3.0, min_gap: float = 7.0, **kwar
     renderer = ax.figure.canvas.get_renderer()
     pad_px = pad * ax.figure.dpi / 72
 
+    labels = list(labels)
+    if not labels:
+        return
+    size = kwargs.pop("fontsize", mpl.rcParams["legend.fontsize"])
     widths, heights = [], []
     for text in labels:
-        probe = ax.text(0, 0, text, fontsize=mpl.rcParams["legend.fontsize"])
+        probe = ax.text(0, 0, text, fontsize=size)
         extent = probe.get_window_extent(renderer)
         widths.append(extent.width)
         heights.append(extent.height)
@@ -437,10 +458,19 @@ def label_ends(ax, lines, labels, pad: float = 3.0, min_gap: float = 7.0, **kwar
     # Separate by the labels' own height, not a fixed point value: the right
     # gap depends on the font, and a constant tuned for one is wrong for another.
     gap_px = max(min_gap * ax.figure.dpi / 72, max(heights) * 1.15)
+    # Setting xlim changes the data-to-pixel scale, so the room cannot be
+    # measured in the old scale: solve for the limit at which the original span
+    # occupies (axes width - label width) pixels.
     x_lo, x_hi = ax.get_xlim()
-    edge_px = ax.transData.transform((x_hi, 0))[0]
-    room = ax.transData.inverted().transform((edge_px + max(widths) + 2 * pad_px, 0))[0]
-    ax.set_xlim(x_lo, room)
+    need = max(widths) + 2 * pad_px
+    axes_px = ax.bbox.width
+    if need < axes_px:
+        scale = ax.xaxis.get_transform()
+        s_lo, s_hi = scale.transform([x_lo, x_hi])
+        room = scale.inverted().transform(
+            [s_lo + (s_hi - s_lo) * axes_px / (axes_px - need)]
+        )[0]
+        ax.set_xlim(x_lo, room)
 
     ends = []
     for line, text in zip(lines, labels):
@@ -458,7 +488,7 @@ def label_ends(ax, lines, labels, pad: float = 3.0, min_gap: float = 7.0, **kwar
             textcoords="offset points",
             color=line.get_color(),
             va="center",
-            fontsize=mpl.rcParams["legend.fontsize"],
+            fontsize=size,
             clip_on=False,
             **kwargs,
         )
@@ -482,7 +512,7 @@ def si_ticks(ax, which: str = "x") -> None:
     axis = ax.xaxis if which == "x" else ax.yaxis
     axis.set_major_formatter(mpl.ticker.FuncFormatter(fmt))
     scale = ax.get_xscale() if which == "x" else ax.get_yscale()
-    lo, hi = ax.get_xlim() if which == "x" else ax.get_ylim()
+    lo, hi = sorted(ax.get_xlim() if which == "x" else ax.get_ylim())
     if scale == "log" and lo > 0 and hi / lo < 10:
         axis.set_minor_formatter(mpl.ticker.FuncFormatter(fmt))
 
