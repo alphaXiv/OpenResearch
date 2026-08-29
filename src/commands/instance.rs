@@ -55,7 +55,10 @@ async fn list(creds: &crate::config::Credentials, args: InstanceListArgs) -> Res
 /// `orx instance delete <sandboxId>` — terminate the box and its provider machine.
 async fn delete(creds: &crate::config::Credentials, args: InstanceDeleteArgs) -> Result<()> {
     delete_sandbox(creds, &args.sandbox_id).await?;
-    println!("\u{2713} Instance {} deleted.", args.sandbox_id);
+    println!(
+        "\u{2713} Termination requested for instance {}.",
+        args.sandbox_id
+    );
     Ok(())
 }
 

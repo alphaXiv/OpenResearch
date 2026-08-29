@@ -29,7 +29,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{bin_version, read_json, HarnessInfo};
+use super::detect::{probe_bin, read_json, HarnessInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
@@ -41,6 +41,9 @@ use crate::local::chat::{
 };
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
+
+const OPENCODE_REINSTALL: &str =
+    "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
 
 pub struct OpenCode;
 
@@ -66,10 +69,11 @@ impl Harness for OpenCode {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
         if let Ok(bin) = find_opencode() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            models = opencode_models(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
+            // A binary that failed `--version` has no catalog to give either.
+            if !info.install_broken {
+                models = opencode_models(&bin).await;
+            }
         }
         let providers = opencode_providers();
         if !providers.is_empty() {
@@ -108,9 +112,11 @@ impl Harness for OpenCode {
         // auth.json nor a provider key above now reads "Not signed in", and
         // since step 1 of onboarding gates on this, an opencode-only user is
         // asked to sign in before continuing.
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
             info.models = models;
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
         } else if info.installed {
             info.agent_note =
                 Some("Sign in with `opencode auth login` to chat with it here.".to_string());

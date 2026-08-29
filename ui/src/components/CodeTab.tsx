@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 // Files and committed changes for one experiment branch. The opening
 // experiment fixes the Git source; users only switch between Files/Changes.
 
@@ -143,7 +145,7 @@ export function CodeTab({
             ? githubBranchUrl(project.githubOwner, project.githubRepo, branch)
             : undefined
         }
-        githubTitle={`Open ${branch} on GitHub`}
+        githubTitle={m.a11y_open_branch_github({ branch: ltr(branch) })}
         refreshing={refreshing}
         onRefresh={() =>
           view === "files" ? load() : setChangesRefreshKey((current) => current + 1)
@@ -158,15 +160,15 @@ export function CodeTab({
         />
       ) : (
         <>
-          {data?.truncated && <div className={CODE_TAB_NOTE_CLASS_NAME}>listing truncated</div>}
-          {error && tree && <div className={CODE_TAB_NOTE_CLASS_NAME}>Refresh failed: {error}</div>}
+          {data?.truncated && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_listing_truncated()}</div>}
+          {error && tree && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_refresh_failed()} {ltr(error)}</div>}
           <div className={CODE_TAB_BODY_CLASS_NAME}>
             {!tree ? (
               <div className={CODE_TAB_NOTE_CLASS_NAME}>
-                {error ? `Failed to load: ${error}` : "Loading…"}
+                {error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}
               </div>
             ) : tree.dirs.size === 0 && tree.files.length === 0 ? (
-              <div className={CODE_TAB_NOTE_CLASS_NAME}>No files.</div>
+              <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_no_files()}</div>
             ) : (
               <div className="file-tree py-1.5 px-0 text-md">
                 <TreeLevel

@@ -9,6 +9,34 @@
 @source "../index.html";
 @source ".";
 
+.tinker-logo {
+  clip-path: inset(34% 9%);
+}
+
+:root[data-theme="dark"] .tinker-logo {
+  filter: invert(1);
+  mix-blend-mode: screen;
+}
+
+:root[lang="fa"] #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
+  unicode-bidi: plaintext;
+}
+
+.md :where(p, h1, h2, h3, h4, li, th, td, blockquote),
+:root[lang="fa"] #root .file-view-note {
+  unicode-bidi: plaintext;
+}
+
+/* The exception preserves DirFooter's RTL front-ellipsis truncation trick. */
+:where(pre, code:not(.path-front-ellipsis), .font-mono, .xterm, .openresearch-diff) {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+.path-front-ellipsis {
+  unicode-bidi: isolate;
+}
+
 @theme inline {
   --color-*: initial;
   --color-transparent: transparent;

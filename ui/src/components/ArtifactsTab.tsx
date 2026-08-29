@@ -1,3 +1,6 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { getLocale } from "../paraglide/runtime.js";
 import {
   Check,
   ChevronRight,
@@ -136,7 +139,7 @@ export function ArtifactMarkdown({
     return artifactTargetUrl(projectId, folder, src);
   };
   return (
-    <div className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-[color-mix(in_oklab,_var(--border)_50%,_transparent)] [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-[0.9em] [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:font-semibold [&_h2]:text-text [&_h2]:font-semibold [&_h3]:text-text [&_h3]:font-semibold [&_h4]:text-text [&_h4]:font-semibold [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:pl-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:pl-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:text-md [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-left [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-left [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pr-0 [&_blockquote]:pb-0.5 [&_blockquote]:pl-2.5 [&_blockquote]:border-l-[3px] [&_blockquote]:border-l-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text artifact-md text-lg [&_h1]:text-[2em] [&_h1]:leading-[1.18] [&_h1]:mt-7 [&_h1]:mx-0 [&_h1]:mb-3.5 [&_h2]:text-[1.5em] [&_h2]:leading-tight [&_h2]:mt-7 [&_h2]:mx-0 [&_h2]:mb-2.5 [&_h3]:text-[1.2em] [&_h3]:leading-[1.35] [&_h3]:mt-5.5 [&_h3]:mx-0 [&_h3]:mb-2 [&_h4]:text-[1em] [&_h4]:leading-[1.4] [&_h4]:mt-4.5 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_.artifact-img]:block [&_.artifact-img]:my-3 [&_.artifact-img]:mx-0 [&_.artifact-img_img]:max-w-full [&_.artifact-img_img]:h-auto [&_.artifact-img_img]:border [&_.artifact-img_img]:border-border [&_.artifact-img_img]:rounded-sm [&_.artifact-img-caption]:block [&_.artifact-img-caption]:mt-1 [&_.artifact-img-caption]:text-center [&_.artifact-img-caption]:text-sm [&_.artifact-img-caption]:text-subtext">
+    <div className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-[color-mix(in_oklab,_var(--border)_50%,_transparent)] [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-[0.9em] [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-[1.05em] [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-[0.9em] [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:font-semibold [&_h2]:text-text [&_h2]:font-semibold [&_h3]:text-text [&_h3]:font-semibold [&_h4]:text-text [&_h4]:font-semibold [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:text-md [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text artifact-md text-lg [&_h1]:text-[2em] [&_h1]:leading-[1.18] [&_h1]:mt-7 [&_h1]:mx-0 [&_h1]:mb-3.5 [&_h2]:text-[1.5em] [&_h2]:leading-tight [&_h2]:mt-7 [&_h2]:mx-0 [&_h2]:mb-2.5 [&_h3]:text-[1.2em] [&_h3]:leading-[1.35] [&_h3]:mt-5.5 [&_h3]:mx-0 [&_h3]:mb-2 [&_h4]:text-[1em] [&_h4]:leading-[1.4] [&_h4]:mt-4.5 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_.artifact-img]:block [&_.artifact-img]:my-3 [&_.artifact-img]:mx-0 [&_.artifact-img_img]:max-w-full [&_.artifact-img_img]:h-auto [&_.artifact-img_img]:border [&_.artifact-img_img]:border-border [&_.artifact-img_img]:rounded-sm [&_.artifact-img-caption]:block [&_.artifact-img-caption]:mt-1 [&_.artifact-img-caption]:text-center [&_.artifact-img-caption]:text-sm [&_.artifact-img-caption]:text-subtext">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions]]}
         rehypePlugins={[rehypeKatex]}
@@ -206,7 +209,7 @@ function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind)
     let cancelled = false;
     const request = ++requestSequence.current;
     const load = getArtifactFileText(projectId, entry.path).then((body) => {
-      if (!body) throw new Error("Artifact not found");
+      if (!body) throw new Error(m.artifacts_not_found());
       return body;
     });
     load
@@ -257,24 +260,24 @@ function PreviewPane({
     body = (
       <div className="file-view-note py-2.5 px-4 text-sm text-muted">
         {kind === "download" || binary
-          ? "Binary or unsupported file — no inline preview."
-          : "File too large to preview inline."}{" "}
+          ? m.artifacts_binary_no_preview()
+          : m.artifacts_too_large_to_preview()}{" "}
         <a
           href={rawUrl}
           {...(kind === "download" || binary
             ? { download: entry.name }
             : { target: "_blank", rel: "noopener noreferrer" })}
         >
-          {kind === "download" || binary ? "Download" : "Open raw"}
+          {kind === "download" || binary ? m.file_viewer_download() : m.artifacts_open_raw()}
         </a>
       </div>
     );
   } else if (error) {
-    body = <div className="file-view-note py-2.5 px-4 text-sm text-muted">Failed to load: {error}</div>;
+    body = <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.artifacts_tab_failed_to_load()} {ltr(error)}</div>;
   } else if (text === null) {
     body = (
       <div className={SETTINGS_LOADING_CLASS_NAME}>
-        <span className={SPINNER_CLASS_NAME} /> Loading…
+        <span className={SPINNER_CLASS_NAME} /> {m.artifacts_tab_loading()}
       </div>
     );
   } else if (isDoc && !showSource) {
@@ -288,12 +291,12 @@ function PreviewPane({
     <div className="fpreview flex-1 min-w-0 bg-background file-view flex flex-col h-full min-h-0">
       <div className="fpreview-head h-10 flex items-center gap-2 py-0 px-3.5 border-b border-b-border-variant text-subtext shrink-0">
         <FileText size={13} style={{ flexShrink: 0 }} />
-        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={entry.path}>
+        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={ltr(entry.path)}>
           {entry.path}
         </code>
-        <span className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
-          Modified{" "}
-          {new Date(entry.modifiedAt).toLocaleString(undefined, {
+        <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
+          {m.artifacts_tab_modified()}{" "}
+          {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
             dateStyle: "medium",
             timeStyle: "short",
           })}
@@ -304,9 +307,9 @@ function PreviewPane({
         {isDoc && (
           <button
             className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
-            data-tip={showSource ? "Rendered view" : "View source"}
+            data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
-            aria-label={showSource ? "Rendered view" : "View source"}
+            aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
             onClick={() => setShowSource((s) => !s)}
           >
             <Code size={13} />
@@ -317,19 +320,19 @@ function PreviewPane({
           href={rawUrl}
           target="_blank"
           rel="noopener noreferrer"
-          data-tip="Open raw in new tab"
+          data-tip={m.artifacts_tab_open_raw_in_new_tab()}
           data-tip-align="end"
-          aria-label="Open raw in new tab"
+          aria-label={m.artifacts_tab_open_raw_in_new_tab()}
         >
           <ExternalLink size={13} />
         </a>
         <button
           className={ICON_BUTTON_CLASS_NAME}
-          data-tip="Delete artifact"
+          data-tip={m.artifacts_tab_delete_artifact()}
           data-tip-align="end"
-          aria-label="Delete artifact"
+          aria-label={m.artifacts_tab_delete_artifact()}
           onClick={() => {
-            if (window.confirm(`Delete "${entry.path}" from the artifacts directory?`))
+            if (window.confirm(m.artifact_delete_confirm({ path: ltr(entry.path) })))
               onDelete(entry.path);
           }}
         >
@@ -340,7 +343,7 @@ function PreviewPane({
         {body}
         {truncated && (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
-            File truncated — showing the first 512 KB.
+            {m.artifacts_tab_file_truncated_showing_the_first_512_kb()}
           </div>
         )}
       </div>
@@ -370,15 +373,15 @@ function TreeRows({
   return (
     <div className="flex w-full max-w-full min-w-0 flex-col items-stretch">
       {entries.map((e) => {
-        const indent = { paddingLeft: 8 + Math.min(depth, TREE_MAX_INDENT_DEPTH) * 14 };
+        const indent = { paddingInlineStart: 8 + Math.min(depth, TREE_MAX_INDENT_DEPTH) * 14 };
         if (e.isDir) {
           const open = !collapsed.has(e.path);
           return (
             <div key={e.path} className="min-w-0 max-w-full">
-              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-left cursor-pointer font-[inherit] text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
+              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
                 <button
                   className="file-tree-chevron text-muted shrink-0 [button&]:inline-flex [button&]:items-center [button&]:justify-center [button&]:w-[13px] [button&]:h-[13px] [button&]:p-0 [button&]:border-0 [button&]:bg-transparent [button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90"
-                  aria-label={open ? `Collapse ${e.name}` : `Expand ${e.name}`}
+                  aria-label={open ? m.artifact_collapse_folder({ name: ltr(e.name) }) : m.artifact_expand_folder({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     onToggle(e.path);
@@ -389,12 +392,12 @@ function TreeRows({
                 <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{e.name}</span>
                 <button
                   className={`${ICON_BUTTON_BASE_CLASS_NAME} ft-row-delete w-4.5 h-4.5 opacity-35 [&:focus-visible]:opacity-100`}
-                  data-tip="Delete folder"
+                  data-tip={m.artifacts_tab_delete_folder()}
                   data-tip-align="end"
-                  aria-label={`Delete folder ${e.name}`}
+                  aria-label={m.artifact_delete_folder_label({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    if (window.confirm(`Delete "${e.path}" from the artifacts directory?`))
+                    if (window.confirm(m.artifact_delete_confirm({ path: ltr(e.path) })))
                       onDelete(e.path);
                   }}
                 >
@@ -422,9 +425,9 @@ function TreeRows({
           <button
             key={e.path}
             type="button"
-            className={`file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-left cursor-pointer font-[inherit] text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100 ${selected === e.path ? "selected" : ""}`}
+            className={`file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100 ${selected === e.path ? "selected" : ""}`}
             style={indent}
-            title={`${e.path} — Space previews inline; double-click or Enter keeps open in a tab`}
+            title={m.a11y_artifact_preview({ path: ltr(e.path) })}
             aria-keyshortcuts="Space Enter"
             aria-pressed={selected === e.path}
             onClick={() => onSelect(e.path)}
@@ -462,12 +465,12 @@ function TreeRows({
 function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5" title={dir}>
-      <code>{dir}</code>
+    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5" title={ltr(dir)}>
+      <code className="path-front-ellipsis">{dir}</code>
       <button
         className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
-        data-tip={copied ? "Copied!" : "Copy path"}
-        aria-label="Copy artifacts directory path"
+        data-tip={copied ? m.common_copied() : m.artifacts_copy_path()}
+        aria-label={m.artifacts_tab_copy_artifacts_directory_path()}
         onClick={() => {
           void navigator.clipboard?.writeText(dir);
           setCopied(true);
@@ -478,9 +481,9 @@ function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => v
       </button>
       <button
         className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
-        data-tip="Storage settings"
+        data-tip={m.artifacts_tab_storage_settings()}
         data-tip-align="end"
-        aria-label="Storage settings"
+        aria-label={m.artifacts_tab_storage_settings()}
         onClick={onOpenStorage}
       >
         <Settings2 size={12} />
@@ -524,16 +527,16 @@ export function ArtifactsTab({
   }, [project.id, collapsed]);
 
   // Drag the divider to resize the tree pane; width persists across reloads.
-  // Mirrors App's right-panel resizer: capture the pointer so views under the
+  // Mirrors App's end-panel resizer: capture the pointer so views under the
   // cursor don't steal the drag, and suppress text selection while dragging.
   const resizeTree = (e: React.PointerEvent) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    const left = treeRef.current?.getBoundingClientRect().left ?? 0;
+    const rect = treeRef.current?.getBoundingClientRect();
     const prevUserSelect = document.body.style.userSelect;
     document.body.style.userSelect = "none";
     const onMove = (ev: PointerEvent) => {
-      const w = Math.round(ev.clientX - left);
+      const w = Math.round(ev.clientX - (rect?.left ?? 0));
       const clamped = Math.min(Math.max(w, TREE_MIN_WIDTH), TREE_MAX_WIDTH);
       setTreeWidth(clamped);
       try {
@@ -579,7 +582,7 @@ export function ArtifactsTab({
     return (
       <div className="files-tab h-full min-h-0 flex bg-background">
         <div className={SETTINGS_LOADING_CLASS_NAME} style={{ padding: 20 }}>
-          <span className={SPINNER_CLASS_NAME} /> Loading artifacts…
+          <span className={SPINNER_CLASS_NAME} /> {m.artifacts_tab_loading_artifacts()}
         </div>
       </div>
     );
@@ -604,10 +607,9 @@ export function ArtifactsTab({
       <div className="files-tab h-full min-h-0 flex bg-background">
         <div className="files-empty-state flex-1 flex flex-col items-center justify-center gap-1.5 p-6 text-center text-muted [&_h3]:mt-1.5 [&_h3]:mx-0 [&_h3]:mb-0 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text [&_p]:m-0 [&_p]:max-w-105 [&_p]:text-md [&_p]:leading-[1.55] [&_p]:text-subtext [&_.ftree-footer]:mt-2.5 [&_.ftree-footer]:max-w-full [&_.ftree-footer]:border [&_.ftree-footer]:border-border [&_.ftree-footer]:rounded-md [&_.ftree-footer]:py-1.5 [&_.ftree-footer]:px-2.5 [&_.ftree-footer]:bg-background [&_.ftree-footer_code]:max-w-95">
           <Package size={28} strokeWidth={1.5} />
-          <h3>No artifacts yet</h3>
+          <h3>{m.artifacts_tab_no_artifacts_yet()}</h3>
           <p>
-            This is the project's durable output space for reports, figures, images, CSVs, PDFs,
-            and other research artifacts. Ask the agent for a write-up or add your own files:
+            {m.artifacts_tab_this_is_the_project_s_durable_output_space()}
           </p>
           <DirFooter dir={artifacts.dir} onOpenStorage={onOpenStorage} />
         </div>
@@ -617,12 +619,12 @@ export function ArtifactsTab({
 
   return (
     <div className="files-tab h-full min-h-0 flex bg-background">
-      <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-l border-l-border-variant border-r border-r-border-variant bg-background" ref={treeRef} style={{ width: treeWidth }}>
-        <div className="ftree-resizer absolute -right-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizeTree} />
+      <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background" ref={treeRef} style={{ width: treeWidth }}>
+        <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)]" onPointerDown={resizeTree} />
         <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-md">
           {tree(artifacts.entries)}
           {artifacts.truncated && (
-            <p className="files-truncated m-0 py-2 px-3.5 text-xs text-muted">Listing truncated — the folder has more artifacts.</p>
+            <p className="files-truncated m-0 py-2 px-3.5 text-xs text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
           )}
         </div>
         <DirFooter dir={artifacts.dir} onOpenStorage={onOpenStorage} />
@@ -639,7 +641,7 @@ export function ArtifactsTab({
       ) : (
         <div className="fpreview flex-1 min-w-0 flex flex-col min-h-0 bg-background fpreview-none items-center justify-center gap-2 text-md text-muted">
           <MousePointerClick size={22} strokeWidth={1.5} />
-          <span>Click an artifact to view it</span>
+          <span>{m.artifacts_tab_click_an_artifact_to_view_it()}</span>
         </div>
       )}
     </div>

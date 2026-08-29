@@ -38,8 +38,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, jwt_payload, nonempty_str, parse_version, read_json, resolve_symlinks, title_case,
-    HarnessInfo, ModelInfo,
+    bin_version, jwt_payload, nonempty_str, parse_version, probe_bin, read_json, resolve_symlinks,
+    title_case, HarnessInfo, ModelInfo,
 };
 use super::options::{
     resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
@@ -117,6 +117,10 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
 /// model that isn't in `CODEX_MODELS` (a `-c model=…` override, or a newer id
 /// this build doesn't know).
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
+/// naming one installer would send a brew or standalone install to npm.
+const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
 
 /// The effort ids a given codex model accepts per the FALLBACK table, or the
 /// conservative intersection. Send-time validation only — detection prefers
@@ -247,6 +251,24 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
             let info = ModelInfo::new(id).with_label(
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
+            );
+            let info = info.with_service_tiers(
+                m.get("serviceTiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"))
+                    .filter_map(|tier| {
+                        Some(OptionChoice {
+                            id: tier.get("id")?.as_str()?.to_string(),
+                            label: tier.get("name")?.as_str()?.to_string(),
+                            description: tier
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
             );
             Some(match default {
                 Some(default) => info.with_reasoning_default(&efforts, default),
@@ -474,9 +496,7 @@ impl Harness for Codex {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_codex() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
         }
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
@@ -514,7 +534,7 @@ impl Harness for Codex {
             }
         }
 
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
             // A custom provider's bundled first-party catalog is meaningless,
             // so probe only when its config declares an explicit catalog.
@@ -569,6 +589,10 @@ impl Harness for Codex {
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
                 );
             }
+        } else if info.install_broken {
+            // Outranks both notes below: neither signing in nor a provider key
+            // helps a codex that can't start.
+            info.agent_note = Some(info.broken_note(CODEX_REINSTALL));
         } else if info.agent_note.is_some() {
             // A configured custom provider already said which env var to set;
             // `codex login` is the wrong instruction for it.
@@ -585,8 +609,14 @@ impl Harness for Codex {
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
         if !runs_app_server().await {
-            return run_turn_exec(ctx)
-                .await
+            let result = run_turn_exec(ctx).await;
+            // Still `Unknown` after a failure means codex died before its first
+            // event — nothing was delivered, so the card must offer Retry, not a
+            // Continue that re-runs the same doomed spawn.
+            if result.is_err() && ctx.delivery_state() == DeliveryState::Unknown {
+                ctx.mark_delivery(DeliveryState::NotSent);
+            }
+            return result
                 .map(|()| TurnOutcome::Completed)
                 .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
         }
@@ -2110,6 +2140,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        thread_setup["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
@@ -2167,6 +2200,9 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "approvalsReviewer": approvals_reviewer,
         "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        turn_params["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
@@ -3295,6 +3331,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
+    if let Some(service_tier) = &ctx.service_tier {
+        cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
+    }
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
     }
@@ -3319,6 +3358,9 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     cmd.arg(prompt);
     prepare_env(&mut cmd);
     cmd.env("CODEX_HOME", codex_home);
+    // Plain text only: a synced FORCE_COLOR would put escape codes in the
+    // `--json` event stream, and every unparseable line reads as "not delivered".
+    cmd.env("NO_COLOR", "1");
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
@@ -4966,6 +5008,10 @@ requires_openai_auth = false
                         { "reasoningEffort": "max", "description": "" },
                         { "reasoningEffort": "ultra", "description": "" },
                     ],
+                    "serviceTiers": [
+                        { "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" },
+                        { "id": "ultrafast", "name": "Ultrafast", "description": "Access controlled" }
+                    ],
                 },
                 {
                     "id": "gpt-5.4-mini", "model": "gpt-5.4-mini",
@@ -5007,6 +5053,10 @@ requires_openai_auth = false
         assert_eq!(models[1].default_reasoning_level.as_deref(), Some("medium"));
         // The catalog's display name rides along for the picker.
         assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].id, "priority");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].label, "Fast");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap().len(), 1);
+        assert!(models[1].service_tiers.as_ref().unwrap().is_empty());
 
         // A config.toml `model_reasoning_effort` outranks the catalog default —
         // codex resolves it that way, so the preselect must too. A configured

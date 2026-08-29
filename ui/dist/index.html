@@ -20,19 +20,42 @@
           document.documentElement.dataset.theme = "light";
         }
       })();
+      // Resolve language before first paint; keep supported in sync with project.inlang/settings.json.
+      (function () {
+        var saved = null;
+        try { saved = localStorage.getItem("orx:locale"); } catch (e) {}
+        var browserPreferences = navigator.languages || [navigator.language];
+        var supported = ["en", "zh-CN", "fa"];
+        var match = function (tag) {
+          if (!tag) return null;
+          var normalized = String(tag).toLowerCase();
+          for (var j = 0; j < supported.length; j += 1) {
+            if (supported[j].toLowerCase() === normalized) return supported[j];
+          }
+          return null;
+        };
+        var locale = match(saved);
+        for (var i = 0; !locale && i < browserPreferences.length; i += 1) {
+          var preference = browserPreferences[i];
+          locale = match(preference) || match(String(preference).split("-")[0]);
+        }
+        locale = locale || "en";
+        document.documentElement.lang = locale;
+        document.documentElement.dir = "ltr";
+      })();
     </script>
     <style>
       /* Pre-CSS background; keep in sync with --base in src/tailwind.css. */
       html { background: #ffffff; }
       html[data-theme="dark"] { background: #0e0c0c; }
     </style>
-    <script type="module" crossorigin src="/assets/index-BHTQ0Swr.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CPmIAxXd.css">
+    <script type="module" crossorigin src="/assets/index-3pBlNq7W.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CECCiDmL.css">
   </head>
   <body>
     <div
       id="root"
-      class="[&_:where([data-tip])]:relative [&_:where([data-tip])::after]:content-[attr(data-tip)] [&_:where([data-tip])::after]:absolute [&_:where([data-tip])::after]:top-[calc(100%_+_6px)] [&_:where([data-tip])::after]:left-1/2 [&_:where([data-tip])::after]:-translate-x-1/2 [&_:where([data-tip])::after]:w-max [&_:where([data-tip])::after]:max-w-none [&_:where([data-tip])::after]:bg-text [&_:where([data-tip])::after]:text-background [&_:where([data-tip])::after]:text-xs [&_:where([data-tip])::after]:font-medium [&_:where([data-tip])::after]:leading-none [&_:where([data-tip])::after]:py-[5px] [&_:where([data-tip])::after]:px-2 [&_:where([data-tip])::after]:rounded-sm [&_:where([data-tip])::after]:whitespace-nowrap [&_:where([data-tip])::after]:opacity-0 [&_:where([data-tip])::after]:invisible [&_:where([data-tip])::after]:pointer-events-none [&_:where([data-tip])::after]:z-[9999] [&_:where([data-tip]):is(:hover,:focus-visible)::after]:opacity-100 [&_:where([data-tip]):is(:hover,:focus-visible)::after]:visible [&_:where([data-tip-align='start'])::after]:left-0 [&_:where([data-tip-align='start'])::after]:translate-none [&_:where([data-tip-align='end'])::after]:right-0 [&_:where([data-tip-align='end'])::after]:left-auto [&_:where([data-tip-align='end'])::after]:translate-none"
+      class="[&_:where([data-tip])]:relative [&_:where([data-tip])::after]:content-[attr(data-tip)] [&_:where([data-tip])::after]:absolute [&_:where([data-tip])::after]:top-[calc(100%_+_6px)] [&_:where([data-tip])::after]:left-1/2 [&_:where([data-tip])::after]:-translate-x-1/2 [&_:where([data-tip])::after]:w-max [&_:where([data-tip])::after]:max-w-none [&_:where([data-tip])::after]:bg-text [&_:where([data-tip])::after]:text-background [&_:where([data-tip])::after]:text-xs [&_:where([data-tip])::after]:font-medium [&_:where([data-tip])::after]:leading-none [&_:where([data-tip])::after]:py-[5px] [&_:where([data-tip])::after]:px-2 [&_:where([data-tip])::after]:rounded-sm [&_:where([data-tip])::after]:whitespace-nowrap [&_:where([data-tip])::after]:opacity-0 [&_:where([data-tip])::after]:invisible [&_:where([data-tip])::after]:pointer-events-none [&_:where([data-tip])::after]:z-[9999] [&_:where([data-tip]):is(:hover,:focus-visible)::after]:opacity-100 [&_:where([data-tip]):is(:hover,:focus-visible)::after]:visible [&_[data-tip-align='start']::after]:start-0 [&_[data-tip-align='start']::after]:translate-none [&_[data-tip-align='end']::after]:end-0 [&_[data-tip-align='end']::after]:start-auto [&_[data-tip-align='end']::after]:translate-none"
     ></div>
   </body>
 </html>

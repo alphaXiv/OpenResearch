@@ -1,4 +1,6 @@
 import { githubBranchUrl } from "../api";
+import { ltr } from "../i18n";
+import { m } from "../paraglide/messages.js";
 import { GitHubMark } from "./BackendLogos";
 
 const FILES_PILL_CLASS_NAME = [
@@ -29,7 +31,7 @@ export function BranchPill({
       href={githubBranchUrl(owner, repo, branch)}
       target="_blank"
       rel="noopener noreferrer"
-      title={`Open ${branch} on GitHub`}
+      title={m.a11y_open_on_github({ name: ltr(branch) })}
     >
       <code>{branch}</code>
       <GitHubMark size={12} />

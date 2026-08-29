@@ -13,8 +13,8 @@
 //! process environment unchanged.
 //!
 //! Scope is orx's own resolution and the children it spawns. The other things
-//! orx shells out to — `git`, `gh`, `kubectl`, `ssh`, the detached
-//! `publish-branch` worker — still inherit the process environment.
+//! orx shells out to — `git`, `kubectl`, and `ssh` — still inherit the process
+//! environment.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};

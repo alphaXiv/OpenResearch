@@ -30,7 +30,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
+    bin_version, nonempty_str, parse_version, probe_bin, read_json, HarnessAuthState, HarnessInfo,
+    ModelInfo,
 };
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
@@ -76,6 +77,9 @@ const CLAUDE_ULTRACODE: &str = "ultracode";
 const MIN_CLAUDE_VERSION: (u64, u64, u64) = (2, 1, 211);
 
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Not `claude update` — that runs the very binary that is failing.
+const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AuthProbe {
@@ -456,13 +460,11 @@ impl Harness for ClaudeCode {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_claude() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
         }
-        // The CLI owns OAuth and Keychain refresh. Its live status, including
-        // the effective auth method, decides whether this harness can run.
-        if info.installed {
+        // The CLI owns OAuth and Keychain refresh. Its live status decides
+        // whether this harness can run; a broken binary would only fail it too.
+        if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
             let probe = match bin {
                 Some(bin) => {
@@ -494,7 +496,7 @@ impl Harness for ClaudeCode {
             }
         }
 
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
             // The resident child is only spawnable once the CLI is ready.
             info.supports_steering = true;
@@ -518,6 +520,8 @@ impl Harness for ClaudeCode {
                     .map(|id| ModelInfo::new(*id).with_reasoning(&ids))
                     .collect()
             }));
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(CLAUDE_REINSTALL));
         } else if info.auth_state == HarnessAuthState::Unsupported {
             info.agent_note = Some(
                 "Update Claude Code to 2.1.211 or newer, then re-check this harness.".to_string(),

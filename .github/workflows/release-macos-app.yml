@@ -128,7 +128,12 @@ jobs:
             --password "$NOTARY_PASSWORD"
 
       - name: Build universal app
-        run: ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
+        run: ORX_OFFICIAL_RELEASE_BUILD=1 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
+
+      - name: Verify bundled production channel
+        env:
+          ORX_TELEMETRY_ENV: "off"
+        run: test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch version --build-channel)" = production
 
       - name: Sign, notarize, and package the DMG
         env:

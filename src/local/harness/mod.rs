@@ -406,6 +406,11 @@ pub fn effective_permission_id(harness_id: &str, stored: Option<&str>) -> Option
     options.default_permission_mode.map(str::to_string)
 }
 
+/// Validate the processing tiers ORX exposes for Codex.
+pub fn service_tier_for<'a>(harness_id: &str, id: &'a str) -> Option<&'a str> {
+    (harness_id == "codex" && matches!(id, "default" | "priority")).then_some(id)
+}
+
 /// One wait in a harness's turn loop: the harness's own next event, or a
 /// message the user steered into the turn meanwhile.
 pub(crate) enum Waited<T> {
@@ -473,7 +478,7 @@ async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
         if info.auth_state == HarnessAuthState::Unknown {
             info.auth_state = if info.agent_ready {
                 HarnessAuthState::Ready
-            } else if info.installed && info.id != "claude-code" {
+            } else if info.installed && !info.install_broken && info.id != "claude-code" {
                 HarnessAuthState::NeedsLogin
             } else {
                 HarnessAuthState::Unknown

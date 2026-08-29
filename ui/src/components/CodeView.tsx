@@ -75,12 +75,12 @@ export function CodeView({
               code never picks it up. */}
           <span
             data-line={i + 1}
-            className={`${CODE_GUTTER_CLASS_NAME} before:content-[attr(data-line)] shrink-0 pr-[1ch]`}
+            className={`${CODE_GUTTER_CLASS_NAME} before:content-[attr(data-line)] shrink-0 pe-[1ch]`}
             style={{ width: `${ruleCh}ch` }}
             aria-hidden="true"
           />
           <code
-            className={`file-view-code flex-1 min-w-0 pl-[2ch] pr-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME}`}
+            className={`file-view-code flex-1 min-w-0 ps-[2ch] pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME}`}
           >
             {/* An empty <code> serializes to nothing, dropping blank lines
                 from a copied selection. */}
@@ -95,7 +95,7 @@ export function CodeView({
     <div className={`file-view-codewrap relative py-3.5 ${CODE_TEXT_CLASS_NAME}`}>
       {lines.length > 0 && (
         <div
-          className="absolute left-0 top-0 bottom-0 border-r border-r-border-variant pointer-events-none"
+          className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
           style={{ width: `${ruleCh}ch` }}
           aria-hidden="true"
         />

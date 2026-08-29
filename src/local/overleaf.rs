@@ -455,9 +455,8 @@ struct Auth<'a> {
     token: &'a str,
 }
 
-/// Answers only for the host the project was linked with, mirroring
-/// `git::GITHUB_CREDENTIAL_HELPER`: git feeds the helper the host on stdin, and
-/// a project URL naming somewhere else gets nothing.
+/// Answers only for the host the project was linked with: git feeds the helper
+/// the host on stdin, and a project URL naming somewhere else gets nothing.
 const CREDENTIAL_HELPER: &str = "!f() { host=; while IFS='=' read key value; do [ \"$key\" = host ] && host=$value; done; [ \"$host\" = \"$ORX_OVERLEAF_HOST\" ] || exit 0; echo username=git; echo \"password=$ORX_OVERLEAF_TOKEN\"; }; f";
 
 /// A git run. The token reaches the child only through its environment — never

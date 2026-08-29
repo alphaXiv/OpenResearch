@@ -110,9 +110,19 @@ function pathsFor(info, slot = null) {
     backendPort: 4900 + slot,
     uiPort: 5200 + slot,
     dataDir: path.join(allocatorRoot, slotKey),
+    cacheDir: path.join(allocatorRoot, slotKey, 'cache'),
     configDir: path.join(allocatorRoot, `${slotKey}-config`),
     statePath: path.join(allocatorRoot, `${slotKey}-state.json`),
     logsDir: path.join(allocatorRoot, 'logs', slotKey),
+  }
+}
+
+export function slotEnvironment(slotPaths) {
+  return {
+    ORX_DATA_DIR: slotPaths.dataDir,
+    ORX_CACHE_DIR: slotPaths.cacheDir,
+    XDG_CONFIG_HOME: slotPaths.configDir,
+    CARGO_TARGET_DIR: slotPaths.cargoTargetDir,
   }
 }
 
@@ -331,9 +341,7 @@ function configurationFor(info, slotPaths) {
       name: `orx-${slotPaths.slot}-${info.label}`,
       runtimeExecutable: 'env',
       runtimeArgs: [
-        `ORX_DATA_DIR=${slotPaths.dataDir}`,
-        `XDG_CONFIG_HOME=${slotPaths.configDir}`,
-        `CARGO_TARGET_DIR=${slotPaths.cargoTargetDir}`,
+        ...Object.entries(slotEnvironment(slotPaths)).map(([key, value]) => `${key}=${value}`),
         'cargo', 'run', '--manifest-path', info.manifestPath,
         '--', 'up', '--no-browser', '--port', String(slotPaths.backendPort),
       ],
@@ -435,6 +443,7 @@ async function reserveSlot(info, dbMode) {
       state.phase = 'preparing'
       atomicWriteJson(slotPaths.statePath, state)
       const database = initializeDatabase(dbMode, slotPaths.dataDir)
+      mkdirSync(slotPaths.cacheDir, { recursive: true, mode: 0o700 })
       mkdirSync(slotPaths.configDir, { recursive: true, mode: 0o700 })
       mkdirSync(slotPaths.cargoTargetDir, { recursive: true, mode: 0o700 })
       mkdirSync(slotPaths.logsDir, { recursive: true, mode: 0o700 })
@@ -611,9 +620,7 @@ async function startUnlocked(info, dbMode, openBrowser) {
       cwd: info.worktreePath,
       env: {
         ...process.env,
-        ORX_DATA_DIR: slotPaths.dataDir,
-        XDG_CONFIG_HOME: slotPaths.configDir,
-        CARGO_TARGET_DIR: slotPaths.cargoTargetDir,
+        ...slotEnvironment(slotPaths),
       },
     }, state.backendLog)
     saveState(slotPaths, state)
@@ -694,6 +701,7 @@ function printStatus(info) {
   console.log(`  Backend: ${listenerPids(slotPaths.backendPort).length > 0 ? 'running' : 'stopped'} on ${slotPaths.backendPort}`)
   console.log(`  UI:      ${listenerPids(slotPaths.uiPort).length > 0 ? 'running' : 'stopped'} on ${slotPaths.uiPort}`)
   console.log(`  Data:    ${slotPaths.dataDir}`)
+  console.log(`  Cache:   ${slotPaths.cacheDir}`)
   console.log(`  State:   ${state ? slotPaths.statePath : 'legacy/unmanaged'}`)
 }
 

@@ -1,12 +1,17 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   getHarnesses,
+  fmtNumber,
   harnessModelLabel,
   modelLabel,
   reasoningFor,
   reconcileReasoning,
+  reconcileServiceTier,
   REASONING_DEFAULT_ID,
+  serviceTiersFor,
   type Harness,
   type HarnessId,
   type OptionChoice,
@@ -49,6 +54,7 @@ export function defaultSelection(harnesses: Harness[]): ModelSelection | null {
   return {
     harness: ready.id,
     model,
+    serviceTier: reconcileServiceTier(ready, model, null),
     permissionMode: ready.options?.defaultPermissionMode ?? null,
     reasoningLevel: reasoningFor(ready, model).defaultId,
   };
@@ -121,7 +127,7 @@ export function ModelPicker({
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "permissions">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions">("root");
 
   const close = () => {
     setOpen(false);
@@ -130,7 +136,7 @@ export function ModelPicker({
   };
 
   useEffect(() => {
-    if (open && (page === "reasoning" || page === "permissions")) {
+    if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
@@ -179,6 +185,11 @@ export function ModelPicker({
     onSelect({
       harness: harness.id,
       model,
+      serviceTier: reconcileServiceTier(
+        harness,
+        model,
+        sameHarness ? value?.serviceTier : null,
+      ),
       permissionMode: sameHarness
         ? value!.permissionMode
         : harness.options?.defaultPermissionMode ?? null,
@@ -204,13 +215,21 @@ export function ModelPicker({
       ? selected
         ? harnessModelLabel(selected)
         : modelLabel(value.model)
-      : "Default model"
-    : "Model";
+      : m.model_picker_default_model()
+    : m.model_picker_model();
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
   const reasoningLabel = reasoningChoices.find((choice) => choice.id === effectiveReasoningId)?.label;
   const effectivePermissionId = value?.permissionMode ?? defaultPermissionId ?? permissionChoices[0]?.id;
   const permissionLabel = permissionChoices.find((choice) => choice.id === effectivePermissionId)?.label;
-  const reasoningAxisLabel = value?.harness === "opencode" ? "Variant" : "Effort";
+  const reasoningAxisLabel = value?.harness === "opencode" ? m.model_picker_variant() : m.model_picker_effort();
+  const selectedHarness = harnesses.find((harness) => harness.id === value?.harness);
+  const speedChoices = serviceTiersFor(selectedHarness, value?.model);
+  const effectiveServiceTier = reconcileServiceTier(
+    selectedHarness,
+    value?.model,
+    value?.serviceTier,
+  );
+  const speedLabel = speedChoices.find((choice) => choice.id === effectiveServiceTier)?.label;
 
   const chooseReasoning = (id: string) => {
     onSelectReasoning?.(id);
@@ -222,6 +241,11 @@ export function ModelPicker({
     close();
   };
 
+  const chooseSpeed = (id: string) => {
+    if (value) onSelect({ ...value, serviceTier: id });
+    close();
+  };
+
   const menuRow = (
     title: string,
     detail: string | undefined,
@@ -229,7 +253,7 @@ export function ModelPicker({
   ) => (
     <button
       type="button"
-      className="model-root-row flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-md text-text hover:bg-surface"
+      className="model-root-row flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-start text-md text-text hover:bg-surface"
       aria-haspopup="menu"
       onClick={() => setPage(next)}
     >
@@ -243,7 +267,7 @@ export function ModelPicker({
     <button
       ref={submenuHeaderRef}
       type="button"
-      className="model-submenu-header flex w-full items-center gap-2 border-0 border-b border-solid border-b-border-variant bg-transparent px-2 py-2 text-left text-sm font-medium text-text hover:bg-surface"
+      className="model-submenu-header flex w-full items-center gap-2 border-0 border-b border-solid border-b-border-variant bg-transparent px-2 py-2 text-start text-sm font-medium text-text hover:bg-surface"
       onClick={() => {
         setPage("root");
         setFilter("");
@@ -267,7 +291,7 @@ export function ModelPicker({
             <span>
               {choice.label}
               {choice.id === defaultId && (
-                <span className="font-normal text-muted"> · Default</span>
+                <span className="font-normal text-muted"> {m.model_picker_default()}</span>
               )}
             </span>
             {choice.description && (
@@ -288,7 +312,7 @@ export function ModelPicker({
         ref={triggerRef}
         type="button"
         className={`${COMPOSER_CONTROL_CLASS_NAME} composer-pill min-w-0 max-w-full gap-[5px] px-2 text-md text-text whitespace-nowrap`}
-        title={`Harness + model for this chat: ${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}`}
+        title={m.a11y_chat_model({ label: `${label}${reasoningLabel ? ` · ${reasoningLabel}` : ""}${speedLabel ? ` · ${speedLabel}` : ""}` })}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => {
@@ -299,35 +323,41 @@ export function ModelPicker({
           }
         }}
       >
-        {value?.harness && <HarnessLogo harness={value.harness} size={14} />}
+        {effectiveServiceTier === "priority" ? (
+          <Zap size={14} fill="currentColor" aria-hidden="true" />
+        ) : value?.harness ? (
+          <HarnessLogo harness={value.harness} size={14} />
+        ) : null}
+        {effectiveServiceTier === "priority" && <span className="sr-only">{m.model_picker_fast_speed()} </span>}
         <span className="model-picker-label min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
           {label}
-          {reasoningLabel && <span className="model-picker-reasoning ml-1 text-muted">{reasoningLabel}</span>}
+          {reasoningLabel && <span className="model-picker-reasoning ms-1 text-muted">{reasoningLabel}</span>}
         </span>
         <ChevronDown size={14} className="shrink-0 text-muted" />
       </button>
       {open && (
-        <div className="model-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-100 flex flex-col bg-background border border-border rounded-md shadow-[0_10px_26px_rgba(0,_0,_0,_0.16)] z-50 overflow-hidden w-72 [&.align-right]:left-auto [&.align-right]:right-0 [&_input]:rounded-none [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-2 [&_input]:px-2.5 [&_input]:text-sm [&_input]:outline-none align-right">
+        <div className="model-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-100 flex flex-col bg-background border border-border rounded-md shadow-[0_10px_26px_rgba(0,_0,_0,_0.16)] z-50 overflow-hidden w-72 [&.align-right]:start-auto [&.align-right]:end-0 [&_input]:rounded-none [&_input]:border-0 [&_input]:border-b [&_input]:border-b-border-variant [&_input]:bg-none [&_input]:bg-transparent [&_input]:py-2 [&_input]:px-2.5 [&_input]:text-sm [&_input]:outline-none align-right">
           {page === "root" && (
             <div className="model-root-menu p-1">
-              {menuRow("Model", label, "models")}
+              {menuRow(m.model_picker_model(), label, "models")}
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
-              {permissionChoices.length > 0 && menuRow("Mode", permissionLabel, "permissions")}
+              {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
+              {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
             </div>
           )}
           {page === "models" && (
             <>
-              {submenuHeader("Model")}
+              {submenuHeader(m.model_picker_model())}
               <input
                 autoFocus
                 type="text"
-                placeholder="Search models…"
+                placeholder={m.model_picker_search_models()}
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
               />
               <div className="model-menu-list overflow-y-auto p-1.5">
                 {groups.map(({ harness, models, hidden }) => (
-                  <div key={harness.id} className="[&_.model-item]:pl-6">
+                  <div key={harness.id} className="[&_.model-item]:ps-6">
                     <div className={MODEL_GROUP_CLASS_NAME}>
                       <span className="inline-flex items-center gap-1.5">
                         <HarnessLogo harness={harness.id} size={14} />
@@ -335,13 +365,13 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> Unavailable
+                          <Lock size={10} /> {m.model_picker_unavailable()}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-xs text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : "Not available"}
+                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>
@@ -353,8 +383,8 @@ export function ModelPicker({
                     {harness.models.length === 0 && (
                       <button className={MODEL_ITEM_CLASS_NAME} onClick={() => pick(harness, null)}>
                         <span>
-                          Default model
-                          <span className="model-id">CLI configuration</span>
+                          {m.model_picker_default_model()}
+                          <span className="model-id">{m.model_picker_cli_configuration()}</span>
                         </span>
                         {value?.harness === harness.id && value?.model === null && (
                           <Check size={13} />
@@ -375,7 +405,7 @@ export function ModelPicker({
                       </button>
                     ))}
                     {hidden > 0 && (
-                      <div className={MODEL_MORE_CLASS_NAME}>{hidden} more — search to find</div>
+                      <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
                     )}
                     {/* Free-form escape hatch: the catalogs are curated menus,
                         not the set of ids the CLIs accept — `--model
@@ -388,8 +418,7 @@ export function ModelPicker({
                           onClick={() => pick(harness, filter.trim())}
                         >
                           <span>
-                            Use “{filter.trim()}”
-                            <span className="model-id">pass as the model id</span>
+                            {m.model_picker_use_id({ id: ltr(filter.trim()) })}
                           </span>
                         </button>
                       )}
@@ -397,12 +426,12 @@ export function ModelPicker({
                     )}
                   </div>
                 ))}
-                {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>Detecting harnesses…</div>}
+                {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>}
               </div>
               {lockHarness && value && harnesses.length > 1 && (
                 <div className="model-locked-note flex items-center gap-1.5 py-[7px] px-3 text-xs text-muted border-t border-t-border-variant [&_svg]:shrink-0">
                   <Lock size={11} />
-                  Sessions keep their harness — new chat to switch
+                  {m.model_picker_sessions_keep_their_harness_new_chat_to_switch()}
                 </div>
               )}
             </>
@@ -415,8 +444,14 @@ export function ModelPicker({
           )}
           {page === "permissions" && (
             <>
-              {submenuHeader("Mode")}
+              {submenuHeader(m.model_picker_mode())}
               {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
+            </>
+          )}
+          {page === "speed" && (
+            <>
+              {submenuHeader(m.model_picker_speed())}
+              {choiceList(speedChoices, effectiveServiceTier ?? undefined, "default", chooseSpeed)}
             </>
           )}
         </div>
@@ -435,9 +470,12 @@ export function OptionPicker({
   defaultId,
   header,
   align = "left",
+  dropDown = false,
+  disabled = false,
   variant = "pill",
   title,
   numbered = false,
+  renderIcon,
   onSelect,
 }: {
   choices: OptionChoice[];
@@ -448,11 +486,14 @@ export function OptionPicker({
   /** Group header (e.g. "Mode"). */
   header?: string;
   align?: "left" | "right";
-  /** `pill` = boxed (permission mode); `bare` = text-only (reasoning). */
-  variant?: "pill" | "bare";
+  dropDown?: boolean;
+  disabled?: boolean;
+  /** `pill` = compact composer control; `bare` = text-only; `field` = settings input. */
+  variant?: "pill" | "bare" | "field";
   title?: string;
   /** Show 1-based number hints on the right (like the mode menu). */
   numbered?: boolean;
+  renderIcon?: (choice: OptionChoice) => ReactNode;
   onSelect: (id: string) => void;
 }) {
   const { open, setOpen, ref } = usePopover();
@@ -479,30 +520,43 @@ export function OptionPicker({
   };
 
   return (
-    <div className="option-picker relative inline-flex" ref={ref}>
+    <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
       <button
         type="button"
-        className={`${COMPOSER_CONTROL_CLASS_NAME} ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-md text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-md text-text"}`}
+        className={
+          variant === "field"
+            ? "inline-flex h-9 w-full items-center justify-between gap-2 rounded-md border border-border bg-background px-3 text-sm font-normal text-text transition-colors duration-120 ease-standard hover:bg-surface disabled:opacity-45"
+            : `${COMPOSER_CONTROL_CLASS_NAME} ${variant === "pill" ? "composer-pill gap-[5px] px-2 text-md text-text whitespace-nowrap" : "composer-bare gap-[3px] px-1 text-md text-text"}`
+        }
         title={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
         onClick={() => setOpen((v) => !v)}
       >
-        {label}
+        <span className="inline-flex min-w-0 items-center gap-2">
+          {current && renderIcon?.(current)}
+          <span className="truncate">{label}</span>
+        </span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] left-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:left-auto [&.align-right]:right-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:left-auto [&.session-menu]:right-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${align === "right" ? "align-right" : ""}`}>
+        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
           {pinned && (
             <>
-              <button className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(pinned.id)}>
-                <span>
-                  {pinned.label}
-                  {/* An unnamed sentinel's label already IS "Default", so the
-                      usual marker would read "Default · Default" — say where
-                      the behavior comes from instead. A named one ("Adaptive")
-                      gets the standard marker. */}
-                  <span className="option-default text-muted font-normal">
-                    {pinned.label === "Default" ? " · CLI configuration" : " · Default"}
+              <button type="button" className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(pinned.id)}>
+                <span className="inline-flex items-center gap-2">
+                  {renderIcon?.(pinned)}
+                  <span>
+                    {pinned.label}
+                    {/* An unnamed sentinel's label already IS "Default", so the
+                        usual marker would read "Default · Default" — say where
+                        the behavior comes from instead. A named one ("Adaptive")
+                        gets the standard marker. */}
+                    <span className="option-default text-muted font-normal">
+                      {m.model_picker_cli_configuration()}
+                    </span>
                   </span>
                 </span>
                 {effectiveId === pinned.id && <Check size={13} />}
@@ -511,22 +565,25 @@ export function OptionPicker({
             </>
           )}
           {rest.map((c, i) => (
-            <button key={c.id} className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(c.id)}>
-              <span className="flex min-w-0 flex-col items-start gap-0.5">
-                <span>
-                  {c.label}
-                  {/* A concrete default renders inline, in ramp order, with just
-                      the marker — it's one of the tiers, not a separate kind of
-                      choice like the pinned sentinel above. */}
-                  {!pinned && c.id === defaultId && (
-                    <span className="option-default text-muted font-normal"> · Default</span>
+            <button type="button" key={c.id} className={MODEL_ITEM_CLASS_NAME} onClick={() => choose(c.id)}>
+              <span className="flex min-w-0 items-center gap-2">
+                {renderIcon?.(c)}
+                <span className="flex min-w-0 flex-col items-start gap-0.5">
+                  <span>
+                    {c.label}
+                    {/* A concrete default renders inline, in ramp order, with just
+                        the marker — it's one of the tiers, not a separate kind of
+                        choice like the pinned sentinel above. */}
+                    {!pinned && c.id === defaultId && (
+                      <span className="option-default text-muted font-normal"> {m.model_picker_default()}</span>
+                    )}
+                  </span>
+                  {c.description && (
+                    <span className="max-w-68 text-sm font-normal leading-snug text-muted">
+                      {c.description}
+                    </span>
                   )}
                 </span>
-                {c.description && (
-                  <span className="max-w-68 text-sm font-normal leading-snug text-muted">
-                    {c.description}
-                  </span>
-                )}
               </span>
               {effectiveId === c.id ? (
                 <Check size={13} />

@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { compileLatex, getLatexEngine } from "./api";
+import { m } from "./paraglide/messages.js";
 
 interface CompiledPdf {
   /** Checkout-relative path of the PDF, for the raw-file URL. */
@@ -133,7 +134,7 @@ export function useLatexCompile({
         setBuiltWithErrors(false);
         setNote(result.note);
         setShowPdf(false);
-        setLog(result.log?.trim() || "The engine exited without producing a PDF or a log.");
+        setLog(result.log?.trim() || m.latex_no_pdf_or_log());
       })
       .catch((e: unknown) => {
         setCompiled(null);

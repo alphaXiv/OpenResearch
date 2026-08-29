@@ -1,15 +1,12 @@
-// Brand marks for the compute backends, rendered inline (no image assets: the
-// UI is embedded via rust-embed and locked down by CSP, so inline SVG is the
-// only portable option). Tinker/Modal/HF/K8s/Ray use their official marks;
-// branded marks carry their own colors, while monochrome marks use currentColor
-// and OpenResearch uses its own product mark, so they read in
-// both light and dark mode); ssh is a protocol with no brand mark and gets a
-// neutral lucide glyph in `currentColor`, and slurm (whose official mark is a
-// complex raster) and local (this machine) get the same treatment.
+// Brand marks for the compute backends. Most are inline SVGs; Tinker uses the
+// supplied Thinking Machines raster mark.
 
-import { Boxes, Laptop, Server } from "lucide-react";
+import { Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
+import slurmLogo from "../assets/slurm-logo.svg";
+import thinkingMachinesLogo from "../assets/thinking-machines.png";
 import { MONO_CLASS_NAME } from "../styleClasses";
+import { m } from "../paraglide/messages.js";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
 function backendName(kind: string): string {
@@ -29,7 +26,7 @@ function backendName(kind: string): string {
     case "openresearch_job":
       return "OpenResearch";
     case "local_job":
-      return "This machine";
+      return m.compute_target_local();
     case "tinker_job":
       return "Tinker";
     default:
@@ -130,20 +127,22 @@ function OpenResearchLogo({ size = 16 }: { size?: number }) {
   );
 }
 
-// Tinker — official console mark (tinker.thinkingmachines.ai/favicon-light.svg).
 function TinkerLogo({ size = 16 }: { size?: number }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 313 314" fill="currentColor" aria-hidden="true">
-      <path d="M67.2344 87.2344C79.7255 87.2344 89.8516 77.1083 89.8516 64.6172C89.8516 52.1261 79.7255 42 67.2344 42C54.7432 42 44.6172 52.1261 44.6172 64.6172C44.6172 77.1083 54.7432 87.2344 67.2344 87.2344Z" />
-      <path d="M242.234 87.2344C254.726 87.2344 264.852 77.1083 264.852 64.6172C264.852 52.1261 254.726 42 242.234 42C229.743 42 219.617 52.1261 219.617 64.6172C219.617 77.1083 229.743 87.2344 242.234 87.2344Z" />
-      <path d="M242.234 267.234C254.726 267.234 264.852 257.108 264.852 244.617C264.852 232.126 254.726 222 242.234 222C229.743 222 219.617 232.126 219.617 244.617C219.617 257.108 229.743 267.234 242.234 267.234Z" />
-      <path d="M62.2344 267.234C74.7255 267.234 84.8516 257.108 84.8516 244.617C84.8516 232.126 74.7255 222 62.2344 222C49.7432 222 39.6172 232.126 39.6172 244.617C39.6172 257.108 49.7432 267.234 62.2344 267.234Z" />
-      <rect width="15" height="60" rx="7.5" transform="matrix(-1 0 0 1 254.5 127)" />
-      <rect width="15" height="60" rx="7.5" transform="matrix(-1 0 0 1 74.5 127)" />
-      <rect width="15" height="156.903" rx="7.5" transform="matrix(0.707107 0.707107 0.707107 -0.707107 95.4375 207.947)" />
-      <rect width="15" height="60" rx="7.5" transform="matrix(-1.19249e-08 -1 -1 1.19249e-08 187 74.5)" />
-    </svg>
+    <img
+      className="tinker-logo block flex-none object-contain"
+      src={thinkingMachinesLogo}
+      width={size}
+      height={size}
+      style={{ transform: size >= 48 ? `translateX(${Math.round(size * 0.18)}px) scale(1.65)` : "scale(1.22)" }}
+      alt=""
+      aria-hidden="true"
+    />
   );
+}
+
+function SlurmLogo({ size = 16 }: { size?: number }) {
+  return <img className="block flex-none object-contain" src={slurmLogo} width={size} height={size} alt="" aria-hidden="true" />;
 }
 
 // GitHub — official octocat mark (lucide dropped brand icons). Not a compute
@@ -167,9 +166,9 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
     case "k8s_job":
       return <KubernetesLogo size={size} />;
     case "ssh_job":
-      return <Server size={size} />;
+      return <Server size={size} strokeWidth={1.5} />;
     case "slurm_job":
-      return <Boxes size={size} />;
+      return <SlurmLogo size={size} />;
     case "ray_job":
       return <RayLogo size={size} />;
     case "openresearch_job":
@@ -177,7 +176,7 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
     case "tinker_job":
       return <TinkerLogo size={size} />;
     case "local_job":
-      return <Laptop size={size} />;
+      return <Laptop size={size} strokeWidth={1.5} />;
     default:
       return <Server size={size} />;
   }

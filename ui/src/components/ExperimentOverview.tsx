@@ -1,3 +1,5 @@
+import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
 import {
   CalendarDays,
   Clock3,
@@ -41,7 +43,7 @@ const EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME = [
 ].join(" ");
 
 function fmtDate(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+  return new Date(ms).toLocaleString(getLocale(), {
     month: "short",
     day: "numeric",
     year: "numeric",
@@ -102,7 +104,7 @@ export function ExperimentOverview({
               )}
             >
               <Terminal size={15} />
-              Logs
+              {m.experiment_overview_logs()}
             </button>
           )}
           <button
@@ -110,34 +112,34 @@ export function ExperimentOverview({
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
           >
             <FolderTree size={15} />
-            Code
+            {m.experiment_overview_code()}
           </button>
         </div>
 
         {experiment.description && (
           <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-md [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-[1.65]">
-            <h2>Description</h2>
+            <h2>{m.experiment_overview_description()}</h2>
             <Md text={experiment.description} />
           </section>
         )}
 
         <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
-          <h2>{latestRun ? "Latest run" : "Runs"}</h2>
+          <h2>{latestRun ? m.experiment_latest_run() : m.experiment_runs()}</h2>
           {latestRun && (
             <>
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-[5px] [&_code]:text-text [&_code]:text-xs">
                 <StatusBadge status={runDisplayStatus(latestRun)} />
                 <BackendBadge backend={latestRun.backend} />
-                <span title="Started">
+                <span title={m.experiment_overview_started()}>
                   <CalendarDays size={13} />
                   {fmtDate(latestRun.createdAt)}
                 </span>
-                <span title="Duration">
+                <span title={m.experiment_overview_duration()}>
                   <Clock3 size={13} />
                   {runDuration(latestRun, now)}
                 </span>
                 {latestRun.commitSha && (
-                  <span title="Commit">
+                  <span title={m.experiment_overview_commit()}>
                     <GitCommitHorizontal size={14} />
                     <code>{latestRun.commitSha.slice(0, 7)}</code>
                   </span>
@@ -145,7 +147,7 @@ export function ExperimentOverview({
                 {latestRun.exitCode !== null &&
                   latestRun.exitCode !== undefined &&
                   latestRun.exitCode !== 0 && (
-                    <span>exit {latestRun.exitCode}</span>
+                    <span>{m.experiment_overview_exit()} {latestRun.exitCode}</span>
                   )}
               </div>
               {latestRun.command && (
@@ -172,11 +174,11 @@ export function ExperimentOverview({
             />
             {parentExperiment && (
               <span>
-                from <code>{parentExperiment.slug}</code>
+                {m.experiment_overview_from()} <code>{parentExperiment.slug}</code>
               </span>
             )}
             <span title={fmtDate(experiment.createdAt)}>
-              created {timeAgo(experiment.createdAt)}
+              {m.experiment_overview_created()} {timeAgo(experiment.createdAt)}
             </span>
           </div>
           {experiment.runCommand !== latestRun?.command && (
@@ -186,8 +188,8 @@ export function ExperimentOverview({
 
         {runs.length > 0 && (
           <section className={EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME}>
-            <h2>Run history</h2>
-            <div className="experiment-run-history border-t border-t-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-left [&_button]:text-sm [&_button:hover]:bg-surface [@media((max-width:_720px))]:[&_button]:grid-cols-[65px_1fr_60px_16px] [@media((max-width:_720px))]:[&_button_>_:nth-child(3)]:hidden">
+            <h2>{m.experiment_overview_run_history()}</h2>
+            <div className="experiment-run-history border-t border-t-border-variant [&_button]:w-full [&_button]:grid [&_button]:grid-cols-[minmax(72px,_0.7fr)_minmax(100px,_1fr)_minmax(70px,_0.7fr)_60px_16px] [&_button]:items-center [&_button]:gap-3.5 [&_button]:py-[11px] [&_button]:px-0.5 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-start [&_button]:text-sm [&_button:hover]:bg-surface [@media((max-width:_720px))]:[&_button]:grid-cols-[65px_1fr_60px_16px] [@media((max-width:_720px))]:[&_button_>_:nth-child(3)]:hidden">
               {runs.map((run, index) => (
                 <button
                   key={run.id}
@@ -195,7 +197,7 @@ export function ExperimentOverview({
                     onOpenLogs(run.id, intent),
                   )}
                 >
-                  <span className="experiment-run-number font-mono text-xs font-semibold">Run {runs.length - index}</span>
+                  <span className="experiment-run-number font-mono text-xs font-semibold">{m.experiment_overview_run()} {runs.length - index}</span>
                   <StatusBadge status={runDisplayStatus(run)} />
                   <span>{timeAgo(run.createdAt)}</span>
                   <span>{runDuration(run, now)}</span>

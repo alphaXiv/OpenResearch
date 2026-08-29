@@ -1,6 +1,8 @@
 // The nested file-tree primitives shared by the code browsers: the committed
 // CodeTab and the live WorktreeTab's Files view. A flat, sorted, repo-relative
 // path list (from a git listing) becomes a nested dir tree that renders as
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 // collapsible rows; clicking a file bubbles its repo-relative path up. Kept
 // source-agnostic — the caller decides which checkout the paths came from and
 // how a file open resolves.
@@ -11,7 +13,7 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const FILE_TREE_ROW_CLASS_NAME = [
   "file-tree-row flex items-center gap-1.5 w-full py-[3px] px-2.5 border-0",
-  "bg-transparent text-text text-left cursor-pointer font-[inherit]",
+  "bg-transparent text-text text-start cursor-pointer font-[inherit]",
   "text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0",
   "[&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted",
 ].join(" ");
@@ -85,7 +87,7 @@ function DirRow({
       <button
         type="button"
         className={FILE_TREE_ROW_CLASS_NAME}
-        style={{ paddingLeft: 8 + depth * 14 }}
+        style={{ paddingInlineStart: 8 + depth * 14 }}
         onClick={() => onToggle(path)}
         title={path}
       >
@@ -151,11 +153,11 @@ export function TreeLevel({
             key={`f:${path}`}
             type="button"
             className={FILE_TREE_ROW_CLASS_NAME}
-            style={{ paddingLeft: 8 + depth * 14 }}
+            style={{ paddingInlineStart: 8 + depth * 14 }}
             {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
               onOpenFile(path, intent),
             )}
-            title={`${path} — double-click or Enter to keep open`}
+            title={m.a11y_keep_open({ name: ltr(path) })}
           >
             <FileTypeIcon name={name} />
             <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>

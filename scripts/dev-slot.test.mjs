@@ -11,6 +11,7 @@ import {
   managedStateMatches,
   parseArgs,
   resolveLiveDataDir,
+  slotEnvironment,
   sqliteBackupCommand,
   supervisorCommandMatches,
 } from './dev-slot.mjs'
@@ -32,6 +33,20 @@ test('empty mode creates no database', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('slot environment isolates data, cache, config, and build artifacts', () => {
+  assert.deepEqual(slotEnvironment({
+    dataDir: '/dev/slot-3',
+    cacheDir: '/dev/slot-3/cache',
+    configDir: '/dev/slot-3-config',
+    cargoTargetDir: '/dev/cargo-target',
+  }), {
+    ORX_DATA_DIR: '/dev/slot-3',
+    ORX_CACHE_DIR: '/dev/slot-3/cache',
+    XDG_CONFIG_HOME: '/dev/slot-3-config',
+    CARGO_TARGET_DIR: '/dev/cargo-target',
+  })
 })
 
 test('copy mode takes a SQLite backup and copies run logs', () => {
