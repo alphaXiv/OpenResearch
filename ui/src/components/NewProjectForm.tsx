@@ -48,7 +48,7 @@ function displayRepository(url: string): string {
     .replace(/\/$/, "");
 }
 
-type Mode = "blank" | "folder" | "paper";
+type Mode = "blank" | "folder" | "paper" | "github";
 type ProjectDraft = {
   name: string;
   nameTouched: boolean;
@@ -86,6 +86,7 @@ export function NewProjectForm({
   const [hits, setHits] = useState<PaperHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [searchedPaperQuery, setSearchedPaperQuery] = useState("");
+  const [githubUrl, setGithubUrl] = useState("");
   const [pathCheckNonce, setPathCheckNonce] = useState(0);
   const seq = useRef(0);
   const pathSeq = useRef(0);
@@ -94,20 +95,30 @@ export function NewProjectForm({
     blank: { name: "", nameTouched: false, path: "", pathTouched: false },
     folder: { name: "", nameTouched: false, path: "", pathTouched: false },
     paper: { name: "", nameTouched: false, path: "", pathTouched: false },
+    github: { name: "", nameTouched: false, path: "", pathTouched: false },
   });
-  const paperGithubRepo = mode === "paper" ? parseGithubRepository(paper?.repoUrl) : null;
   const automaticBlankProjectPath = name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "";
   const automaticPaperProjectPath = `~/OpenResearch/${slugify(name || paper?.title || paper?.paperId || "")}`;
+  const paperGithubRepo = mode === "paper" ? parseGithubRepository(paper?.repoUrl) : null;
+  const githubRepo =
+    mode === "github"
+      ? parseGithubRepository(githubUrl.trim() || null)
+      : paperGithubRepo ?? (
+        pathStatus?.githubOwner && pathStatus.githubRepo
+          ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
+          : null
+      );
   const projectPath = mode === "blank" && !pathTouched
     ? automaticBlankProjectPath
-    : mode === "paper" && paper && !pathTouched
-      ? automaticPaperProjectPath
-      : path;
-  const existingGithubRepo = paperGithubRepo ?? (
-    pathStatus?.githubOwner && pathStatus.githubRepo
-      ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
-      : null
-  );
+    : mode === "github" && githubRepo && !pathTouched
+      ? `~/OpenResearch/${slugify(githubRepo.repo, 48)}`
+      : mode === "paper" && paper && !pathTouched
+        ? automaticPaperProjectPath
+        : path;
+  // A remote we can already push to, for labeling the GitHub sync option. A
+  // fork targets a brand-new repo under the account, so it never reuses one.
+  const existingGithubRepo =
+    mode === "github" ? null : githubRepo;
 
   useEffect(() => {
     void githubAccount()
@@ -315,6 +326,9 @@ export function NewProjectForm({
         requireNewFolder: mode === "blank",
         initializeGit: true,
         githubSyncEnabled,
+        ...(mode === "github" && githubRepo
+          ? { forkUrl: `https://github.com/${githubRepo.owner}/${githubRepo.repo}` }
+          : {}),
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
           : {}),
@@ -338,6 +352,8 @@ export function NewProjectForm({
     Boolean(projectPath.trim()) && pathStatus?.exists === true && pathStatus.directory === false;
   const nonemptyPaperCloneFolder =
     mode === "paper" && Boolean(paper?.repoUrl) && pathStatus?.empty === false;
+  const nonemptyGithubCloneFolder =
+    mode === "github" && githubRepo && pathStatus?.empty === false;
   // A blank paper project is seeded and committed at the folder it initializes,
   // so it needs a folder of its own rather than one inside an existing repo.
   const unusableBlankPaperFolder =
@@ -354,6 +370,8 @@ export function NewProjectForm({
     invalidProjectDestination ||
     nonemptyPaperCloneFolder ||
     unusableBlankPaperFolder;
+  const githubDestinationHasError =
+    (pathTouched && !projectPath.trim()) || invalidProjectDestination || nonemptyGithubCloneFolder;
   const blankDestinationHasError =
     (pathTouched && !projectPath.trim()) || invalidProjectDestination || existingBlankFolder;
   const blankDestinationError = pathTouched && !projectPath.trim()
@@ -362,6 +380,13 @@ export function NewProjectForm({
     ? m.new_project_destination_is_file()
     : existingBlankFolder
       ? m.new_project_folder_exists()
+      : null;
+  const githubDestinationError = pathTouched && !projectPath.trim()
+    ? m.new_project_location_required()
+    : invalidProjectDestination
+    ? m.new_project_destination_is_file()
+    : nonemptyGithubCloneFolder
+      ? m.new_project_paper_needs_empty_folder()
       : null;
   const paperDestinationError = pathTouched && !projectPath.trim()
     ? m.new_project_location_required()
@@ -385,8 +410,13 @@ export function NewProjectForm({
     !invalidProjectDestination &&
     !nonemptyPaperCloneFolder &&
     !unusableBlankPaperFolder &&
+    !nonemptyGithubCloneFolder &&
     !unusableRepository &&
     (mode !== "paper" || Boolean(paper)) &&
+    (mode !== "github" ||
+      (Boolean(githubRepo) &&
+        typeof githubLogin === "string" &&
+        !githubRepoPreviewPending)) &&
     (!githubSyncEnabled ||
       (typeof githubLogin === "string" &&
         !githubRepoPreviewPending &&
@@ -433,7 +463,47 @@ export function NewProjectForm({
         >
           {m.new_project_form_from_a_paper()}
         </button>
+        <span aria-hidden className={`h-6 w-px bg-border${mode === "github" ? "" : " invisible"}`} />
+        <button
+          type="button"
+          className={mode === "github" ? "active" : ""}
+          aria-pressed={mode === "github"}
+          onClick={() => chooseMode("github")}
+        >
+          {m.new_project_form_from_git_hub()}
+        </button>
       </div>
+
+      {mode === "github" && (
+        <label className="!font-normal">
+          {m.new_project_form_git_hub_repository()}
+          <input
+            className="text-md font-normal"
+            data-initial-focus
+            value={githubUrl}
+            onChange={(event) => {
+              setError(null);
+              setGithubUrl(event.target.value);
+            }}
+            placeholder={m.new_project_form_git_hub_repository_placeholder()}
+          />
+          {githubRepo ? (
+            <span className="repo-hint ok">
+              {m.new_project_form_will_fork_under({ account: githubLogin ?? "your GitHub account" })}
+            </span>
+          ) : githubUrl.trim() ? (
+            <span className="repo-hint">{m.new_project_form_enter_a_public_git_hub_repo_url()}</span>
+          ) : (
+            <span className="repo-hint">{m.new_project_form_public_repo_is_forked_and_cloned()}</span>
+          )}
+          {!githubRepo && githubUrl.trim() && (
+            <div className="project-path-notice error">{m.new_project_form_enter_a_valid_git_hub_url()}</div>
+          )}
+          {githubRepo && githubLogin === null && (
+            <div className="project-path-notice error">{m.new_project_run_before_create({ command: ltr("gh auth login") })}</div>
+          )}
+        </label>
+      )}
 
       {mode === "paper" && !paper && (
         <label className="!font-normal">
@@ -507,10 +577,14 @@ export function NewProjectForm({
               />
             </label>
           )}
-          {mode === "paper" ? (
+          {mode === "paper" || mode === "github" ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">
-                {paper?.repoUrl ? m.new_project_clone_destination() : m.new_project_form_project_location()}
+                {mode === "github"
+                  ? m.new_project_fork_destination()
+                  : paper?.repoUrl
+                    ? m.new_project_clone_destination()
+                    : m.new_project_form_project_location()}
               </span>
               <input
                 className="text-md font-normal"
@@ -520,14 +594,27 @@ export function NewProjectForm({
                   setPathStatus(null);
                   setPath(event.target.value);
                 }}
-                aria-describedby={paperDestinationHasError ? "paper-destination-description" : undefined}
-                placeholder="~/OpenResearch/paper-title"
+                aria-describedby={
+                  mode === "github"
+                    ? githubDestinationHasError
+                      ? "github-destination-description"
+                      : undefined
+                    : paperDestinationHasError
+                      ? "paper-destination-description"
+                      : undefined
+                }
+                placeholder="~/OpenResearch/repo-name"
                 spellCheck={false}
               />
               {checkingPath && (
                 <span className="sr-only" role="status" aria-live="polite">{m.new_project_form_checking_project_location()}</span>
               )}
-              {paperDestinationHasError && (
+              {mode === "github" && githubDestinationHasError && (
+                <span id="github-destination-description" className="folder-picker-hint error !text-accent-red" role="alert">
+                  {githubDestinationError}
+                </span>
+              )}
+              {mode === "paper" && paperDestinationHasError && (
                 <span id="paper-destination-description" className="folder-picker-hint error !text-accent-red" role="alert">
                   {paperDestinationError}
                 </span>
@@ -666,7 +753,9 @@ export function NewProjectForm({
                 : m.new_project_create()
               : mode === "folder"
                 ? m.new_project_use_folder()
-                : m.new_project_create()}
+                : mode === "github"
+                  ? m.new_project_fork()
+                  : m.new_project_create()}
         </button>
       </div>
     </form>

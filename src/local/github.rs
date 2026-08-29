@@ -153,6 +153,29 @@ pub async fn public_repo_size_kb(url: &str) -> Option<u64> {
     body.get("size").and_then(Value::as_u64)
 }
 
+/// Fork a public GitHub repository under the currently authenticated account
+/// without cloning it locally or adding a remote. Returns the fork's
+/// `(owner, repo)`.
+pub async fn fork_public_repo(url: &str) -> Result<(String, String)> {
+    let (owner, repo) = super::git::github_repository(url)
+        .ok_or_else(|| anyhow!("Expected a github.com URL like https://github.com/owner/repo."))?;
+    // `gh repo fork` is idempotent: an existing fork is reused rather than
+    // duplicated, so re-running against the same repo is safe.
+    gh(
+        &["repo", "fork", &format!("{owner}/{repo}")],
+        Duration::from_secs(120),
+    )
+    .await?;
+    let login = viewer_login().await?;
+    Ok((login, repo))
+}
+
+/// Canonical `https://github.com/{owner}/{repo}` URL for an input repo URL.
+pub fn canonical_repo_url(url: &str) -> Option<String> {
+    let (owner, repo) = super::git::github_repository(url)?;
+    Some(format!("https://github.com/{owner}/{repo}"))
+}
+
 pub struct RepoMeta {
     pub can_push: bool,
     pub archived: bool,
@@ -240,6 +263,23 @@ mod tests {
         let meta = parse_repo_meta("{}").expect("metadata");
         assert!(!meta.can_push);
         assert!(!meta.archived);
+    }
+
+    #[test]
+    fn canonical_repo_url_normalizes_github_urls() {
+        assert_eq!(
+            canonical_repo_url("https://github.com/owner/repo.git"),
+            Some("https://github.com/owner/repo".to_string())
+        );
+        assert_eq!(
+            canonical_repo_url("git@github.com:owner/repo.git"),
+            Some("https://github.com/owner/repo".to_string())
+        );
+        assert_eq!(
+            canonical_repo_url("https://github.com/owner/repo/"),
+            Some("https://github.com/owner/repo".to_string())
+        );
+        assert_eq!(canonical_repo_url("not a github url"), None);
     }
 
     #[test]

@@ -863,6 +863,16 @@ pub fn rename_origin_to_upstream(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Set the URL of a remote, adding it if it does not yet exist.
+pub fn set_remote_url(path: &Path, name: &str, url: &str) -> Result<()> {
+    if git(Some(path), &["remote", "get-url", name]).is_ok() {
+        git(Some(path), &["remote", "set-url", name, url])?;
+    } else {
+        git(Some(path), &["remote", "add", name, url])?;
+    }
+    Ok(())
+}
+
 pub fn require_current_branch(path: &Path) -> Result<String> {
     let branch = git(Some(path), &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|_| anyhow!("The repository is on a detached HEAD. Check out a branch first."))?;
