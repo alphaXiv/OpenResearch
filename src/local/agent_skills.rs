@@ -102,6 +102,41 @@ const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
+const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
+const FIGURES_RESOURCES: &[AgentSkillResource] = &[
+    AgentSkillResource {
+        path: "references/curves.md",
+        content: include_str!("../../agent-skills/orx-figures/references/curves.md"),
+    },
+    AgentSkillResource {
+        path: "references/scaling.md",
+        content: include_str!("../../agent-skills/orx-figures/references/scaling.md"),
+    },
+    AgentSkillResource {
+        path: "references/comparison.md",
+        content: include_str!("../../agent-skills/orx-figures/references/comparison.md"),
+    },
+    AgentSkillResource {
+        path: "references/pareto.md",
+        content: include_str!("../../agent-skills/orx-figures/references/pareto.md"),
+    },
+    AgentSkillResource {
+        path: "references/matrix.md",
+        content: include_str!("../../agent-skills/orx-figures/references/matrix.md"),
+    },
+    AgentSkillResource {
+        path: "references/diagram.md",
+        content: include_str!("../../agent-skills/orx-figures/references/diagram.md"),
+    },
+    AgentSkillResource {
+        path: "assets/orx_figstyle.py",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx_figstyle.py"),
+    },
+    AgentSkillResource {
+        path: "assets/orx-tikz-preamble.tex",
+        content: include_str!("../../agent-skills/orx-figures/assets/orx-tikz-preamble.tex"),
+    },
+];
 
 // Descriptions are the *trigger surface*: what the module covers plus explicit,
 // liberal "Use when …" cues (false positives beat false negatives — an agent
@@ -160,6 +195,12 @@ const S_PAPER: AgentSkill = AgentSkill {
     content: PAPER,
     resources: &[],
 };
+const S_FIGURES: AgentSkill = AgentSkill {
+    name: "orx-figures",
+    description: "Publication-quality figures in matplotlib or TikZ: learning curves, scaling laws, benchmark and ablation comparisons, Pareto trade-offs, heatmaps and confusion matrices, method diagrams. Covers the shared style module, sizing, uncertainty, and vector export. Use whenever you plot, chart, or visualize results, add a figure to a paper or report, or one looks unpolished; then read one reference.",
+    content: FIGURES,
+    resources: FIGURES_RESOURCES,
+};
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
     description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
@@ -185,6 +226,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_INSTANCES,
             &S_EVIDENCE,
             &S_REPORTS,
+            &S_FIGURES,
             &S_PAPER,
             &S_LIT,
         ],
@@ -197,6 +239,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_INSTANCES,
             &S_EVIDENCE,
             &S_REPORTS,
+            &S_FIGURES,
             &S_PAPER,
             &S_LIT,
         ],
@@ -561,6 +604,72 @@ mod tests {
         assert!(tinker.contains("TINKER_API_KEY"));
         assert!(!tmp.join(rel).join("orx-compute-k8s").exists());
         let _ = std::fs::remove_dir_all(tmp);
+    }
+
+    #[test]
+    fn figures_skill_ships_its_style_module_and_routes_by_figure_type() {
+        // The references are worth nothing if the style module they all import
+        // is not installed beside them, so pin both halves.
+        let figures = find("figures", SkillSet::Local).expect("figures skill");
+        let paths: HashSet<&str> = figures.resources.iter().map(|r| r.path).collect();
+        for expected in [
+            "references/curves.md",
+            "references/scaling.md",
+            "references/comparison.md",
+            "references/pareto.md",
+            "references/matrix.md",
+            "references/diagram.md",
+            "assets/orx_figstyle.py",
+            "assets/orx-tikz-preamble.tex",
+        ] {
+            assert!(paths.contains(expected), "figures is missing {expected}");
+            assert!(
+                figures.content.contains(expected)
+                    || figures
+                        .resources
+                        .iter()
+                        .any(|r| r.content.contains(expected)),
+                "nothing routes to {expected}"
+            );
+        }
+
+        let style = find_resource("figures/assets/orx_figstyle.py", SkillSet::Local)
+            .expect("style module")
+            .1;
+        // arXiv rejects Type 3 fonts; every figure inherits the fix from here.
+        assert!(style.content.contains("\"pdf.fonttype\": 42"));
+        // Every rule the audit enforces is one an agent would otherwise skip.
+        for check in [
+            "problems.append(f\"overlapping text:",
+            "text runs off the canvas and will be clipped",
+            "text below the 5pt floor",
+            "duplicates the caption \u{2014} delete it",
+        ] {
+            assert!(
+                style.content.contains(check),
+                "audit lost its {check} check"
+            );
+        }
+    }
+
+    #[test]
+    fn figures_skill_pairs_each_destination_with_its_citation_tag() {
+        // A worktree figure cited with an `artifacts/` prefix resolves in
+        // neither root and reaches the user as a dead chip.
+        let figures = find("figures", SkillSet::Local).expect("figures skill");
+        assert!(figures
+            .content
+            .contains(r#"<file path="figs/loss_curve.pdf" />"#));
+        assert!(figures
+            .content
+            .contains(r#"<file path="artifacts/loss_curve.pdf" />"#));
+        assert!(figures
+            .content
+            .contains("The tag must match the destination"));
+        assert!(
+            figures.content.contains("/tmp"),
+            "must rule out scratch dirs"
+        );
     }
 
     #[test]

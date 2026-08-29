@@ -755,6 +755,14 @@ mod tests {
     }
 
     #[test]
+    fn playbook_directs_figure_work_to_the_figures_skill() {
+        // Without this the agent plots with raw matplotlib and never loads the
+        // module, which is what shipped the first unusable figures.
+        let md = sample_playbook();
+        assert!(md.contains("`orx-figures` before writing plotting code"));
+    }
+
+    #[test]
     fn reports_skill_owns_artifact_output_policy() {
         let md = sample_playbook();
         let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();

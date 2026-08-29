@@ -12,7 +12,10 @@ output without relying on its directory, for example:
 
 - `<artifacts-dir>/scaling-analysis.md`
 - `<artifacts-dir>/benchmark-results.csv`
-- `<artifacts-dir>/ablation-comparison.png`
+- `<artifacts-dir>/ablation-comparison.pdf`
+
+Read the `orx-figures` module before writing any figure; a default
+matplotlib plot does not meet the bar the reports are held to.
 
 Write at the artifacts root unless a folder is useful. Markdown may reference
 nearby images by relative path; no name such as `project/`, an experiment slug,
