@@ -610,7 +610,6 @@ impl AgentHost {
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
 

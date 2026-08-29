@@ -210,8 +210,10 @@ def _audit(fig) -> list[str]:
             continue
         if ax.get_title():
             problems.append(f"axes title {ax.get_title()!r} duplicates the caption — delete it")
-        if getattr(ax, "_colorbar", None) is not None:
-            continue  # a colorbar carries its own label, checked by the caller
+        # A colorbar carries its own label. Two signals because the first is a
+        # private attribute: a rename would otherwise fail every heatmap.
+        if getattr(ax, "_colorbar", None) is not None or ax.get_label() == "<colorbar>":
+            continue
         for axis, name, shared in (
             (ax.xaxis, "x", ax.get_shared_x_axes()),
             (ax.yaxis, "y", ax.get_shared_y_axes()),
@@ -280,9 +282,8 @@ def _text_collisions(fig) -> list[str]:
     for ax in fig.axes:
         if ax.axison:
             continue
-        # Its axis artists still exist and still carry positions, but nothing
-        # draws them. The axes' own text is a different matter — on an axis-off
-        # axes that text is the figure.
+        # Its axis artists still carry positions but are never drawn; the
+        # axes' own text is the figure and must stay in the comparison.
         for part in (ax.xaxis, ax.yaxis):
             hidden.update(id(t) for t in part.findobj(mpl.text.Text))
     for text in fig.findobj(mpl.text.Text):

@@ -56,6 +56,9 @@ reproducible after this session ends:
 mkdir -p figs && orx skill figures/assets/orx_figstyle.py > figs/orx_figstyle.py
 ```
 
+Vendor it next to whichever destination the script lives in — a report's script
+under the artifacts directory needs its own copy there, or the import fails.
+
 (That works from any directory. Check the file is non-empty before importing
 it — the redirect creates the target before the lookup runs.)
 

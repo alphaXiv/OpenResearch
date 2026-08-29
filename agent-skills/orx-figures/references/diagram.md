@@ -129,10 +129,13 @@ as every other figure here:
 \end{figure}
 ```
 
-To put the picture inline instead, move the `\definecolor` and `\tikzset`
-blocks into the paper's preamble and `\input` the `tikzpicture` body. The sans
-face rides in the `orx`, `edgelbl`, and `stagelbl` styles, so it travels with
-them and touches nothing outside the picture.
+To put the picture inline instead, move `\usepackage{tikz}`, the
+`\usetikzlibrary{...}` line, and the `\definecolor` and `\tikzset` blocks into
+the paper's preamble, then `\input` the `tikzpicture` body. Miss the libraries
+and the paper stops compiling: `trapezium`, `Stealth`, `fit=`, and
+`on background layer` each come from one of them. Do **not** carry
+`\familydefault` across — the sans face rides in the `orx`, `edgelbl`, and
+`stagelbl` styles, so it travels with the picture and touches nothing else.
 
 ## Checklist
 
