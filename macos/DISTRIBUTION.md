@@ -163,8 +163,10 @@ both must be safe to have at once:
 - **Lifecycle lock** — app mode takes the same read lock `dispatch` takes for
   `orx up`, so `orx delete` refuses to wipe the store under a running app.
 - **`orx` on the agent's PATH** — the bundle ships `Contents/MacOS/orx`, a
-  symlink to the executable, and `chat::prepare_env` prepends that directory.
-  Agents shelling out to `orx` therefore get *this* build rather than whatever
+  symlink to the executable, and `chat::prepare_env` prepends that directory,
+  which `chat::PATH_GUARD` re-fronts from the session's shell hooks once the
+  user's own startup files (and `path_helper`) have had their say. Agents
+  shelling out to `orx` therefore get *this* build rather than whatever
   CLI version happens to be installed, and a DMG-only user needs no CLI at all.
   Invoked under that name the binary stays a plain CLI — see
   `launched_as_app_bundle`.
