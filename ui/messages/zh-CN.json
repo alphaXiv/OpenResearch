@@ -490,6 +490,7 @@
   "tree_view_other_tasks": "其他任务",
   "tree_view_runs": "运行",
   "tree_view_switch_to_entire_project_to_see_all_experiments": "切换到“整个项目”以查看所有实验",
+  "offline_banner_disconnected": "无法连接 OpenResearch。请重新打开以恢复实时更新。",
   "update_banner_dismiss": "关闭",
   "worktree_tab_listing_truncated": "列表已截断。",
   "worktree_tab_loading": "正在加载…",

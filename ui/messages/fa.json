@@ -490,6 +490,7 @@
   "tree_view_other_tasks": "وظایف دیگر",
   "tree_view_runs": "اجراها",
   "tree_view_switch_to_entire_project_to_see_all_experiments": "برای دیدن همهٔ آزمایش‌ها به «کل پروژه» بروید",
+  "offline_banner_disconnected": "دسترسی به OpenResearch ممکن نیست. برای از سرگیری به‌روزرسانی‌های زنده دوباره آن را باز کنید.",
   "update_banner_dismiss": "بستن",
   "worktree_tab_listing_truncated": "فهرست کوتاه شده است.",
   "worktree_tab_loading": "در حال بارگیری…",

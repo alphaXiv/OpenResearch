@@ -490,6 +490,7 @@
   "tree_view_other_tasks": "other tasks",
   "tree_view_runs": "Runs",
   "tree_view_switch_to_entire_project_to_see_all_experiments": "Switch to Entire project to see all experiments",
+  "offline_banner_disconnected": "Can’t reach OpenResearch. Reopen it to resume live updates.",
   "update_banner_dismiss": "Dismiss",
   "worktree_tab_listing_truncated": "Listing truncated.",
   "worktree_tab_loading": "Loading…",
