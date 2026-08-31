@@ -97,7 +97,8 @@ import { useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { getLocale, isLocale, setLocale, type Locale } from "../paraglide/runtime.js";
+import { setLocale, useLocale } from "../locale";
+import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
@@ -2071,6 +2072,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
 ];
 
 function AppearanceTab() {
+  const locale = useLocale();
   const [preference, setPreference] = useThemePreference();
 
   // Arrow keys move selection relative to the focused radio, with focus
@@ -2128,7 +2130,7 @@ function AppearanceTab() {
           <div className="w-52 flex-none">
             <OptionPicker
               choices={LOCALE_CHOICES}
-              value={getLocale()}
+              value={locale}
               variant="field"
               dropDown
               onSelect={(next) => {
@@ -3156,7 +3158,7 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
 
 type SettingsNavItem = {
   id: Tab;
-  label: string;
+  label: () => string;
   icon: React.ReactNode;
   activeTabs: Tab[];
 };
@@ -3167,14 +3169,14 @@ const SETTINGS_SECTIONS: Tab[] = ["projects", "harnesses", "storage"];
 export const SETTINGS_NAV: SettingsNavItem[] = [
   {
     id: "compute",
-    label: m.settings_page_compute(),
+    label: m.settings_page_compute,
     icon: <Cpu size={15} />,
     activeTabs: ["compute", "instances"],
   },
-  { id: "environment", label: m.settings_page_environment(), icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
+  { id: "environment", label: m.settings_page_environment, icon: <SquareTerminal size={15} />, activeTabs: ["environment"] },
   {
     id: "settings",
-    label: m.settings_page_settings(),
+    label: m.settings_page_settings,
     icon: <Settings size={15} />,
     activeTabs: ["settings", ...SETTINGS_SECTIONS],
   },
