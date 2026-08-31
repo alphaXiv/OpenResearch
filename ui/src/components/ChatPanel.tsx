@@ -1,5 +1,6 @@
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
+import { useLocale } from "../locale";
 import {
   ArrowUpRight,
   Blocks,
@@ -3070,6 +3071,7 @@ const Message = memo(function Message({
   onFork: (messageId: string, text: string) => void;
   onSelectFork: (leafId: string) => void;
 }) {
+  useLocale();
   // Editing re-asks as a new fork rather than rewriting history, so the original
   // stays reachable through the pager.
   const [editDraft, setEditDraft] = useState<string | null>(null);
@@ -3711,6 +3713,7 @@ const Transcript = memo(function Transcript({
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
 }) {
+  useLocale();
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
   const visibleMessages = useMemo(
     () => messages.filter((message) => messageHasVisibleContent(message, activePermissionId)),
@@ -5632,7 +5635,7 @@ export function ChatPanel({
             onClick={() => onSelectMainView(item.id)}
           >
             {item.icon}
-            {item.label}
+            {item.label()}
           </button>
         ))}
       </nav>

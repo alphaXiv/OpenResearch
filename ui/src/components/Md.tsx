@@ -1,5 +1,6 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
+import { useLocale } from "../locale";
 // Chat markdown with evidence mentions, mirroring openresearch.sh's
 // MarkdownContent: `<file path="..." lines="20-40"/>` tags (and plain relative
 // links) render as chips that open the file as a right-pane tab, and
@@ -322,6 +323,7 @@ export const Md = memo(function Md({
   resolveImageSrc?: (src: string) => string | null;
   predict?: boolean;
 }) {
+  useLocale();
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
     "file-mention": (props) => (
       <FileChip path={props.path} lines={props.lines} exp={props.exp} onOpenFile={onOpenFile} />

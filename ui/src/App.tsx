@@ -1,5 +1,6 @@
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
+import { useLocale } from "./locale";
 import {
   ChartSpline,
   Check,
@@ -445,6 +446,7 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
 }
 
 export default function App() {
+  const locale = useLocale();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [uiState, setUiState] = useState<UiState | null>(null);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
@@ -1055,7 +1057,7 @@ export default function App() {
 
   const nextExperimentNames = useMemo(
     () => new Map(experiments.map((experiment) => [experiment.id, experiment.title?.trim() || experiment.slug || m.tree_experiment()])),
-    [experiments],
+    [experiments, locale],
   );
   const experimentNames = useStableStringMap(nextExperimentNames);
   const nextRunExperimentNames = useMemo(() => {
@@ -1064,7 +1066,7 @@ export default function App() {
       names.set(run.id, experimentNames.get(run.experimentId) ?? m.tree_experiment());
     }
     return names;
-  }, [experimentNames, runs]);
+  }, [experimentNames, runs, locale]);
   const runExperimentNames = useStableStringMap(nextRunExperimentNames);
 
   const runExperimentName = useCallback((runId: string) => {

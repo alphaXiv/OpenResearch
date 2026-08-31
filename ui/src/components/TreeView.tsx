@@ -1,5 +1,6 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
+import { useLocale } from "../locale";
 import {
   Background,
   BackgroundVariant,
@@ -181,6 +182,7 @@ function runSquareClass(status: string): string {
 }
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
+  useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
   const live = status === "running" || status === "starting" || status === "cancelling";
@@ -299,6 +301,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
 });
 
 const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>) {
+  useLocale();
   const { count, onShowProjectScope } = data;
   // A div, not a <button>: ReactFlow's <Handle> renders divs, which are
   // invalid inside button elements. tabIndex opts the pill back into the tab

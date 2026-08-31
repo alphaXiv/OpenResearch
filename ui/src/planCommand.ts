@@ -3,7 +3,9 @@ import { m } from "./paraglide/messages.js";
 
 export const PLAN_COMMAND: SkillInfo = {
   name: "plan",
-  description: m.plan_command_description(),
+  get description() {
+    return m.plan_command_description();
+  },
   source: "command",
 };
 
