@@ -124,16 +124,6 @@ import {
   type SlashCommandContext,
 } from "../planCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
-import {
-  COMPOSER_CONTROL_CLASS_NAME,
-  COMPOSER_ICON_CONTROL_CLASS_NAME,
-  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
-  ICON_BUTTON_BASE_CLASS_NAME,
-  ICON_BUTTON_CLASS_NAME,
-  MODEL_ITEM_CLASS_NAME,
-  PAPER_TITLE_CLASS_NAME,
-  SPINNER_CLASS_NAME,
-} from "../styleClasses";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import {
   escapeMarkdownText,
@@ -146,10 +136,12 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
+import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
+import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = [
   "tool-line flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
-  "text-lg",
+  "text-base",
 ].join(" ");
 const TOOL_TARGET_LIMIT = 256;
 const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
@@ -561,7 +553,7 @@ function AnnotationEntries({
   return annotations.map((annotation, index) => (
     <div
       key={annotation.id}
-      className={`annotation-item grid gap-2 py-2 px-1 [&+&]:border-t [&+&]:border-border-variant ${onRemove ? "grid-cols-[24px_minmax(0,_1fr)_24px]" : "grid-cols-[24px_minmax(0,_1fr)]"}`}
+      className={`annotation-item grid gap-2 py-2 px-1 [&+&]:border-t [&+&]:border-border-variant ${onRemove ? "grid-cols-[24px_minmax(0,_1fr)_28px]" : "grid-cols-[24px_minmax(0,_1fr)]"}`}
     >
       <span className="text-sm text-muted text-end">{index + 1}.</span>
       <div className="min-w-0">
@@ -569,16 +561,16 @@ function AnnotationEntries({
         <AnnotationPreview annotation={annotation} />
       </div>
       {onRemove && (
-        <button
+        <IconButton
           type="button"
+          size="small"
           data-annotation-remove
-          className="inline-flex items-center justify-center w-6 h-6 rounded-sm text-muted [&:hover]:bg-surface [&:hover]:text-text"
           title={m.chat_panel_remove_annotation()}
           aria-label={m.a11y_remove_annotation({ number: fmtNumber(index + 1) })}
           onClick={() => onRemove(annotation.id)}
         >
           <X size={13} />
-        </button>
+        </IconButton>
       )}
     </div>
   ));
@@ -666,7 +658,7 @@ function AnnotationsPopover({
           id={dialogId}
           ref={dialogRef}
           tabIndex={-1}
-          className={`annotation-menu absolute bottom-[calc(100%_+_8px)] z-50 w-[min(440px,_calc(100vw_-_48px))] max-h-80 overflow-y-auto overscroll-contain bg-background border border-border rounded-lg shadow-[0_4px_16px_rgba(0,_0,_0,_0.10)] p-2 text-start ${sent ? "end-0 after:absolute after:top-full after:start-0 after:end-0 after:h-2 after:content-['']" : "start-3"}`}
+          className={`annotation-menu absolute bottom-[calc(100%_+_8px)] z-50 w-[min(440px,_calc(100vw_-_48px))] max-h-80 overflow-y-auto overscroll-contain bg-background border border-border rounded-lg shadow-popover p-2 text-start ${sent ? "end-0 after:absolute after:top-full after:start-0 after:end-0 after:h-2 after:content-['']" : "start-3"}`}
           role="dialog"
           aria-label={m.chat_panel_selected_chat_text()}
         >
@@ -682,7 +674,7 @@ function ComposerAnnotations(props: Omit<React.ComponentProps<typeof Annotations
 }
 
 const PROMPT_COLLAPSED_CLASS_NAME = [
-  "prompt-collapsed text-muted text-lg font-[375] my-3.5 mx-0 [&_summary]:flex",
+  "prompt-collapsed text-muted text-base font-[375] my-3.5 mx-0 [&_summary]:flex",
   "[&_summary]:items-center [&_summary]:gap-2 [&_summary]:cursor-pointer",
   "[&_summary]:list-none [&_summary]:select-none [&_summary::-webkit-details-marker]:hidden",
   "[&_summary::after]:content-['›'] [&_summary::after]:text-muted",
@@ -691,7 +683,7 @@ const PROMPT_COLLAPSED_CLASS_NAME = [
 
 const PROMPT_COLLAPSED_BODY_CLASS_NAME = [
   "prompt-collapsed-body mt-1.5 ps-3 border-s-2 border-s-border",
-  "text-md text-subtext",
+  "text-sm text-subtext",
 ].join(" ");
 
 const PLAN_RESOLVED_CLASS_NAME = [
@@ -705,30 +697,11 @@ const PLAN_RESOLVED_CLASS_NAME = [
 ].join(" ");
 
 const PROMPT_HEAD_CLASS_NAME = [
-  "prompt-head text-xs font-semibold text-text",
+  "prompt-head text-sm font-medium text-text",
   "[&_code]:font-mono [&_code]:text-sm [&_code]:text-text",
 ].join(" ");
 
-const PROMPT_ACTIONS_CLASS_NAME = [
-  "prompt-actions flex flex-wrap gap-2 [&_.btn-primary]:inline-flex",
-  "[&_.btn-primary]:items-center [&_.btn-primary]:gap-1.5 [&_.btn-primary]:py-1.5 [&_.btn-primary]:px-[13px]",
-  "[&_.btn-primary]:font-[inherit] [&_.btn-primary]:text-sm",
-  "[&_.btn-primary]:font-semibold [&_.btn-primary]:border [&_.btn-primary]:border-transparent",
-  "[&_.btn-primary]:rounded-sm [&_.btn-primary]:cursor-pointer",
-  "[&_.btn-primary]:transition-[background,border-color] [&_.btn-primary]:duration-80 [&_.btn-primary]:ease-standard [&_.btn-ghost]:inline-flex",
-  "[&_.btn-ghost]:items-center [&_.btn-ghost]:gap-1.5 [&_.btn-ghost]:py-1.5 [&_.btn-ghost]:px-[13px]",
-  "[&_.btn-ghost]:font-[inherit] [&_.btn-ghost]:text-sm",
-  "[&_.btn-ghost]:font-semibold [&_.btn-ghost]:border [&_.btn-ghost]:border-transparent",
-  "[&_.btn-ghost]:rounded-sm [&_.btn-ghost]:cursor-pointer",
-  "[&_.btn-ghost]:transition-[background,border-color] [&_.btn-ghost]:duration-80 [&_.btn-ghost]:ease-standard",
-  "[&_.btn-primary]:bg-primary [&_.btn-primary]:text-background",
-  "[&_.btn-primary:hover:not(:disabled)]:opacity-90 [&_.btn-ghost]:bg-transparent",
-  "[&_.btn-ghost]:border-border [&_.btn-ghost]:text-subtext",
-  "[&_.btn-ghost:hover:not(:disabled)]:border-border-strong",
-  "[&_.btn-ghost:hover:not(:disabled)]:text-text",
-  "[&_.btn-ghost:hover:not(:disabled)]:bg-surface [&_button:disabled]:opacity-50",
-  "[&_button:disabled]:cursor-default",
-].join(" ");
+const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 // --- chat state --------------------------------------------------------------
 
@@ -2148,7 +2121,7 @@ function ToolActivityLabel({
               items={hiddenSessions}
               onSelect={onOpenSpawnedSession}
               targetType={m.chat_agent_sessions()}
-            />
+           />
           </>
         )}
       </>
@@ -2420,7 +2393,7 @@ function TurnStatusRow({
     const label = retryStatusLabel(input ?? {}, now);
     return (
       <div className="turn-retry-row flex items-center gap-2 py-1 px-1 text-sm text-subtext">
-        <span className={SPINNER_CLASS_NAME} />
+        <Spinner />
         <span>{label}</span>
       </div>
     );
@@ -2435,14 +2408,14 @@ function TurnStatusRow({
       <span className="min-w-0 truncate text-sm text-accent-red" title={errorMessage}>
         {errorMessage}
       </span>
-      <button
+      <Button
         type="button"
-        className="shrink-0 h-7 px-2.5 rounded-sm border border-border bg-background text-xs font-medium text-text disabled:opacity-50 [&:hover:not(:disabled)]:bg-surface"
+        size="small"
         disabled={busy || recovering}
         onClick={() => onRecover?.(turnId, action)}
       >
         {recovering ? m.chat_starting() : label}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2483,7 +2456,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted self-start mt-[5px]" />
       )}
-      <span className={`tool-line flex-1 min-w-0 whitespace-normal break-words text-lg ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`tool-line flex-1 min-w-0 whitespace-normal break-words text-base ${failed ? "text-accent-red" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2492,7 +2465,7 @@ function ToolRow({
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
-        />
+       />
         {repeatCount > 1 && (
           <span className="tool-repeat-count ms-1 text-muted font-normal" title={m.a11y_identical_calls({ count: fmtNumber(repeatCount) })}>
             ×{repeatCount}
@@ -2576,7 +2549,7 @@ function ToolGroup({
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
-          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-lg text-subtext">
+          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base text-subtext">
             <ToolActivityIcon activity={pendingActivity} className={`${shimmering ? "tool-running-shimmer-icon" : "text-muted"} self-start mt-[5px]`} />
             <span
               className={`${shimmering ? "tool-running-shimmer" : ""} tool-active-label min-w-0 whitespace-normal break-words`}
@@ -2590,7 +2563,7 @@ function ToolGroup({
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
-              />
+             />
             </span>
           </div>
         </div>
@@ -2606,7 +2579,7 @@ function ToolGroup({
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
-        />
+       />
       </div>
     );
   }
@@ -2614,7 +2587,7 @@ function ToolGroup({
   const expanded = open;
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-lg text-subtext text-start">
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base text-subtext text-start">
         <ToolActivityIcon activity={iconActivity} className={`${shimmering ? "tool-running-shimmer-icon" : "text-muted"} mt-[5px]`} />
         {pendingActivity ? (
           <span
@@ -2629,7 +2602,7 @@ function ToolGroup({
               runExperimentName={runExperimentName}
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
-            />
+           />
           </span>
         ) : (
           <button
@@ -2669,7 +2642,7 @@ function ToolGroup({
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
-              />
+             />
             ))}
           </div>
         </div>
@@ -2718,11 +2691,11 @@ function PromptCard({
       return (
         <details className={PLAN_RESOLVED_CLASS_NAME}>
           <summary>
-            <span className="plan-resolved-label text-lg font-[375] wrap-anywhere">
+            <span className="plan-resolved-label text-base font-[375] wrap-anywhere">
               {p.synthesized ? m.chat_plan() : m.chat_proposed_plan()}
             </span>
             <OutcomeIcon size={17} strokeWidth={1.8} className={`shrink-0 ${outcome.iconClass}`} />
-            <span className="plan-resolved-label prompt-outcome text-lg font-[375] wrap-anywhere">{outcome.label}</span>
+            <span className="plan-resolved-label prompt-outcome text-base font-[375] wrap-anywhere">{outcome.label}</span>
             <ChevronRight size={12} className="plan-chevron shrink-0 text-muted" />
           </summary>
           <div className={`${PROMPT_COLLAPSED_BODY_CLASS_NAME} ms-6`}>
@@ -2752,7 +2725,7 @@ function PromptCard({
             {/* The summary title already shows the question when there's no header. */}
             {p.header && p.question && <div className="prompt-q text-base font-semibold leading-normal text-text">{p.question}</div>}
             {(p.options ?? []).length > 0 && (
-              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-semibold">
+              <ul className="prompt-collapsed-options mt-1.5 mx-0 mb-0 ps-4.5 [&_.sel]:text-text [&_.sel]:font-medium">
                 {(p.options ?? []).map((o) => (
                   <li key={o.label} className={p.answers?.includes(o.label) ? "sel" : ""}>
                     {o.label}
@@ -2777,7 +2750,7 @@ function PromptCard({
     const docked = !!onOpenPlan;
     return (
       <div className={`prompt-card my-2 mx-0 py-3 px-3.5 border border-border border-s-[3px] border-s-border rounded-sm bg-surface flex flex-col gap-[9px] [&.plan]:border-s-accent-blue [&.permission]:border-s-accent-amber [&.question]:border-s-accent-purple [&.readonly]:opacity-60 plan ${done ? "readonly" : ""}`}>
-        <div className="prompt-head text-lg font-semibold text-text">
+        <div className="prompt-head text-base font-semibold text-text">
           {p.synthesized ? m.chat_plan_ready() : m.chat_proposed_plan()}
         </div>
         <div className={`prompt-plan text-base leading-[1.6] text-text max-h-85 overflow-y-auto [&.clamped]:max-h-[9.5em] [&.clamped]:overflow-hidden [&.clamped]:relative [&.clamped::after]:content-[''] [&.clamped::after]:absolute [&.clamped::after]:inset-x-0 [&.clamped::after]:bottom-0 [&.clamped::after]:top-auto [&.clamped::after]:h-8.5 [&.clamped::after]:bg-[linear-gradient(to_bottom,_transparent,_var(--surface))] [&.clamped::after]:pointer-events-none ${docked ? "clamped" : ""}`}>
@@ -2797,15 +2770,15 @@ function PromptCard({
             provides onOpenPlan): same action semantics as the strip. */}
         {!done && !docked && (
           <div className={PROMPT_ACTIONS_CLASS_NAME}>
-            <button className="btn-primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
+            <Button size="small" variant="primary" onClick={() => respond({ approve: true, resumeMode: "auto" })}>
               {m.chat_panel_accept_and_auto_mode()}
-            </button>
-            <button className="btn-ghost" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
+            </Button>
+            <Button size="small" onClick={() => respond({ approve: true, resumeMode: "bypassPermissions" })}>
               {m.chat_panel_accept_and_bypass_all()}
-            </button>
-            <button className="btn-ghost" onClick={() => respond({ approve: false })}>
+            </Button>
+            <Button size="small" onClick={() => respond({ approve: false })}>
               {m.chat_panel_reject()}
-            </button>
+            </Button>
           </div>
         )}
       </div>
@@ -2826,7 +2799,7 @@ function PromptCard({
     const headingId = `permission-heading-${part.id}`;
     return (
       <div
-        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-md border border-border bg-background shadow-[0_1px_2px_rgb(0_0_0_/_4%)] [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
+        className={`prompt-card permission my-3 w-full max-w-2xl overflow-hidden rounded-md border border-border bg-background shadow-hairline [&.readonly]:opacity-60 ${done ? "readonly" : ""}`}
         role="group"
         aria-labelledby={headingId}
       >
@@ -2849,18 +2822,20 @@ function PromptCard({
             // blocked tool — acceptEdits would re-deny Bash); inline harnesses
             // (opencode) reply once/reject keyed off `approve`. Deny denies either way.
             <div className="prompt-actions flex items-center justify-end gap-2 pt-0.5">
-              <button
-                className="rounded-sm border border-transparent bg-transparent px-3 py-1.5 text-sm font-semibold text-subtext transition-[background,color] duration-80 ease-standard hover:bg-surface hover:text-text"
+              <Button
+                size="small"
+                variant="ghost"
                 onClick={() => respond({ approve: false })}
               >
                 {m.chat_panel_deny()}
-              </button>
-              <button
-                className="rounded-sm border border-text bg-text px-3 py-1.5 text-sm font-semibold text-background transition-opacity duration-80 ease-standard hover:opacity-85"
+              </Button>
+              <Button
+                size="small"
+                variant="primary"
                 onClick={() => respond({ approve: true })}
               >
                 {m.chat_panel_allow()}
-              </button>
+              </Button>
             </div>
           )}
         </div>
@@ -2891,7 +2866,7 @@ function PromptCard({
               disabled={done}
               onClick={() => (done ? undefined : p.multiSelect ? toggle(o.label) : respond({ answers: [o.label] }))}
             >
-              <span className="prompt-option-label block text-md font-semibold">{o.label}</span>
+              <span className="prompt-option-label block text-sm font-medium">{o.label}</span>
               {o.description && <span className="prompt-option-desc block text-sm font-normal leading-[1.45] text-subtext">{o.description}</span>}
             </button>
           );
@@ -2899,13 +2874,14 @@ function PromptCard({
       </div>
       {p.multiSelect && !done && (
         <div className={PROMPT_ACTIONS_CLASS_NAME}>
-          <button
-            className="btn-primary"
+          <Button
+            size="small"
+            variant="primary"
             disabled={picked.length === 0}
             onClick={() => respond({ answers: picked })}
           >
             {m.chat_panel_submit()}
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -2972,12 +2948,6 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   return { src, isPdf, name };
 }
 
-const FORK_BUTTON_CLASS_NAME = [
-  ICON_BUTTON_BASE_CLASS_NAME,
-  "w-6 h-6 rounded-sm [&:disabled]:opacity-40 [&:disabled]:cursor-default",
-  "[&:disabled:hover]:bg-transparent [&:disabled:hover]:text-subtext",
-].join(" ");
-
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
@@ -3008,38 +2978,35 @@ function ForkControls({
     >
       {many && (
         <>
-          <button
-            className={FORK_BUTTON_CLASS_NAME}
+          <IconButton size="small"
             title={m.chat_panel_previous_version()}
             aria-label={m.chat_panel_previous_version()}
             disabled={pagerDisabled || !prevId}
             onClick={() => prevId && onSelect(prevId)}
           >
             <ChevronLeft size={14} />
-          </button>
+          </IconButton>
           <span className="fork-count text-xs text-subtext tabular-nums select-none">
             {index + 1}/{count}
           </span>
-          <button
-            className={FORK_BUTTON_CLASS_NAME}
+          <IconButton size="small"
             title={m.chat_panel_next_version()}
             aria-label={m.chat_panel_next_version()}
             disabled={pagerDisabled || !nextId}
             onClick={() => nextId && onSelect(nextId)}
           >
             <ChevronRight size={14} />
-          </button>
+          </IconButton>
         </>
       )}
-      <button
-        className={FORK_BUTTON_CLASS_NAME}
+      <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
         aria-label={m.chat_panel_edit_and_re_send()}
         disabled={editDisabled}
         onClick={onEdit}
       >
         <Pencil size={13} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -3154,18 +3121,19 @@ const Message = memo(function Message({
                   submit();
                 }
               }}
-            />
+           />
             <div className={`${PROMPT_ACTIONS_CLASS_NAME} justify-end`}>
-              <button className="btn-ghost" onClick={() => setEditDraft(null)}>
+              <Button size="small" onClick={() => setEditDraft(null)}>
                 {m.chat_panel_cancel()}
-              </button>
-              <button
-                className="btn-primary"
+              </Button>
+              <Button
+                size="small"
+                variant="primary"
                 onClick={submit}
                 disabled={forkDisabled || !editDraft.trim()}
               >
                 {m.chat_panel_send()}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -3208,7 +3176,7 @@ const Message = memo(function Message({
             pagerDisabled={branchDisabled}
             onEdit={() => setEditDraft(text)}
             editDisabled={forkDisabled}
-          />
+         />
         )}
       </div>
     );
@@ -3218,7 +3186,7 @@ const Message = memo(function Message({
     ? message.parts.filter((part) => part !== turnStatus)
     : message.parts;
   return (
-    <div className="msg-assistant group/turn text-lg leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       {renderParts(regularParts, {
         activePermissionId,
         pendingTailToolId,
@@ -3239,7 +3207,7 @@ const Message = memo(function Message({
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
-        />
+       />
       )}
     </div>
   );
@@ -3302,7 +3270,7 @@ function renderParts(
         runExperimentName={runExperimentName}
         onOpenExperiment={onOpenExperiment}
         experimentName={experimentName}
-      />,
+     />,
     );
     toolRun = [];
   };
@@ -3333,7 +3301,7 @@ function renderParts(
           // tail-tool id only ever points at one row and would freeze the rest.
           pendingTail={(predictTextTail && part.state?.status === "running") || part.id === pendingTailToolId}
           onOpenSubagent={onOpenSubagent}
-        />,
+       />,
       );
       continue;
     }
@@ -3352,7 +3320,7 @@ function renderParts(
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           predict={predictTextTail && part.id === visibleTail?.id}
-        />,
+       />,
       );
     else if (part.type === "steer")
       // A message the user sent into this turn while it ran — the same bubble a
@@ -3376,7 +3344,7 @@ function renderParts(
           onRespond={onRespond}
           onOpenFile={onOpenFile}
           onOpenPlan={onOpenPlan}
-        />,
+       />,
       );
   }
   flushTools();
@@ -3461,7 +3429,7 @@ export function SubagentTranscript({
   const hasProseChild = parts.some((p) => p.type === "text" && !!p.text);
   const finalReport = hasProseChild ? "" : spawnFinalReport(spawn);
   return (
-    <div className="msg-assistant text-lg leading-[1.62] text-text min-w-0">
+    <div className="msg-assistant text-base leading-[1.62] text-text min-w-0">
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
         <div className="tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">
@@ -3469,7 +3437,7 @@ export function SubagentTranscript({
         </div>
       )}
       {rendered.length === 0 && !finalReport && !errorMessage ? (
-        <div className="subagent-empty py-[3px] px-1 text-md text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
+        <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{running ? m.chat_working() : m.chat_no_activity()}</div>
       ) : (
         <>
           {rendered}
@@ -3522,14 +3490,14 @@ function SubagentBlock({
   // children — offering a transcript there opens an empty pane.
   if (inert) {
     return (
-      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-lg text-start rounded-sm [&_.tool-line]:text-lg">
+      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm [&_.tool-line]:text-base">
         {line}
       </div>
     );
   }
   return (
     <button
-      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-lg text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-lg"
+      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-base"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3797,7 +3765,7 @@ const Transcript = memo(function Transcript({
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
-          />
+         />
         );
       })}
     </>
@@ -3830,20 +3798,21 @@ function SessionFilterMenu({
   const { open, setOpen, ref } = usePopover();
   return (
     <div className="rail-filter relative inline-flex" ref={ref}>
-      <button
-        className={`${ICON_BUTTON_BASE_CLASS_NAME} rail-filter-btn w-6 h-6 rounded-sm ${value !== "active" ? "active" : ""}`}
+      <IconButton size="small"
+        className="rail-filter-btn"
+        active={value !== "active"}
         title={m.chat_panel_filter_sessions()}
         aria-label={m.chat_panel_filter_sessions()}
         onClick={() => setOpen((v) => !v)}
       >
         <SlidersHorizontal size={13} />
-      </button>
+      </IconButton>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right">
           {SESSION_FILTERS.map((f) => (
-            <button
+            <MenuItem
               key={f.id}
-              className={MODEL_ITEM_CLASS_NAME}
+
               onClick={() => {
                 onChange(f.id);
                 setOpen(false);
@@ -3851,7 +3820,7 @@ function SessionFilterMenu({
             >
               <span>{f.label()}</span>
               {value === f.id && <Check size={13} />}
-            </button>
+            </MenuItem>
           ))}
         </div>
       )}
@@ -3965,7 +3934,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-md text-text cursor-pointer select-none [&:hover]:bg-surface [&.active]:bg-surface [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-2xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
       }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
@@ -4022,14 +3991,14 @@ function SessionRow({
               setEditing(false);
             }
           }}
-        />
+       />
       ) : (
         <span className="session-title">
           <TitleReveal
             key={revealTitle ?? "static"}
             title={title}
             animate={revealTitle !== undefined}
-          />
+         />
         </span>
       )}
       <span className="session-time">{relTime(session.updatedAt)}</span>
@@ -4045,9 +4014,8 @@ function SessionRow({
         <MoreHorizontal size={14} />
       </button>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
-          <button
-            className={MODEL_ITEM_CLASS_NAME}
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down session-menu">
+          <MenuItem
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -4055,9 +4023,8 @@ function SessionRow({
             }}
           >
             <span>{m.chat_panel_rename()}</span>
-          </button>
-          <button
-            className={MODEL_ITEM_CLASS_NAME}
+          </MenuItem>
+          <MenuItem
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -4065,9 +4032,8 @@ function SessionRow({
             }}
           >
             <span>{session.archived ? m.chat_unarchive() : m.chat_archive()}</span>
-          </button>
-          <button
-            className={`${MODEL_ITEM_CLASS_NAME} danger`}
+          </MenuItem>
+          <MenuItem danger
             onClick={(e) => {
               e.stopPropagation();
               setOpen(false);
@@ -4075,7 +4041,7 @@ function SessionRow({
             }}
           >
             <span>{m.chat_panel_delete()}</span>
-          </button>
+          </MenuItem>
         </div>
       )}
     </div>
@@ -5535,7 +5501,7 @@ export function ChatPanel({
     try {
       await deleteChatSession(session.id);
     } catch (err) {
-      window.alert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }));
+      showAlert(m.chat_delete_session_failed({ title: autoDir(title), error: ltr(err instanceof Error ? err.message : String(err)) }), "error");
       return;
     }
     forgetSession(session.id);
@@ -5625,19 +5591,19 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className={`session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 floating-panel border border-border rounded-lg overflow-visible ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`}>
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
       {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${filesActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${filesActive ? "active" : ""}`}
           onClick={onOpenWorktree}
         >
           <FolderOpen size={15} />
           {m.chat_panel_files()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${artifactsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${artifactsActive ? "active" : ""}`}
           data-onboarding="nav-artifacts"
           onClick={onOpenArtifacts}
         >
@@ -5645,14 +5611,14 @@ export function ChatPanel({
           {m.chat_panel_artifacts()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${experimentsActive ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${experimentsActive ? "active" : ""}`}
           onClick={onOpenExperiments}
         >
           <FlaskConical size={15} />
           {m.chat_panel_experiments()}
         </button>
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView === "skills" ? "active" : ""}`}
+          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
           onClick={() => onSelectMainView("skills")}
         >
           <Blocks size={15} />
@@ -5661,7 +5627,7 @@ export function ChatPanel({
         {SETTINGS_NAV.map((item) => (
           <button
             key={item.id}
-            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover]:bg-surface [&.active]:bg-panel [&.active]:font-semibold ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
+            className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView !== "chat" && mainView !== "skills" && item.activeTabs.includes(mainView) ? "active" : ""}`}
             data-onboarding={item.id === "compute" ? "nav-compute" : undefined}
             onClick={() => onSelectMainView(item.id)}
           >
@@ -5671,12 +5637,12 @@ export function ChatPanel({
         ))}
       </nav>
       <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-1.5 ps-4.5">
-        <div className="rail-section-label p-0 text-md font-medium text-subtext">
+        <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel() ?? m.chat_recents()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
           <button
-            className="rail-section-new inline-flex items-center gap-1 py-[3px] px-1.5 rounded-sm text-subtext text-xs font-medium [&:hover]:text-text [&:hover]:bg-surface tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+            className="rail-section-new inline-flex items-center gap-1 py-[3px] px-1.5 rounded-sm text-subtext text-sm font-medium [&:hover]:text-text [&:hover]:bg-surface tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
             data-onboarding="new-session"
             data-tip={newTaskShortcut}
             aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
@@ -5712,10 +5678,10 @@ export function ChatPanel({
             onRename={(title) => rename(s, title)}
             onSetArchived={(archived) => setArchived(s, archived)}
             onDelete={() => void removeSession(s)}
-          />
+         />
         ))}
         {visibleSessions.length === 0 && (
-          <div className="rail-empty py-1.5 px-2.5 text-md text-muted">
+          <div className="rail-empty py-1.5 px-2.5 text-sm text-muted">
             {sessionFilter === "archived"
               ? m.chat_no_archived_sessions()
               : sessions.length > 0
@@ -5733,14 +5699,13 @@ export function ChatPanel({
   // column.
   const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&.rail-hidden]:max-w-none [&.rail-hidden]:py-0 [&.rail-hidden]:px-0.5 [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none${railOpen ? "" : " rail-hidden"}`;
   const railReopen = !railOpen && (
-    <button
-      className={ICON_BUTTON_CLASS_NAME}
+    <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
     >
       <PanelLeft size={15} />
-    </button>
+    </IconButton>
   );
 
   if (mainView !== "chat") {
@@ -5763,8 +5728,7 @@ export function ChatPanel({
           right, fading into the chat below (sessions live in the rail). */}
       <div className={headerClass}>
         {railReopen}
-        <div
-          className={PAPER_TITLE_CLASS_NAME}
+        <PaperTitle variant="header"
           title={activeSession ? activeSession.title?.trim() || m.chat_untitled() : m.chat_new_session()}
         >
           {activeSession ? (
@@ -5772,26 +5736,25 @@ export function ChatPanel({
               key={activeTitleReveal ?? "static"}
               title={activeSession.title?.trim() || m.chat_untitled()}
               animate={activeTitleReveal !== undefined}
-            />
+           />
           ) : (
             m.chat_new_session()
           )}
-        </div>
+        </PaperTitle>
         {onOpenDemoWelcome && (
-          <button
-            className={ICON_BUTTON_CLASS_NAME}
+          <IconButton
             data-tip={m.chat_panel_about_this_demo()}
             aria-label={m.chat_panel_about_this_demo()}
             onClick={onOpenDemoWelcome}
           >
             <HelpCircle size={15} />
-          </button>
+          </IconButton>
         )}
       </div>
 
       {historyLoading ? (
         <div className="chat-loading flex-1 flex items-center justify-center gap-3 text-subtext text-xl p-5 [&_.spinner]:w-5.5 [&_.spinner]:h-5.5 [&_.spinner]:border-[3px]" aria-live="polite" aria-busy="true">
-          <span className={SPINNER_CLASS_NAME} />
+          <Spinner />
           <span>{m.chat_panel_loading_conversation()}</span>
         </div>
       ) : !threadMounted ? (
@@ -5800,7 +5763,7 @@ export function ChatPanel({
             <BrandMark />
           </div>
           <h2>{m.chat_panel_what_should_we_research()}</h2>
-          <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-semibold">
+          <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-medium">
             <FolderOpen size={19} />
             <span>{projectName}</span>
           </div>
@@ -5835,13 +5798,13 @@ export function ChatPanel({
               recoveringTurnId={recoveringTurnId}
               onRecover={recoverFailedTurn}
               skills={commands}
-            />
+           />
             {busy &&
               (awaitingInput ? (
-                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
+                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
               ) : (
-                <div className="working flex items-center gap-2 text-subtext text-md pt-0.5 px-0 pb-2 [&.awaiting]:italic">
-                  <span className={SPINNER_CLASS_NAME} /> {hasPendingTailTool ? m.chat_working() : m.chat_thinking()}
+                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic">
+                  <Spinner /> {hasPendingTailTool ? m.chat_working() : m.chat_thinking()}
                 </div>
               ))}
           </div>
@@ -5849,9 +5812,10 @@ export function ChatPanel({
       )}
 
       {transcriptSelection.action && (
-        <button
+        <Button
           type="button"
-          className="chat-selection-action fixed z-50 inline-flex items-center gap-1.5 py-1.5 px-3 border border-border rounded-md bg-background text-text text-sm font-medium shadow-[0_2px_8px_rgba(0,_0,_0,_0.10)] whitespace-nowrap [&:hover]:bg-surface"
+          size="small"
+          className="chat-selection-action fixed z-50 shadow-control"
           style={{
             left: transcriptSelection.action.x,
             top: transcriptSelection.action.top,
@@ -5862,7 +5826,7 @@ export function ChatPanel({
         >
           <MessageSquareQuote size={14} />
           {m.chat_panel_ask_about_this()}
-        </button>
+        </Button>
       )}
 
       {/* Docked while a plan awaits a decision, so the approval controls never
@@ -5900,7 +5864,7 @@ export function ChatPanel({
               if (activeId) setRevising({ sessionId: activeId, promptId: pendingPlan.promptId });
               respond({ promptId: pendingPlan.promptId, approve: false, note });
             }}
-          />
+         />
         )}
         {queued.length > 0 && (
           <div className="composer-queued flex flex-col gap-1 mb-1.5">
@@ -5917,7 +5881,7 @@ export function ChatPanel({
                   {q.text}
                 </span>
                 {q.dispatchState !== "blocked" && (
-                  <span className="shrink-0 text-xs text-muted">
+                  <span className="shrink-0 text-sm text-muted">
                     {q.dispatchState === "retrying"
                       ? queuedRetryLabel(q.nextRetryAt, queueClock)
                       : m.chat_queued()}
@@ -5929,7 +5893,7 @@ export function ChatPanel({
                       onClick={() => void retryQueued(q.id)}
                       aria-label={m.a11y_retry_queued_message({ text: q.text })}
                       disabled={retryingQueuedId !== null}
-                      className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-xs text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
+                      className="shrink-0 px-1.5 py-0.5 border border-border rounded-sm text-sm text-text bg-background cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:border-text"
                     >
                       {retryingQueuedId === q.id ? m.retrying() : m.app_retry()}
                     </button>
@@ -5937,12 +5901,12 @@ export function ChatPanel({
                       onClick={() => cancelQueued(q.id)}
                       aria-label={m.a11y_remove_queued_message({ text: q.text })}
                       disabled={retryingQueuedId !== null}
-                      className="shrink-0 px-1.5 py-0.5 border-0 text-xs text-muted bg-transparent cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:text-text"
+                      className="shrink-0 px-1.5 py-0.5 border-0 text-sm text-muted bg-transparent cursor-pointer disabled:opacity-50 disabled:cursor-default [&:hover:not(:disabled)]:text-text"
                     >
                       {m.chat_panel_remove()}
                     </button>
                     {index === firstBlockedQueueIndex && index < queued.length - 1 && (
-                      <span className="basis-full ps-5 text-xs text-muted">
+                      <span className="basis-full ps-5 text-sm text-muted">
                         {m.chat_panel_later_queued_messages_will_wait_until_this_is()}
                       </span>
                     )}
@@ -5961,9 +5925,9 @@ export function ChatPanel({
             ))}
           </div>
         )}
-        <div className={`composer-box relative flex flex-col border border-border rounded-lg bg-background ${ELEVATED_SURFACE_SHADOW_CLASS_NAME}`} data-onboarding="composer">
+        <div className="composer-box relative flex flex-col border border-border rounded-lg bg-background shadow-elevated" data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
-            <div className="composer-harness-warning py-2 px-3 text-subtext text-xs leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
+            <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
               <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
               {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : m.chat_recheck_setup()}
             </div>
@@ -5974,7 +5938,7 @@ export function ChatPanel({
               activeIndex={activeSkillIdx}
               onPick={pickSkill}
               onHover={setSkillIdx}
-            />
+           />
           )}
           {annotations.length > 0 && (
             <ComposerAnnotations
@@ -5990,7 +5954,7 @@ export function ChatPanel({
                   window.requestAnimationFrame(() => composerRef.current?.focus());
                 }
               }}
-            />
+           />
           )}
           {attachments.length > 0 && (
             <div className="composer-attachments flex flex-wrap gap-1.5 pt-2 px-3 pb-0">
@@ -6136,7 +6100,7 @@ export function ChatPanel({
                   void send({ queue: e.metaKey || e.ctrlKey });
                 }
               }}
-            />
+           />
             {/* After the textarea: its ref must be attached before the mirror
               * measures it. */}
             <ComposerSkillChips
@@ -6145,13 +6109,13 @@ export function ChatPanel({
               skills={commands}
               projectId={projectId}
               textareaRef={composerRef}
-            />
+           />
           </div>
           <div className="composer-actions flex min-w-0 justify-end items-center gap-2 pt-1.5 px-2 pb-2">
             <div className="option-picker relative inline-flex shrink-0" ref={dataSources.ref}>
-              <button
+              <IconButton
                 type="button"
-                className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-bare`}
+                className="composer-bare"
                 title={m.chat_panel_data_sources()}
                 aria-label={m.chat_panel_data_sources()}
                 aria-haspopup="dialog"
@@ -6159,9 +6123,9 @@ export function ChatPanel({
                 onClick={() => dataSources.setOpen((open) => !open)}
               >
                 <ToggleRight size={16} />
-              </button>
+              </IconButton>
               {dataSources.open && (
-                <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-[0_10px_26px_rgba(0,_0,_0,_0.16)]">
+                <div className="composer-sources-menu absolute bottom-[calc(100%_+_8px)] start-0 z-50 flex min-w-55 flex-col gap-1 rounded-md border border-border bg-background p-2 shadow-dropdown">
                   <span className="px-1 text-sm font-medium text-muted">{m.chat_panel_data_sources()}</span>
                   <LitSourcesList />
                 </div>
@@ -6177,20 +6141,22 @@ export function ChatPanel({
                 addFiles(Array.from(e.target.files ?? []));
                 e.target.value = ""; // let the same file be re-picked
               }}
-            />
-            <button
+           />
+            <IconButton
               type="button"
-              className={`${COMPOSER_ICON_CONTROL_CLASS_NAME} composer-attach`}
+              className="composer-attach"
               title={m.chat_panel_attach_a_pdf_or_image()}
               aria-label={m.chat_panel_attach_a_pdf_or_image()}
               onClick={() => fileInputRef.current?.click()}
             >
               <Paperclip size={16} />
-            </button>
+            </IconButton>
             {planActive && (
-              <button
+              <Button
                 type="button"
-                className={`${COMPOSER_CONTROL_CLASS_NAME} plan-indicator group shrink-0 gap-1.5 bg-surface px-2 text-sm text-muted hover:text-text focus-visible:text-text`}
+                variant="ghost"
+                active
+                className="group"
                 title={m.chat_panel_exit_plan_mode()}
                 aria-label={m.chat_panel_exit_plan_mode()}
                 onClick={() => void exitPlanMode()}
@@ -6200,7 +6166,7 @@ export function ChatPanel({
                   <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
                 </span>
                 <span>{m.chat_panel_plan()}</span>
-              </button>
+              </Button>
             )}
             <div className="min-w-0 flex-1" />
             {/* The model picker reflects the open session (harness locked once it
@@ -6218,7 +6184,7 @@ export function ChatPanel({
                 onSelectReasoning={setReasoningLevel}
                 onHarnesses={setHarnesses}
                 lockHarness={!!openSession}
-              />
+             />
               <ContextMeter usage={openSession?.contextUsage} />
             </div>
             {busy && !pendingQuestion ? (
@@ -6227,12 +6193,13 @@ export function ChatPanel({
               // (their cards are the affordance; send() can't service them).
               // Send stays only when it actually works: idle, or a held
               // QUESTION card that owns typed text.
-              <button className="send-btn inline-flex shrink-0 items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))] stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
+              <IconButton className="send-btn" variant="stop" title={m.chat_panel_stop()} aria-label={m.chat_panel_stop()} onClick={stop}>
                 <X size={16} />
-              </button>
+              </IconButton>
             ) : (
-              <button
-                className="send-btn inline-flex shrink-0 items-center justify-center w-8 h-8 rounded-md bg-primary text-background transition-[background,opacity] duration-100 ease-standard [&:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--primary)_88%,_var(--text))] [&:disabled]:opacity-40 [&:disabled]:cursor-default [&.stop]:bg-surface [&.stop]:text-text [&.stop:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--surface)_88%,_var(--text))]"
+              <IconButton
+                className="send-btn"
+                variant="primary"
                 title={m.chat_panel_send()}
                 aria-label={m.chat_panel_send()}
                 onClick={() => void send()}
@@ -6242,7 +6209,7 @@ export function ChatPanel({
                 }
               >
                 <CornerDownLeft size={16} />
-              </button>
+              </IconButton>
             )}
           </div>
         </div>

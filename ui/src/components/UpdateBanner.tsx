@@ -4,6 +4,7 @@ import { RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getUpdateStatus, type UpdateStatus } from "../api";
 import { onUpdateStatus } from "../events";
+import { IconButton } from "./ui";
 
 export interface UpdateState {
   status: UpdateStatus | null;
@@ -51,21 +52,22 @@ export function UpdateBanner() {
 
   return (
     <div
-      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-xs text-text bg-surface border-b border-b-border"
+      className="update-banner flex items-center gap-2 shrink-0 py-1.5 px-3.5 text-sm text-text bg-surface border-b border-b-border"
       role="status"
     >
       <RefreshCw size={13} className="shrink-0 text-subtext" />
       <span className="min-w-0">
         {m.update_banner_complete({ version: ltr(version) })}
       </span>
-      <button
+      <IconButton
         type="button"
-        className="ms-auto shrink-0 p-1 rounded-sm text-subtext hover:text-text hover:bg-highlight"
+        size="small"
+        className="ms-auto"
         aria-label={m.update_banner_dismiss()}
         onClick={() => setDismissed(version)}
       >
         <X size={13} />
-      </button>
+      </IconButton>
     </div>
   );
 }

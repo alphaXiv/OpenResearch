@@ -13,7 +13,7 @@ import { ExternalLink } from "lucide-react";
 import type { OverleafSync } from "../useOverleafSync";
 import { getLocale } from "../paraglide/runtime.js";
 import { autoDir, ltr } from "../i18n";
-import { BUTTON_CLASS_NAME, GHOST_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import { Button, Spinner } from "./ui";
 
 const list = (paths: string[]) => autoDir(new Intl.ListFormat(getLocale()).format(paths.map(ltr)));
 
@@ -79,7 +79,7 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center flex-wrap gap-2 text-sm text-subtext">
           <span className="flex-1 min-w-0">{status(overleaf)}</span>
-          {overleaf.syncing && <span className={SPINNER_CLASS_NAME} />}
+          {overleaf.syncing && <Spinner />}
           <a
             className="inline-flex items-center gap-1 text-sm text-subtext whitespace-nowrap"
             href={overleaf.link.url}
@@ -88,16 +88,14 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
           >
             {m.overleaf_panel_open_in_overleaf()} <ExternalLink size={11} />
           </a>
-          <button
-            className={BUTTON_CLASS_NAME}
+          <Button
             disabled={overleaf.syncing || overleaf.blocked}
             data-tip={overleaf.blocked ? m.overleaf_save_first() : undefined}
             onClick={() => overleaf.sync()}
           >
             {m.overleaf_panel_sync_now()}
-          </button>
-          <button
-            className={GHOST_BUTTON_CLASS_NAME}
+          </Button>
+          <Button variant="ghost"
             disabled={overleaf.syncing}
             onClick={() =>
               void overleaf.unlink().catch((err: unknown) => {
@@ -106,27 +104,25 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
             }
           >
             {m.overleaf_panel_unlink()}
-          </button>
+          </Button>
         </div>
         {conflicts.map((path) => (
           <div key={path} className="flex items-center flex-wrap gap-2 text-sm text-accent-red">
             <span className="flex-1 min-w-0">
               <code className="font-mono">{path}</code> {m.overleaf_panel_changed_here_and_on_overleaf_both_copies_are()}
             </span>
-            <button
-              className={BUTTON_CLASS_NAME}
+            <Button
               disabled={overleaf.syncing || overleaf.blocked}
               onClick={() => overleaf.sync({ [path]: "keep-local" })}
             >
               {m.overleaf_panel_keep_this_copy()}
-            </button>
-            <button
-              className={BUTTON_CLASS_NAME}
+            </Button>
+            <Button
               disabled={overleaf.syncing || overleaf.blocked}
               onClick={() => overleaf.sync({ [path]: "take-overleaf" })}
             >
               {m.overleaf_panel_use_overleaf_apos_s()}
-            </button>
+            </Button>
           </div>
         ))}
         {overleaf.last?.note && (
@@ -137,9 +133,9 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
         )}
         <div className="flex items-center flex-wrap gap-3">
           <UploadLink href={overleaf.uploadUrl} />
-          <button type="button" className={GHOST_BUTTON_CLASS_NAME} onClick={replaceToken}>
+          <Button variant="ghost" type="button" onClick={replaceToken}>
             {m.overleaf_panel_replace_the_overleaf_token()}
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -154,16 +150,16 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
       </div>
       <div className="flex items-center flex-wrap gap-2">
         <input
-          className="flex-1 min-w-55 font-mono text-sm"
+          className="flex-1 min-w-55 text-sm"
           type={needsToken ? "password" : "text"}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           placeholder={needsToken ? m.overleaf_git_token() : "https://www.overleaf.com/project/…"}
           autoComplete="off"
-        />
-        <button type="submit" className={BUTTON_CLASS_NAME} disabled={busy || !value.trim()}>
+       />
+        <Button type="submit" disabled={busy || !value.trim()}>
           {busy ? (needsToken ? m.common_saving() : m.common_checking()) : needsToken ? m.overleaf_save_token() : m.overleaf_link_and_sync()}
-        </button>
+        </Button>
         <a
           className="text-sm text-subtext whitespace-nowrap"
           href={
@@ -181,20 +177,20 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
       <div className="flex items-center flex-wrap gap-3">
         <UploadLink href={overleaf.uploadUrl} />
         {replacingToken ? (
-          <button
+          <Button variant="ghost"
             type="button"
-            className={GHOST_BUTTON_CLASS_NAME}
+
             onClick={() => setReplacingToken(false)}
           >
             {m.overleaf_panel_cancel()}
-          </button>
+          </Button>
         ) : (
           // A token can be rejected before this paper is ever linked, so the
           // way to replace it has to live in this state too.
           overleaf.hasToken && (
-            <button type="button" className={GHOST_BUTTON_CLASS_NAME} onClick={replaceToken}>
+            <Button variant="ghost" type="button" onClick={replaceToken}>
               {m.overleaf_panel_replace_the_overleaf_token()}
-            </button>
+            </Button>
           )
         )}
       </div>

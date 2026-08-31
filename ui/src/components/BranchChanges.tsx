@@ -3,7 +3,7 @@ import { ltr } from "../i18n";
 import { useEffect, useState } from "react";
 import { getExperimentDiff, type DiffPayload, type Experiment } from "../api";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
-import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
+import { CodeTabBody, CodeTabNote } from "./layout/TabBody";
 
 export function BranchChanges({
   experiment,
@@ -38,11 +38,11 @@ export function BranchChanges({
   }, [experiment.id, refreshKey, onLoadingChange]);
 
   return (
-    <div className={`${CODE_TAB_BODY_CLASS_NAME} branch-changes [&_>_.changes-note]:my-3.5 [&_>_.changes-note]:mx-4 [&_>_.openresearch-diff]:mt-3.5 [&_>_.openresearch-diff]:mx-4 [&_>_.openresearch-diff]:mb-0 [&_>_.truncated-notice]:mt-3.5 [&_>_.truncated-notice]:mx-4 [&_>_.truncated-notice]:mb-0 [&_>_.diff-explorer]:mt-3.5 [&_>_.diff-explorer]:mx-4 [&_>_.diff-explorer]:mb-0`}>
+    <CodeTabBody className="branch-changes [&_>_.changes-note]:mx-4 [&_>_.changes-note]:my-3.5 [&_>_.diff-explorer]:mx-4 [&_>_.diff-explorer]:mb-0 [&_>_.diff-explorer]:mt-3.5 [&_>_.openresearch-diff]:mx-4 [&_>_.openresearch-diff]:mb-0 [&_>_.openresearch-diff]:mt-3.5 [&_>_.truncated-notice]:mx-4 [&_>_.truncated-notice]:mb-0 [&_>_.truncated-notice]:mt-3.5">
       {error ? (
-        <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.branch_changes_failed_to_load_changes()} {ltr(error)}</div>
+        <CodeTabNote>{m.branch_changes_failed_to_load_changes()} {ltr(error)}</CodeTabNote>
       ) : !diff ? (
-        <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.branch_changes_loading_changes()}</div>
+        <CodeTabNote>{m.branch_changes_loading_changes()}</CodeTabNote>
       ) : !diff.diff.trim() ? (
         <div className="changes-note text-sm text-muted">
           {experiment.parentExperimentId
@@ -57,6 +57,6 @@ export function BranchChanges({
           <GitDiffExplorer diff={diff.diff} partial={diff.truncated} />
         </>
       )}
-    </div>
+    </CodeTabBody>
   );
 }

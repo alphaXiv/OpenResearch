@@ -5,7 +5,6 @@ import { Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
 import slurmLogo from "../assets/slurm-logo.svg";
 import thinkingMachinesLogo from "../assets/thinking-machines.png";
-import { MONO_CLASS_NAME } from "../styleClasses";
 import { m } from "../paraglide/messages.js";
 
 /** Human name for a backend kind, used as the logo's alt/label. */
@@ -137,7 +136,7 @@ function TinkerLogo({ size = 16 }: { size?: number }) {
       style={{ transform: size >= 48 ? `translateX(${Math.round(size * 0.18)}px) scale(1.65)` : "scale(1.22)" }}
       alt=""
       aria-hidden="true"
-    />
+   />
   );
 }
 
@@ -191,7 +190,7 @@ export function BackendBadge({ backend }: { backend: Run["backend"] }) {
     <span className="backend-badge inline-flex items-center gap-[7px] [&_svg]:flex-none [&_svg]:block [&_.backend-name]:font-medium [&_.backend-detail]:text-muted [&.muted]:text-muted">
       <BackendLogo kind={kind} />
       <span className="backend-name">{backendName(kind)}</span>
-      {detail && <span className={`backend-detail ${MONO_CLASS_NAME}`}>{detail}</span>}
+      {detail && <span className="backend-detail text-sm">{detail}</span>}
     </span>
   );
 }

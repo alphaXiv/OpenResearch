@@ -1,24 +1,21 @@
-// Mirror of openresearch.sh StatusBadge: sentence-case label + colored dot,
-// live statuses pulse. STATUS_STYLES is the single source of truth for status
-// coloring across the table, graph and drawer.
 
-import { STATUS_BADGE_CLASS_NAME } from "../styleClasses";
 import { m } from "../paraglide/messages.js";
+import { StatusIndicator, type StatusTone } from "./ui";
 
 export interface StatusStyle {
-  className: string;
+  tone: StatusTone;
   live: boolean;
 }
 
 export const STATUS_STYLES: Record<string, StatusStyle> = {
-  done: { className: "st-done", live: false },
-  failed: { className: "st-failed", live: false },
-  running: { className: "st-running", live: true },
-  starting: { className: "st-starting", live: true },
-  cancelling: { className: "st-cancelling", live: true },
-  cancelled: { className: "st-cancelled", live: false },
-  editing: { className: "st-editing", live: true },
-  idle: { className: "st-idle", live: false },
+  done: { tone: "success", live: false },
+  failed: { tone: "danger", live: false },
+  running: { tone: "info", live: true },
+  starting: { tone: "warning", live: true },
+  cancelling: { tone: "caution", live: true },
+  cancelled: { tone: "caution", live: false },
+  editing: { tone: "accent", live: true },
+  idle: { tone: "neutral", live: false },
 };
 
 export function statusStyle(status: string): StatusStyle {
@@ -42,12 +39,11 @@ export function statusLabel(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
-export function StatusBadge({ status, label }: { status: string; label?: string }) {
+export function StatusBadge({ status, label, className }: { status: string; label?: string; className?: string }) {
   const style = statusStyle(status);
   return (
-    <span className={`${STATUS_BADGE_CLASS_NAME} ${style.className}${style.live ? " live" : ""}`}>
-      <span className="dot" />
+    <StatusIndicator tone={style.tone} live={style.live} className={className}>
       {label ?? statusLabel(status)}
-    </span>
+    </StatusIndicator>
   );
 }

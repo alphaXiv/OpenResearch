@@ -13,7 +13,7 @@ import {
 } from "../api";
 import { onProjectActivityEvent } from "../events";
 import { NewProjectForm } from "./NewProjectForm";
-import { BUTTON_CLASS_NAME } from "../styleClasses";
+import { Button } from "./ui";
 
 export function NewProjectDialog({
   onClose,
@@ -80,14 +80,14 @@ export function NewProjectDialog({
 
   return (
     <div
-      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.42)] flex items-start justify-center p-5 [--new-project-modal-top:clamp(4rem,20vh,24rem)] pt-[var(--new-project-modal-top)] overflow-y-auto z-100"
+      className="modal-backdrop fixed inset-0 bg-modal-backdrop flex items-start justify-center p-5 [--new-project-modal-top:clamp(4rem,20vh,24rem)] pt-[var(--new-project-modal-top)] overflow-y-auto z-100"
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={dialogRef}
-        className="modal w-120 max-w-full max-h-[calc(100vh_-_var(--new-project-modal-top)_-_1.25rem)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl [&_h2]:font-medium"
+        className="modal w-120 max-w-full max-h-[calc(100vh_-_var(--new-project-modal-top)_-_1.25rem)] overflow-y-auto bg-background border border-border rounded-xl shadow-modal p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl [&_h2]:font-medium"
         role="dialog"
         aria-modal="true"
         aria-labelledby="new-project-dialog-title"
@@ -164,14 +164,14 @@ function DeleteProjectDialog({
 
   return (
     <div
-      className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.42)] flex items-center justify-center p-5 overflow-y-auto z-100"
+      className="modal-backdrop fixed inset-0 bg-modal-backdrop flex items-center justify-center p-5 overflow-y-auto z-100"
       onClick={(event) => {
         if (!deleting && event.target === event.currentTarget) onClose();
       }}
     >
       <div
         ref={dialogRef}
-        className="modal w-110 max-w-full bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6"
+        className="modal w-110 max-w-full bg-background border border-border rounded-xl shadow-modal p-6"
         role="dialog"
         aria-modal="true"
         aria-labelledby="delete-project-dialog-title"
@@ -179,7 +179,7 @@ function DeleteProjectDialog({
         tabIndex={-1}
       >
         <h2 id="delete-project-dialog-title" className="mt-0 mb-3 text-xl">{m.projects_home_delete_project()}</h2>
-        <div id="delete-project-dialog-description" className="flex flex-col gap-2 text-md leading-normal text-subtext">
+        <div id="delete-project-dialog-description" className="flex flex-col gap-2 text-sm leading-normal text-subtext">
           <p className="m-0">
             {m.projects_delete_from_app({ name: autoDir(project.name) })}
           </p>
@@ -189,10 +189,10 @@ function DeleteProjectDialog({
           {error && <p className="m-0 text-accent-red" role="alert">{error}</p>}
         </div>
         <div className="mt-5 flex justify-end gap-2">
-          <button className={BUTTON_CLASS_NAME} disabled={deleting} onClick={onClose}>{m.projects_home_cancel()}</button>
-          <button className={`${BUTTON_CLASS_NAME} danger`} disabled={deleting} onClick={onConfirm}>
+          <Button disabled={deleting} onClick={onClose}>{m.projects_home_cancel()}</Button>
+          <Button variant="danger" disabled={deleting} onClick={onConfirm}>
             {deleting ? m.projects_home_deleting() : m.projects_home_delete_project_action()}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -274,16 +274,15 @@ export function ProjectsHome({
       <div className="home-inner max-w-290 my-0 mx-auto pt-12 px-6 pb-16 [@media((max-width:_960px))]:pt-6 [@media((max-width:_960px))]:px-4">
         <div className="home-head flex items-center justify-between gap-3 mb-4.5 [&_h2]:m-0 [&_h2]:text-4xl [&_h2]:tracking-[-0.02em] [@media((max-width:_520px))]:items-start [@media((max-width:_520px))]:flex-col">
           <h2>{m.projects_home_projects()}</h2>
-          <button
-            className={BUTTON_CLASS_NAME}
+          <Button
             onClick={() => setModalOpen(true)}
           >
             <Plus size={15} /> {m.projects_home_new_project()}
-          </button>
+          </Button>
         </div>
         <div className="home-list overflow-hidden rounded-lg border border-border bg-background">
           <div>
-            <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 ps-4 pe-2 text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
+            <div className="grid grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border bg-background py-2.5 ps-4 pe-2 text-xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:hidden">
               <span>{m.projects_home_project()}</span>
               <span>{m.projects_home_agents()}</span>
               <span>{m.projects_home_experiments()}</span>
@@ -340,7 +339,7 @@ export function ProjectsHome({
                       className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
                       aria-label={m.a11y_open_item({ name: autoDir(p.name) })}
                       onClick={() => onOpen(p.id)}
-                    />
+                   />
                     {/* Cells stay click-transparent so the stretched button owns row navigation. */}
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
                       <span dir="auto" className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
@@ -363,8 +362,8 @@ export function ProjectsHome({
                       </span>
                     </div>
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_agents()}</span>
-                      <span className="inline-flex items-center gap-2 text-md text-text">
+                      <span className="hidden text-xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_agents()}</span>
+                      <span className="inline-flex items-center gap-2 text-sm text-text">
                         {summary && summary.activeAgents > 0 && (
                           <LiveDot />
                         )}
@@ -373,8 +372,8 @@ export function ProjectsHome({
                       <span className="text-xs text-muted">{agentTotal}</span>
                     </div>
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_experiments()}</span>
-                      <span className="inline-flex items-center gap-2 text-md text-text">
+                      <span className="hidden text-xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:block">{m.projects_home_experiments()}</span>
+                      <span className="inline-flex items-center gap-2 text-sm text-text">
                         {summary && summary.runningExperiments > 0 && (
                           <LiveDot />
                         )}
@@ -383,7 +382,7 @@ export function ProjectsHome({
                       {experimentTotal && <span className="text-xs text-muted">{experimentTotal}</span>}
                     </div>
                     <div className="relative z-1 min-w-0 pointer-events-none [@media((max-width:_600px))]:col-span-2">
-                      <span className="hidden text-2xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:mb-1 [@media((max-width:_960px))]:block">{m.projects_home_repository()}</span>
+                      <span className="hidden text-xs font-medium tracking-[0.06em] text-text uppercase [@media((max-width:_960px))]:mb-1 [@media((max-width:_960px))]:block">{m.projects_home_repository()}</span>
                       {githubUrl ? (
                         <a
                           className="project-row-secondary inline-flex max-w-full items-center gap-2 text-sm text-text no-underline pointer-events-auto hover:underline underline-offset-2"
@@ -414,7 +413,7 @@ export function ProjectsHome({
             setModalOpen(false);
             onCreated(project, githubPublicationError);
           }}
-        />
+       />
       )}
       {projectPendingDelete && (
         <DeleteProjectDialog
@@ -426,7 +425,7 @@ export function ProjectsHome({
             setProjectPendingDelete(null);
           }}
           onConfirm={() => void onDelete(projectPendingDelete)}
-        />
+       />
       )}
     </div>
   );

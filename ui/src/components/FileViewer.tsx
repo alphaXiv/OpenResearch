@@ -50,7 +50,7 @@ import { isLatexFile, isMarkdownFile } from "./FileTypeIcon";
 import { OverleafPanel } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
-import { BUTTON_CLASS_NAME, ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import { Button, IconButton, IconButtonLink, Spinner } from "./ui";
 
 type ArtifactPreviewFile = Omit<ProjectFile, "root">;
 type LoadedFile =
@@ -99,8 +99,7 @@ function CopyableCommand({ command }: { command: string }) {
       >
         {command}
       </code>
-      <button
-        className={ICON_BUTTON_CLASS_NAME}
+      <IconButton
         data-tip={
           state === "copied"
             ? m.common_copied()
@@ -112,7 +111,7 @@ function CopyableCommand({ command }: { command: string }) {
         onClick={() => void copy()}
       >
         {state === "copied" ? <Check size={13} /> : <Copy size={13} />}
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -474,24 +473,24 @@ export function FileViewer({
   return (
     <div className="file-view flex flex-col h-full min-h-0">
       <div className="file-view-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant text-text shrink-0">
-        <FileText size={13} style={{ flexShrink: 0 }} />
+        <FileText size={13} className="shrink-0" />
         <code className="file-view-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={filePath}>
           {filePath}
         </code>
         {branchLabel && (
-          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 font-mono text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
         )}
         {showingEditor && (saving || dirty || saveError) && (
           <span
-            className={`file-view-save-status inline-flex items-center gap-1 text-xs shrink-0 ${saveError ? "text-accent-red" : "text-muted"}`}
+            className={`file-view-save-status inline-flex items-center gap-1 text-sm shrink-0 ${saveError ? "text-accent-red" : "text-muted"}`}
             title={saveError ?? (saving ? m.common_saving() : m.file_viewer_unsaved_tip())}
           >
             {saving ? (
               <>
-                <span className={SPINNER_CLASS_NAME} /> {m.file_viewer_saving()}
+                <Spinner /> {m.file_viewer_saving()}
               </>
             ) : saveError ? (
               m.file_viewer_save_failed()
@@ -501,8 +500,8 @@ export function FileViewer({
           </span>
         )}
         {isLatex && latex.compiled && (
-          <button
-            className={`${ICON_BUTTON_CLASS_NAME} ${!latex.showPdf ? "active" : ""}`}
+          <IconButton
+            active={!latex.showPdf}
             data-tip={
               latex.stale && latex.showPdf
                 ? m.file_viewer_pdf_out_of_date()
@@ -519,11 +518,10 @@ export function FileViewer({
             ) : (
               <FileText size={13} className={latex.stale ? "text-accent-amber" : undefined} />
             )}
-          </button>
+          </IconButton>
         )}
         {isLatex && compiledPdfUrl && compiledPdfName && (
-          <a
-            className={ICON_BUTTON_CLASS_NAME}
+          <IconButtonLink
             data-tip={
               latex.stale
                 ? m.file_viewer_download_stale_pdf({ name: ltr(compiledPdfName) })
@@ -535,11 +533,11 @@ export function FileViewer({
             download={compiledPdfName}
           >
             <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
-          </a>
+          </IconButtonLink>
         )}
         {liveTex && (
-          <button
-            className={`${ICON_BUTTON_CLASS_NAME} ${showOverleaf ? "active" : ""}`}
+          <IconButton
+            active={showOverleaf}
             data-tip={overleafTip}
             data-tip-align="end"
             aria-label={m.a11y_overleaf_status({ status: overleafTip })}
@@ -547,56 +545,53 @@ export function FileViewer({
             onClick={() => setShowOverleaf((open) => !open)}
           >
             {overleaf.syncing ? (
-              <span className={SPINNER_CLASS_NAME} />
+              <Spinner />
             ) : (
               <CloudUpload size={13} className={overleafColor} />
             )}
-          </button>
+          </IconButton>
         )}
         {isLatex && onDisk && (
-          <button
-            className={ICON_BUTTON_CLASS_NAME}
+          <IconButton
             data-tip={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             data-tip-align="end"
             aria-label={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             disabled={latex.compiling || !latex.engine}
             onClick={() => void compileFromDisk()}
           >
-            {latex.compiling ? <span className={SPINNER_CLASS_NAME} /> : <FileOutput size={13} />}
-          </button>
+            {latex.compiling ? <Spinner /> : <FileOutput size={13} />}
+          </IconButton>
         )}
         {isMarkdown && (
-          <button
-            className={`${ICON_BUTTON_CLASS_NAME} ${showSource ? "active" : ""}`}
+          <IconButton
+            active={showSource}
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
             aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
             onClick={() => setShowSource((s) => !s)}
           >
             <Code size={13} />
-          </button>
+          </IconButton>
         )}
         {onDisk && (
-          <button
-            className={ICON_BUTTON_CLASS_NAME}
+          <IconButton
             data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
             data-tip-align="end"
             aria-label={m.file_viewer_open_in_default_editor()}
             disabled={openingEditor}
             onClick={() => void openInEditor()}
           >
-            {openingEditor ? <span className={SPINNER_CLASS_NAME} /> : <ExternalLink size={13} />}
-          </button>
+            {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
+          </IconButton>
         )}
-        <button
-          className={ICON_BUTTON_CLASS_NAME}
+        <IconButton
           data-tip={m.file_viewer_reload_file()}
           data-tip-align="end"
           aria-label={m.file_viewer_reload_file()}
           onClick={() => setNonce((n) => n + 1)}
         >
-          {loading ? <span className={SPINNER_CLASS_NAME} /> : <RotateCw size={13} />}
-        </button>
+          {loading ? <Spinner /> : <RotateCw size={13} />}
+        </IconButton>
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be
           editable, and the editor's `h-full` would push it out of view. */}
@@ -618,15 +613,14 @@ export function FileViewer({
                   ? m.file_viewer_compiled_with_errors()
                   : m.file_viewer_compile_failed())}
             </span>
-            <button
-              className={ICON_BUTTON_CLASS_NAME}
+            <IconButton
               data-tip={m.file_viewer_dismiss()}
               data-tip-align="end"
               aria-label={m.file_viewer_dismiss_compile_message()}
               onClick={latex.dismiss}
             >
               <X size={13} />
-            </button>
+            </IconButton>
           </div>
           {latex.log && (
             <pre className="mt-1.5 mb-0 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere">
@@ -640,15 +634,14 @@ export function FileViewer({
           <span className="flex-1 min-w-0">
             {m.file_viewer_overleaf_apos_s_copy_of_this_file_was()}
           </span>
-          <button
-            className={BUTTON_CLASS_NAME}
+          <Button
             onClick={() => {
               overleaf.reloaded();
               setNonce((n) => n + 1);
             }}
           >
             {m.file_viewer_discard_my_edits_and_reload()}
-          </button>
+          </Button>
         </div>
       )}
       {liveTex && overleaf.error && (
@@ -656,15 +649,14 @@ export function FileViewer({
           <span className="flex-1 min-w-0 text-sm text-accent-red whitespace-pre-wrap">
             {overleaf.error}
           </span>
-          <button
-            className={ICON_BUTTON_CLASS_NAME}
+          <IconButton
             data-tip={m.file_viewer_dismiss()}
             data-tip-align="end"
             aria-label={m.file_viewer_dismiss_overleaf_message()}
             onClick={overleaf.dismiss}
           >
             <X size={13} />
-          </button>
+          </IconButton>
         </div>
       )}
       {liveTex && showOverleaf && overleaf.loaded && (
@@ -723,7 +715,7 @@ export function FileViewer({
             kind={mediaKind}
             url={rawUrl}
             name={path.split("/").pop() ?? path}
-          />
+         />
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
@@ -735,15 +727,15 @@ export function FileViewer({
             url={pdfPaneUrl}
             name={compiledPdfName}
             downloadBar={false}
-          />
+         />
         ) : isMarkdown && !showSource ? (
-          <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-[1.5em] [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-[1.25em] [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-[1.1em]">
+          <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
               <ArtifactMarkdown
                 projectId={projectId}
                 folder={parentFolder}
                 markdown={data.content}
-              />
+             />
             ) : (
               <Md
                 text={data.content}
@@ -754,7 +746,7 @@ export function FileViewer({
                   ((p, _line, _exp, _ref, intent) =>
                     onOpenFile(p, sessionId, gitRef, intent))
                 }
-              />
+             />
             )}
           </div>
         ) : showingEditor ? (
@@ -772,7 +764,7 @@ export function FileViewer({
             highlightLine={line}
             scrollRequest={lineScrollRequest}
             onScrollRequestHandled={onLineScrollRequestHandled}
-          />
+         />
         ) : (
           <>
             <CodeView
@@ -781,7 +773,7 @@ export function FileViewer({
               highlightLine={line}
               scrollRequest={lineScrollRequest}
               onScrollRequestHandled={onLineScrollRequestHandled}
-            />
+           />
             {data.truncated && (
               <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
             )}

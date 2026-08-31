@@ -64,7 +64,7 @@ export function MediaPreview({
           src={url}
           aria-label={name}
           onError={() => setFailed(true)}
-        />
+       />
       </div>
     );
   } else if (kind === "video") {
@@ -77,7 +77,7 @@ export function MediaPreview({
           src={url}
           aria-label={name}
           onError={() => setFailed(true)}
-        />
+       />
       </div>
     );
   } else {
@@ -98,7 +98,7 @@ export function MediaPreview({
     <div className="flex h-full min-h-0 flex-col">
       {preview}
       {downloadBar && (
-        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-end text-xs">
+        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-end text-sm">
           <a href={url} download={name}>{m.media_preview_download()} {name}</a>
         </div>
       )}

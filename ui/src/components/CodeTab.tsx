@@ -15,8 +15,8 @@ import {
 import { BranchChanges } from "./BranchChanges";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
-import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 import type { TabOpenIntent } from "../tabPreview";
+import { CodeTabBody, CodeTabNote } from "./layout/TabBody";
 
 export type CodeView = CodeBrowserView;
 
@@ -150,27 +150,27 @@ export function CodeTab({
         onRefresh={() =>
           view === "files" ? load() : setChangesRefreshKey((current) => current + 1)
         }
-      />
+     />
       {view === "changes" ? (
         <BranchChanges
           key={experiment.id}
           experiment={experiment}
           refreshKey={changesRefreshKey}
           onLoadingChange={setChangesLoading}
-        />
+       />
       ) : (
         <>
-          {data?.truncated && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_listing_truncated()}</div>}
-          {error && tree && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_refresh_failed()} {ltr(error)}</div>}
-          <div className={CODE_TAB_BODY_CLASS_NAME}>
+          {data?.truncated && <CodeTabNote>{m.code_tab_listing_truncated()}</CodeTabNote>}
+          {error && tree && <CodeTabNote>{m.code_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
+          <CodeTabBody>
             {!tree ? (
-              <div className={CODE_TAB_NOTE_CLASS_NAME}>
+              <CodeTabNote>
                 {error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}
-              </div>
+              </CodeTabNote>
             ) : tree.dirs.size === 0 && tree.files.length === 0 ? (
-              <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.code_tab_no_files()}</div>
+              <CodeTabNote>{m.code_tab_no_files()}</CodeTabNote>
             ) : (
-              <div className="file-tree py-1.5 px-0 text-md">
+              <div className="file-tree py-1.5 px-0 text-sm">
                 <TreeLevel
                   node={tree}
                   parentPath=""
@@ -182,10 +182,10 @@ export function CodeTab({
                       ? onOpenFile(path, editSessionId, undefined, intent)
                       : onOpenFile(path, undefined, branch, intent)
                   }
-                />
+               />
               </div>
             )}
-          </div>
+          </CodeTabBody>
         </>
       )}
     </div>

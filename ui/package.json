@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && tsc --noEmit && vite build",
     "lint:i18n": "node scripts/check-i18n.mjs",
+    "lint:styles": "node scripts/check-styles.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.mjs",
     "preview": "vite preview"
   },
@@ -28,6 +29,8 @@
     "remark-math": "^6.0.0",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
+    "sonner": "^2.0.8",
+    "tailwind-merge": "^3.6.0",
     "unified": "11.0.5"
   },
   "devDependencies": {

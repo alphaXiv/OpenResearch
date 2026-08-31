@@ -110,7 +110,7 @@ export function CodeEditor({
         className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
         style={{ width: `${ruleCh}ch` }}
         aria-hidden="true"
-      />
+     />
       <div
         ref={overlayRef}
         className={`file-view-code ${layerClassName} overflow-hidden pointer-events-none`}
@@ -137,7 +137,7 @@ export function CodeEditor({
       </div>
       <textarea
         ref={taRef}
-        className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-[var(--text)] outline-none`}
+        className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}
         onChange={(e) => onChange(e.target.value)}
@@ -148,7 +148,7 @@ export function CodeEditor({
         autoComplete="off"
         autoCorrect="off"
         autoCapitalize="off"
-      />
+     />
     </div>
   );
 }

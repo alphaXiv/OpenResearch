@@ -38,12 +38,12 @@ export function LitSourceLogo({
 }) {
   return (
     <span
-      className={`lit-logo flex-none inline-flex items-center justify-center p-[1.5px] box-border bg-white rounded-[3px] shadow-[0_0_0_1px_rgba(0,_0,_0,_0.08)] [&_svg]:w-full [&_svg]:h-full [&_svg]:block ${className}`}
+      className={`lit-logo flex-none inline-flex items-center justify-center p-[1.5px] box-border bg-white rounded-[3px] shadow-logo [&_svg]:w-full [&_svg]:h-full [&_svg]:block ${className}`}
       style={{ width: size, height: size }}
       {...(decorative ? { "aria-hidden": true } : { role: "img", "aria-label": LIT_SOURCE_NAME[source] })}
       // Static, build-inlined brand SVGs — not user input.
       dangerouslySetInnerHTML={{ __html: LIT_SOURCE_SVG[source] }}
-    />
+   />
   );
 }
 

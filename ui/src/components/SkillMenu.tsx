@@ -1,4 +1,6 @@
 import type { SkillInfo } from "../api";
+import { m } from "../paraglide/messages.js";
+import { Badge } from "./ui";
 
 /** Slash-skill dropdown above the composer. Open/filter/keyboard state lives
  * in ChatPanel (it's derived from the draft); this just renders the matches. */
@@ -14,12 +16,12 @@ export function SkillMenu({
   onHover: (index: number) => void;
 }) {
   return (
-    <div className="skill-menu absolute bottom-[calc(100%_+_8px)] start-0 min-w-85 max-w-full p-1.5 bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden">
+    <div className="skill-menu absolute bottom-[calc(100%_+_8px)] start-0 min-w-85 max-w-full p-1.5 bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden">
       {skills.map((s, i) => (
         <button
           key={s.name}
           type="button"
-          className={`skill-item flex flex-col gap-0.5 w-full text-start py-[7px] px-2 rounded-sm [&.active]:bg-surface [&_.skill-name]:text-md [&_.skill-desc]:text-sm [&_.skill-desc]:text-subtext ${i === activeIndex ? "active" : ""}`}
+          className={`skill-item flex flex-col gap-0.5 w-full text-start py-[7px] px-2 rounded-sm [&.active]:bg-surface [&_.skill-name]:text-sm [&_.skill-desc]:text-sm [&_.skill-desc]:text-subtext ${i === activeIndex ? "active" : ""}`}
           // mousedown + preventDefault keeps the textarea focused.
           onMouseDown={(e) => {
             e.preventDefault();
@@ -30,9 +32,9 @@ export function SkillMenu({
           <span className="skill-name flex items-center gap-1.5">
             /{s.name}
             {s.source !== "command" && (
-              <span className="inline-flex h-4 items-center rounded-full border border-border-variant bg-canvas px-1.5 text-2xs font-semibold tracking-[0.05em] text-muted">
-                SKILL
-              </span>
+              <Badge className="h-5 border-border-variant bg-canvas px-1.5 tracking-[0.05em]">
+                {m.skill_chips_badge()}
+              </Badge>
             )}
           </span>
           <span className="skill-desc">{s.description}</span>

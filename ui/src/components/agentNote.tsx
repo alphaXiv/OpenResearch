@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { MONO_CLASS_NAME } from "../styleClasses";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 
@@ -10,7 +9,7 @@ function CommandPill({ cmd }: { cmd: string }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="cmd-inline inline-flex items-center gap-1 align-baseline">
-      <code className={MONO_CLASS_NAME}>{cmd}</code>
+      <code className="font-mono text-sm">{cmd}</code>
       <button
         type="button"
         className="cmd-inline-copy inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text"

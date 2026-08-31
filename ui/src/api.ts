@@ -1110,6 +1110,8 @@ export interface TelemetrySettings {
   enabled: boolean;
   /** Saved user preference, independent of build and runtime eligibility. */
   preferenceEnabled: boolean;
+  /** Whether the current build or launch configuration forces analytics off. */
+  locked: boolean;
   /** When off, a short human reason (e.g. "--no-telemetry flag"); null when on. */
   reason: string | null;
 }

@@ -5,20 +5,7 @@ import { useState } from "react";
 import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-
-const EXPERIMENT_TABLE_ACTION_CLASS_NAME = [
-  "experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5",
-  "border border-border rounded-md bg-background text-text",
-  "text-sm font-medium leading-none",
-  "[&:hover:not(:disabled)]:bg-surface",
-  "[&:hover:not(:disabled)]:border-border-strong [&:disabled]:text-muted",
-  "[&:disabled]:cursor-default [&:disabled]:opacity-50",
-  "[&.danger]:border-[color-mix(in_oklab,_var(--accent-red)_42%,_var(--border))]",
-  "[&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))]",
-  "[&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red",
-  "[&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))]",
-  "[@container((max-width:_560px))]:[&.danger]:ms-auto",
-].join(" ");
+import { Button } from "./ui";
 
 export function ExperimentsTable({
   runs,
@@ -85,7 +72,7 @@ export function ExperimentsTable({
           {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div className="experiments-table w-full text-md bg-background" role="list" aria-label={m.experiments_table_experiments()}>
+      <div className="experiments-table w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {sortedExperiments.map((experiment) => {
           const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
           const latestRun = experimentRuns[0] ?? null;
@@ -107,7 +94,7 @@ export function ExperimentsTable({
           return (
             <div
               key={experiment.id}
-              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-[color-mix(in_oklab,_var(--text)_7%,_transparent)] bg-background cursor-pointer [&:hover]:bg-canvas [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
+              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-canvas [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
               role="listitem"
               onClick={() => onOpen(experiment, "preview")}
               onDoubleClick={() => onOpen(experiment, "keepOpen")}
@@ -136,10 +123,10 @@ export function ExperimentsTable({
                 <div className="experiment-table-status flex items-center min-w-0">
                   <StatusBadge status={status} />
                 </div>
-                <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-xs font-medium">
+                <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-sm font-medium">
                   <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
                 </div>
-                <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-xs font-medium whitespace-nowrap">
+                <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-sm font-medium whitespace-nowrap">
                   <span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
                 </div>
               </div>
@@ -151,8 +138,8 @@ export function ExperimentsTable({
                 onDoubleClick={(event) => event.stopPropagation()}
                 onAuxClick={(event) => event.stopPropagation()}
               >
-                <button
-                  className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
+                <Button
+                  size="small"
                   disabled={!logsRun}
                   title={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
@@ -161,9 +148,9 @@ export function ExperimentsTable({
                 >
                   <Terminal size={15} />
                   {m.experiments_table_logs()}
-                </button>
-                <button
-                  className={EXPERIMENT_TABLE_ACTION_CLASS_NAME}
+                </Button>
+                <Button
+                  size="small"
                   title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpenCode(experiment.id, intent),
@@ -171,17 +158,19 @@ export function ExperimentsTable({
                 >
                   <FolderTree size={15} />
                   {m.experiments_table_code()}
-                </button>
+                </Button>
                 {liveRun && (
-                  <button
-                    className="experiment-table-action inline-flex items-center gap-1.5 py-1.5 px-2.5 border border-border rounded-md bg-background text-text text-sm font-medium leading-none [&:hover:not(:disabled)]:bg-surface [&:hover:not(:disabled)]:border-border-strong [&:disabled]:text-muted [&:disabled]:cursor-default [&:disabled]:opacity-50 [&.danger]:border-[color-mix(in_oklab,_var(--accent-red)_42%,_var(--border))] [&.danger]:bg-[color-mix(in_oklab,_var(--accent-red)_6%,_var(--base))] [&.danger]:text-accent-red [&.danger:hover:not(:disabled)]:border-accent-red [&.danger:hover:not(:disabled)]:bg-[color-mix(in_oklab,_var(--accent-red)_10%,_var(--base))] [@container((max-width:_560px))]:[&.danger]:ms-auto danger"
+                  <Button
+                    size="small"
+                    variant="danger"
+                    className="[@container((max-width:_560px))]:ms-auto"
                     disabled={cancelling}
                     title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
                     onClick={() => void requestCancel(liveRun.id)}
                   >
                     <CircleStop size={15} />
                     {cancelling ? m.common_stopping() : m.common_stop()}
-                  </button>
+                  </Button>
                 )}
               </div>
             </div>

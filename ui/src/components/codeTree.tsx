@@ -14,7 +14,7 @@ import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 const FILE_TREE_ROW_CLASS_NAME = [
   "file-tree-row flex items-center gap-1.5 w-full py-[3px] px-2.5 border-0",
   "bg-transparent text-text text-start cursor-pointer font-[inherit]",
-  "text-[length:inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0",
+  "[&:hover]:bg-panel [&_>_svg]:shrink-0",
   "[&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted",
 ].join(" ");
 
@@ -106,7 +106,7 @@ function DirRow({
           toggled={toggled}
           onToggle={onToggle}
           onOpenFile={onOpenFile}
-        />
+       />
       )}
     </>
   );
@@ -143,7 +143,7 @@ export function TreeLevel({
             toggled={toggled}
             onToggle={onToggle}
             onOpenFile={onOpenFile}
-          />
+         />
         );
       })}
       {fileNames.map((name) => {
