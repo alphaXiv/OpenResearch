@@ -10,6 +10,7 @@ const CONFIRM_DATABASE: &str = "DELETE DATABASE";
 const CONFIRM_CLI: &str = "DELETE CLI";
 const CONFIRM_ALL: &str = "DELETE ALL";
 const AGENT_SESSION_ENV_VARS: &[&str] = &[
+    crate::local::chat::CHAT_HARNESS_ENV,
     crate::local::chat::CHAT_SESSION_ENV,
     crate::local::chat::LOCAL_SESSION_ENV,
     "CODEX_THREAD_ID",

@@ -1864,8 +1864,13 @@ fn transcript_parts(
 }
 
 enum SelectedSlashSkill {
-    Builtin(&'static str),
-    User { instructions: String },
+    Builtin {
+        name: &'static str,
+        instructions: String,
+    },
+    User {
+        instructions: String,
+    },
 }
 
 fn slash_skill_name(token: &str) -> Option<String> {
@@ -1876,9 +1881,11 @@ fn slash_skill_name(token: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
-/// Slash tokens select supplementary instructions. The transcript keeps the
-/// exact message, while every recognized selection shares that complete request.
-fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
+fn selected_slash_skills(project: &LocalProject, text: &str) -> (Vec<SelectedSlashSkill>, bool) {
+    let has_request = text
+        .split_whitespace()
+        .filter(|token| slash_skill_name(token).is_none())
+        .any(|token| token.chars().any(char::is_alphanumeric));
     let mut seen = HashSet::new();
     let mut selected = Vec::new();
     for token in text.split_whitespace() {
@@ -1892,8 +1899,17 @@ fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
             .iter()
             .find(|skill| skill.name.eq_ignore_ascii_case(&name))
         {
-            seen.insert(name);
-            selected.push(SelectedSlashSkill::Builtin(skill.name));
+            if let Some(instructions) = crate::local::skills::instructions(
+                skill.name,
+                has_request,
+                project.github_enabled(),
+            ) {
+                seen.insert(name);
+                selected.push(SelectedSlashSkill::Builtin {
+                    name: skill.name,
+                    instructions,
+                });
+            }
         } else if let Some(instructions) =
             crate::local::user_skills::instructions(&name, &project.id)
         {
@@ -1901,26 +1917,35 @@ fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
             selected.push(SelectedSlashSkill::User { instructions });
         }
     }
+    (selected, has_request)
+}
+
+/// Bundled catalog only: user skill names are free text and stay local.
+pub(crate) fn builtin_slash_skill_names(project: &LocalProject, text: &str) -> Vec<&'static str> {
+    selected_slash_skills(project, text)
+        .0
+        .into_iter()
+        .filter_map(|skill| match skill {
+            SelectedSlashSkill::Builtin { name, .. } => Some(name),
+            SelectedSlashSkill::User { .. } => None,
+        })
+        .collect()
+}
+
+/// Slash tokens select supplementary instructions. The transcript keeps the
+/// exact message, while every recognized selection shares that complete request.
+fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
+    let (selected, has_request) = selected_slash_skills(project, text);
     if selected.is_empty() {
         return text.to_string();
     }
 
-    let has_request = text
-        .split_whitespace()
-        .filter(|token| slash_skill_name(token).is_none())
-        .any(|token| token.chars().any(char::is_alphanumeric));
     let mut sections = Vec::with_capacity(selected.len());
     for skill in selected {
-        match skill {
-            SelectedSlashSkill::Builtin(name) => {
-                if let Some(instructions) =
-                    crate::local::skills::instructions(name, has_request, project.github_enabled())
-                {
-                    sections.push(instructions);
-                }
-            }
-            SelectedSlashSkill::User { instructions } => sections.push(instructions),
-        }
+        sections.push(match skill {
+            SelectedSlashSkill::Builtin { instructions, .. }
+            | SelectedSlashSkill::User { instructions } => instructions,
+        });
     }
 
     let mut expanded = format!(
@@ -1936,7 +1961,7 @@ fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
 
 #[cfg(test)]
 mod slash_skill_tests {
-    use super::{expand_slash_skills, LocalProject};
+    use super::{builtin_slash_skill_names, expand_slash_skills, LocalProject};
 
     fn project() -> LocalProject {
         LocalProject {
@@ -1975,6 +2000,13 @@ mod slash_skill_tests {
         assert_eq!(
             expand_slash_skills(&project(), "plain /unknown text"),
             "plain /unknown text"
+        );
+        assert_eq!(
+            builtin_slash_skill_names(
+                &project(),
+                "/REPRODUCE-PAPER /unknown /reproduce-paper /write-paper"
+            ),
+            vec!["reproduce-paper", "write-paper"]
         );
     }
 
@@ -3775,7 +3807,7 @@ impl ChatHost {
         session_id: &str,
         message_id: &str,
         kind: ForkKind,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut overrides = TurnOverrides::default();
         let store = Store::open()?;
         let messages = store.list_chat_messages(session_id)?;
@@ -3873,7 +3905,8 @@ impl ChatHost {
         // behind it silently continues from the older harness thread. Best-effort
         // and harness id first, because a half-applied restore that kept the
         // rewind is worse than either end state.
-        if !matches!(submitted, Ok(TurnSubmission::Started(_))) {
+        let started = matches!(&submitted, Ok(TurnSubmission::Started(_)));
+        if !started {
             if rewind.is_some() {
                 let _ = store
                     .set_chat_session_native_id(session_id, session.native_session_id.as_deref());
@@ -3885,7 +3918,7 @@ impl ChatHost {
                 json!({ "sessionId": session_id, "activeLeafId": session.active_leaf_id }),
             );
         }
-        submitted.map(|_| ())
+        submitted.map(|_| started)
     }
 
     /// Show a different fork of a turn. The whole branch under `leaf_id` comes
@@ -7140,6 +7173,9 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
 /// `launching_chat_session`) and `orx exp wake` can register the current chat.
 pub const CHAT_SESSION_ENV: &str = "ORX_CHAT_SESSION_ID";
 
+/// Harness label paired with [`CHAT_SESSION_ENV`] for child telemetry.
+pub const CHAT_HARNESS_ENV: &str = "ORX_CHAT_HARNESS";
+
 /// Marks a process as a child of a local `orx up` harness. Separate from
 /// [`CHAT_SESSION_ENV`], which the cloud box's opencode plugin also exports for
 /// attribution — presence of a session id alone no longer implies local.
@@ -7218,9 +7254,11 @@ fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
 pub fn set_chat_session_env(
     cmd: &mut tokio::process::Command,
     session_id: &str,
+    harness: &str,
     up_port: Option<u16>,
 ) {
     cmd.env(CHAT_SESSION_ENV, session_id);
+    cmd.env(CHAT_HARNESS_ENV, harness);
     cmd.env(LOCAL_SESSION_ENV, "1");
     // Never let a child inherit a port owned by some outer orx up process.
     match up_port {
@@ -7281,6 +7319,12 @@ pub fn launching_chat_session() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+pub fn launching_chat_harness() -> Option<String> {
+    std::env::var(CHAT_HARNESS_ENV)
+        .ok()
+        .filter(|harness| !harness.is_empty())
+}
+
 /// Whether this process is running inside a local `orx up` session.
 /// [`LOCAL_SESSION_ENV`] is exported only by [`set_chat_session_env`] onto
 /// `orx up` harness children, so its presence means this process is one (or a
@@ -7326,7 +7370,8 @@ pub fn harness_log(name: &str) -> Result<std::fs::File> {
 #[cfg(test)]
 mod session_env_tests {
     use super::{
-        in_local_session, trusted_up_port, CHAT_SESSION_ENV, LOCAL_SESSION_ENV, UP_PORT_ENV,
+        in_local_session, launching_chat_harness, trusted_up_port, CHAT_HARNESS_ENV,
+        CHAT_SESSION_ENV, LOCAL_SESSION_ENV, UP_PORT_ENV,
     };
     use std::sync::{Mutex, MutexGuard};
 
@@ -7367,10 +7412,13 @@ mod session_env_tests {
     /// `orx skill` serves the Local skill bodies on every cloud box.
     #[test]
     fn chat_session_alone_is_not_a_local_session() {
-        let _guard = EnvGuard::new(&[CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
+        let _guard = EnvGuard::new(&[CHAT_HARNESS_ENV, CHAT_SESSION_ENV, LOCAL_SESSION_ENV]);
 
         std::env::set_var(CHAT_SESSION_ENV, "ses_cloud_box");
         assert!(!in_local_session());
+
+        std::env::set_var(CHAT_HARNESS_ENV, "opencode");
+        assert_eq!(launching_chat_harness().as_deref(), Some("opencode"));
 
         std::env::set_var(LOCAL_SESSION_ENV, "1");
         assert!(in_local_session());
