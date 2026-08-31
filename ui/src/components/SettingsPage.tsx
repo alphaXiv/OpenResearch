@@ -2442,11 +2442,10 @@ function ProjectDefaultsTab() {
   return (
     <>
       <h2>{m.settings_page_general()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-sm leading-relaxed text-subtext">{m.settings_page_defaults_applied_when_you_create_a_project()}</p>
       {!settings ? (
         error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
-        <div className={`${SETTINGS_CARD_CLASS_NAME} project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0`}>
+        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0`}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>{m.settings_page_git_hub_publishing()}</h3>
             <Badge variant={settings.githubAuthenticated ? "success" : settings.ghInstalled ? "warning" : "error"}>

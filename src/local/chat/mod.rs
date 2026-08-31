@@ -7109,18 +7109,16 @@ pub async fn watch_runs(
 
 /// Env prep shared by the CLI adapters: this orx first on PATH (agents shell
 /// out to `orx`), the shell environment app mode imported, and the
-/// dashboard-managed env vars, real env winning.
+/// dashboard-managed env vars, real env winning. Only the starting order —
+/// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
-    if let Ok(exe) = std::env::current_exe().and_then(|p| p.canonicalize()) {
-        if let Some(dir) = exe.parent() {
-            let mut path = std::ffi::OsString::from(dir);
-            if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty())
-            {
-                path.push(":");
-                path.push(existing);
-            }
-            cmd.env("PATH", path);
+    if let Some(dir) = orx_bin_dir() {
+        let mut path = dir.into_os_string();
+        if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
+            path.push(":");
+            path.push(existing);
         }
+        cmd.env("PATH", path);
     }
     // So an agent's `orx exp run` resolves the same store the dashboard is
     // showing it, rather than re-resolving to the default.
@@ -7148,6 +7146,34 @@ pub const LOCAL_SESSION_ENV: &str = "ORX_LOCAL_SESSION";
 /// Loopback port of the trusted `orx up` process that owns local agent runs.
 pub const UP_PORT_ENV: &str = "ORX_UP_PORT";
 
+/// Directory of the `orx` running this session, for the shell hooks to restore
+/// to the front of `PATH`.
+const BIN_DIR_ENV: &str = "ORX_BIN_DIR";
+
+/// Re-front [`BIN_DIR_ENV`] on `PATH` once the user's own startup file has run:
+/// a profile prepending its bin dir, or macOS `path_helper`, would otherwise
+/// pick which `orx` an agent's `orx …` reaches. Every zsh mode and every
+/// non-interactive bash sources a file this rides on; an interactive bash
+/// ignores `BASH_ENV`. A harness that snapshots the user's shell inherits the
+/// guarded order, because capturing the snapshot runs these same files.
+const PATH_GUARD: &str =
+    "if [ -n \"${ORX_BIN_DIR-}\" ] && [ \"${PATH%%:*}\" != \"$ORX_BIN_DIR\" ]; then\n\
+     export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
+     fi\n";
+
+/// Directory holding the running `orx`. A relative or colon-bearing directory
+/// is dropped rather than fronted: neither can be spelled in a `PATH` entry,
+/// and an empty one would mean the agent's cwd.
+fn orx_bin_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
+    // the un-canonicalized path still names the right directory.
+    let exe = exe.canonicalize().unwrap_or(exe);
+    exe.parent()
+        .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains(':'))
+        .map(std::path::Path::to_path_buf)
+}
+
 fn shell_single_quote(path: &std::path::Path) -> String {
     format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
 }
@@ -7159,7 +7185,7 @@ fn zsh_startup_wrapper(name: &str) -> String {
          [[ -r \"$ZDOTDIR/{name}\" ]] && source \"$ZDOTDIR/{name}\"\n\
          _ORX_CHAT_USER_ZDOTDIR=$ZDOTDIR\n\
          ZDOTDIR=$_ORX_CHAT_SHIM_ZDOTDIR\n"
-    )
+    ) + PATH_GUARD
 }
 
 fn zshenv_hook(original_zdotdir: &std::path::Path) -> String {
@@ -7178,7 +7204,7 @@ fn zshenv_hook(original_zdotdir: &std::path::Path) -> String {
            unset ORX_CHAT_TARGET_FILE\n\
          fi\n",
         shell_single_quote(original_zdotdir)
-    )
+    ) + PATH_GUARD
 }
 
 fn bash_env_hook(original: Option<String>) -> String {
@@ -7201,7 +7227,7 @@ fn bash_env_hook(original: Option<String>) -> String {
          elif [[ -z \"${{ORX_CHAT_TARGET_FILE-}}\" ]]; then\n\
            unset ORX_CHAT_TARGET_FILE\n\
          fi\n"
-    )
+    ) + PATH_GUARD
 }
 
 fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
@@ -7212,9 +7238,10 @@ fn child_env_value(key: &str) -> Option<std::ffi::OsString> {
     })
 }
 
-/// Stamp the launching session id onto a harness child's env. Call *after*
-/// `prepare_env` so a dashboard-synced value can't shadow it. Harness children
-/// are one-per-session, so this is unambiguous.
+/// Stamp the launching session id and the running orx's bin dir onto a harness
+/// child's env, and write the shell hooks its tool calls source. Call *after*
+/// `prepare_env` so a dashboard-synced value can't shadow either. Harness
+/// children are one-per-session, so this is unambiguous.
 pub fn set_chat_session_env(
     cmd: &mut tokio::process::Command,
     session_id: &str,
@@ -7229,6 +7256,14 @@ pub fn set_chat_session_env(
         }
         None => {
             cmd.env_remove(UP_PORT_ENV);
+        }
+    }
+    match orx_bin_dir() {
+        Some(dir) => {
+            cmd.env(BIN_DIR_ENV, dir);
+        }
+        None => {
+            cmd.env_remove(BIN_DIR_ENV);
         }
     }
     cmd.env_remove(CHAT_TARGET_FILE_ENV);
@@ -7438,6 +7473,130 @@ mod cap_tests {
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ORX_CHAT_TARGET_FILE-}"));
         assert!(bash_env_hook(None).contains("${BASH_EXECUTION_STRING-}"));
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ZSH_EXECUTION_STRING-}"));
+    }
+
+    fn write_orx_stub(dir: &std::path::Path, marker: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let bin = dir.join("orx");
+        std::fs::write(&bin, format!("#!/bin/sh\nprintf '%s' {marker}\n")).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stale `orx` on a directory a user startup file prepends, ahead of the
+    /// one `prepare_env` fronted.
+    fn path_guard_fixture(root: &std::path::Path) -> (PathBuf, String, String) {
+        let ours = root.join("ours");
+        let decoy = root.join("decoy");
+        write_orx_stub(&ours, "ours");
+        write_orx_stub(&decoy, "decoy");
+        let path = format!(
+            "{}:{}",
+            ours.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let prepend_decoy = format!("export PATH=\"{}:$PATH\"\n", decoy.display());
+        (ours, path, prepend_decoy)
+    }
+
+    /// The hooks branch on the chat target vars, which a `cargo test` run from
+    /// inside a chat session would otherwise inherit; interactive zsh wants a
+    /// `TERM` it can name.
+    fn shell_output(mut cmd: std::process::Command) -> String {
+        let out = cmd
+            .env_remove(CHAT_TARGET_FILE_ENV)
+            .env_remove(CHAT_TARGET_POINTER_ENV)
+            .env("TERM", "dumb")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    #[test]
+    fn path_guard_refronts_orx_after_a_bash_hook_prepends_its_own_bin() {
+        let root = std::env::temp_dir().join(format!("orx-path-guard-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (ours, path, prepend_decoy) = path_guard_fixture(&root);
+        let user_hook = root.join("user_hook");
+        std::fs::write(&user_hook, prepend_decoy).unwrap();
+        let shim = root.join("bash_env");
+        std::fs::write(
+            &shim,
+            bash_env_hook(Some(user_hook.to_string_lossy().into_owned())),
+        )
+        .unwrap();
+
+        let run = |bin_dir: Option<&std::path::Path>| {
+            let mut cmd = std::process::Command::new("bash");
+            cmd.args(["-c", "orx"])
+                .env("BASH_ENV", &shim)
+                .env("PATH", &path);
+            match bin_dir {
+                Some(dir) => cmd.env(BIN_DIR_ENV, dir),
+                None => cmd.env_remove(BIN_DIR_ENV),
+            };
+            shell_output(cmd)
+        };
+        let guarded = run(Some(&ours));
+        let unguarded = run(None);
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(guarded, "ours");
+        assert_eq!(unguarded, "decoy", "the user hook's prepend never ran");
+    }
+
+    #[test]
+    fn path_guard_refronts_orx_after_a_zsh_startup_file_prepends_its_own_bin() {
+        if !std::process::Command::new("zsh")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
+            eprintln!("skipping: no usable zsh on this machine");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("orx-path-guard-{}", uuid::Uuid::new_v4()));
+        let user_dir = root.join("user");
+        let shim_dir = root.join("shim");
+        std::fs::create_dir_all(&user_dir).unwrap();
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let (ours, path, prepend_decoy) = path_guard_fixture(&root);
+        // Every startup file a tool shell can read prepends the decoy, so each
+        // one's guard has to answer for itself.
+        for name in [".zshrc", ".zprofile", ".zlogin"] {
+            std::fs::write(user_dir.join(name), &prepend_decoy).unwrap();
+            std::fs::write(shim_dir.join(name), zsh_startup_wrapper(name)).unwrap();
+        }
+        std::fs::write(shim_dir.join(".zshenv"), zshenv_hook(&user_dir)).unwrap();
+
+        // `-d` drops the machine's own global rc files. A harness spells its tool
+        // shell `-lc`; one snapshotting the user's shell reaches `.zshrc` instead.
+        let run = |mode: &str, bin_dir: Option<&std::path::Path>| {
+            let mut cmd = std::process::Command::new("zsh");
+            cmd.args([mode, "orx"])
+                .env("ZDOTDIR", &shim_dir)
+                .env("PATH", &path);
+            match bin_dir {
+                Some(dir) => cmd.env(BIN_DIR_ENV, dir),
+                None => cmd.env_remove(BIN_DIR_ENV),
+            };
+            shell_output(cmd)
+        };
+        let guarded_login = run("-dlc", Some(&ours));
+        let guarded_interactive = run("-dic", Some(&ours));
+        let unguarded_login = run("-dlc", None);
+        let unguarded_interactive = run("-dic", None);
+
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(guarded_login, "ours");
+        assert_eq!(guarded_interactive, "ours");
+        assert_eq!(unguarded_login, "decoy");
+        assert_eq!(unguarded_interactive, "decoy");
     }
 
     #[tokio::test]
