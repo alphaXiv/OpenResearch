@@ -20,22 +20,17 @@ import {
   type SkillScope,
   type UserSkill,
 } from "../api";
-import {
-  BADGE_CLASS_NAME,
-  ICON_BUTTON_CLASS_NAME,
-  SMALL_BUTTON_CLASS_NAME,
-  SPINNER_CLASS_NAME,
-} from "../styleClasses";
+import { Badge, Button, IconButton, Spinner } from "./ui";
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 const CARD_CLASS_NAME =
-  "bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text";
-const CARD_SUB_CLASS_NAME = "mt-0 mx-0 mb-3 text-muted text-md leading-normal";
+  "bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text";
+const CARD_SUB_CLASS_NAME = "mt-0 mx-0 mb-3 text-sm leading-relaxed text-text";
 const SKILL_ROW_CLASS_NAME =
   "flex items-start gap-3 py-2.5 border-t border-t-border first:border-t-0";
-const SKILL_NAME_CLASS_NAME = "font-mono text-sm font-medium text-text";
-const SKILL_DESC_CLASS_NAME = "mt-0.5 mb-0 text-xs leading-relaxed text-muted";
+const SKILL_NAME_CLASS_NAME = "font-mono text-base font-medium text-text";
+const SKILL_DESC_CLASS_NAME = "mt-1 mb-0 text-sm leading-relaxed text-text";
 
 /** Read a File into base64 (strips the `data:...;base64,` prefix). */
 function fileToBase64(file: File): Promise<string> {
@@ -89,7 +84,7 @@ function ScopePicker({
         onClick={() => onScope("global")}
       >
         {m.skills_tab_global()}
-        <span className="text-2xs font-normal text-muted">{m.skills_tab_every_project()}</span>
+        <span className="text-sm font-normal text-subtext">{m.skills_tab_every_project()}</span>
       </button>
       <button
         type="button"
@@ -100,7 +95,7 @@ function ScopePicker({
         onClick={() => onScope("project")}
       >
         {m.skills_tab_this_project()}
-        <span className="text-2xs font-normal text-muted">
+        <span className="text-sm font-normal text-subtext">
           {project ? project.name : m.skills_no_project_open()}
         </span>
       </button>
@@ -125,12 +120,12 @@ function DropZone({
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <div
-      className={`flex flex-col items-center justify-center gap-2 py-6.5 px-4.5 border-[1.5px] border-dashed rounded-md text-center text-sm transition-[border-color,background] duration-120 [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text ${
+      className={`flex flex-col items-center justify-center gap-2 py-6.5 px-4.5 border-[1.5px] border-dashed rounded-md text-center text-sm text-text transition-[border-color,background] duration-120 [&_code]:font-mono [&_code]:text-sm [&_code]:text-text ${
         busy ? "cursor-default" : "cursor-pointer"
       } ${
         dragging
           ? "border-primary bg-surface text-text"
-          : "border-border-variant bg-surface text-muted [&:hover]:border-primary [&:hover]:text-text"
+          : "border-border-variant bg-surface [&:hover]:border-primary"
       }`}
       onDragOver={(e) => {
         e.preventDefault();
@@ -163,17 +158,17 @@ function DropZone({
           if (file) onFile(file);
           e.target.value = "";
         }}
-      />
+     />
       {busy ? (
         <>
-          <span className={SPINNER_CLASS_NAME} />
+          <Spinner />
           <span>{m.skills_tab_uploading()}</span>
         </>
       ) : (
         <>
           <Upload size={20} strokeWidth={1.5} />
           <span>{prompt}</span>
-          <span dir="auto" className="inline-flex items-center gap-1.5 text-2xs text-subtext">
+          <span dir="auto" className="inline-flex items-center gap-1.5 text-sm text-subtext">
             <FileUp size={12} /> {m.skills_tab_adding_to()}{" "}
             <strong dir="auto" className="text-text font-semibold">{destination}</strong>
           </span>
@@ -202,13 +197,12 @@ function SkillRow({
         <p className={SKILL_DESC_CLASS_NAME}>{skill.description}</p>
       </div>
       <div className="shrink-0 text-end whitespace-nowrap pt-0.5">
-        <div className="text-2xs text-subtext">{fmtBytes(skill.bytes)}</div>
+        <div className="text-xs text-subtext">{fmtBytes(skill.bytes)}</div>
         {skill.updatedAt > 0 && (
-          <div className="text-2xs text-muted">{timeAgo(skill.updatedAt)}</div>
+          <div className="text-xs text-muted">{timeAgo(skill.updatedAt)}</div>
         )}
       </div>
-      <button
-        className={ICON_BUTTON_CLASS_NAME}
+      <IconButton
         data-tip={m.skills_tab_delete_skill()}
         data-tip-align="end"
         aria-label={m.skills_delete_skill_label({ name: ltr(skill.name) })}
@@ -229,7 +223,7 @@ function SkillRow({
         }}
       >
         <Trash2 size={13} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -254,7 +248,7 @@ function SkillList({
       <h3>{title}</h3>
       <p className={CARD_SUB_CLASS_NAME}>{hint}</p>
       {skills.length === 0 ? (
-        <div className="text-muted text-sm">{m.skills_tab_no_skills_yet()}</div>
+        <div className="text-sm text-subtext">{m.skills_tab_no_skills_yet()}</div>
       ) : (
         <div className="flex flex-col">
           {skills.map((s) => (
@@ -264,7 +258,7 @@ function SkillList({
               projectId={projectId}
               onDeleted={onChanged}
               onError={onError}
-            />
+           />
           ))}
         </div>
       )}
@@ -289,12 +283,11 @@ function HarnessSkillRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <code className={SKILL_NAME_CLASS_NAME}>/{skill.name}</code>
-          <span className={BADGE_CLASS_NAME}>{skill.harnessName}</span>
+          <Badge>{skill.harnessName}</Badge>
         </div>
         <p className={SKILL_DESC_CLASS_NAME}>{skill.description}</p>
       </div>
-      <button
-        className={SMALL_BUTTON_CLASS_NAME}
+      <Button size="small"
         disabled={busy}
         title={m.a11y_import_into({ name: scopeLabel })}
         onClick={async () => {
@@ -306,9 +299,9 @@ function HarnessSkillRow({
           }
         }}
       >
-        {busy ? <span className={SPINNER_CLASS_NAME} /> : <Download size={13} />}
+        {busy ? <Spinner /> : <Download size={13} />}
         {alreadyImported ? m.skills_reimport() : m.skills_import()}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -382,7 +375,7 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
   return (
     <section className={CARD_CLASS_NAME}>
       <h3>{m.skills_tab_la_te_x_templates()}</h3>
-      <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text`}>
+      <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-sm [&_code]:text-text`}>
         {m.skills_templates_description()}
       </p>
 
@@ -394,20 +387,20 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
         destination={scope === "global" ? m.skills_global_destination() : (project?.name ?? "")}
         prompt={m.skills_drop_template()}
         onFile={(file) => void upload(file)}
-      />
+     />
 
-      {error && <div className="mt-2.5 text-accent-red text-sm whitespace-pre-wrap">{error}</div>}
+      {error && <div className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">{error}</div>}
 
       {templates === null ? (
-        <div className="flex items-center gap-2 text-subtext text-md pt-3">
-          <span className={SPINNER_CLASS_NAME} /> {m.skills_tab_loading_templates()}
+        <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
+          <Spinner /> {m.skills_tab_loading_templates()}
         </div>
       ) : loadError ? (
-        <div className="text-accent-red text-sm pt-3">
+        <div className="pt-3 text-base text-accent-red">
           {m.skills_tab_could_not_load_templates()} {loadError}
         </div>
       ) : applicable.length === 0 ? (
-        <div className="text-muted text-sm pt-3">{m.skills_tab_no_templates_yet()}</div>
+        <div className="pt-3 text-sm text-subtext">{m.skills_tab_no_templates_yet()}</div>
       ) : (
         <div className="flex flex-col mt-1">
           {applicable.map((t) => (
@@ -417,7 +410,7 @@ function LatexTemplatesCard({ project }: { project: Project | null }) {
               projectId={project?.id}
               onChanged={refresh}
               onError={setError}
-            />
+           />
           ))}
         </div>
       )}
@@ -442,10 +435,10 @@ function LatexTemplateRow({
     <div className={SKILL_ROW_CLASS_NAME}>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <code className={SKILL_NAME_CLASS_NAME}>{template.name}</code>
-          <span className={BADGE_CLASS_NAME}>
+          <span className="text-base font-medium text-text">{template.name}</span>
+          <Badge>
             {template.scope === "global" ? m.skills_tab_global() : m.skills_tab_this_project()}
-          </span>
+          </Badge>
         </div>
         <p className={SKILL_DESC_CLASS_NAME}>
           {template.entry}
@@ -453,13 +446,12 @@ function LatexTemplateRow({
         </p>
       </div>
       <div className="shrink-0 text-end whitespace-nowrap pt-0.5">
-        <div className="text-2xs text-subtext">{fmtBytes(template.bytes)}</div>
+        <div className="text-xs text-subtext">{fmtBytes(template.bytes)}</div>
         {template.updatedAt > 0 && (
-          <div className="text-2xs text-muted">{timeAgo(template.updatedAt)}</div>
+          <div className="text-xs text-muted">{timeAgo(template.updatedAt)}</div>
         )}
       </div>
-      <button
-        className={ICON_BUTTON_CLASS_NAME}
+      <IconButton
         data-tip={m.skills_tab_delete_template()}
         data-tip-align="end"
         aria-label={m.skills_delete_template_label({ name: ltr(template.name) })}
@@ -480,7 +472,7 @@ function LatexTemplateRow({
         }}
       >
         <Trash2 size={13} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -582,7 +574,7 @@ export function SkillsTab({ project }: { project: Project | null }) {
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl">
       <h1>{m.skills_tab_customize()}</h1>
-      <p className="mt-0 mx-0 mb-5 text-muted text-md leading-normal [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text">
+      <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text [&_code]:font-mono [&_code]:text-sm [&_code]:text-text">
         {m.skills_overview_description()}
       </p>
 
@@ -599,15 +591,15 @@ export function SkillsTab({ project }: { project: Project | null }) {
           destination={scope === "global" ? m.skills_global_destination() : (project?.name ?? "")}
           prompt={m.skills_drop_skill()}
           onFile={(file) => void upload(file)}
-        />
+       />
 
-        {error && <div className="mt-2.5 text-accent-red text-sm whitespace-pre-wrap">{error}</div>}
+        {error && <div className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">{error}</div>}
       </section>
 
       {harnessSkills.length > 0 && (
         <section className={CARD_CLASS_NAME}>
           <h3>{m.skills_tab_import_from_your_agent()}</h3>
-          <p dir="auto" className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:text-text [&_strong]:text-text [&_strong]:font-semibold`}>
+          <p dir="auto" className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-sm [&_code]:text-text [&_strong]:text-text [&_strong]:font-semibold`}>
             {m.skills_tab_skills_already_installed_in_your_coding_agents_import()}{" "}
             <strong>{scopeLabel}</strong> {m.skills_tab_so_it_s_managed_here_and_invocable_with()} <code>/name</code>.
           </p>
@@ -619,15 +611,15 @@ export function SkillsTab({ project }: { project: Project | null }) {
                 scopeLabel={scopeLabel}
                 alreadyImported={existingInScope.has(s.name)}
                 onImport={importSkill}
-              />
+             />
             ))}
           </div>
         </section>
       )}
 
       {skills === null ? (
-        <div className="flex items-center gap-2 text-subtext text-md p-3">
-          <span className={SPINNER_CLASS_NAME} /> {m.skills_tab_loading_skills()}
+        <div className="flex items-center gap-2 p-3 text-sm text-subtext">
+          <Spinner /> {m.skills_tab_loading_skills()}
         </div>
       ) : (
         <>
@@ -637,7 +629,7 @@ export function SkillsTab({ project }: { project: Project | null }) {
             skills={globalSkills}
             onChanged={refresh}
             onError={setError}
-          />
+         />
           {project && (
             <SkillList
               title={m.a11y_named_skills({ name: project.name })}
@@ -646,7 +638,7 @@ export function SkillsTab({ project }: { project: Project | null }) {
               projectId={project.id}
               onChanged={refresh}
               onError={setError}
-            />
+           />
           )}
         </>
       )}

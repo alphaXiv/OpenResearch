@@ -30,8 +30,8 @@ import { onChatEvent } from "../events";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
-import { CODE_TAB_BODY_CLASS_NAME, CODE_TAB_NOTE_CLASS_NAME } from "../styleClasses";
 import type { TabOpenIntent } from "../tabPreview";
+import { CodeTabBody, CodeTabNote } from "./layout/TabBody";
 
 /** Poll cadence while the session's agent is working. */
 const POLL_MS = 5000;
@@ -205,14 +205,14 @@ export function WorktreeTab({
         githubTitle={githubBranch ? m.a11y_open_branch_github({ branch: ltr(githubBranch) }) : undefined}
         refreshing={loading}
         onRefresh={load}
-      />
-      {error && (wt || tree) && <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_refresh_failed()} {ltr(error)}</div>}
+     />
+      {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
       {!tree || (sessionId && !wt) ? (
-        <div className={CODE_TAB_BODY_CLASS_NAME}>
-          <div className={CODE_TAB_NOTE_CLASS_NAME}>{error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}</div>
-        </div>
+        <CodeTabBody>
+          <CodeTabNote>{error ? m.common_failed_to_load({ error: ltr(error) }) : m.common_loading()}</CodeTabNote>
+        </CodeTabBody>
       ) : liveWorktree && view === "changes" ? (
-        <div className={`${CODE_TAB_BODY_CLASS_NAME} wt-changes pt-0 px-4 pb-6 [&_>_:first-child]:mt-3.5`}>
+        <CodeTabBody className="wt-changes px-4 pb-6 pt-0 [&_>_:first-child]:mt-3.5">
           {fileCount === 0 || !liveWorktree.diff ? (
             <div className="changes-note text-sm text-muted">{m.worktree_tab_no_changes_yet()}</div>
           ) : (
@@ -221,26 +221,26 @@ export function WorktreeTab({
                 <TruncatedDiffNotice
                   bytesRead={liveWorktree.diff.bytesRead}
                   byteLimit={liveWorktree.diff.byteLimit}
-                />
+               />
               )}
               <GitDiffExplorer
                 diff={liveWorktree.diff.diff}
                 partial={liveWorktree.diff.truncated}
-              />
+             />
             </>
           )}
-        </div>
+        </CodeTabBody>
       ) : (
-        <div className={CODE_TAB_BODY_CLASS_NAME}>
+        <CodeTabBody>
           {tree.truncated && (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_listing_truncated()}</div>
+            <CodeTabNote>{m.worktree_tab_listing_truncated()}</CodeTabNote>
           )}
           {!filesTree ? (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_loading()}</div>
+            <CodeTabNote>{m.worktree_tab_loading()}</CodeTabNote>
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
-            <div className={CODE_TAB_NOTE_CLASS_NAME}>{m.worktree_tab_no_files()}</div>
+            <CodeTabNote>{m.worktree_tab_no_files()}</CodeTabNote>
           ) : (
-            <div className="file-tree py-1.5 px-0 text-md">
+            <div className="file-tree py-1.5 px-0 text-sm">
               <TreeLevel
                 node={filesTree}
                 parentPath=""
@@ -252,10 +252,10 @@ export function WorktreeTab({
                     ? onOpenFile(path, sessionId, undefined, intent)
                     : onOpenFile(path, undefined, project.baselineBranch, intent)
                 }
-              />
+             />
             </div>
           )}
-        </div>
+        </CodeTabBody>
       )}
     </div>
   );

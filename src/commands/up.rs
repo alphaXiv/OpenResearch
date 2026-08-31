@@ -3599,6 +3599,11 @@ async fn set_env_var(Json(req): Json<SetEnvVarReq>) -> ApiResult {
             "key must be letters, digits or _, not starting with a digit",
         ));
     }
+    if crate::local::shell_env::IMPORTED.contains(&key.as_str()) {
+        return Err(bad_request(format!(
+            "{key} is reserved by OpenResearch. To change it, set {key} in your shell and restart OpenResearch."
+        )));
+    }
     if value.is_empty() {
         return Err(bad_request("value is required"));
     }
@@ -4038,9 +4043,13 @@ async fn set_git_settings(Json(req): Json<SetGitSettingsReq>) -> ApiResult {
 fn telemetry_settings_json() -> Value {
     let preference_enabled = crate::telemetry::preference_enabled();
     match crate::telemetry::effective_disabled_reason() {
-        None => json!({ "enabled": true, "preferenceEnabled": preference_enabled, "reason": null }),
+        None => {
+            json!({ "enabled": true, "preferenceEnabled": preference_enabled, "locked": false, "reason": null })
+        }
         Some(r) => {
-            json!({ "enabled": false, "preferenceEnabled": preference_enabled, "reason": r.as_str() })
+            let reason = r.as_str();
+            let locked = !matches!(r, crate::telemetry::DisabledReason::Persisted);
+            json!({ "enabled": false, "preferenceEnabled": preference_enabled, "locked": locked, "reason": reason })
         }
     }
 }

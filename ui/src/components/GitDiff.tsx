@@ -20,39 +20,28 @@ import { detectSyntaxLanguageFromFilePath } from "../syntaxLanguage";
 import { fmtBytes, fmtNumber } from "../api";
 const DIFF_CLASS_NAME = [
   "openresearch-diff flex flex-col gap-4",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-selection-background-color:color-mix(_in_oklab,_var(--surface)_76%,_var(--primary)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-gutter-selection-background-color:color-mix(_in_oklab,_var(--surface)_68%,_var(--primary)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-insert-gutter-background-color:color-mix(_in_oklab,_var(--base)_84%,_var(--accent-green)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-delete-gutter-background-color:color-mix(_in_oklab,_var(--base)_86%,_var(--accent-red)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-insert-code-background-color:color-mix(_in_oklab,_var(--base)_91%,_var(--accent-green)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-delete-code-background-color:color-mix(_in_oklab,_var(--base)_92%,_var(--accent-red)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-insert-edit-background-color:color-mix(_in_oklab,_var(--base)_72%,_var(--accent-green)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-delete-edit-background-color:color-mix(_in_oklab,_var(--base)_78%,_var(--accent-red)_)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-divider-color:var(--border)]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-omit-gutter-line-color:color-mix(in_oklab,_var(--base)_86%,_var(--text))]",
-  "[&_.openresearch-diff-file]:[--openresearch-diff-unified-gutter-text-color:color-mix(in_oklab,_var(--text)_45%,_var(--base))]",
   "[&_.openresearch-diff-file]:[--diff-background-color:var(--base)]",
   "[&_.openresearch-diff-file]:[--diff-text-color:var(--text)]",
   "[&_.openresearch-diff-file]:[--diff-font-family:var(--mono)]",
   "[&_.openresearch-diff-file]:[--diff-selection-text-color:var(--primary)]",
-  "[&_.openresearch-diff-file]:[--diff-selection-background-color:var(--openresearch-diff-selection-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-selection-background-color:var(--color-diff-selection)]",
   "[&_.openresearch-diff-file]:[--diff-gutter-selected-text-color:var(--diff-selection-text-color)]",
-  "[&_.openresearch-diff-file]:[--diff-gutter-selected-background-color:var(--openresearch-diff-gutter-selection-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-gutter-selected-background-color:var(--color-diff-gutter-selection)]",
   "[&_.openresearch-diff-file]:[--diff-code-selected-text-color:var(--diff-selection-text-color)]",
   "[&_.openresearch-diff-file]:[--diff-code-selected-background-color:var(--diff-selection-background-color)]",
   "[&_.openresearch-diff-file]:[--diff-gutter-insert-text-color:var(--accent-green)]",
-  "[&_.openresearch-diff-file]:[--diff-gutter-insert-background-color:var(--openresearch-diff-insert-gutter-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-gutter-insert-background-color:var(--color-diff-insert-gutter)]",
   "[&_.openresearch-diff-file]:[--diff-gutter-delete-text-color:var(--accent-red)]",
-  "[&_.openresearch-diff-file]:[--diff-gutter-delete-background-color:var(--openresearch-diff-delete-gutter-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-gutter-delete-background-color:var(--color-diff-delete-gutter)]",
   "[&_.openresearch-diff-file]:[--diff-code-insert-text-color:var(--diff-text-color)]",
-  "[&_.openresearch-diff-file]:[--diff-code-insert-background-color:var(--openresearch-diff-insert-code-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-code-insert-background-color:var(--color-diff-insert-code)]",
   "[&_.openresearch-diff-file]:[--diff-code-delete-text-color:var(--diff-text-color)]",
-  "[&_.openresearch-diff-file]:[--diff-code-delete-background-color:var(--openresearch-diff-delete-code-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-code-delete-background-color:var(--color-diff-delete-code)]",
   "[&_.openresearch-diff-file]:[--diff-code-insert-edit-text-color:var(--diff-text-color)]",
-  "[&_.openresearch-diff-file]:[--diff-code-insert-edit-background-color:var(--openresearch-diff-insert-edit-background-color)]",
+  "[&_.openresearch-diff-file]:[--diff-code-insert-edit-background-color:var(--color-diff-insert-edit)]",
   "[&_.openresearch-diff-file]:[--diff-code-delete-edit-text-color:var(--diff-text-color)]",
-  "[&_.openresearch-diff-file]:[--diff-code-delete-edit-background-color:var(--openresearch-diff-delete-edit-background-color)]",
-  "[&_.openresearch-diff-file]:[--diff-omit-gutter-line-color:var(--openresearch-diff-omit-gutter-line-color)]",
+  "[&_.openresearch-diff-file]:[--diff-code-delete-edit-background-color:var(--color-diff-delete-edit)]",
+  "[&_.openresearch-diff-file]:[--diff-omit-gutter-line-color:var(--color-diff-omit-gutter)]",
   "[&_.openresearch-diff-file]:w-full [&_.openresearch-diff-file]:text-sm",
   "[&_.openresearch-diff-file]:leading-[1.55] [&_.openresearch-diff-file.diff-unified]:table-auto",
   "[&_.openresearch-diff-file.diff-unified_col.diff-gutter-col:first-child]:collapse",
@@ -66,18 +55,18 @@ const DIFF_CLASS_NAME = [
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pt-0 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pe-2.5 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pb-0 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:ps-3.5",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:whitespace-nowrap",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:text-end",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:text-[var(--openresearch-diff-unified-gutter-text-color)]",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e-[var(--openresearch-diff-divider-color)]",
+  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:text-diff-gutter-text",
+  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e-border",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:select-none",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:cursor-default",
   "[&_.openresearch-diff-file_.diff-line]:leading-[1.55]",
-  "[&_.openresearch-diff-file_.diff-line:has(.diff-code-insert)]:bg-[var(--openresearch-diff-insert-code-background-color)]",
-  "[&_.openresearch-diff-file_.diff-line:has(.diff-code-delete)]:bg-[var(--openresearch-diff-delete-code-background-color)]",
+  "[&_.openresearch-diff-file_.diff-line:has(.diff-code-insert)]:bg-diff-insert-code",
+  "[&_.openresearch-diff-file_.diff-line:has(.diff-code-delete)]:bg-diff-delete-code",
   "[&_.openresearch-diff-file_.diff-code]:py-0 [&_.openresearch-diff-file_.diff-code]:px-4",
   "[&_.openresearch-diff-file_.diff-code]:whitespace-pre",
   "[&_.openresearch-diff-file_.diff-code]:break-normal",
   "[&_.openresearch-diff-file_.diff-code]:wrap-normal",
-  "[&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t [&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t-[var(--openresearch-diff-divider-color)]",
+  "[&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t [&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t-border",
 ].join(" ");
 
 const HIGHLIGHT_MAX = 2000; // above this many changed lines, skip tokenizing
@@ -174,7 +163,7 @@ export function TruncatedDiffNotice({
   byteLimit: number;
 }) {
   return (
-    <div className="truncated-notice border border-accent-amber rounded-md bg-accent-amber-subtle py-3 px-3.5 text-md [&_h4]:mt-0 [&_h4]:mx-0 [&_h4]:mb-1 [&_h4]:text-md [&_h4]:text-accent-amber [&_p]:m-0 [&_p]:text-subtext">
+    <div className="truncated-notice border border-accent-amber rounded-md bg-accent-amber-subtle py-3 px-3.5 text-sm [&_h4]:mt-0 [&_h4]:mx-0 [&_h4]:mb-1 [&_h4]:text-sm [&_h4]:text-accent-amber [&_p]:m-0 [&_p]:text-subtext">
       <h4>{m.git_diff_diff_preview_truncated()}</h4>
       <p>
         {m.git_diff_truncated_detail({ limit: ltr(fmtBytes(byteLimit)), read: ltr(fmtBytes(bytesRead)) })}
@@ -205,7 +194,7 @@ function DiffFileCard({
   return (
     <section className={`diff-file-card overflow-hidden border border-border rounded-md bg-background [&.expanded_.diff-file-header]:border-b [&.expanded_.diff-file-header]:border-b-border ${expanded ? "expanded" : ""}`}>
       <button
-        className="diff-file-header sticky top-0 z-10 flex items-center justify-between gap-3 w-full text-start py-2 px-3 bg-canvas cursor-pointer [&_.chev]:text-muted [&_.chev]:text-2xs [&_.chev]:shrink-0 [&_.chev]:w-3 [&_.path]:flex [&_.path]:items-center [&_.path]:gap-2 [&_.path]:min-w-0 [&_.path]:flex-1 [&_.path_code]:min-w-0 [&_.path_code]:flex-1 [&_.path_code]:overflow-hidden [&_.path_code]:text-ellipsis [&_.path_code]:whitespace-nowrap [&_.path_code]:font-mono [&_.path_code]:text-xs [&_.path_code]:font-semibold [&_.path_code]:text-text [&_.stats]:flex [&_.stats]:items-center [&_.stats]:gap-2 [&_.stats]:shrink-0 [&_.stats]:font-mono [&_.stats]:text-2xs [&_.stats]:font-medium [&_.stats]:tabular-nums"
+        className="diff-file-header sticky top-0 z-10 flex items-center justify-between gap-3 w-full text-start py-2 px-3 bg-canvas cursor-pointer [&_.chev]:text-muted [&_.chev]:text-xs [&_.chev]:shrink-0 [&_.chev]:w-3 [&_.path]:flex [&_.path]:items-center [&_.path]:gap-2 [&_.path]:min-w-0 [&_.path]:flex-1 [&_.path_code]:min-w-0 [&_.path_code]:flex-1 [&_.path_code]:overflow-hidden [&_.path_code]:text-ellipsis [&_.path_code]:whitespace-nowrap [&_.path_code]:font-mono [&_.path_code]:text-xs [&_.path_code]:font-semibold [&_.path_code]:text-text [&_.stats]:flex [&_.stats]:items-center [&_.stats]:gap-2 [&_.stats]:shrink-0 [&_.stats]:font-mono [&_.stats]:text-xs [&_.stats]:font-medium [&_.stats]:tabular-nums"
         aria-expanded={expanded}
         onClick={() => setExpanded((e) => !e)}
       >
@@ -222,7 +211,7 @@ function DiffFileCard({
       </button>
       {expanded &&
         (file.hunks.length === 0 ? (
-          <div className="diff-empty py-2 px-3 text-muted text-md">{m.git_diff_no_textual_diff_for_this_file()}</div>
+          <div className="diff-empty py-2 px-3 text-muted text-sm">{m.git_diff_no_textual_diff_for_this_file()}</div>
         ) : (
           <div className="diff-file-body overflow-x-auto bg-background">
             <Diff
@@ -233,7 +222,7 @@ function DiffFileCard({
               renderGutter={renderUnifiedGutter}
               tokens={tokens}
               viewType="unified"
-            />
+           />
           </div>
         ))}
     </section>
@@ -248,7 +237,7 @@ function DiffFiles({ files, className }: { files: FileData[]; className?: string
           key={`${file.oldPath}→${file.newPath}#${i}`}
           file={file}
           defaultExpanded={i === 0}
-        />
+       />
       ))}
     </div>
   );
@@ -256,8 +245,8 @@ function DiffFiles({ files, className }: { files: FileData[]; className?: string
 
 export function GitDiff({ diff, className }: { diff: string; className?: string }) {
   const parsed = useMemo(() => parseDiffFiles(diff, false), [diff]);
-  if (parsed.failed) return <div className="diff-empty py-2 px-3 text-muted text-md">{m.git_diff_unable_to_parse_this_diff()}</div>;
-  if (parsed.files.length === 0) return <div className="diff-empty py-2 px-3 text-muted text-md">{m.git_diff_no_changes()}</div>;
+  if (parsed.failed) return <div className="diff-empty py-2 px-3 text-muted text-sm">{m.git_diff_unable_to_parse_this_diff()}</div>;
+  if (parsed.files.length === 0) return <div className="diff-empty py-2 px-3 text-muted text-sm">{m.git_diff_no_changes()}</div>;
   return <DiffFiles files={parsed.files} className={className} />;
 }
 
@@ -298,16 +287,16 @@ export function GitDiffExplorer({ diff, partial = false }: { diff: string; parti
 
   if (parsed.failed) {
     return (
-      <div className="diff-empty py-2 px-3 text-muted text-md">
+      <div className="diff-empty py-2 px-3 text-muted text-sm">
         {partial ? m.git_diff_no_complete_preview() : m.git_diff_parse_failed()}
       </div>
     );
   }
-  if (items.length === 0) return <div className="diff-empty py-2 px-3 text-muted text-md">{m.git_diff_no_changes()}</div>;
+  if (items.length === 0) return <div className="diff-empty py-2 px-3 text-muted text-sm">{m.git_diff_no_changes()}</div>;
 
   return (
     <div className="diff-explorer @container">
-      <div className="diff-explorer-toolbar flex items-center justify-between gap-3 mb-2.5 text-sm [&_button]:py-0.5 [&_button]:px-0 [&_button]:text-muted [&_button]:text-xs [&_button]:font-medium [&_button:hover]:text-text [&_button:hover]:underline [&_button:hover]:underline-offset-2">
+      <div className="diff-explorer-toolbar flex items-center justify-between gap-3 mb-2.5 text-sm [&_button]:py-0.5 [&_button]:px-0 [&_button]:text-muted [&_button]:text-sm [&_button]:font-medium [&_button:hover]:text-text [&_button:hover]:underline [&_button:hover]:underline-offset-2">
         <strong>
           {partial
             ? items.length === 1 ? m.git_diff_one_file_partial() : m.git_diff_files_partial({ count: fmtNumber(items.length) })
@@ -325,7 +314,7 @@ export function GitDiffExplorer({ diff, partial = false }: { diff: string; parti
         <DiffFiles files={files} />
       ) : (
         <div className="diff-explorer-layout grid grid-cols-[minmax(180px,_260px)_minmax(0,_1fr)] items-start gap-3.5 [@container((max-width:_960px))]:grid-cols-1">
-          <div className="diff-explorer-files sticky top-0 max-h-[min(70vh,_720px)] overflow-auto border border-border rounded-md bg-background [&_button]:grid [&_button]:grid-cols-[18px_minmax(0,_1fr)_auto_auto] [&_button]:items-center [&_button]:gap-[7px] [&_button]:w-full [&_button]:py-2 [&_button]:px-[9px] [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-start [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_button.active]:bg-surface [&_button.active]:shadow-[inset_2px_0_0_var(--text)] [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_code]:text-xs [@container((max-width:_960px))]:static [@container((max-width:_960px))]:max-h-55" aria-label={m.git_diff_changed_files()}>
+          <div className="diff-explorer-files sticky top-0 max-h-[min(70vh,_720px)] overflow-auto border border-border rounded-md bg-background [&_button]:grid [&_button]:grid-cols-[18px_minmax(0,_1fr)_auto_auto] [&_button]:items-center [&_button]:gap-[7px] [&_button]:w-full [&_button]:py-2 [&_button]:px-[9px] [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-text [&_button]:text-start [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_button.active]:bg-surface [&_button.active]:shadow-diff-active [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap [&_code]:text-xs [@container((max-width:_960px))]:static [@container((max-width:_960px))]:max-h-55" aria-label={m.git_diff_changed_files()}>
             {items.map((item) => (
               <button
                 type="button"
@@ -334,12 +323,12 @@ export function GitDiffExplorer({ diff, partial = false }: { diff: string; parti
                 aria-pressed={item.key === activeKey}
                 onClick={() => setSelectedKey(item.key)}
               >
-                <span className={`diff-file-status font-mono text-xs font-semibold text-muted [&.status-add]:text-accent-green [&.status-delete]:text-accent-red [&.status-rename]:text-accent-blue [&.status-copy]:text-accent-blue status-${item.file.type}`}>
+                <span className={`diff-file-status font-mono text-xs font-medium text-muted [&.status-add]:text-accent-green [&.status-delete]:text-accent-red [&.status-rename]:text-accent-blue [&.status-copy]:text-accent-blue status-${item.file.type}`}>
                   {fileStatus(item.file)}
                 </span>
                 <code title={formatDiffFilePath(item.file)}>{formatDiffFilePath(item.file)}</code>
-                <span className="diff-explorer-stat font-mono text-2xs diff-stat-add text-accent-green">+{item.changes.additions}</span>
-                <span className="diff-explorer-stat font-mono text-2xs diff-stat-del text-accent-red">−{item.changes.deletions}</span>
+                <span className="diff-explorer-stat font-mono text-xs diff-stat-add text-accent-green">+{item.changes.additions}</span>
+                <span className="diff-explorer-stat font-mono text-xs diff-stat-del text-accent-red">−{item.changes.deletions}</span>
               </button>
             ))}
           </div>
@@ -349,7 +338,7 @@ export function GitDiffExplorer({ diff, partial = false }: { diff: string; parti
                 key={selected.key}
                 file={selected.file}
                 defaultExpanded
-              />
+             />
             )}
           </div>
         </div>

@@ -1,0 +1,86 @@
+@layer base {
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--base);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.45;
+  overflow: hidden;
+}
+
+::selection {
+  background: var(--highlight);
+}
+
+.chat-thread-inner ::selection {
+  background: var(--chat-annotation-highlight);
+}
+
+::highlight(chat-annotations) {
+  background: var(--chat-annotation-highlight);
+}
+
+/* The editor stacks a transparent textarea over the highlighted code, so an
+   opaque selection would paint out the tokens underneath it. */
+.file-view-editarea::selection {
+  background: var(--editor-selection);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+input,
+textarea,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--base);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 6px 10px;
+  outline: none;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--text);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+}

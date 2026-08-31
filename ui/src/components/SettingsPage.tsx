@@ -4,6 +4,7 @@ import {
   ChevronDown,
   Cpu,
   ExternalLink,
+  Info,
   Monitor,
   Moon,
   Plus,
@@ -103,43 +104,43 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
-import { BADGE_CLASS_NAME, BUTTON_CLASS_NAME, ERROR_BADGE_CLASS_NAME, ICON_BUTTON_CLASS_NAME, MONO_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SETTINGS_LOADING_CLASS_NAME, SETTINGS_SWITCH_CLASS_NAME, SMALL_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, SUCCESS_BADGE_CLASS_NAME, WARNING_BADGE_CLASS_NAME } from "../styleClasses";
+import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
-  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md",
+  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
   "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
   "rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5",
-  "[&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text",
+  "[&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text",
   "[&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5",
   "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
 ].join(" ");
 
 const KV_CLASS_NAME = [
-  "kv grid grid-cols-[auto_1fr] gap-y-[3px] gap-x-3.5 text-md",
-  "[&_.k]:text-subtext [&_.v]:font-mono [&_.v]:text-sm",
+  "kv grid grid-cols-[auto_1fr] items-baseline gap-y-[3px] gap-x-3.5 text-base",
+  "[&_.k]:text-sm [&_.k]:text-subtext [&_.v]:text-base [&_.v]:text-text",
   "[&_.v]:break-all",
 ].join(" ");
 
 const COMPUTE_DETAILS_CLASS_NAME = [
-  "grid grid-cols-[9rem_minmax(0,1fr)] items-center gap-x-5 gap-y-2.5 font-sans text-md text-text",
-  "[&_.k]:font-medium [&_.k]:text-md [&_.k]:text-text",
+  "grid grid-cols-[9rem_minmax(0,1fr)] items-center gap-x-5 gap-y-2.5 font-sans text-base text-text",
+  "[&_.k]:font-medium [&_.k]:text-sm [&_.k]:text-text",
   "[&_.v]:min-w-0 [&_.v]:flex [&_.v]:items-center [&_.v]:flex-wrap [&_.v]:gap-2",
-  "[&_.v]:font-sans [&_.v]:text-md [&_.v]:text-text [&_.v]:break-words",
+  "[&_.v]:font-sans [&_.v]:text-base [&_.v]:text-text [&_.v]:break-words",
 ].join(" ");
 
 const COMPUTE_DIAGNOSTIC_CLASS_NAME =
-  "mt-3 mx-0 mb-0 ps-3 border-s-2 border-s-accent-red font-sans text-md leading-relaxed text-text whitespace-pre-wrap";
+  "mt-3 mx-0 mb-0 ps-3 border-s-2 border-s-accent-red font-sans text-base leading-relaxed text-text whitespace-pre-wrap";
 
 const SETTINGS_NOTE_CLASS_NAME = [
-  "settings-note mt-2.5 mx-0 mb-0 text-sm py-2 px-2.5",
+  "settings-note mt-2.5 mx-0 mb-0 text-base py-2 px-2.5",
   "border border-accent-amber rounded-md bg-accent-amber-subtle",
   "text-accent-amber font-medium",
 ].join(" ");
 
 const FORM_CLASS_NAME = [
-  "form font-sans text-md text-text [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
-  "[&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3 [&_.repo-hint]:font-mono",
-  "[&_.repo-hint]:font-normal [&_.repo-hint]:text-xs",
+  "form font-sans text-sm text-text [&_.form-seg]:self-start [&_.form-seg]:mb-0.5",
+  "[&_.form-seg_button]:py-[5px] [&_.form-seg_button]:px-3",
+  "[&_.repo-hint]:font-normal [&_.repo-hint]:text-sm",
   "[&_.repo-hint]:text-muted [&_.repo-hint.ok]:text-accent-teal",
   "[&_.folder-picker-control]:flex [&_.folder-picker-control]:items-center",
   "[&_.folder-picker-control]:gap-[9px] [&_.folder-picker-control]:w-full",
@@ -150,7 +151,7 @@ const FORM_CLASS_NAME = [
   "[&_.folder-picker-control]:text-start",
   "[&_.folder-picker-control]:transition-[border-color,box-shadow] [&_.folder-picker-control]:duration-120 [&_.folder-picker-control]:ease-standard",
   "[&_.folder-picker-control:hover:not(:disabled)]:border-muted",
-  "[&_.folder-picker-control:hover:not(:disabled)]:shadow-[0_2px_8px_rgb(0_0_0_/_5%)]",
+  "[&_.folder-picker-control:hover:not(:disabled)]:shadow-control-subtle",
   "[&_.folder-picker-control:focus-visible]:outline-2 [&_.folder-picker-control:focus-visible]:outline-solid [&_.folder-picker-control:focus-visible]:outline-text",
   "[&_.folder-picker-control:focus-visible]:outline-offset-2 [&_.folder-picker-control_span]:flex-1",
   "[&_.folder-picker-control_span]:min-w-0 [&_.folder-picker-control_span]:overflow-hidden",
@@ -164,8 +165,8 @@ const FORM_CLASS_NAME = [
   "[&_.project-location-field]:flex [&_.project-location-field]:flex-col",
   "[&_.project-location-field]:gap-2 [&_.project-location-label]:text-text",
   "[&_.project-location-label]:text-base",
-  "[&_.project-location-label]:font-semibold [&_.project-field-label]:text-text",
-  "[&_.project-field-label]:text-base [&_.project-field-label]:font-semibold",
+  "[&_.project-location-label]:font-medium [&_.project-field-label]:text-text",
+  "[&_.project-field-label]:text-base [&_.project-field-label]:font-medium",
   "[&_.folder-picker-control:disabled]:cursor-default [&_.folder-picker-control:disabled]:opacity-65",
   "[&_.paper-destination]:flex [&_.paper-destination]:items-center",
   "[&_.paper-destination]:gap-2.5 [&_.paper-destination]:pt-2 [&_.paper-destination]:pe-2 [&_.paper-destination]:pb-2 [&_.paper-destination]:ps-3",
@@ -178,9 +179,9 @@ const FORM_CLASS_NAME = [
   "[&_.paper-destination_.btn]:flex-none [&_.project-path-notice]:py-[9px] [&_.project-path-notice]:px-[11px]",
   "[&_.project-path-notice]:border [&_.project-path-notice]:border-border-variant",
   "[&_.project-path-notice]:rounded-sm [&_.project-path-notice]:bg-surface",
-  "[&_.project-path-notice]:text-subtext [&_.project-path-notice]:text-sm",
+  "[&_.project-path-notice]:text-base [&_.project-path-notice]:leading-relaxed [&_.project-path-notice]:text-text",
   "[&_.project-path-notice]:leading-[1.4]",
-  "[&_.project-path-notice.error]:border-[color-mix(in_srgb,_var(--accent-red)_35%,_var(--border-variant))]",
+  "[&_.project-path-notice.error]:border-danger-notice-border",
   "[&_.paper-results]:flex [&_.paper-results]:flex-col",
   "[&_.paper-results]:border [&_.paper-results]:border-border [&_.paper-results]:rounded-md",
   "[&_.paper-results]:max-h-60 [&_.paper-results]:overflow-y-auto",
@@ -192,15 +193,15 @@ const FORM_CLASS_NAME = [
   "[&_.paper-results_button]:text-start [&_.paper-results_button]:[font:inherit]",
   "[&_.paper-results_button]:text-text [&_.paper-results_button]:cursor-pointer",
   "[&_.paper-results_button:last-child]:border-b-0",
-  "[&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-md",
-  "[&_.paper-results_.title]:font-medium [&_.paper-results_.id]:font-mono",
+  "[&_.paper-results_button:hover]:bg-surface [&_.paper-results_.title]:text-sm",
+  "[&_.paper-results_.title]:font-medium",
   "[&_.paper-results_.id]:text-xs [&_.paper-results_.id]:text-muted",
-  "[&_.paper-pick_.id]:font-mono [&_.paper-pick_.id]:text-xs",
+  "[&_.paper-pick_.id]:text-xs",
   "[&_.paper-pick_.id]:text-muted [&_.paper-pick]:flex [&_.paper-pick]:items-center",
   "[&_.paper-pick]:justify-between [&_.paper-pick]:gap-2.5 [&_.paper-pick]:py-2.5 [&_.paper-pick]:px-3",
   "[&_.paper-pick]:border [&_.paper-pick]:border-border [&_.paper-pick]:rounded-md",
   "[&_.paper-pick]:bg-surface [&_.paper-pick_.meta]:min-w-0",
-  "[&_.paper-pick_.title]:text-md [&_.paper-pick_.title]:font-semibold",
+  "[&_.paper-pick_.title]:text-sm [&_.paper-pick_.title]:font-medium",
   "flex flex-col gap-2.5 [&_label]:flex [&_label]:flex-col",
   "[&_label]:gap-1 [&_label]:text-sm [&_label]:text-text",
   "[&_label]:font-medium [&_.row2]:grid [&_.row2]:grid-cols-2",
@@ -208,31 +209,29 @@ const FORM_CLASS_NAME = [
   "[&_select]:font-sans [&_select]:text-sm [&_select]:font-normal [&_select]:text-text",
   "[&_.row2]:gap-2.5 [&_.actions]:flex [&_.actions]:justify-end",
   "[&_.actions]:gap-2.5 [&_.actions]:mt-1.5 [&_.new-project-actions]:justify-start",
-  "[&_.new-project-actions]:mt-2.5 [&_.new-project-actions_.primary]:ms-auto",
-  "[&_.error]:text-accent-red [&_.error]:text-md [&_.error]:whitespace-pre-wrap",
+  "[&_.new-project-actions]:mt-2.5",
+  "[&_.error]:text-accent-red [&_.error]:text-base [&_.error]:whitespace-pre-wrap",
   "settings-form mt-3.5 pt-3.5 border-t border-t-border",
 ].join(" ");
 
 const PROJECT_DEFAULT_ROW_CLASS_NAME = [
   "project-default-row flex items-center justify-between gap-6",
   "pt-3.5 border-t border-t-border-variant [&_p]:mt-[3px] [&_p]:mx-0 [&_p]:mb-0",
-  "[&_p]:text-muted [&_p]:text-sm",
+  "[&_.project-default-title]:text-base [&_p]:text-sm [&_p]:leading-relaxed [&_p]:text-text",
 ].join(" ");
 
 const GIT_SETTINGS_CARD_CLASS_NAME = [
-  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md",
+  "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
   "[&_>_.error]:whitespace-pre-wrap bg-background border border-border",
-  "rounded-lg mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm",
+  "rounded-lg mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-base",
   "[&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3",
   "[&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0",
   "git-settings-card py-3.5 px-4 [&_h3]:mb-3",
   "[&_.kv]:grid-cols-[132px_minmax(0,_1fr)] [&_.kv]:items-center [&_.kv]:gap-y-[9px] [&_.kv]:gap-x-4.5",
   "[&_.kv_.k]:text-sm [&_.kv_.v]:flex [&_.kv_.v]:items-center",
   "[&_.kv_.v]:flex-wrap [&_.kv_.v]:gap-[7px] [&_.kv_.v]:min-w-0 [&_.kv_.v]:font-sans",
-  "[&_.kv_.v]:text-md [&_.kv_.v]:break-normal [&_.kv_.v.mono]:font-mono",
-  "[&_.kv_.v.mono]:text-sm [&_.kv_.v_.mono]:font-mono",
-  "[&_.kv_.v_.mono]:text-sm [&_.kv_.k.mono]:font-mono",
-  "[&_.kv_.k.mono]:text-sm [@media((max-width:_640px))]:[&_.kv]:grid-cols-1",
+  "[&_.kv_.v]:text-base [&_.kv_.v]:break-normal",
+  "[@media((max-width:_640px))]:[&_.kv]:grid-cols-1",
   "[@media((max-width:_640px))]:[&_.kv]:gap-[3px] [@media((max-width:_640px))]:[&_.kv_.v_+_.k]:mt-[7px]",
 ].join(" ");
 
@@ -259,15 +258,15 @@ type Tab = SettingsTab;
 
 // --- harnesses ---------------------------------------------------------------
 
-function harnessStatus(h: Harness): { cls: string; label: string } {
-  if (h.agentReady) return { cls: "ok", label: m.settings_page_signed_in() };
+function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
+  if (h.agentReady) return { cls: "ok", variant: "success", label: m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
-  if (!h.installed) return { cls: "warn", label: m.settings_page_not_installed() };
-  if (h.installBroken) return { cls: "warn", label: m.settings_page_install_broken() };
-  if (h.authState === "unknown") return { cls: "warn", label: m.settings_page_unable_to_verify() };
-  if (h.authState === "unsupported") return { cls: "warn", label: m.settings_page_update_required() };
-  return { cls: "warn", label: m.settings_page_not_signed_in() };
+  if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
+  if (h.installBroken) return { cls: "warn", variant: "warning", label: m.settings_page_install_broken() };
+  if (h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  if (h.authState === "unsupported") return { cls: "warn", variant: "warning", label: m.settings_page_update_required() };
+  return { cls: "warn", variant: "warning", label: m.settings_page_not_signed_in() };
 }
 
 function AuthLabel({ h }: { h: Harness }) {
@@ -295,10 +294,7 @@ function HarnessesTab() {
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        {m.settings_page_coding_agent_setups_detected_on_this_machine_the()}
-      </p>
-      <div className="harness-tabs flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-md [&_button]:font-semibold [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
+      <div className="harness-tabs mt-3 flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
         {(harnesses ?? []).map((x) => (
           <button
             key={x.id}
@@ -306,22 +302,22 @@ function HarnessesTab() {
             onClick={() => setActive(x.id)}
           >
             {x.name}
-            <span className={`harness-dot w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
+            <span className={`w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
           </button>
         ))}
       </div>
       {!harnesses ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_detecting_harnesses()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_detecting_harnesses()}
+        </LoadingRow>
       ) : !h ? null : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
-            <span className={`${BADGE_CLASS_NAME} ${harnessStatus(h).cls}`}>{harnessStatus(h).label}</span>
-            <div className="spacer" style={{ flex: 1 }} />
-            <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => load(true, true)} disabled={refreshing}>
-              <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-            </button>
+            <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
+            <div className="spacer flex-1" />
+            <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
+              <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+            </Button>
           </div>
           <div className={KV_CLASS_NAME}>
             <span className="k">{m.settings_page_binary()}</span>
@@ -367,12 +363,12 @@ function HarnessesTab() {
 // --- compute (kubernetes) -------------------------------------------------------
 
 function K8sHealthBadge({ s }: { s: K8sSettings }) {
-  if (!s.configured) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_configured()}</span>;
+  if (!s.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
   const p = s.preflight;
-  if (!p.kubectlFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_kubectl_not_found()}</span>;
-  if (!p.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_cluster_unreachable()}</span>;
-  if (!p.canCreateJobs) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_job_create_permission()}</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
+  if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
+  if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
+  if (!p.canCreateJobs) return <Badge variant="error">{m.settings_page_no_job_create_permission()}</Badge>;
+  return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
 function K8sSection() {
@@ -419,9 +415,9 @@ function K8sSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_kubectl()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_checking_kubectl()}
+        </LoadingRow>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
@@ -453,7 +449,7 @@ function K8sSection() {
                   dropDown
                   disabled={saving}
                   onSelect={setContext}
-                />
+               />
               </label>
               <label>
                 {m.settings_page_namespace()}
@@ -464,19 +460,19 @@ function K8sSection() {
                   placeholder={m.settings_page_default()}
                   autoComplete="off"
                   spellCheck={false}
-                />
+               />
               </label>
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">
-              <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
+              <Button variant="primary" type="submit" disabled={saving || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
-              </button>
+              </Button>
             </div>
           </form>
           <section className="mt-7">
-            <h3 className="mt-0 mx-0 mb-1.5 text-md font-semibold text-text">{m.settings_page_run_manifest()}</h3>
-            <p className="m-0 font-sans text-md leading-relaxed text-text">
+            <h3 className="mt-0 mx-0 mb-1.5 text-base font-semibold text-text">{m.settings_page_run_manifest()}</h3>
+            <p className="m-0 font-sans text-sm leading-relaxed text-text">
               {m.settings_manifest_description({ placeholder: ltr("{{ORX_RUN}}"), command: ltr("--manifest <path>") })}
             </p>
           </section>
@@ -495,12 +491,12 @@ const MODAL_TOKEN_LABELS: Record<ModalTokenSource, () => string> = {
 };
 
 function ModalBadge({ s }: { s: ModalSettings }) {
-  if (s.ready) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
-  if (!s.tokenConfigured && !s.modalImportable) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_set_up()}</span>;
+  if (s.ready) return <Badge variant="success">{m.settings_page_connected()}</Badge>;
+  if (!s.tokenConfigured && !s.modalImportable) return <Badge>{m.settings_page_not_set_up()}</Badge>;
   if (!s.modalImportable)
-    return <span className={ERROR_BADGE_CLASS_NAME}>{s.envProvisioned ? m.settings_env_broken() : m.settings_env_not_built()}</span>;
-  if (!s.tokenConfigured) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_token()}</span>;
-  return <span className={BADGE_CLASS_NAME}>{m.settings_page_unknown()}</span>;
+    return <Badge variant="error">{s.envProvisioned ? m.settings_env_broken() : m.settings_env_not_built()}</Badge>;
+  if (!s.tokenConfigured) return <Badge variant="error">{m.settings_page_no_token()}</Badge>;
+  return <Badge>{m.settings_page_unknown()}</Badge>;
 }
 
 function ModalSection() {
@@ -533,9 +529,9 @@ function ModalSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !s ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_modal()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_checking_modal()}
+        </LoadingRow>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
@@ -567,9 +563,9 @@ function ModalSection() {
           {error && <div className="error">{error}</div>}
           {!s.modalImportable && (
             <div className="mt-6 flex justify-end">
-              <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void provision()} disabled={provisioning}>
+              <Button variant="primary" onClick={() => void provision()} disabled={provisioning}>
                 {provisioning ? m.settings_setting_up_environment() : m.settings_set_up_environment()}
-              </button>
+              </Button>
             </div>
           )}
         </>
@@ -583,27 +579,27 @@ function ModalSection() {
 type HostTest = "testing" | SshPreflight;
 
 function HostTestCell({ test }: { test: HostTest | undefined }) {
-  if (test === undefined) return <span className="block text-start text-[12px] text-text">{m.settings_page_not_checked()}</span>;
+  if (test === undefined) return <span className="block text-start text-sm text-text">{m.settings_page_not_checked()}</span>;
   if (test === "testing")
     return (
-      <span className="inline-flex items-center gap-1.5 text-text text-xs" role="status">
-        <span className={SPINNER_CLASS_NAME} aria-hidden="true" /> {m.settings_page_testing()}
+      <span className="inline-flex items-center gap-1.5 text-text text-sm" role="status">
+        <Spinner aria-hidden="true" /> {m.settings_page_testing()}
       </span>
     );
   const missingTools = test.missingTools ?? [];
   const badge = !test.reachable ? (
-    <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>
+    <Badge variant="error">{m.settings_page_failed()}</Badge>
   ) : !test.toolsFound ? (
-    <span className={ERROR_BADGE_CLASS_NAME}>
+    <Badge variant="error">
       {missingTools.length === 1 ? m.settings_needs_tool({ tool: ltr(missingTools[0]) }) : m.settings_needs_tools()}
-    </span>
+    </Badge>
   ) : (
-    <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_ready()}</span>
+    <Badge variant="success">{m.settings_page_ready()}</Badge>
   );
   return (
     <div role="status">
       {badge}
-      <span className="ssh-tested-at block mt-2 text-[12px] text-text">{timeAgo(test.testedAt)}</span>
+      <span className="ssh-tested-at block mt-2 text-xs text-text">{timeAgo(test.testedAt)}</span>
     </div>
   );
 }
@@ -647,11 +643,11 @@ function SshSection() {
   return (
     <>
       {hosts === null ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_reading_ssh_config()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_reading_ssh_config()}
+        </LoadingRow>
       ) : hosts.length === 0 ? (
-        <p className="settings-empty text-muted text-md mt-1 mx-0 mb-0">{m.settings_page_no_hosts_found_in_ssh_config()}</p>
+        <p className="settings-empty mt-1 mx-0 mb-0 text-base text-subtext">{m.settings_page_no_hosts_found_in_ssh_config()}</p>
       ) : (
         <div className="border-y border-border-variant divide-y divide-border-variant">
           {hosts.map((h) => {
@@ -681,20 +677,20 @@ function SshSection() {
                       <ChevronDown
                         size={15}
                         className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
-                      />
+                     />
                     </button>
                     <div className="min-w-0">
                       <div className="truncate text-base font-medium text-text" title={h.host}>{h.host}</div>
-                      <div className="mt-1 truncate font-mono text-sm text-muted" title={address}>{address}</div>
+                      <div className="mt-1 truncate text-sm text-subtext" title={address}>{address}</div>
                     </div>
                   </div>
                   <div className="grid flex-none grid-cols-[6rem_5rem] items-center gap-x-[clamp(1rem,2vw,2.5rem)]">
                     <div className="text-start">
                       <HostTestCell test={hostTest} />
                     </div>
-                    <button
+                    <Button size="small"
                       type="button"
-                      className={`${SMALL_BUTTON_CLASS_NAME} justify-self-end`}
+                      className="justify-self-end"
                       onClick={(event) => {
                         event.stopPropagation();
                         void test(h.host);
@@ -702,20 +698,20 @@ function SshSection() {
                       disabled={testing}
                     >
                       {testing ? m.settings_testing() : hostTest ? m.settings_retest() : m.settings_test()}
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 {open && (
                   <div className="border-t border-t-border-variant py-3 pe-2 ps-10">
                     <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
                       <dt className="text-sm font-medium text-subtext">{m.settings_page_identity()}</dt>
-                      <dd className={`m-0 text-sm text-text wrap-anywhere${h.identityFile ? " font-mono" : ""}`}>
+                      <dd className="m-0 text-base text-text wrap-anywhere">
                         {h.identityFile ?? m.settings_ssh_defaults()}
                       </dd>
                       {hostTest !== "testing" && hostTest?.error && (
                         <>
                           <dt className="text-sm font-medium text-subtext">{m.settings_page_last_error()}</dt>
-                          <dd className="m-0 text-sm leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
+                          <dd className="m-0 text-base leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
                             {hostTest.error}
                           </dd>
                         </>
@@ -737,11 +733,11 @@ function SshSection() {
 /** First failing check wins, like K8sHealthBadge. */
 function SlurmTestBadge({ test }: { test: "testing" | SlurmPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <span className={BADGE_CLASS_NAME}>{m.settings_page_testing()}</span>;
-  if (!test.reachable) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>;
-  if (!test.slurmFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_slurm_cli()}</span>;
-  if (!test.toolsFound) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_missing_bash_tar()}</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_ready()}</span>;
+  if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
+  if (!test.reachable) return <Badge variant="error">{m.settings_page_failed()}</Badge>;
+  if (!test.slurmFound) return <Badge variant="error">{m.settings_page_no_slurm_cli()}</Badge>;
+  if (!test.toolsFound) return <Badge variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
+  return <Badge variant="success">{m.settings_page_ready()}</Badge>;
 }
 
 function SlurmSection() {
@@ -818,9 +814,9 @@ function SlurmSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_slurm_settings()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading_slurm_settings()}
+        </LoadingRow>
       ) : (
         <>
           {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
@@ -850,7 +846,7 @@ function SlurmSection() {
                     setHost(id);
                     setTest(null); // a badge earned by cluster A must not vouch for cluster B
                   }}
-                />
+               />
               </label>
               <label>
                 {m.settings_page_partition()}
@@ -862,7 +858,7 @@ function SlurmSection() {
                   placeholder={m.settings_page_cluster_default()}
                   autoComplete="off"
                   spellCheck={false}
-                />
+               />
                 <datalist id="slurm-partitions">
                   {preflight?.partitions.map((p) => <option key={p} value={p} />)}
                 </datalist>
@@ -878,7 +874,7 @@ function SlurmSection() {
                   placeholder={m.settings_page_cluster_default()}
                   autoComplete="off"
                   spellCheck={false}
-                />
+               />
               </label>
               <label>
                 {m.settings_page_time_limit()}
@@ -889,23 +885,23 @@ function SlurmSection() {
                   placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
                   autoComplete="off"
                   spellCheck={false}
-                />
+               />
               </label>
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">
-              <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
+              <Button variant="primary" type="submit" disabled={saving || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className={BUTTON_CLASS_NAME}
+
                 onClick={() => void runPreflight(host)}
                 disabled={!host || test === "testing"}
                 title={host ? undefined : m.settings_pick_login_node()}
               >
                 {m.settings_page_test_connection()}
-              </button>
+              </Button>
               <SlurmTestBadge test={test} />
             </div>
           </form>
@@ -970,9 +966,9 @@ function RaySection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_ray_settings()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading_ray_settings()}
+        </LoadingRow>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
@@ -1001,21 +997,21 @@ function RaySection() {
                 placeholder="http://127.0.0.1:8265"
                 autoComplete="off"
                 spellCheck={false}
-              />
+             />
             </label>
             {error && <div className="error">{error}</div>}
             <div className="actions">
-              <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving || unchanged}>
+              <Button variant="primary" type="submit" disabled={saving || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
-              </button>
-              <button
+              </Button>
+              <Button
                 type="button"
-                className={BUTTON_CLASS_NAME}
+
                 onClick={() => void runPreflight()}
                 disabled={test === "testing"}
               >
                 {m.settings_page_test_connection()}
-              </button>
+              </Button>
               <RayTestBadge test={test} />
             </div>
           </form>
@@ -1027,9 +1023,9 @@ function RaySection() {
 
 function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <span className={BADGE_CLASS_NAME}>{m.settings_page_testing()}</span>;
-  if (test.reachable) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_reachable()}</span>;
-  return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_failed()}</span>;
+  if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
+  if (test.reachable) return <Badge variant="success">{m.settings_page_reachable()}</Badge>;
+  return <Badge variant="error">{m.settings_page_failed()}</Badge>;
 }
 
 // --- compute (local) --------------------------------------------------------------
@@ -1049,9 +1045,9 @@ function LocalSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !hw ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_detecting_hardware()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_detecting_hardware()}
+        </LoadingRow>
       ) : (
         <div className={COMPUTE_DETAILS_CLASS_NAME}>
           <span className="k">{m.settings_page_hostname()}</span>
@@ -1099,9 +1095,9 @@ function OpenResearchSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !s ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_credentials()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_checking_credentials()}
+        </LoadingRow>
       ) : !s.loggedIn ? (
         <p className={SETTINGS_NOTE_CLASS_NAME}>
           {m.settings_login_help({ command: ltr("orx login") })}
@@ -1111,20 +1107,20 @@ function OpenResearchSection() {
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_signed_in()}</span>
+              <Badge variant="success">{m.settings_page_signed_in()}</Badge>
             </span>
             <span className="k">{m.settings_page_orgs()}</span>
             <span className="v">{s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
               {s.sshKeyStatus === "matched" ? (
-                <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_on_this_computer()}</span>
+                <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
-                <span className={WARNING_BADGE_CLASS_NAME}>{m.settings_page_not_on_this_computer()}</span>
+                <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "none_registered" ? (
-                <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_none_registered()}</span>
+                <Badge variant="error">{m.settings_page_none_registered()}</Badge>
               ) : (
-                <span className={BADGE_CLASS_NAME}>{m.settings_page_unknown()}</span>
+                <Badge>{m.settings_page_unknown()}</Badge>
               )}
             </span>
           </div>
@@ -1236,10 +1232,10 @@ function targetConnection(target: ComputeTargetSummary): string {
 function BackendOverview({ target }: { target: ComputeTargetSummary }) {
   return (
     <dl className="m-0 mt-8 grid grid-cols-[9rem_minmax(0,1fr)] gap-x-5 gap-y-4 font-sans">
-      <dt className="text-md font-medium text-subtext">{m.settings_page_how_it_connects()}</dt>
-      <dd className="m-0 text-md leading-relaxed text-text">{targetConnection(target)}</dd>
-      <dt className="text-md font-medium text-subtext">{m.settings_page_what_happens()}</dt>
-      <dd className="m-0 text-md leading-relaxed text-text">{TARGET_USAGE[target.id]()}</dd>
+      <dt className="text-sm font-medium text-subtext">{m.settings_page_how_it_connects()}</dt>
+      <dd className="m-0 text-base leading-relaxed text-text">{targetConnection(target)}</dd>
+      <dt className="text-sm font-medium text-subtext">{m.settings_page_what_happens()}</dt>
+      <dd className="m-0 text-base leading-relaxed text-text">{TARGET_USAGE[target.id]()}</dd>
     </dl>
   );
 }
@@ -1372,7 +1368,7 @@ function DefaultDestinationEditor({
               return target ? <BackendLogo kind={TARGET_KIND[target.id]} size={16} /> : null;
             }}
             onSelect={changeBackend}
-          />
+         />
           {flavored && (
             <div>
               {customFlavor ? (
@@ -1397,7 +1393,7 @@ function DefaultDestinationEditor({
                     autoComplete="off"
                     spellCheck={false}
                     disabled={saving}
-                  />
+                 />
                   <button
                     type="button"
                     className="absolute inset-y-0 end-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
@@ -1430,7 +1426,7 @@ function DefaultDestinationEditor({
                   dropDown
                   disabled={saving}
                   onSelect={changeFlavor}
-                />
+               />
               )}
             </div>
           )}
@@ -1442,7 +1438,7 @@ function DefaultDestinationEditor({
           </p>
         )}
       </div>
-      <p className="mt-2 mb-0 text-sm text-subtext">{helperText}</p>
+      <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{helperText}</p>
     </section>
   );
 }
@@ -1475,10 +1471,10 @@ function TargetTile({
         <BackendLogo kind={TARGET_KIND[target.id]} size={48} />
       </span>
       <span className="mt-5 text-lg font-semibold text-text">{TARGET_LABELS[target.id]()}</span>
-      <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-subtext">
+      <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-text">
         {TARGET_CARD_DESCRIPTIONS[target.id]()}
       </span>
-      <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-md">
+      <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
         <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
           {isDefault ? m.settings_page_default_808d7dc() : target.configured ? m.settings_view_settings() : setupLabel}
         </span>
@@ -1503,7 +1499,7 @@ function BackendDetailPage({
     <>
       <button
         type="button"
-        className="settings-back mb-10 inline-flex items-center gap-2 text-md font-medium text-subtext hover:text-text"
+        className="settings-back mb-10 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text"
         onClick={onBack}
       >
         <ArrowLeft size={16} /> {m.settings_page_back_to_compute()}
@@ -1516,14 +1512,14 @@ function BackendDetailPage({
           <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
-          <span className="inline-flex flex-none items-center rounded-sm border border-primary bg-primary-subtle py-px px-2 text-xs font-medium text-primary">
+          <Badge className="flex-none border-primary bg-primary-subtle text-primary">
             {m.settings_page_default_808d7dc()}
-          </span>
+          </Badge>
         )}
       </div>
       <BackendOverview target={target} />
       {target.id !== "tinker" && (
-        <div className="mt-8 font-sans text-md text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
+        <div className="mt-8 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
           {target.id === "local" && <LocalSection />}
           {target.id === "hf" && <HfSection />}
           {target.id === "modal" && <ModalSection />}
@@ -1605,7 +1601,7 @@ function ComputeTab({
       target={target}
       isDefault={defaultBackend === target.id}
       onOpen={() => setSelectedTarget(target.id)}
-    />
+   />
   );
   const selected = selectedTarget
     ? settings?.targets.find((target) => target.id === selectedTarget)
@@ -1617,23 +1613,23 @@ function ComputeTab({
         target={selected}
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
-      />
+     />
     );
   }
 
   return (
     <>
       <h1>{m.settings_page_compute()}</h1>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_page_connect_compute_backends_and_choose_where_new_runs()}
       </p>
       <ComputeActivity projectId={project?.id} onViewHistory={onViewHistory} />
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_checking_compute_targets()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_checking_compute_targets()}
+        </LoadingRow>
       ) : (
         <>
           {error && <div className="error">{error}</div>}
@@ -1641,7 +1637,7 @@ function ComputeTab({
             settings={settings}
             projectId={project?.id}
             onSaved={apply}
-          />
+         />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1671,18 +1667,18 @@ const SOURCE_LABELS: Record<HfTokenSource, () => string> = {
 };
 
 function HfStatusBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured) return <span className={BADGE_CLASS_NAME}>{m.settings_page_not_configured()}</span>;
-  if (!settings.valid) return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_invalid_token()}</span>;
-  return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_connected()}</span>;
+  if (!settings.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
+  if (!settings.valid) return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
+  return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
 /** Jobs-permission detail only — configured/valid state is HfStatusBadge's job. */
 function HfJobsBadge({ settings }: { settings: HfSettings }) {
   if (!settings.configured || !settings.valid) return null;
-  if (settings.jobsWrite === true) return <span className={SUCCESS_BADGE_CLASS_NAME}>{m.settings_page_jobs_write_ok()}</span>;
+  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_jobs_write_ok()}</Badge>;
   if (settings.jobsWrite === false)
-    return <span className={ERROR_BADGE_CLASS_NAME}>{m.settings_page_no_job_write_permission()}</span>;
-  return <span className={BADGE_CLASS_NAME}>{m.settings_page_jobs_permission_unknown()}</span>;
+    return <Badge variant="error">{m.settings_page_no_job_write_permission()}</Badge>;
+  return <Badge>{m.settings_page_jobs_permission_unknown()}</Badge>;
 }
 
 function HfSection() {
@@ -1729,9 +1725,9 @@ function HfSection() {
       {loadError ? (
         <div className="error">{loadError}</div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading_status()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading_status()}
+        </LoadingRow>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
@@ -1774,13 +1770,13 @@ function HfSection() {
             onChange={(e) => setToken(e.target.value)}
             placeholder={m.settings_page_hf()}
             autoComplete="off"
-          />
+         />
         </label>
         {error && <div className="error">{error}</div>}
         <div className="actions">
-          <button type="submit" className={PRIMARY_BUTTON_CLASS_NAME} disabled={!token.trim() || saving}>
+          <Button variant="primary" type="submit" disabled={!token.trim() || saving}>
             {saving ? m.settings_validating() : m.common_save()}
-          </button>
+          </Button>
         </div>
       </form>
     </>
@@ -1811,24 +1807,23 @@ function HfHintRow() {
 // shown as rows alongside custom variables.
 const RECOMMENDED_ENV_KEYS = ["TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"];
 
+function showEnvError(name: string, err: unknown) {
+  const message = err instanceof Error ? err.message : String(err);
+  showAlert(message.includes(name) ? message : `${name}: ${message}`, "error");
+}
+
 /** One variable row. Set: masked value + delete. Unset: inline value input. */
 function EnvRow({
   name,
   entry,
   onVars,
-  onError,
 }: {
   name: string;
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
-  onError: (msg: string) => void;
 }) {
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
-
-  // Errors share one card-level slot, so name the row they came from.
-  const fail = (err: unknown) =>
-    onError(`${name}: ${err instanceof Error ? err.message : String(err)}`);
 
   async function save() {
     if (!value.trim() || saving) return;
@@ -1837,7 +1832,7 @@ function EnvRow({
       onVars(await setEnvVar(name, value.trim()));
       setValue("");
     } catch (err) {
-      fail(err);
+      showEnvError(name, err);
     } finally {
       setSaving(false);
     }
@@ -1849,7 +1844,7 @@ function EnvRow({
     try {
       onVars(await deleteEnvVar(name));
     } catch (err) {
-      fail(err);
+      showEnvError(name, err);
     } finally {
       setSaving(false);
     }
@@ -1858,16 +1853,17 @@ function EnvRow({
   return (
     <>
       <tr>
-        <td className={MONO_CLASS_NAME}>{name}</td>
-        <td className={`${MONO_CLASS_NAME} muted text-muted`}>
+        <td className="font-mono text-sm">{name}</td>
+        <td className="text-base text-subtext">
           {entry ? (
             <>
               {entry.maskedValue}
-              {entry.inProcessEnv && <span className={BADGE_CLASS_NAME}>{m.settings_page_overridden_by_env()}</span>}
+              {entry.inProcessEnv && <Badge>{m.settings_page_overridden_by_env()}</Badge>}
             </>
           ) : (
-            <input
-              className={MONO_CLASS_NAME}
+            <Input
+              variant="inline"
+              className="text-base"
               type="password"
               value={value}
               onChange={(e) => setValue(e.target.value)}
@@ -1882,25 +1878,25 @@ function EnvRow({
               aria-label={m.a11y_value_for({ name: ltr(name) })}
               autoComplete="new-password"
               disabled={saving}
-            />
+           />
           )}
         </td>
         <td>
           {entry ? (
-            <button
-              className={ICON_BUTTON_CLASS_NAME}
+            <IconButton
+              className="[&:hover:not(:disabled)]:text-accent-red"
               title={m.a11y_delete_item({ name: ltr(name) })}
               aria-label={m.a11y_delete_item({ name: ltr(name) })}
               onClick={() => void remove()}
               disabled={saving}
             >
               <Trash2 size={13} />
-            </button>
+            </IconButton>
           ) : (
             value.trim() && (
-              <button className={SMALL_BUTTON_CLASS_NAME} onClick={() => void save()} disabled={saving}>
+              <Button size="small" onClick={() => void save()} disabled={saving}>
                 {saving ? m.common_saving() : m.common_save()}
-              </button>
+              </Button>
             )
           )}
         </td>
@@ -1913,11 +1909,9 @@ function EnvRow({
 /** The in-table row for a new custom variable (opened by “Add variable”). */
 function AddVarRow({
   onVars,
-  onError,
   onDone,
 }: {
   onVars: (vars: EnvVar[]) => void;
-  onError: (msg: string) => void;
   onDone: () => void;
 }) {
   const [key, setKey] = useState("");
@@ -1931,7 +1925,7 @@ function AddVarRow({
       onVars(await setEnvVar(key.trim(), value.trim()));
       onDone();
     } catch (err) {
-      onError(`${key.trim()}: ${err instanceof Error ? err.message : String(err)}`);
+      showEnvError(key.trim(), err);
     } finally {
       setSaving(false);
     }
@@ -1949,9 +1943,10 @@ function AddVarRow({
     <>
       <tr>
         <td>
-          <input
+          <Input
             autoFocus
-            className={MONO_CLASS_NAME}
+            variant="inline"
+            className="font-mono text-sm"
             type="text"
             value={key}
             onChange={(e) => setKey(e.target.value)}
@@ -1961,11 +1956,12 @@ function AddVarRow({
             autoComplete="off"
             spellCheck={false}
             disabled={saving}
-          />
+         />
         </td>
         <td>
-          <input
-            className={MONO_CLASS_NAME}
+          <Input
+            variant="inline"
+            className="text-base"
             type="password"
             value={value}
             onChange={(e) => setValue(e.target.value)}
@@ -1974,25 +1970,23 @@ function AddVarRow({
             aria-label={m.settings_page_new_variable_value()}
             autoComplete="new-password"
             disabled={saving}
-          />
+         />
         </td>
         <td>
-          <button
-            className={SMALL_BUTTON_CLASS_NAME}
+          <Button size="small"
             onClick={() => void save()}
             disabled={saving || !key.trim() || !value.trim()}
           >
             {saving ? m.common_saving() : m.common_save()}
-          </button>
-          <button
-            className={ICON_BUTTON_CLASS_NAME}
+          </Button>
+          <IconButton
             title={m.settings_page_cancel()}
             aria-label={m.settings_page_cancel_new_variable()}
             onClick={onDone}
             disabled={saving}
           >
             <X size={13} />
-          </button>
+          </IconButton>
         </td>
       </tr>
       {key.trim() !== "HF_TOKEN" && HF_TOKEN_RE.test(value.trim()) && <HfHintRow />}
@@ -2004,7 +1998,6 @@ function EnvVarsSection() {
   const [vars, setVars] = useState<EnvVar[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getEnvVars()
@@ -2012,61 +2005,50 @@ function EnvVarsSection() {
       .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
   }, []);
 
-  // Every mutation returns the fresh full list; success clears a stale error.
-  const applyVars = (v: EnvVar[]) => {
-    setVars(v);
-    setError(null);
-  };
-
   // Recommended keys first (fixed order), then custom variables in file order.
   const customKeys =
     vars === null ? [] : vars.map((v) => v.key).filter((k) => !RECOMMENDED_ENV_KEYS.includes(k));
   const names = [...RECOMMENDED_ENV_KEYS, ...customKeys];
 
   return (
-    <div className={SETTINGS_CARD_CLASS_NAME}>
-      <div className="settings-card-head flex items-center gap-2.5 mb-3">
-        <h3>{m.settings_page_environment_variables()}</h3>
-        <div className="spacer" style={{ flex: 1 }} />
-        <button
-          className={SMALL_BUTTON_CLASS_NAME}
+    <>
+      <div className="mb-4.5 flex items-center justify-between gap-4">
+        <p className="m-0 text-base leading-relaxed text-text">
+          {m.settings_page_variables_available_to_runs_and_the_research_agent()}
+        </p>
+        <Button size="small" className="shrink-0"
           onClick={() => setAdding(true)}
           disabled={adding || vars === null}
         >
           <Plus size={12} /> {m.settings_page_add_variable()}
-        </button>
+        </Button>
       </div>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        {m.settings_environment_help({ path: ltr("~/.openresearch/env"), tinker: ltr("TINKER_API_KEY"), hf: ltr("HF_TOKEN"), wandb: ltr("WANDB_API_KEY") })}
-      </p>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : vars === null ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
-        </div>
-      ) : (
-        <table className="env-table w-full border-collapse text-md table-fixed [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_input]:w-full [&_input]:border-0 [&_input]:bg-transparent [&_input]:p-0 [&_input:focus]:shadow-[0_1px_0_0_var(--text)] [&_td]:h-9 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle [&_.icon-btn:hover]:text-accent-red">
-          <tbody>
-            {names.map((name) => (
-              <EnvRow
-                key={name}
-                name={name}
-                entry={vars.find((v) => v.key === name)}
-                onVars={applyVars}
-                onError={setError}
-              />
-            ))}
-            {adding && (
-              // onDone deliberately leaves the error slot alone — cancelling
-              // the add row must not wipe another row's failure message.
-              <AddVarRow onVars={applyVars} onError={setError} onDone={() => setAdding(false)} />
-            )}
-          </tbody>
-        </table>
-      )}
-      {error && <div className="error">{error}</div>}
-    </div>
+      <div className={SETTINGS_CARD_CLASS_NAME}>
+        {loadError ? (
+          <div className="error">{loadError}</div>
+        ) : vars === null ? (
+          <LoadingRow>
+            <Spinner /> {m.settings_page_loading()}
+          </LoadingRow>
+        ) : (
+          <table className="env-table w-full table-fixed border-collapse text-base [&_td:first-child]:w-[32%] [&_td:first-child]:wrap-anywhere [&_.badge]:ms-2 [&_td]:h-12 [&_td]:pt-0 [&_td]:pe-2.5 [&_td]:pb-0 [&_td]:ps-0 [&_td]:align-middle [&_td]:border-b [&_td]:border-b-border-variant [&_td:last-child]:w-29 [&_td:last-child]:whitespace-nowrap [&_td:last-child]:text-end [&_td[colspan]]:whitespace-normal [&_td[colspan]]:text-start [&_.icon-btn]:ms-2 [&_.icon-btn]:align-middle">
+            <tbody>
+              {names.map((name) => (
+                <EnvRow
+                  key={name}
+                  name={name}
+                  entry={vars.find((v) => v.key === name)}
+                  onVars={setVars}
+               />
+              ))}
+              {adding && (
+                <AddVarRow onVars={setVars} onDone={() => setAdding(false)} />
+              )}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -2116,13 +2098,9 @@ function AppearanceTab() {
   return (
     <>
       <h2>{m.settings_appearance_heading()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">{m.settings_appearance_description()}</p>
-      <div className={SETTINGS_CARD_CLASS_NAME}>
+      <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
         <div className={`${PROJECT_DEFAULT_ROW_CLASS_NAME} pb-3.5`}>
-          <div>
-            <div className="project-default-title text-md font-semibold">{m.settings_theme_heading()}</div>
-            <p>{m.settings_theme_description()}</p>
-          </div>
+          <div className="project-default-title text-base font-medium">{m.settings_theme_heading()}</div>
           <div
             className="theme-segmented inline-flex flex-none gap-0.5 p-0.5 border border-border rounded-md bg-surface"
             role="radiogroup"
@@ -2146,10 +2124,7 @@ function AppearanceTab() {
           </div>
         </div>
         <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
-          <div>
-            <div className="project-default-title text-md font-semibold">{m.settings_language_heading()}</div>
-            <p>{m.settings_language_description()}</p>
-          </div>
+          <div className="project-default-title text-base font-medium">{m.settings_language_heading()}</div>
           <div className="w-52 flex-none">
             <OptionPicker
               choices={LOCALE_CHOICES}
@@ -2159,7 +2134,7 @@ function AppearanceTab() {
               onSelect={(next) => {
                 if (isLocale(next)) setLocale(next);
               }}
-            />
+           />
           </div>
         </div>
       </div>
@@ -2201,9 +2176,9 @@ function UpdatesTab() {
             <div className="error">{loadError}</div>
           </div>
         ) : (
-          <div className={SETTINGS_LOADING_CLASS_NAME}>
-            <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
-          </div>
+          <LoadingRow>
+            <Spinner /> {m.settings_page_loading()}
+          </LoadingRow>
         )}
       </>
     );
@@ -2226,11 +2201,8 @@ function UpdatesTab() {
   return (
     <>
       <h2>{m.settings_page_updates()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        {m.settings_page_keeping_this_copy_of_orx_on_the_latest()}
-      </p>
-      <div className={SETTINGS_CARD_CLASS_NAME}>
-        <div className={KV_CLASS_NAME}>
+      <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
+        <div className={`${KV_CLASS_NAME} pb-3.5`}>
           <div className="k">{m.settings_page_version()}</div>
           <div className="v">{status.current}</div>
           <div className="k">{m.settings_page_latest()}</div>
@@ -2242,7 +2214,7 @@ function UpdatesTab() {
         {status.restartRequired && (
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">
+              <div className="project-default-title text-base font-medium">
                 {m.settings_page_restart_to_finish_updating()}
               </div>
               <p>
@@ -2256,7 +2228,7 @@ function UpdatesTab() {
           <>
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
-                <div className="project-default-title text-md font-semibold">
+                <div className="project-default-title text-base font-medium">
                   {m.settings_page_install_updates_automatically()}
                 </div>
                 <p>
@@ -2265,23 +2237,19 @@ function UpdatesTab() {
                     m.settings_updates_disabled_by_env()}
                 </p>
               </div>
-              <button
+              <Switch
                 type="button"
-                role="switch"
-                aria-checked={status.autoUpdate}
+                checked={status.autoUpdate}
                 aria-label={m.settings_page_install_updates_automatically()}
-                className={`${SETTINGS_SWITCH_CLASS_NAME} ${status.autoUpdate ? "on" : ""}`}
                 disabled={busy !== null}
                 onClick={() =>
                   void run("auto", () => setAutoUpdateApi(!status.autoUpdate).then(apply))
                 }
-              >
-                <span />
-              </button>
+              />
             </div>
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
               <div>
-                <div className="project-default-title text-md font-semibold">
+                <div className="project-default-title text-base font-medium">
                   {status.updateAvailable ? m.settings_update_to_version({ version: ltr(status.latest ?? "—") }) : m.settings_check_for_updates()}
                 </div>
                 <p>
@@ -2290,9 +2258,9 @@ function UpdatesTab() {
                     : m.settings_checks_automatically()}
                 </p>
               </div>
-              <button
+              <Button size="small"
                 type="button"
-                className={SMALL_BUTTON_CLASS_NAME}
+
                 disabled={busy !== null}
                 onClick={() => void run("apply", () => applyUpdate().then(apply))}
               >
@@ -2301,13 +2269,13 @@ function UpdatesTab() {
                   : status.updateAvailable
                     ? m.settings_update_now()
                     : m.settings_check_now()}
-              </button>
+              </Button>
             </div>
           </>
         ) : (
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">
+              <div className="project-default-title text-base font-medium">
                 {m.settings_page_orx_can_t_update_this_install()}
               </div>
               <p>
@@ -2349,30 +2317,32 @@ function TelemetryTab() {
   return (
     <>
       <h2>{m.settings_page_usage_analytics()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-        {m.settings_page_share_anonymous_product_usage_linked_only_to_a()}
-      </p>
       {!settings ? (
-        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
+        error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
-        <div className={SETTINGS_CARD_CLASS_NAME}>
+        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">{m.settings_page_anonymous_usage_analytics()}</div>
+              <div className="project-default-title inline-flex items-center gap-1.5 text-base font-medium">
+                {m.settings_page_anonymous_usage_analytics()}
+                {settings.locked && settings.reason && (
+                  <Tooltip
+                    content={`${m.settings_page_currently_off()} ${settings.reason}.`}
+                    className="text-subtext"
+                  >
+                    <Info size={15} />
+                  </Tooltip>
+                )}
+              </div>
               <p>{m.settings_page_no_code_prompts_file_contents_or_account_identifiers()}</p>
-              {!settings.enabled && settings.reason && <p>{m.settings_page_currently_off()} {settings.reason}.</p>}
             </div>
-            <button
+            <Switch
               type="button"
-              role="switch"
-              aria-checked={settings.preferenceEnabled}
+              checked={settings.enabled}
               aria-label={m.settings_page_anonymous_usage_analytics()}
-              className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.preferenceEnabled ? "on" : ""}`}
-              disabled={saving}
+              disabled={saving || settings.locked}
               onClick={toggle}
-            >
-              <span />
-            </button>
+            />
           </div>
           {error && <div className="error">{error}</div>}
         </div>
@@ -2413,7 +2383,7 @@ function InstallCliRow({
   return (
     <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
       <div>
-        <div className="project-default-title text-md font-semibold">
+        <div className="project-default-title text-base font-medium">
           {m.settings_install_cli_title({ command: ltr("orx") })}
         </div>
         {result ? (
@@ -2429,14 +2399,14 @@ function InstallCliRow({
           </p>
         )}
       </div>
-      <button
+      <Button size="small"
         type="button"
-        className={SMALL_BUTTON_CLASS_NAME}
+
         disabled={busy !== null}
         onClick={() => install(needsForce)}
       >
         {busy === "cli" ? m.chat_working() : needsForce ? m.settings_replace_anyway() : result ? m.settings_relink() : m.settings_install()}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -2470,35 +2440,31 @@ function ProjectDefaultsTab() {
   return (
     <>
       <h2>{m.settings_page_general()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">{m.settings_page_defaults_applied_when_you_create_a_project()}</p>
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-sm leading-relaxed text-subtext">{m.settings_page_defaults_applied_when_you_create_a_project()}</p>
       {!settings ? (
-        error ? <div className="error">{error}</div> : <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
+        error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
-        <div className="settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap bg-background border border-border rounded-lg py-4 px-4.5 mb-4 [&_h3]:mt-0 [&_h3]:mx-0 [&_h3]:mb-2.5 [&_h3]:text-sm [&_h3]:font-semibold [&_h3]:text-text [&_.settings-sub]:mb-3 [&_.kv]:gap-y-1.5 [&_.kv]:gap-x-4.5 [&_>_.project-default-row:first-child]:pt-0 [&_>_.project-default-row:first-child]:border-t-0 project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0">
+        <div className={`${SETTINGS_CARD_CLASS_NAME} project-defaults-card [&_.settings-card-head]:justify-between [&_.settings-card-head]:mb-0 [&_.settings-card-head]:pb-3 [&_.settings-card-head_h3]:m-0`}>
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <h3>{m.settings_page_git_hub_publishing()}</h3>
-            <span className={`${BADGE_CLASS_NAME} ${settings.githubAuthenticated ? "ok" : settings.ghInstalled ? "warn" : "err"}`}>
+            <Badge variant={settings.githubAuthenticated ? "success" : settings.ghInstalled ? "warning" : "error"}>
               {settings.githubAuthenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}
-            </span>
+            </Badge>
           </div>
           <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
             <div>
-              <div className="project-default-title text-md font-semibold">{m.settings_page_enable_git_hub_syncing_for_new_projects()}</div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_enable_git_hub_syncing_for_new_projects()}</div>
               <p>
                 {m.settings_page_when_enabled_each_new_project_gets_a_private()}
               </p>
             </div>
-            <button
+            <Switch
               type="button"
-              role="switch"
-              aria-checked={settings.githubForNewProjects}
+              checked={settings.githubForNewProjects}
               aria-label={m.settings_page_enable_git_hub_syncing_for_new_projects()}
-              className={`${SETTINGS_SWITCH_CLASS_NAME} ${settings.githubForNewProjects ? "on" : ""}`}
               disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
               onClick={toggle}
-            >
-              <span />
-            </button>
+            />
           </div>
           {!settings.githubAuthenticated && (
             <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
@@ -2527,23 +2493,22 @@ function GitHubCliHelp({
 
   return (
     <>
-      <p className="git-card-helper text-subtext text-sm m-0">
+      <p className="git-card-helper m-0 text-sm leading-relaxed text-text">
         {renderNote(ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login())}
       </p>
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
-          <a
-            className={PRIMARY_BUTTON_CLASS_NAME}
+          <ButtonLink variant="primary"
             href="https://cli.github.com/"
             target="_blank"
             rel="noreferrer"
           >
             {m.settings_page_install_git_hub_cli()} <ExternalLink size={12} />
-          </a>
+          </ButtonLink>
         )}
-        <button type="button" className={`${BUTTON_CLASS_NAME} ${ghInstalled ? "text-accent-amber border-accent-amber" : ""}`} disabled={checking} onClick={check}>
+        <Button type="button" variant={ghInstalled ? "warning" : "default"} disabled={checking} onClick={check}>
           {checking ? m.common_checking() : m.settings_check_again()}
-        </button>
+        </Button>
       </div>
     </>
   );
@@ -2568,18 +2533,17 @@ function OverleafCard() {
       <div className={KV_CLASS_NAME}>
         <span className="k">{m.settings_page_git_token()}</span>
         <span className="v">
-          <span className={`${BADGE_CLASS_NAME} ${hasToken ? "ok" : ""}`}>
+          <Badge variant={hasToken ? "success" : "default"}>
             {hasToken === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasToken ? m.settings_saved() : m.settings_not_set()}
-          </span>
+          </Badge>
         </span>
       </div>
-      <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
+      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
         {m.settings_page_with_a_token_saved_a_paper_opened_in()}
       </p>
       {hasToken ? (
         <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-          <button
-            className={BUTTON_CLASS_NAME}
+          <Button
             disabled={saving}
             onClick={() => {
               setSaving(true);
@@ -2591,7 +2555,7 @@ function OverleafCard() {
             }}
           >
             {saving ? m.settings_removing() : m.settings_remove_token()}
-          </button>
+          </Button>
         </div>
       ) : (
         <TokenForm
@@ -2599,7 +2563,7 @@ function OverleafCard() {
           onSaved={(result) => setHasToken(result.hasToken)}
           placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
-        />
+       />
       )}
       {error && <div className="error">{error}</div>}
     </div>
@@ -2690,7 +2654,7 @@ function GitTab({
   return (
     <>
       <h1>{m.settings_page_repository()}</h1>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-base leading-relaxed text-text">
         {m.settings_repository_description({ project: project?.name ?? m.settings_current_project() })}
       </p>
       {!project ? (
@@ -2698,27 +2662,27 @@ function GitTab({
       ) : error && !status ? (
         <div className="error">{error}</div>
       ) : !status ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading()}
+        </LoadingRow>
       ) : (
         <>
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>{m.settings_page_local_repository()}</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">{m.settings_page_path()}</span><span className={`v ${MONO_CLASS_NAME}`}>{status.path}</span>
+              <span className="k">{m.settings_page_path()}</span><span className="v">{status.path}</span>
               <span className="k">Git</span><span className="v">{status.gitVersion ?? m.onboarding_not_found()}</span>
               <span className="k">{m.settings_page_state()}</span><span className="v">{status.initialized ? m.settings_git_state({ branch: ltr(status.currentBranch ?? m.settings_detached()), state: status.clean ? m.settings_clean() : m.settings_has_changes() }) : m.settings_not_initialized()}</span>
-              <span className="k">{m.settings_page_baseline()}</span><span className={`v ${MONO_CLASS_NAME}`}>{status.baselineBranch}</span>
+              <span className="k">{m.settings_page_baseline()}</span><span className="v">{status.baselineBranch}</span>
               <span className="k">{m.settings_page_remotes()}</span><span className="v">{status.remotes.length ? status.remotes.map((remote) => `${remote.name}: ${remote.url}`).join(" · ") : m.settings_none()}</span>
             </div>
-            {!status.initialized && <div className={GIT_CARD_ACTIONS_CLASS_NAME}><button className={PRIMARY_BUTTON_CLASS_NAME} onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</button></div>}
+            {!status.initialized && <div className={GIT_CARD_ACTIONS_CLASS_NAME}><Button variant="primary" onClick={() => void initializeProjectGit(project.id).then(setStatus).catch((err) => setError(String(err)))}>{m.settings_page_initialize_git()}</Button></div>}
           </div>
           <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
-              <span className="k">{m.settings_page_authentication()}</span><span className="v"><span className={`${BADGE_CLASS_NAME} ${status.github.authenticated ? "ok" : status.github.ghInstalled ? "warn" : "err"}`}>{status.github.authenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}</span></span>
-              <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span className={MONO_CLASS_NAME}>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <span className="badge inline-flex items-center font-sans font-medium py-px px-[7px] border border-border rounded-sm [&.ok]:text-accent-green [&.ok]:border-accent-green [&.ok]:bg-accent-green-subtle [&.err]:text-accent-red [&.err]:border-accent-red [&.err]:bg-accent-red-subtle [&.warn]:text-accent-amber [&.warn]:border-accent-amber [&.warn]:bg-accent-amber-subtle git-detail-meta text-muted text-sm">{m.settings_page_syncing_off()}</span>}</> : <span className={BADGE_CLASS_NAME}>{m.settings_page_local_only()}</span>}</span>
+              <span className="k">{m.settings_page_authentication()}</span><span className="v"><Badge variant={status.github.authenticated ? "success" : status.github.ghInstalled ? "warning" : "error"}>{status.github.authenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}</Badge></span>
+              <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <Badge>{m.settings_page_syncing_off()}</Badge>}</> : <Badge>{m.settings_page_local_only()}</Badge>}</span>
               {status.github.enabled && <><span className="k">{m.settings_page_sync()}</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
             {!status.github.authenticated && (
@@ -2728,25 +2692,25 @@ function GitTab({
             )}
             {status.github.authenticated && !status.github.enabled && (
               <>
-                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
+                <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
                   {hasGithubRepository
                     ? m.settings_use_existing_github_repository()
                     : m.settings_create_private_github_repository()}
                 </p>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-                  {hasGithubRepository && status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></a>}
-                  <button className={PRIMARY_BUTTON_CLASS_NAME} disabled={saving} onClick={enableSync}>{saving ? m.repository_enabling() : m.repository_enable_syncing()}</button>
+                  {hasGithubRepository && status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
+                  <Button variant="primary" disabled={saving} onClick={enableSync}>{saving ? m.repository_enabling() : m.repository_enable_syncing()}</Button>
                 </div>
               </>
             )}
             {status.github.enabled && (
               <>
-                <p className="git-card-helper text-muted text-sm mt-3.5 mx-0 mb-0">
+                <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
                   {m.settings_page_disabling_syncing_stops_automatic_pushes_compute_continues_to()}
                 </p>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-                  {status.github.url && <a className={BUTTON_CLASS_NAME} href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></a>}
-                  <button className={BUTTON_CLASS_NAME} disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</button>
+                  {status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
+                  <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>
                 </div>
               </>
             )}
@@ -2757,9 +2721,9 @@ function GitTab({
         </>
       )}
       {defaultPromptOpen && (
-        <div className="modal-backdrop fixed inset-0 bg-[rgba(29,_27,_26,_0.4)] flex items-start justify-center pt-[var(--modal-top)] px-4 pb-6 overflow-y-auto z-100" onClick={() => finishDefaultPrompt(false)}>
+        <div className="modal-backdrop fixed inset-0 bg-modal-backdrop-light flex items-start justify-center pt-[var(--modal-top)] px-4 pb-6 overflow-y-auto z-100" onClick={() => finishDefaultPrompt(false)}>
           <div
-            className="modal max-w-[94vw] max-h-[calc(100vh_-_var(--modal-top)_-_48px)] overflow-y-auto bg-background border border-border rounded-xl shadow-[0_24px_60px_rgba(0,_0,_0,_0.22)] p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl github-default-modal w-110 [&_>_p]:m-0 [&_>_p]:text-muted [&_>_p]:text-md [&_>_p]:leading-normal [&_>_.error]:mt-3.5"
+            className="modal max-w-[94vw] max-h-[calc(100vh_-_var(--modal-top)_-_48px)] overflow-y-auto bg-background border border-border rounded-xl shadow-modal p-6 [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-xl github-default-modal w-110 [&_>_p]:m-0 [&_>_p]:text-sm [&_>_p]:leading-relaxed [&_>_p]:text-text [&_>_.error]:mt-3.5"
             role="dialog"
             aria-modal="true"
             aria-labelledby="github-default-title"
@@ -2771,12 +2735,12 @@ function GitTab({
             </p>
             {defaultPromptError && <div className="error">{defaultPromptError}</div>}
             <div className="github-default-actions flex justify-end gap-2.5 mt-5.5">
-              <button className={BUTTON_CLASS_NAME} disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(false)}>
+              <Button disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(false)}>
                 {m.settings_page_not_now()}
-              </button>
-              <button className={PRIMARY_BUTTON_CLASS_NAME} disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(true)}>
+              </Button>
+              <Button variant="primary" disabled={defaultPromptSaving} onClick={() => finishDefaultPrompt(true)}>
                 {defaultPromptSaving ? m.common_saving() : m.settings_make_default()}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -2900,7 +2864,7 @@ function StorageTab() {
   return (
     <>
       <h2>{m.settings_page_storage()}</h2>
-      <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
+      <p className="settings-sub mt-0 mx-0 mb-4.5 text-sm leading-relaxed text-subtext">
         {m.settings_storage_description()}
       </p>
       {loadError ? (
@@ -2908,39 +2872,27 @@ function StorageTab() {
           <div className="error">{loadError}</div>
         </div>
       ) : !settings ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading()}
+        </LoadingRow>
       ) : (
         <div className={SETTINGS_CARD_CLASS_NAME}>
-          <div className="settings-card-head flex items-center gap-2.5 mb-3">
+          <div className="settings-card-head mb-3">
             <h3>{m.settings_page_data_directory()}</h3>
-            <div className="spacer" style={{ flex: 1 }} />
-            <span className={BADGE_CLASS_NAME}>{settings.isDefault ? m.settings_page_default_808d7dc() : m.settings_page_custom_flavor_1c8a207()}</span>
           </div>
           <div className={KV_CLASS_NAME}>
             <span className="k">{m.settings_page_current()}</span>
-            <span className={`v ${MONO_CLASS_NAME}`}>{settings.current}</span>
+            <span className="v">{settings.current}</span>
             <span className="k">{m.settings_page_source()}</span>
             <span className="v">{DATA_DIR_SOURCE_LABEL[settings.source]()}</span>
-            {!settings.isDefault && (
-              <>
-                <span className="k">{m.settings_page_default_808d7dc()}</span>
-                <span className={`v ${MONO_CLASS_NAME}`}>{settings.defaultPath}</span>
-              </>
-            )}
           </div>
 
-          {envForced ? (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_data_dir_forced({ variable: ltr("ORX_DATA_DIR") })}
-            </p>
-          ) : (
+          {!envForced && (
             <form className={FORM_CLASS_NAME} onSubmit={startMove}>
               <label>
                 {m.settings_page_new_location()}
                 <input
-                  className={MONO_CLASS_NAME}
+                  className="text-sm"
                   type="text"
                   value={path}
                   onChange={(e) => {
@@ -2951,7 +2903,7 @@ function StorageTab() {
                   autoComplete="off"
                   spellCheck={false}
                   disabled={move.kind === "moving"}
-                />
+               />
               </label>
 
               {validation && !validation.error && validation.ok && (
@@ -2973,12 +2925,12 @@ function StorageTab() {
                   label={movePhaseLabel(move.phase)}
                   caption={
                     move.total > 0 ? (
-                      <span className={MONO_CLASS_NAME}>
+                      <span className="text-sm">
                         {fmtBytes(move.copied)} / {fmtBytes(move.total)}
                       </span>
                     ) : undefined
                   }
-                />
+               />
               )}
               {move.kind === "done" && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
@@ -2994,21 +2946,21 @@ function StorageTab() {
               {move.kind === "error" && <div className="error">{m.settings_page_move_failed()} {move.message}</div>}
 
               <div className="actions">
-                <button
+                <Button
                   type="button"
-                  className={BUTTON_CLASS_NAME}
+
                   onClick={check}
                   disabled={checking || !trimmed || unchanged || move.kind === "moving"}
                 >
                   {checking ? m.common_checking() : m.settings_check()}
-                </button>
-                <button
+                </Button>
+                <Button variant="primary"
                   type="submit"
-                  className={PRIMARY_BUTTON_CLASS_NAME}
+
                   disabled={!trimmed || unchanged || move.kind === "moving"}
                 >
                   {move.kind === "moving" ? m.storage_moving() : m.storage_move_here()}
-                </button>
+                </Button>
               </div>
             </form>
           )}
@@ -3034,11 +2986,11 @@ function runtimeLabel(inst: Run): string {
 /** One section's table: backend (logo + flavor), status, started, runtime. */
 function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabel: string }) {
   if (instances.length === 0) {
-    return <p className="instances-empty m-0 py-3.5 px-4 border border-border rounded-lg bg-background text-subtext text-md">{emptyLabel}</p>;
+    return <p className="instances-empty m-0 rounded-lg border border-border bg-background py-3.5 px-4 text-base text-subtext">{emptyLabel}</p>;
   }
   return (
     <div className="instances-table-wrap overflow-x-auto">
-      <table className="runs-table w-full border-collapse text-md bg-background [&_th]:text-start [&_th]:text-text [&_th]:text-xs [&_th]:font-semibold [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-[color-mix(in_oklab,_var(--text)_6%,_transparent)] [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
+      <table className="runs-table w-full border-collapse bg-background text-base [&_th]:text-start [&_th]:text-text [&_th]:text-sm [&_th]:font-medium [&_th]:py-2 [&_th]:px-3 [&_th]:border-b [&_th]:border-b-border [&_th]:sticky [&_th]:top-0 [&_th]:bg-background [&_th]:z-1 [&_td]:py-2 [&_td]:px-3 [&_td]:border-b [&_td]:border-b-divider-faint [&_td]:whitespace-nowrap [&_tr:last-child_td]:border-b-0 [&_tr.clickable]:cursor-pointer [&_tr.clickable:hover_td]:bg-canvas">
         <thead>
           <tr>
             <th>{m.settings_page_backend()}</th>
@@ -3054,11 +3006,10 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
             return (
               <tr key={inst.id}>
                 <td>
-                  <span className="backend-cell inline-flex items-center gap-0.5 [&_.icon-btn]:w-5.5 [&_.icon-btn]:h-5.5">
+                  <span className="backend-cell inline-flex items-center gap-0.5">
                     <BackendBadge backend={inst.backend} />
                     {url && (
-                      <a
-                        className={ICON_BUTTON_CLASS_NAME}
+                      <IconButtonLink size="small"
                         href={url}
                         target="_blank"
                         rel="noreferrer"
@@ -3067,7 +3018,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                         onClick={(e) => e.stopPropagation()}
                       >
                         <ExternalLink size={12} />
-                      </a>
+                      </IconButtonLink>
                     )}
                   </span>
                 </td>
@@ -3132,19 +3083,19 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
           </h2>
         </div>
         <div className="compute-activity-actions flex gap-2 flex-none [@media((max-width:_640px))]:justify-start">
-          <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-            <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-          </button>
-          <button className={SMALL_BUTTON_CLASS_NAME} onClick={onViewHistory}>
+          <Button size="small" onClick={load} disabled={refreshing}>
+            <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+          </Button>
+          <Button size="small" onClick={onViewHistory}>
             {past?.length ? m.instances_view_history_count({ count: fmtNumber(past.length) }) : m.instances_view_history()}
-          </button>
+          </Button>
         </div>
       </div>
       {error && <div className="error">{error}</div>}
       {!running || !past ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}
-        </div>
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading()}
+        </LoadingRow>
       ) : <InstancesTable instances={running} emptyLabel={projectId ? m.instances_nothing_running() : m.instances_select_project_runs()} />}
     </section>
   );
@@ -3187,13 +3138,13 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
       </button>
       <div className="settings-head-row flex items-center justify-between gap-2.5 [&_h1]:m-0">
         <h1>{m.settings_page_instance_history()}</h1>
-        <button className={SMALL_BUTTON_CLASS_NAME} onClick={load} disabled={refreshing}>
-          <RefreshCw size={12} className={refreshing ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
-        </button>
+        <Button size="small" onClick={load} disabled={refreshing}>
+          <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
+        </Button>
       </div>
       {error && <div className="error">{error}</div>}
       {!instances ? (
-        <div className={SETTINGS_LOADING_CLASS_NAME}><span className={SPINNER_CLASS_NAME} /> {m.settings_page_loading()}</div>
+        <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
         <InstancesTable instances={instances} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
       )}
@@ -3250,7 +3201,7 @@ export function SettingsView({
   const showsSettings = tab === "settings" || isSettingsSection(tab);
 
   return (
-    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-md [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
+    <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
       {showsSettings && (
         <>
           <h1>{m.settings_page_settings()}</h1>
@@ -3280,7 +3231,7 @@ export function SettingsView({
         <ComputeTab
           project={project}
           onViewHistory={() => onSelectTab("instances")}
-        />
+       />
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
@@ -3288,9 +3239,6 @@ export function SettingsView({
       {tab === "environment" && (
         <>
           <h1>{m.settings_page_environment()}</h1>
-          <p className="settings-sub mt-0 mx-0 mb-4.5 text-text text-md">
-            {m.settings_page_variables_available_to_runs_and_the_research_agent()}
-          </p>
           <EnvVarsSection />
         </>
       )}
@@ -3299,7 +3247,7 @@ export function SettingsView({
           project={project}
           publicationError={githubPublicationError}
           onProjectUpdate={onProjectUpdate}
-        />
+       />
       )}
     </div>
   );

@@ -61,22 +61,14 @@ import { DemoWelcomeModal } from "./components/Tour";
 import { clearReadDemoSessions } from "./demoSessionState";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
-import {
-  CODE_TAB_BODY_CLASS_NAME,
-  ELEVATED_SURFACE_SHADOW_CLASS_NAME,
-  ICON_BUTTON_BASE_CLASS_NAME,
-  ICON_BUTTON_CLASS_NAME,
-  MODEL_ITEM_CLASS_NAME,
-  PRIMARY_BUTTON_CLASS_NAME,
-  SPINNER_CLASS_NAME,
-  TAB_BODY_CLASS_NAME,
-} from "./styleClasses";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
+import { Button, IconButton, MenuItem, Spinner } from "./components/ui";
+import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
   "justify-center gap-2.5 p-6 text-center text-subtext",
-  "[&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:text-md [&_p]:leading-normal",
+  "[&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:text-sm [&_p]:leading-normal",
   "[&_p]:text-balance [&_p.empty-state-title]:text-2xl",
   "[&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text",
   "[&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext",
@@ -1571,12 +1563,12 @@ export default function App() {
       key={`file:${fileTabKey(tab)}`}
       active={fileTab !== null && sameFileTab(fileTab, tab)}
       label={tab.path.split("/").pop() || tab.path}
-      icon={<FileCode size={12} style={{ flexShrink: 0 }} />}
+      icon={<FileCode size={12} className="shrink-0" />}
       preview={isPreviewTab(tab)}
       onSelect={() => selectRightTab(tab)}
       onPromote={() => promoteRightTab(tab)}
       onClose={() => closeFileTab(tab)}
-    />
+   />
   );
   const activeProject = projects?.find((p) => p.id === projectId) ?? null;
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
@@ -1594,16 +1586,16 @@ export default function App() {
           label={experiment ? experiment.title || experiment.slug : "…"}
           icon={
             tab.view === "overview" ? (
-              <ChartSpline size={12} style={{ flexShrink: 0 }} />
+              <ChartSpline size={12} className="shrink-0" />
             ) : (
-              <Terminal size={12} style={{ flexShrink: 0 }} />
+              <Terminal size={12} className="shrink-0" />
             )
           }
           preview={isPreviewTab(tab)}
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closeExperimentTab(tab)}
-        />
+       />
       );
     }
     if ("kind" in tab && tab.kind === "plan") {
@@ -1612,12 +1604,12 @@ export default function App() {
           key={rightTabKey(tab)}
           active={planTab !== null && planTab.promptId === tab.promptId}
           label={m.chat_plan()}
-          icon={<ScrollText size={12} style={{ flexShrink: 0 }} />}
+          icon={<ScrollText size={12} className="shrink-0" />}
           preview={isPreviewTab(tab)}
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closePlanTab(tab)}
-        />
+       />
       );
     }
     if ("kind" in tab) {
@@ -1627,12 +1619,12 @@ export default function App() {
           active={subagentTab !== null && subagentTab.spawnPartId === tab.spawnPartId}
           label={spawnMeta[tab.spawnPartId]?.label ?? tab.label ?? m.app_subagent()}
           shimmer={spawnMeta[tab.spawnPartId]?.running ?? false}
-          icon={<Users size={12} style={{ flexShrink: 0 }} />}
+          icon={<Users size={12} className="shrink-0" />}
           preview={isPreviewTab(tab)}
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closeSubagentTab(tab)}
-        />
+       />
       );
     }
     const experiment = experiments.find((item) => item.id === tab.experimentId);
@@ -1641,12 +1633,12 @@ export default function App() {
         key={rightTabKey(tab)}
         active={codeTab !== null && sameCodeTab(codeTab, tab)}
         label={experiment?.slug ?? tab.branch}
-        icon={<FolderOpen size={12} style={{ flexShrink: 0 }} />}
+        icon={<FolderOpen size={12} className="shrink-0" />}
         preview={isPreviewTab(tab)}
         onSelect={() => selectRightTab(tab)}
         onPromote={() => promoteRightTab(tab)}
         onClose={() => closeCodeTab(tab)}
-      />
+     />
     );
   };
 
@@ -1655,7 +1647,7 @@ export default function App() {
       <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
           <p>{startupError}</p>
-          <button className={PRIMARY_BUTTON_CLASS_NAME} onClick={loadInitialState}>{m.app_retry()}</button>
+          <Button variant="primary" onClick={loadInitialState}>{m.app_retry()}</Button>
         </div>
       </div>
     );
@@ -1665,7 +1657,7 @@ export default function App() {
     return (
       <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
-          <span className={SPINNER_CLASS_NAME} />
+          <Spinner />
         </div>
       </div>
     );
@@ -1681,7 +1673,7 @@ export default function App() {
             onOpen={setProjectId}
             onCreated={onProjectCreated}
             onDeleted={onProjectDeleted}
-          />
+         />
         ) : (
           <Onboarding
             preferredAgent={uiState.preferredAgent}
@@ -1696,7 +1688,7 @@ export default function App() {
                 preferredAgent: selection,
               }));
             }}
-          />
+         />
         )}
       </div>
     );
@@ -1709,7 +1701,7 @@ export default function App() {
       onNewProject={() => setNewProjectOpen(true)}
       onRepository={() => selectMainView("git")}
       onCollapse={() => setRailOpen(false)}
-    />
+   />
   );
 
   return (
@@ -1724,7 +1716,7 @@ export default function App() {
           }}
           onCreated={onProjectCreated}
           onDeleted={onProjectDeleted}
-        />
+       />
       ) : (
       <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
         {projectId && (
@@ -1774,21 +1766,21 @@ export default function App() {
                   if (project.githubEnabled) setGithubPublicationError(null);
                 }}
                 onSelectTab={selectMainView}
-              />
+             />
             ) : null}
           </ChatPanel>
         )}
         {mainView === "chat" && panelOpen && (
         <aside
-          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-[0_12px_40px_color-mix(in_oklab,_var(--text)_22%,_transparent)] floating-panel border border-border rounded-lg overflow-hidden ${ELEVATED_SURFACE_SHADOW_CLASS_NAME} ${panelMax ? "max" : ""}`}
+          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
           style={panelMax ? undefined : { width: panelWidth }}
           data-onboarding="experiments"
         >
           <div
-            className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] [&:active]:bg-[color-mix(in_oklab,_var(--text)_12%,_transparent)] ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
+            className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
             title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
             onPointerDown={resizePanel}
-          />
+         />
           <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
             <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {leadingFileTabs.map(renderFileTab)}
@@ -1796,42 +1788,40 @@ export default function App() {
                 <ClosableTab
                   active={rightTab === "files"}
                   label={m.app_files()}
-                  icon={<FolderOpen size={12} style={{ flexShrink: 0 }} />}
+                  icon={<FolderOpen size={12} className="shrink-0" />}
                   onSelect={() => selectRightTab("files")}
                   onClose={() => closeHomeTab("files")}
-                />
+               />
               )}
               {artifactsTabOpen && (
                 <ClosableTab
                   active={rightTab === "artifacts"}
                   label={m.app_artifacts()}
-                  icon={<Package size={12} style={{ flexShrink: 0 }} />}
+                  icon={<Package size={12} className="shrink-0" />}
                   onSelect={() => selectRightTab("artifacts")}
                   onClose={() => closeHomeTab("artifacts")}
-                />
+               />
               )}
               {experimentsTabOpen && (
                 <ClosableTab
                   active={rightTab === "experiments"}
                   label={m.app_experiments()}
-                  icon={<FlaskConical size={12} style={{ flexShrink: 0 }} />}
+                  icon={<FlaskConical size={12} className="shrink-0" />}
                   onSelect={() => selectRightTab("experiments")}
                   onClose={() => closeHomeTab("experiments")}
-                />
+               />
               )}
               {orderedContentTabs.map(renderContentTab)}
             </div>
             <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
-              <button
-                className={ICON_BUTTON_CLASS_NAME}
+              <IconButton
                 title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
                 aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
                 onClick={() => setPanelMax((m) => !m)}
               >
                 {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-              </button>
-              <button
-                className={ICON_BUTTON_CLASS_NAME}
+              </IconButton>
+              <IconButton
                 title={m.app_close_panel()}
                 aria-label={m.app_close_panel()}
                 onClick={() => {
@@ -1841,11 +1831,11 @@ export default function App() {
                 }}
               >
                 <X size={14} />
-              </button>
+              </IconButton>
             </div>
           </div>
           {rightTab === "artifacts" ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {activeProject && (
                 <ArtifactsTab
                   key={activeProject.id}
@@ -1854,29 +1844,29 @@ export default function App() {
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
                   onOpenStorage={() => selectMainView("storage")}
-                />
+               />
               )}
-            </div>
+            </TabBody>
           ) : rightTab === "experiments" ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
-                <span style={{ flex: 1 }} />
+                <span className="flex-1" />
                 <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
                   <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                    <button
+                    <IconButton size="small"
                       ref={scopeTriggerRef}
-                      className={`${ICON_BUTTON_BASE_CLASS_NAME} experiment-scope-trigger w-6.5 h-6.5 rounded-sm${effectiveScope === "agent" ? " active" : ""}`}
+                      className="experiment-scope-trigger"
+                      active={effectiveScope === "agent"}
                       title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
                       aria-label={m.app_filter_experiments()}
                       aria-expanded={scopeMenuOpen}
                       onClick={() => setScopeMenuOpen((open) => !open)}
                     >
                       <Filter size={16} strokeWidth={2.5} />
-                    </button>
+                    </IconButton>
                     {scopeMenuOpen && (
-                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
-                        <button
-                          className={MODEL_ITEM_CLASS_NAME}
+                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                        <MenuItem
                           aria-pressed={effectiveScope === "agent"}
                           disabled={!activeSessionId || !allExperimentsAttributed}
                           title={
@@ -1893,9 +1883,8 @@ export default function App() {
                         >
                           <span>{m.app_current_task()}</span>
                           {effectiveScope === "agent" && <Check size={13} />}
-                        </button>
-                        <button
-                          className={MODEL_ITEM_CLASS_NAME}
+                        </MenuItem>
+                        <MenuItem
                           aria-pressed={effectiveScope === "project"}
                           onClick={() => {
                             setScope("project");
@@ -1904,12 +1893,12 @@ export default function App() {
                         >
                           <span>{m.app_entire_project()}</span>
                           {effectiveScope === "project" && <Check size={13} />}
-                        </button>
+                        </MenuItem>
                       </div>
                     )}
                   </div>
                   <div
-                    className="seg inline-flex items-center gap-0.5 rounded-md bg-[color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:font-semibold [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
+                    className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
                     role="group"
                     aria-label={m.app_experiment_view()}
                   >
@@ -1941,7 +1930,7 @@ export default function App() {
                       onOpenCode={openCodeTabForExperiment}
                       agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
                       onShowProjectScope={showProjectScope}
-                    />
+                   />
                   )
                 ) : (
                   <ExperimentsTable
@@ -1970,12 +1959,12 @@ export default function App() {
                         );
                     }}
                     onCancel={cancelRun}
-                  />
+                 />
                 )}
               </div>
-            </div>
+            </TabBody>
           ) : rightTab === "files" ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {activeProject ? (
                 <WorktreeTab
                   key={`files:${activeSessionId ?? `project:${activeProject.id}`}`}
@@ -1996,20 +1985,20 @@ export default function App() {
                       intent,
                     )
                   }
-                />
+               />
               ) : (
                 <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
-                  <div className={CODE_TAB_BODY_CLASS_NAME}>
+                  <CodeTabBody>
                     <div className="wt-empty flex flex-col items-center gap-2.5 py-12 px-6 text-center text-muted [&_>_svg]:text-subtext [&_p]:m-0 [&_p]:max-w-80 [&_p]:text-sm">
                       <FolderGit2 size={22} />
                       <p>{m.app_select_a_project_to_browse_its_files()}</p>
                     </div>
-                  </div>
+                  </CodeTabBody>
                 </div>
               )}
-            </div>
+            </TabBody>
           ) : fileTab ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {projectId && (
                 <FileViewer
                   key={fileScrollKey(projectId, activeSessionId, fileTab)}
@@ -2050,11 +2039,11 @@ export default function App() {
                   lineScrollRequest={fileTab.lineScrollRequest}
                   onLineScrollRequestHandled={() => consumeFileLineScrollRequest(fileTab)}
                   onEdit={() => promoteRightTab(fileTab)}
-                />
+               />
               )}
-            </div>
+            </TabBody>
           ) : planTab ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {/* The plan markdown is already client-side — render directly,
                   file links resolve against the plan's session worktree. */}
               <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
@@ -2073,9 +2062,9 @@ export default function App() {
                       ),
                     )
                   }
-                />
+               />
               </div>
-            </div>
+            </TabBody>
           ) : subagentTab ? (
             <SubagentTab
               // Remount per spawn part so the seed + subscription reset cleanly.
@@ -2100,9 +2089,9 @@ export default function App() {
                   openSubagentTab(subagentTab.sessionId, pid, label, intent),
                 )
               }
-            />
+           />
           ) : codeTab ? (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {projectId && activeProject && codeTab && codeExperiment && (
                 <CodeTab
                   key={`code:${codeTab.branch}`}
@@ -2126,11 +2115,11 @@ export default function App() {
                       ),
                     )
                   }
-                />
+               />
               )}
-            </div>
+            </TabBody>
           ) : (
-            <div className={TAB_BODY_CLASS_NAME}>
+            <TabBody>
               {expTab && tabExperiment && activeProject && (
                 <DetailDrawer
                   key={`${expTab.id}:${expTab.view}`}
@@ -2161,9 +2150,9 @@ export default function App() {
                       ),
                     )
                   }
-                />
+               />
               )}
-            </div>
+            </TabBody>
           )}
         </aside>
         )}
@@ -2176,13 +2165,13 @@ export default function App() {
             setNewProjectOpen(false);
             onProjectCreated(project, publicationError);
           }}
-        />
+       />
       )}
       {demoWelcomeOpen && !homeOpen && activeProject && isDemoProjectId(activeProject.id) && (
         <DemoWelcomeModal
           onClose={closeDemoWelcome}
           onCreateProject={createProjectFromDemoWelcome}
-        />
+       />
       )}
     </div>
   );

@@ -1,7 +1,7 @@
 import { m } from "../paraglide/messages.js";
 import { GitBranch, RotateCw } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
-import { ICON_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME } from "../styleClasses";
+import { IconButton, IconButtonLink, Spinner } from "./ui";
 
 export type CodeBrowserView = "files" | "changes";
 
@@ -29,7 +29,7 @@ export function CodeBrowserHeader({
   return (
     <div className="code-tab-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant shrink-0 [&_>_.seg]:p-0.5 [&_>_.seg]:rounded-sm [&_>_.seg_button]:py-0.5 [&_>_.seg_button]:px-2 [&_>_.seg_button]:text-sm [&_>_.seg_button]:font-medium">
       {showViewToggle && (
-        <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-[color-mix(in_oklab,_var(--text)_10%,_transparent)] [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-md [&_button]:font-semibold [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-[0_1px_3px_color-mix(in_oklab,_var(--text)_25%,_transparent)] [&_button:disabled]:text-muted [&_button:disabled]:cursor-default" role="group" aria-label={m.code_browser_header_code_browser_view()}>
+        <div className="seg inline-flex items-center gap-0.5 p-[3px] rounded-md bg-hover-subtle [&_button]:py-[3px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default" role="group" aria-label={m.code_browser_header_code_browser_view()}>
           <button
             type="button"
             className={view === "files" ? "active" : ""}
@@ -49,14 +49,13 @@ export function CodeBrowserHeader({
         </div>
       )}
       {branchLabel && (
-        <span className="wt-branch-chip inline-flex items-center gap-1 min-w-0 py-0.5 px-2 rounded-full bg-[color-mix(in_oklab,_var(--text)_8%,_transparent)] text-subtext text-xs [&_>_svg]:shrink-0" title={branchTitle}>
+        <span className="wt-branch-chip inline-flex items-center gap-1 min-w-0 py-0.5 px-2 rounded-full bg-hover-muted text-subtext text-xs [&_>_svg]:shrink-0" title={branchTitle}>
           <GitBranch size={12} />
-          <span className="wt-branch-name overflow-hidden text-ellipsis whitespace-nowrap font-mono">{branchLabel}</span>
+          <span className="wt-branch-name overflow-hidden text-ellipsis whitespace-nowrap">{branchLabel}</span>
         </span>
       )}
       {githubHref && (
-        <a
-          className={ICON_BUTTON_CLASS_NAME}
+        <IconButtonLink
           href={githubHref}
           target="_blank"
           rel="noopener noreferrer"
@@ -64,12 +63,12 @@ export function CodeBrowserHeader({
           aria-label={githubTitle}
         >
           <GitHubMark size={13} />
-        </a>
+        </IconButtonLink>
       )}
-      <span style={{ flex: 1 }} />
-      <button className={ICON_BUTTON_CLASS_NAME} title={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
-        {refreshing ? <span className={SPINNER_CLASS_NAME} /> : <RotateCw size={13} />}
-      </button>
+      <span className="flex-1" />
+      <IconButton title={m.code_browser_header_refresh()} aria-label={m.code_browser_header_refresh()} onClick={onRefresh}>
+        {refreshing ? <Spinner /> : <RotateCw size={13} />}
+      </IconButton>
     </div>
   );
 }

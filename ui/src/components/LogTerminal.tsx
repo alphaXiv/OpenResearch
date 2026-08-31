@@ -23,6 +23,7 @@ export function LogTerminal({ runId }: { runId: string }) {
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
+    const rootStyles = getComputedStyle(document.documentElement);
 
     const term = new Terminal({
       convertEol: true,
@@ -30,15 +31,14 @@ export function LogTerminal({ runId }: { runId: string }) {
       fontSize: 12,
       // xterm needs a resolved font string, so read --mono off the root element.
       fontFamily:
-        getComputedStyle(document.documentElement).getPropertyValue("--mono").trim() ||
+        rootStyles.getPropertyValue("--mono").trim() ||
         "ui-monospace, Menlo, Consolas, monospace",
       scrollback: 20000,
       theme: {
-        // Matches --term-bg in tailwind.css (terminal stays dark in both themes).
-        background: "#1a1a1a",
-        foreground: "#e6e1e0",
-        cursor: "#1a1a1a",
-        selectionBackground: "#2c3441",
+        background: rootStyles.getPropertyValue("--term-bg").trim(),
+        foreground: rootStyles.getPropertyValue("--term-foreground").trim(),
+        cursor: rootStyles.getPropertyValue("--term-bg").trim(),
+        selectionBackground: rootStyles.getPropertyValue("--term-selection").trim(),
       },
     });
     const fit = new FitAddon();
@@ -108,5 +108,5 @@ export function LogTerminal({ runId }: { runId: string }) {
     };
   }, [runId]);
 
-  return <div ref={wrapRef} style={{ width: "100%", height: "100%" }} />;
+  return <div ref={wrapRef} className="h-full w-full" />;
 }

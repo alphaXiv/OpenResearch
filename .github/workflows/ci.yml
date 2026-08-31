@@ -27,6 +27,9 @@ jobs:
       - name: Localization catalogs
         run: node ui/scripts/check-i18n.mjs
 
+      - name: Style tokens
+        run: node ui/scripts/check-styles.mjs
+
       - name: Dev-slot helper tests
         run: node --test scripts/dev-slot.test.mjs
 

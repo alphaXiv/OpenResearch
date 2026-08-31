@@ -13,8 +13,8 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
-import { SMALL_BUTTON_CLASS_NAME } from "../styleClasses";
 import type { TabOpenIntent } from "../tabPreview";
+import { Button, MenuItem } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -55,7 +55,7 @@ export function DetailDrawer({
         runs={expRuns}
         onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
         onOpenCode={(intent) => onOpenCode("files", intent)}
-      />
+     />
     );
   }
 
@@ -65,7 +65,7 @@ export function DetailDrawer({
       expRuns={expRuns}
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
-    />
+   />
   );
 }
 
@@ -140,49 +140,50 @@ function TerminalView({
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
       <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
-        <div className="term-title min-w-0 text-md font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
+        <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         {error && (
           <span className="error" role="alert">
             {error}
           </span>
         )}
         {live && (
-          <button className={`${SMALL_BUTTON_CLASS_NAME} ghost`} disabled={cancelling} onClick={() => void stop()}>
+          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
             {cancelling ? m.common_cancelling() : m.common_stop()}
-          </button>
+          </Button>
         )}
         {expRuns.length > 0 && selectedRun && (
           <div className="run-history relative shrink-0" ref={historyRef}>
-            <button
-              className="run-picker inline-flex items-center gap-2 pt-1 pe-1.5 pb-1 ps-2.5 border border-border rounded-md bg-background text-text [&:hover]:bg-surface [&_.run-label]:text-sm [&_.run-label]:font-semibold"
+            <Button
               title={m.detail_drawer_switch_run()}
+              aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >
-              <span className="run-label">{m.detail_drawer_run()} {runNumber(selectedRun.id)}</span>
+              <span>{m.detail_drawer_run()} {runNumber(selectedRun.id)}</span>
               <StatusBadge
                 status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
-              />
+             />
               <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
-            </button>
+            </Button>
             {historyOpen && (
-              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] p-[5px] z-50">
+              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-[5px] z-50">
                 {expRuns.map((r) => (
-                  <button
+                  <MenuItem
                     key={r.id}
-                    className={`history-item flex items-center gap-2 w-full text-start py-1.5 px-2 text-sm rounded-sm [&:hover]:bg-surface [&.active]:bg-surface [&_.run-label]:font-semibold [&_.when]:ms-auto [&_.when]:text-xs [&_.when]:text-muted ${r.id === selectedRun?.id ? "active" : ""}`}
+                    className="justify-start"
+                    active={r.id === selectedRun?.id}
                     onClick={() => {
                       onSelectRun(r.id);
                       setHistoryOpen(false);
                     }}
                   >
-                    <span className="run-label">{m.detail_drawer_run()} {runNumber(r.id)}</span>
+                    <span className="font-medium">{m.detail_drawer_run()} {runNumber(r.id)}</span>
                     <StatusBadge status={runDisplayStatus(r)} />
-                    <span className="when">{timeAgo(r.createdAt)}</span>
-                  </button>
+                    <span className="ms-auto text-xs text-muted">{timeAgo(r.createdAt)}</span>
+                  </MenuItem>
                 ))}
               </div>
             )}
@@ -190,13 +191,13 @@ function TerminalView({
         )}
       </div>
 
-      <div className="term-fill flex-1 min-h-0 bg-[var(--term-bg)] pt-1 pe-0 pb-1 ps-1.5">
+      <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
         {selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />
         ) : (
-          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-md text-muted">{m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
         )}
       </div>
     </div>

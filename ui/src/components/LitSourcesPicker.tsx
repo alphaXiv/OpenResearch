@@ -7,7 +7,7 @@ import { useEffect, useState } from "react";
 
 import { getLitSources, setLitSources, type LitSourcesSettings } from "../api";
 import { LitSourceLogo, LIT_SOURCE_NAME, type LitSource } from "./LitSourceLogo";
-import { MODEL_ITEM_CLASS_NAME, SETTINGS_SWITCH_CLASS_NAME } from "../styleClasses";
+import { MenuItem, SwitchIndicator } from "./ui";
 
 const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv"];
 
@@ -46,12 +46,12 @@ export function LitSourcesList() {
       {LIT_SOURCES.map((key) => {
         const on = settings[key];
         return (
-          <button
+          <MenuItem
             key={key}
             type="button"
             role="switch"
             aria-checked={on}
-            className={MODEL_ITEM_CLASS_NAME}
+
             disabled={saving}
             onClick={() => toggle(key)}
           >
@@ -59,10 +59,8 @@ export function LitSourcesList() {
               <LitSourceLogo source={key} size={16} decorative />
               {LIT_SOURCE_NAME[key]}
             </span>
-            <span className={`${SETTINGS_SWITCH_CLASS_NAME} ${on ? "on" : ""}`} aria-hidden="true">
-              <span />
-            </span>
-          </button>
+            <SwitchIndicator checked={on} aria-hidden="true" />
+          </MenuItem>
         );
       })}
     </div>

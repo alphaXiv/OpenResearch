@@ -67,7 +67,7 @@ export function CodeView({
           ref={i + 1 === targetLine ? targetRowRef : undefined}
           className={`file-view-line flex items-stretch ${
             i + 1 === targetLine
-              ? "file-view-line-highlight bg-accent-blue-subtle shadow-[inset_2px_0_0_var(--accent-blue)]"
+              ? "file-view-line-highlight bg-accent-blue-subtle shadow-file-line"
               : ""
           }`}
         >
@@ -78,7 +78,7 @@ export function CodeView({
             className={`${CODE_GUTTER_CLASS_NAME} before:content-[attr(data-line)] shrink-0 pe-[1ch]`}
             style={{ width: `${ruleCh}ch` }}
             aria-hidden="true"
-          />
+         />
           <code
             className={`file-view-code flex-1 min-w-0 ps-[2ch] pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME}`}
           >
@@ -98,7 +98,7 @@ export function CodeView({
           className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
           style={{ width: `${ruleCh}ch` }}
           aria-hidden="true"
-        />
+       />
       )}
       {rows}
     </div>

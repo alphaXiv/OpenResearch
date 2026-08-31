@@ -1,6 +1,6 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { ArrowLeft, ArrowRight, Check, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -22,10 +22,11 @@ import {
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
 import { onHarnessAuth } from "../events";
-import { GHOST_BUTTON_CLASS_NAME, MONO_CLASS_NAME, PAPER_TITLE_CLASS_NAME, PRIMARY_BUTTON_CLASS_NAME, SPINNER_CLASS_NAME, STATUS_BADGE_CLASS_NAME } from "../styleClasses";
+import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
+import { PaperTitle } from "./PaperTitle";
 
 const ONB_GATE_HINT_CLASS_NAME = [
-  "onb-gate-hint text-base font-semibold leading-normal text-text",
+  "onb-gate-hint text-base font-medium leading-normal text-text",
   "onb-agent-hint mt-0 mx-0 mb-2.5",
 ].join(" ");
 
@@ -37,7 +38,7 @@ const ONB_CARD_META_CLASS_NAME = [
 ].join(" ");
 
 const GIT_RETRY_HINT_CLASS_NAME = [
-  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-semibold leading-normal",
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-medium leading-normal",
   "text-text onb-git-hint mt-2",
 ].join(" ");
 
@@ -47,7 +48,7 @@ const ONB_CARD_CLASS_NAME = [
 ].join(" ");
 
 const FINISH_ERROR_CLASS_NAME = [
-  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-semibold leading-normal",
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-medium leading-normal",
   "text-text",
 ].join(" ");
 
@@ -247,10 +248,10 @@ export function Onboarding({
         {step === 0 ? (
           <div className="onb-intro relative flex min-h-dvh flex-col justify-center gap-4 py-12 min-[1120px]:grid min-[1120px]:grid-cols-[minmax(0,_1.1fr)_minmax(28rem,_1fr)] min-[1120px]:grid-rows-[auto_auto] min-[1120px]:content-center min-[1120px]:gap-x-20 min-[1120px]:gap-y-10">
             <div className="onb-intro-copy relative z-10 min-[1120px]:col-start-1 min-[1120px]:row-start-1 min-[1120px]:self-start">
-              <div className="onb-intro-brand text-[4rem] leading-none font-semibold tracking-[-0.035em] mb-10">
+              <div className="onb-intro-brand mb-10 text-6xl font-semibold leading-none tracking-[-0.035em]">
                 <Wordmark />
               </div>
-              <h2 className="onb-title mt-0 mx-0 text-[2.5rem] leading-[1.08] tracking-[-0.035em]">
+              <h2 className="onb-title mt-0 mx-0 text-4xl font-medium leading-[1.08] tracking-[-0.035em]">
                 {m.onboarding_a_workspace_for_your_research_agents()}
               </h2>
             </div>
@@ -258,11 +259,11 @@ export function Onboarding({
               <div
                 aria-hidden="true"
                 className="absolute -inset-14 rounded-full bg-primary-subtle opacity-70 blur-3xl"
-              />
+             />
               <ul className="onb-intro-list relative flex flex-col gap-4 m-0 p-0 list-none">
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-[0_14px_36px_color-mix(in_oklab,_var(--text)_6%,_transparent)]">
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
                   <span>
-                    <strong className="mb-1.5 block text-2xl tracking-[-0.015em]">
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
                       {m.onboarding_consolidate_your_research()}
                     </strong>
                     <span className="block text-lg leading-[1.55] text-text">
@@ -270,9 +271,9 @@ export function Onboarding({
                     </span>
                   </span>
                 </li>
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-[0_14px_36px_color-mix(in_oklab,_var(--text)_6%,_transparent)]">
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
                   <span>
-                    <strong className="mb-1.5 block text-2xl tracking-[-0.015em]">
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
                       {m.onboarding_ground_your_agents()}
                     </strong>
                     <span className="block text-lg leading-[1.55] text-text">
@@ -280,9 +281,9 @@ export function Onboarding({
                     </span>
                   </span>
                 </li>
-                <li className="rounded-2xl border border-border bg-background p-6 shadow-[0_14px_36px_color-mix(in_oklab,_var(--text)_6%,_transparent)]">
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
                   <span>
-                    <strong className="mb-1.5 block text-2xl tracking-[-0.015em]">
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
                       {m.onboarding_everything_stays_local()}
                     </strong>
                     <span className="block text-lg leading-[1.55] text-text">
@@ -293,18 +294,18 @@ export function Onboarding({
               </ul>
             </div>
             <div className="onb-intro-actions relative z-10 mt-8 flex justify-end min-[1120px]:col-start-2 min-[1120px]:row-start-2 min-[1120px]:mt-0 min-[1120px]:self-start">
-              <button
-                className={`${PRIMARY_BUTTON_CLASS_NAME} !py-3.5 !px-7 !text-xl !rounded-lg`}
+              <Button variant="primary" size="large"
                 onClick={() => setStep(1)}
               >
                 {m.onboarding_continue()} <ArrowRight size={20} />
-              </button>
+              </Button>
             </div>
           </div>
         ) : step === 1 ? (
           <>
-            <div className="onb-eyebrow text-xl font-semibold text-muted mb-4.5">
-              <Wordmark /> {m.onboarding_step_1_of_2()}
+            <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
+              <Wordmark />
+              <span>{m.onboarding_step_1_of_2()}</span>
             </div>
             <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em]">{m.onboarding_choose_a_coding_agent()}</h2>
             <p className="onb-sub text-text text-base leading-[1.55] mt-0 mx-0 mb-5.5 max-w-120">{m.onboarding_open_research_uses_a_coding_agent_already_installed()}</p>
@@ -326,15 +327,15 @@ export function Onboarding({
                     h={h}
                     selected={preferredHarness === h.id}
                     onSelect={() => setPreferredHarness(h.id)}
-                  />
+                 />
                 ))
               ) : harnessError ? (
                 // Never a spinner next to an error — detection isn't running.
                 <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_retry_connection()}</div>
               ) : (
-                <div className="onb-loading flex items-center gap-2 text-subtext text-md py-2 px-0">
-                  <span className={SPINNER_CLASS_NAME} /> {m.onboarding_detecting_claude_code_codex_open_code()}
-                </div>
+                <LoadingRow className="py-2">
+                  <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
+                </LoadingRow>
               )}
             </div>
             {(gitVersion === null || gitError) && (
@@ -350,20 +351,19 @@ export function Onboarding({
               </div>
             )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
-              <button className={GHOST_BUTTON_CLASS_NAME} onClick={() => setStep(0)}>
+              <Button variant="ghost" onClick={() => setStep(0)}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
-              </button>
+              </Button>
               {(harnessError ||
                 gitError ||
                 gitVersion === null ||
                 (harnesses !== null && !anyAgentReady)) && (
-                <button className={GHOST_BUTTON_CLASS_NAME} onClick={() => load(true, true)} disabled={checking}>
-                  <RefreshCw size={12} className={checking ? "spin animate-[settings-spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
-                </button>
+                <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
+                  <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
+                </Button>
               )}
-              <div style={{ flex: 1 }} />
-              <button
-                className={PRIMARY_BUTTON_CLASS_NAME}
+              <div className="flex-1" />
+              <Button variant="primary"
                 onClick={() => setStep(2)}
                 disabled={checking || !anyAgentReady || preferredHarness === null || !gitReady}
                 title={
@@ -383,18 +383,19 @@ export function Onboarding({
                 }
               >
                 {m.onboarding_continue()} <ArrowRight size={13} />
-              </button>
+              </Button>
             </div>
           </>
         ) : (
           <>
-            <div className="onb-eyebrow text-xl font-semibold text-muted mb-4.5">
-              <Wordmark /> {m.onboarding_step_2_of_2()}
+            <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
+              <Wordmark />
+              <span>{m.onboarding_step_2_of_2()}</span>
             </div>
             <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em] onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
             <div className="onb-cards flex flex-col gap-2.5">
               <div className={ONB_CARD_CLASS_NAME}>
-                <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-semibold [&_legend]:mb-1.5">
+                <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-medium [&_legend]:mb-1.5">
                   <legend>{m.onboarding_what_areas_are_you_interested_in()}</legend>
                   <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">{m.onboarding_choose_one_or_more()}</p>
                   <div className="onb-area-options grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2">
@@ -405,7 +406,7 @@ export function Onboarding({
                           checked={researchAreas.includes(area.id)}
                           onChange={() => toggleResearchArea(area.id)}
                           disabled={finishing}
-                        />
+                       />
                         <span>{area.label()}</span>
                       </label>
                     ))}
@@ -418,10 +419,10 @@ export function Onboarding({
                       disabled={finishing}
                       placeholder={m.onboarding_tell_us_your_other_research_area()}
                       aria-label={m.onboarding_other_research_area()}
-                    />
+                   />
                   )}
                 </fieldset>
-                <label className="onb-field-label text-base font-semibold mb-1.5" htmlFor="onb-background">
+                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-background">
                   {m.onboarding_research_background()}
                 </label>
                 <textarea
@@ -432,8 +433,8 @@ export function Onboarding({
                   disabled={finishing}
                   rows={4}
                   placeholder={m.onboarding_e_g_i_work_on_sample_efficient_rl()}
-                />
-                <label className="onb-field-label text-base font-semibold mb-1.5" htmlFor="onb-paper-search">
+               />
+                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-paper-search">
                   {m.onboarding_representative_papers()}
                 </label>
                 <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">
@@ -446,11 +447,11 @@ export function Onboarding({
                     onChange={(e) => setPaperQuery(e.target.value)}
                     disabled={finishing}
                     placeholder={m.onboarding_search_alpha_xiv_by_title_to_link_a()}
-                  />
+                 />
                   {searchingPapers ? (
                     <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_searching_alpha_xiv()}</div>
                   ) : paperHits.length > 0 ? (
-                    <div className="onb-paper-results flex flex-col border border-border rounded-md max-h-50 overflow-y-auto [&_button]:flex [&_button]:flex-col [&_button]:items-start [&_button]:gap-0.5 [&_button]:py-2 [&_button]:px-2.5 [&_button]:bg-none [&_button]:bg-transparent [&_button]:border-0 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-start [&_button]:[font:inherit] [&_button]:text-text [&_button]:cursor-pointer [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_.title]:text-md [&_.title]:font-medium [&_.id]:font-mono [&_.id]:text-xs [&_.id]:text-muted">
+                    <div className="onb-paper-results flex flex-col border border-border rounded-md max-h-50 overflow-y-auto [&_button]:flex [&_button]:flex-col [&_button]:items-start [&_button]:gap-0.5 [&_button]:py-2 [&_button]:px-2.5 [&_button]:bg-none [&_button]:bg-transparent [&_button]:border-0 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-start [&_button]:[font:inherit] [&_button]:text-text [&_button]:cursor-pointer [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_.title]:text-sm [&_.title]:font-medium [&_.id]:text-xs [&_.id]:text-muted">
                       {paperHits.map((h) => (
                         <button
                           key={h.paperId}
@@ -458,7 +459,7 @@ export function Onboarding({
                           onClick={() => addPaper(h)}
                           disabled={finishing}
                         >
-                          <span className={PAPER_TITLE_CLASS_NAME}>{cleanPaperTitle(h.title)}</span>
+                          <PaperTitle>{cleanPaperTitle(h.title)}</PaperTitle>
                           <span className="id">{h.paperId}</span>
                         </button>
                       ))}
@@ -468,8 +469,8 @@ export function Onboarding({
                 {papers.length > 0 && (
                   <div className="onb-paper-chips flex flex-wrap gap-1.5 mt-2.5">
                     {papers.map((p) => (
-                      <span key={p.paperId} className="onb-paper-chip inline-flex items-center gap-1.5 pt-1 pe-1 pb-1 ps-2.5 border border-border rounded-sm bg-surface text-sm max-w-full [&_.title]:font-medium [&_.title]:overflow-hidden [&_.title]:text-ellipsis [&_.title]:whitespace-nowrap [&_.title]:max-w-60 [&_.id]:font-mono [&_.id]:text-xs [&_.id]:text-muted [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:p-0.5 [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent [&_button]:text-muted [&_button]:cursor-pointer [&_button]:rounded-xs [&_button:hover]:text-text [&_button:hover]:bg-panel">
-                        <span className={PAPER_TITLE_CLASS_NAME}>{p.title || p.paperId}</span>
+                      <span key={p.paperId} className="onb-paper-chip inline-flex items-center gap-1.5 pt-1 pe-1 pb-1 ps-2.5 border border-border rounded-sm bg-surface text-sm max-w-full [&_.title]:font-medium [&_.title]:overflow-hidden [&_.title]:text-ellipsis [&_.title]:whitespace-nowrap [&_.title]:max-w-60 [&_.id]:text-xs [&_.id]:text-muted [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:p-0.5 [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent [&_button]:text-muted [&_button]:cursor-pointer [&_button]:rounded-xs [&_button:hover]:text-text [&_button:hover]:bg-panel">
+                        <PaperTitle>{p.title || p.paperId}</PaperTitle>
                         <span className="id">{p.paperId}</span>
                         <button
                           type="button"
@@ -493,25 +494,24 @@ export function Onboarding({
               </p>
             )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
-              <button className={GHOST_BUTTON_CLASS_NAME} onClick={() => setStep(1)} disabled={finishing}>
+              <Button variant="ghost" onClick={() => setStep(1)} disabled={finishing}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
-              </button>
-              <div style={{ flex: 1 }} />
-              <button
-                className={PRIMARY_BUTTON_CLASS_NAME}
+              </Button>
+              <div className="flex-1" />
+              <Button variant="primary"
                 onClick={() => void finishOnboarding()}
                 disabled={finishing || preferredHarness === null || !researchProfileValid}
               >
                 {finishing ? (
                   <>
-                    <span className={SPINNER_CLASS_NAME} /> {m.onboarding_setting_things_up()}
+                    <Spinner /> {m.onboarding_setting_things_up()}
                   </>
                 ) : (
                   <>
                     {m.onboarding_get_started()} <ArrowRight size={13} />
                   </>
                 )}
-              </button>
+              </Button>
             </div>
             {preferredHarness === null && (
               <p className={FINISH_ERROR_CLASS_NAME}>
@@ -534,14 +534,14 @@ function cleanPaperTitle(title: string): string {
 
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
-function agentBadge(h: Harness): { cls: string; label: string } {
-  if (h.agentReady) return { cls: "st-done", label: m.onboarding_signed_in() };
-  if (!h.installed) return { cls: "st-idle", label: m.onboarding_not_detected() };
-  if (h.installBroken) return { cls: "st-starting", label: m.onboarding_install_broken() };
-  if (h.authState === "unknown") return { cls: "st-starting", label: m.onboarding_unable_to_verify() };
-  if (h.authState === "unsupported") return { cls: "st-starting", label: m.onboarding_update_required() };
-  if (h.installed) return { cls: "st-starting", label: m.onboarding_not_signed_in() };
-  return { cls: "st-idle", label: m.onboarding_not_detected() };
+function agentBadge(h: Harness): { tone: StatusTone; label: string } {
+  if (h.agentReady) return { tone: "success", label: m.onboarding_signed_in() };
+  if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
+  if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
+  if (h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
+  if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
+  return { tone: "neutral", label: m.onboarding_not_detected() };
 }
 
 function selectionFor(harness: Harness): AgentSelection {
@@ -568,7 +568,9 @@ function AgentCard({
   onSelect: () => void;
 }) {
   const badge = agentBadge(h);
-  const visibleBadge = selected ? { cls: "st-done", label: m.onboarding_selected() } : badge;
+  const visibleBadge: { tone: StatusTone; label: string } = selected
+    ? { tone: "success", label: m.onboarding_selected() }
+    : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
   const meta = [
     version,
@@ -584,19 +586,16 @@ function AgentCard({
     <div className="onb-card-head flex items-center justify-between gap-3">
       <span className="onb-card-identity flex items-center gap-3 min-w-0">
         <AgentLogo harness={h.id} />
-        <span className="onb-card-name text-xl font-semibold tracking-[-0.01em]">{h.name}</span>
+        <span className="onb-card-name text-lg font-semibold tracking-[-0.01em]">{h.name}</span>
       </span>
-      <span className={`${STATUS_BADGE_CLASS_NAME} ${visibleBadge.cls}`}>
-        {h.agentReady ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
-        {visibleBadge.label}
-      </span>
+      <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
     </div>
   );
   // An unready agent can't be selected — render it as a plain container, not a
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
     return (
-      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]">
+      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
         {head}
         <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
       </div>
@@ -605,12 +604,12 @@ function AgentCard({
   return (
     <button
       type="button"
-      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-[0_0_0_1px_var(--accent)]${selected ? " selected" : ""}`}
+      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
       {head}
-      <div className={`onb-card-detail ${MONO_CLASS_NAME}`}>
+      <div className="onb-card-detail text-sm">
         {h.account ?? m.onboarding_api_key()}
         {h.plan ? ` · ${h.plan}` : ""}
       </div>
@@ -635,12 +634,9 @@ function LocalGitCard({
     <div className={ONB_CARD_CLASS_NAME}>
       <div className="onb-card-head flex items-center justify-between gap-3">
         <span className="onb-card-name font-semibold text-base">{m.onboarding_local_git()}</span>
-        <span
-          className={`${STATUS_BADGE_CLASS_NAME} ${gitVersion ? "st-done" : error || gitVersion === null ? "st-failed" : "st-starting"}`}
-        >
-          {gitVersion ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
+        <StatusIndicator tone={gitVersion ? "success" : error || gitVersion === null ? "danger" : "warning"}>
           {gitVersion ? m.onboarding_ready() : error ? m.onboarding_check_failed() : gitVersion === null ? m.onboarding_not_found() : m.onboarding_checking()}
-        </span>
+        </StatusIndicator>
       </div>
       {(gitVersion || (!error && gitVersion === undefined)) && (
         <div className={ONB_CARD_META_CLASS_NAME}>{gitVersion ?? m.onboarding_checking_git()}</div>

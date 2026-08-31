@@ -14,6 +14,7 @@ import { createPortal } from "react-dom";
 import { getSkillContent, type SkillInfo } from "../api";
 import { splitCommandTokens } from "../planCommand";
 import { Md } from "./Md";
+import { Badge } from "./ui";
 
 /** Metrics the composer mirror copies off the textarea so its text lands on the
  * real text glyph for glyph. */
@@ -86,7 +87,7 @@ function chipSegments(
           onCommandMouseDown ? (event) => onCommandMouseDown(event, end) : undefined
         }
       >
-        <span className="text-[var(--skill-blue-slash)]">/</span>
+        <span className="text-skill-blue-slash">/</span>
         {segment.text.slice(1)}
       </span>
     ) : (
@@ -176,7 +177,7 @@ function ComposerSkillToken({
         aria-controls={cardId}
         aria-expanded={open}
         aria-label={m.a11y_preview_skill({ name })}
-        className="composer-chip group/skill pointer-events-auto relative z-1 cursor-text rounded-md bg-background text-[var(--skill-blue)]"
+        className="composer-chip group/skill pointer-events-auto relative z-1 cursor-text rounded-md bg-background text-skill-blue"
         onMouseEnter={show}
         onMouseLeave={scheduleClose}
         onFocus={show}
@@ -213,9 +214,9 @@ function ComposerSkillToken({
           clearClose();
         }}
       >
-        <span className="pointer-events-none absolute -inset-[7px] z-0 rounded-md bg-[var(--skill-blue-subtle)] opacity-0 transition-opacity group-hover/skill:opacity-100" />
+        <span className="pointer-events-none absolute -inset-[7px] z-0 rounded-md bg-skill-blue-subtle opacity-0 transition-opacity group-hover/skill:opacity-100" />
         <span className="relative z-1">
-          <span className="text-[var(--skill-blue-slash)]">/</span>
+          <span className="text-skill-blue-slash">/</span>
           {label.slice(1)}
         </span>
       </span>
@@ -230,7 +231,7 @@ function ComposerSkillToken({
               ...position,
               maxHeight: "min(28rem, calc(100vh - 2rem))",
             }}
-            className="fixed z-100 overflow-y-auto rounded-lg border border-border bg-background shadow-[0_8px_24px_rgba(0,_0,_0,_0.14)]"
+            className="fixed z-100 overflow-y-auto rounded-lg border border-border bg-background shadow-floating"
             onMouseEnter={clearClose}
             onMouseLeave={scheduleClose}
             onFocus={clearClose}
@@ -238,10 +239,10 @@ function ComposerSkillToken({
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="sticky top-0 z-1 flex items-center gap-2 border-b border-border-variant bg-background px-4 py-3">
-              <span className="text-md font-medium text-muted">/{name}</span>
-              <span className="inline-flex h-4 items-center rounded-full border border-border-variant bg-canvas px-1.5 text-2xs font-semibold tracking-[0.05em] text-muted">
+              <span className="text-sm font-medium text-muted">/{name}</span>
+              <Badge className="h-5 border-border-variant bg-canvas px-1.5 tracking-[0.05em]">
                 {m.skill_chips_badge()}
-              </span>
+              </Badge>
             </div>
             <div className="p-4 text-sm text-text">
               {loading && content === null ? (
@@ -270,7 +271,7 @@ export function MessageWithChips({
       {chipSegments(
         text,
         isCommand,
-        "skill-chip mx-1 inline-flex items-center rounded-md px-2 py-1 font-medium text-[var(--skill-blue)] transition-colors hover:bg-[var(--skill-blue-subtle)]",
+        "skill-chip mx-1 inline-flex items-center rounded-md px-2 py-1 font-medium text-skill-blue transition-colors hover:bg-skill-blue-subtle",
       )}
     </>
   );
@@ -357,10 +358,10 @@ export function ComposerSkillChips({
               skill={skill}
               projectId={projectId}
               textareaRef={textareaRef}
-            />
+           />
           ) : (
-            <span key={`${key}:${end}`} aria-hidden="true" className="bg-background text-[var(--skill-blue)]">
-              <span className="text-[var(--skill-blue-slash)]">/</span>
+            <span key={`${key}:${end}`} aria-hidden="true" className="bg-background text-skill-blue">
+              <span className="text-skill-blue-slash">/</span>
               {label.slice(1)}
             </span>
           );

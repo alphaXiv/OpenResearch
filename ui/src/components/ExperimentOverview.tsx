@@ -21,19 +21,11 @@ import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { StatusBadge } from "./StatusBadge";
-
-const EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME = [
-  "experiment-overview-action inline-flex items-center justify-center gap-[7px]",
-  "min-h-9 py-[7px] px-3 border border-border-variant rounded-sm",
-  "bg-background text-text text-sm font-semibold",
-  "transition-[background,border-color] duration-120 ease-standard",
-  "[&:hover]:border-[color-mix(in_oklab,_var(--text)_34%,_var(--border))]",
-  "[&:hover]:bg-surface",
-].join(" ");
+import { Button } from "./ui";
 
 const EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME = [
   "experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant",
-  "[&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-md",
+  "[&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm",
   "[&_h2]:font-semibold",
 ].join(" ");
 
@@ -85,39 +77,37 @@ export function ExperimentOverview({
   }, [hasLiveRun]);
 
   return (
-    <div className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-[22px] [&_h1]:leading-tight">
+    <div className="experiment-overview absolute inset-0 overflow-y-auto bg-background [&_h1]:m-0 [&_h1]:text-text [&_h1]:text-xl [&_h1]:leading-tight">
       <div className="experiment-overview-inner w-full max-w-230 my-0 mx-auto pt-6.5 px-7 pb-10 [@media((max-width:_720px))]:pt-5 [@media((max-width:_720px))]:px-4.5 [@media((max-width:_720px))]:pb-8">
         <header className="experiment-overview-head flex items-start justify-between gap-6">
           <div className="experiment-overview-heading min-w-0">
             <h1>{experiment.title || experiment.slug}</h1>
-            <div className="experiment-overview-slug mt-[5px] text-muted font-mono text-sm">{experiment.slug}</div>
+            <div className="experiment-overview-slug mt-[5px] text-muted text-sm">{experiment.slug}</div>
           </div>
           <StatusBadge status={latestRun ? runDisplayStatus(latestRun) : "idle"} />
         </header>
 
         <div className="experiment-overview-actions flex gap-[7px] mt-4.5 [@media((max-width:_720px))]:flex-wrap">
           {latestRun && (
-            <button
-              className={EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME}
+            <Button
               {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                 onOpenLogs(latestRun.id, intent),
               )}
             >
               <Terminal size={15} />
               {m.experiment_overview_logs()}
-            </button>
+            </Button>
           )}
-          <button
-            className={EXPERIMENT_OVERVIEW_ACTION_CLASS_NAME}
+          <Button
             {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
           >
             <FolderTree size={15} />
             {m.experiment_overview_code()}
-          </button>
+          </Button>
         </div>
 
         {experiment.description && (
-          <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-md [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-[1.65]">
+          <section className="experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant [&_h2]:mt-0 [&_h2]:mx-0 [&_h2]:mb-3.5 [&_h2]:text-text [&_h2]:text-sm [&_h2]:font-semibold overview-description [&_.md]:text-text [&_.md]:leading-[1.65]">
             <h2>{m.experiment_overview_description()}</h2>
             <Md text={experiment.description} />
           </section>
@@ -171,7 +161,7 @@ export function ExperimentOverview({
               owner={project.githubEnabled ? project.githubOwner : ""}
               repo={project.githubEnabled ? project.githubRepo : ""}
               branch={experiment.branchName}
-            />
+           />
             {parentExperiment && (
               <span>
                 {m.experiment_overview_from()} <code>{parentExperiment.slug}</code>
@@ -197,7 +187,7 @@ export function ExperimentOverview({
                     onOpenLogs(run.id, intent),
                   )}
                 >
-                  <span className="experiment-run-number font-mono text-xs font-semibold">{m.experiment_overview_run()} {runs.length - index}</span>
+                  <span className="experiment-run-number text-xs font-medium">{m.experiment_overview_run()} {runs.length - index}</span>
                   <StatusBadge status={runDisplayStatus(run)} />
                   <span>{timeAgo(run.createdAt)}</span>
                   <span>{runDuration(run, now)}</span>

@@ -2,10 +2,6 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import { fmtTokens, type ContextUsage } from "../api";
-import {
-  COMPOSER_CONTROL_CLASS_NAME,
-  COMPOSER_ICON_CONTROL_CLASS_NAME,
-} from "../styleClasses";
 import { usePopover } from "./ModelPicker";
 import { ProgressBar } from "./ProgressBar";
 
@@ -44,7 +40,7 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
     <div className="option-picker relative inline-flex shrink-0" ref={ref}>
       <button
         type="button"
-        className={`${pct === null ? `${COMPOSER_CONTROL_CLASS_NAME} px-1` : COMPOSER_ICON_CONTROL_CLASS_NAME} composer-bare context-ring text-md text-text`}
+        className={`${pct === null ? "inline-flex h-8 items-center rounded-md px-1 transition-[background,color] duration-150 ease-standard hover:bg-surface" : "inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-text transition-[background,color] duration-150 ease-standard hover:bg-surface"} composer-bare context-ring text-sm text-text`}
         title={m.context_meter_context_window_used()}
         onClick={() => setOpen((v) => !v)}
       >
@@ -59,7 +55,7 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
               fill="none"
               stroke="var(--border)"
               strokeWidth="2.5"
-            />
+           />
             <circle
               cx="8"
               cy="8"
@@ -70,12 +66,12 @@ function VisibleContextMeter({ usage }: { usage: ContextUsage }) {
               strokeLinecap="round"
               strokeDasharray={`${(RING_C * Math.max(pct, 2)) / 100} ${RING_C}`}
               transform="rotate(-90 8 8)"
-            />
+           />
           </svg>
         )}
       </button>
       {open && (
-        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-[0_12px_32px_rgba(0,_0,_0,_0.18)] z-50 overflow-hidden min-w-47.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 align-right context-meter-menu w-70 pt-2.5 px-3 pb-3 [&_.progress]:mt-2 [&_.progress]:mx-0 [&_.progress]:mb-0 [&_.progress-track]:h-[5px] [&_.progress-track]:border-0 [&_.progress-track]:bg-border">
+        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 align-right context-meter-menu w-70 pt-2.5 px-3 pb-3 [&_.progress]:mt-2 [&_.progress]:mx-0 [&_.progress]:mb-0 [&_.progress-track]:h-[5px] [&_.progress-track]:border-0 [&_.progress-track]:bg-border">
           <div className="context-meter-head flex justify-between items-baseline gap-3 text-sm text-muted">
             <span>{m.context_meter_context_window()}</span>
             <span className="context-meter-value text-text tabular-nums">
