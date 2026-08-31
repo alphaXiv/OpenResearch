@@ -825,7 +825,7 @@
   "new_project_destination_is_file": "مقصد دیگری انتخاب کنید. این مسیر فایل است، نه پوشه.",
   "new_project_folder_exists": "پوشه‌ای در این محل وجود دارد. نام یا محل دیگری انتخاب کنید، یا از «پوشهٔ موجود» استفاده کنید.",
   "new_project_paper_needs_empty_folder": "مقصد دیگری انتخاب کنید. مخزن مقاله به پوشه‌ای جدید یا خالی نیاز دارد.",
-  "new_project_blank_paper_needs_folder": "مقصد دیگری انتخاب کنید. پروژهٔ مقاله باید بیرون از هر مخزن Git، پوشهٔ جدید یا خالیِ جداگانه‌ای داشته باشد.",
+  "new_project_blank_paper_needs_folder": "مقصد دیگری انتخاب کنید. پروژهٔ مقاله باید پوشهٔ جدید یا خالیِ جداگانه‌ای داشته باشد.",
   "new_project_searching_alphaxiv": "در حال جست‌وجوی alphaXiv…",
   "new_project_public_repo_cloned": "مخزن عمومی کدِ پیوندشده بدون نیاز به اعتبارنامه کلون می‌شود.",
   "new_project_clone_destination": "مقصد کلون",

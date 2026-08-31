@@ -340,13 +340,10 @@ export function NewProjectForm({
   const nonemptyPaperCloneFolder =
     mode === "paper" && Boolean(paper?.repoUrl) && pathStatus?.empty === false;
   // A blank paper project is seeded and committed at the folder it initializes,
-  // so it needs a folder of its own rather than one inside an existing repo.
+  // so it needs an empty folder of its own — a folder inside another repository
+  // is fine, since it gets a repository of its own.
   const unusableBlankPaperFolder =
-    mode === "paper" &&
-    Boolean(paper) &&
-    !paper?.repoUrl &&
-    (pathStatus?.empty === false ||
-      (pathStatus?.gitState != null && pathStatus.gitState !== "notRepository"));
+    mode === "paper" && Boolean(paper) && !paper?.repoUrl && pathStatus?.empty === false;
   const unusableRepository =
     mode === "folder" &&
     (pathStatus?.gitState === "detached" || pathStatus?.gitState === "invalid");

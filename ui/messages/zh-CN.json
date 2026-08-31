@@ -825,7 +825,7 @@
   "new_project_destination_is_file": "请选择其他位置。此路径是文件，不是文件夹。",
   "new_project_folder_exists": "此处已有文件夹。请选择其他名称或位置，或使用“现有文件夹”。",
   "new_project_paper_needs_empty_folder": "请选择其他位置。论文仓库需要一个新的或空的文件夹。",
-  "new_project_blank_paper_needs_folder": "请选择其他位置。论文项目需要位于任何 Git 仓库之外，并拥有独立的新文件夹或空文件夹。",
+  "new_project_blank_paper_needs_folder": "请选择其他位置。论文项目需要拥有独立的新文件夹或空文件夹。",
   "new_project_searching_alphaxiv": "正在搜索 alphaXiv…",
   "new_project_public_repo_cloned": "关联的公开代码仓库无需凭据即可克隆。",
   "new_project_clone_destination": "克隆位置",
