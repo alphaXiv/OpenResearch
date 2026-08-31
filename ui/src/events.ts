@@ -138,14 +138,13 @@ function emitUpdateStatus(status: UpdateStatus) {
   updateStatusListeners.forEach((fn) => fn(status));
 }
 
-// Connection state for the whole dashboard: the one EventSource is also the one
-// signal that the local server is still there.
-//
-// Starts connected — this page was served by that server moments ago.
+// Connection state for the whole dashboard: the one EventSource is also the only
+// evidence the local server is there. Starts true — it served this page moments ago.
 let connected = true;
-const connectionListeners = new Set<(connected: boolean) => void>();
+type ConnectionListener = () => void;
+const connectionListeners = new Set<ConnectionListener>();
 
-export function onConnectionChange(fn: (connected: boolean) => void): () => void {
+export function onConnectionChange(fn: ConnectionListener): () => void {
   connectionListeners.add(fn);
   return () => {
     connectionListeners.delete(fn);
@@ -159,11 +158,12 @@ export function isConnected(): boolean {
 function setConnected(next: boolean) {
   if (next === connected) return;
   connected = next;
-  connectionListeners.forEach((fn) => fn(next));
+  connectionListeners.forEach((fn) => fn());
 }
 
 // Chrome and Safari re-try a dropped stream after ~3s, so an outage is only
-// distinguishable from a blip once a couple of those attempts have failed.
+// distinguishable from a blip once a couple of those attempts have failed; the
+// manual reopen below keeps to that same cadence.
 const OFFLINE_AFTER_MS = 8_000;
 const REOPEN_AFTER_MS = 3_000;
 
@@ -194,15 +194,20 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     let needsRepair = false;
 
     const connect = () => {
+      // connect() owns exactly one live source.
+      source?.close();
       const es = new EventSource("/api/events");
       source = es;
       es.onerror = () => {
+        // An error landing after cleanup would otherwise arm a timer whose id no
+        // longer reaches anyone, leaving the banner up over a healthy stream.
+        if (stopped) return;
         needsRepair = true;
         offlineTimer ??= window.setTimeout(() => setConnected(false), OFFLINE_AFTER_MS);
         // CLOSED is the browser giving up for good, which it does for any
         // non-SSE response — including the 500 the dev proxy returns while the
         // backend restarts. Nothing reopens the stream after that but us.
-        if (es.readyState === EventSource.CLOSED && reopenTimer === undefined && !stopped) {
+        if (es.readyState === EventSource.CLOSED && reopenTimer === undefined) {
           reopenTimer = window.setTimeout(() => {
             reopenTimer = undefined;
             connect();
@@ -210,6 +215,7 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         }
       };
       es.onopen = () => {
+        if (stopped) return;
         window.clearTimeout(offlineTimer);
         offlineTimer = undefined;
         setConnected(true);

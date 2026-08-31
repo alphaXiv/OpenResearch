@@ -1670,6 +1670,7 @@ export default function App() {
   if (projects.length === 0) {
     return (
       <div className="app flex flex-col h-full">
+        <OfflineBanner />
         {onboarded ? (
           <ProjectsHome
             projects={projects}
