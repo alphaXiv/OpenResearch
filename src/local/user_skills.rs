@@ -79,12 +79,16 @@ pub(crate) fn migrate_project_scoped(root: &Path) {
     let dest_base = store_dir(root);
     if let Ok(entries) = fs::read_dir(&projects) {
         for project in entries.flatten() {
+            if project.file_name() == ".DS_Store" {
+                let _ = fs::remove_file(project.path());
+                continue;
+            }
             let Ok(items) = fs::read_dir(project.path()) else {
                 continue;
             };
             for item in items.flatten() {
-                // Junk keeps the dir non-empty, which would keep the retired
-                // tree — and this walk — alive on every call forever.
+                // Junk keeps a dir non-empty, which would keep the retired tree
+                // — and this walk — alive on every call forever.
                 if item.file_name() == ".DS_Store" {
                     let _ = fs::remove_file(item.path());
                     continue;
@@ -564,7 +568,7 @@ fn source_dirs(
     root: &Path,
     mirrored: &[Mirrored],
     skills_dir_rel: Option<&str>,
-) -> Vec<(String, PathBuf)> {
+) -> Vec<(String, PathBuf, Tally)> {
     // Through `list_uploaded_in`, so a folder the listing drops as unreadable
     // can't still win the name here and shadow a mirrored skill that works.
     let mut out: Vec<(String, PathBuf, Option<&'static str>)> = list_uploaded_in(root)
@@ -582,7 +586,9 @@ fn source_dirs(
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.into_iter()
         .filter(|(_, _, host)| !matches!((host, skills_dir_rel), (Some(h), Some(rel)) if *h == rel))
-        .map(|(name, dir, _)| (name, dir))
+        // Budget here rather than at the write, so a `/name` the session can't
+        // be given isn't one the menu, the preview or the tab offer either.
+        .filter_map(|(name, dir, _)| within_budget(&dir).map(|tally| (name, dir, tally)))
         .collect()
 }
 
@@ -592,9 +598,9 @@ pub fn content(name: &str) -> Option<String> {
 }
 
 fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
-    let (_, dir) = source_dirs(root, mirrored, None)
+    let (_, dir, _) = source_dirs(root, mirrored, None)
         .into_iter()
-        .find(|(n, _)| n == name)?;
+        .find(|(n, ..)| n == name)?;
     let content = fs::read_to_string(dir.join("SKILL.md")).ok()?;
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let after_open = content
@@ -651,19 +657,19 @@ fn write_into_session_in(
     skills_dir_rel: &str,
 ) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
-    let previous = previously_managed(&base);
+    // No manifest at all — the agent can delete it — is the one case where a
+    // destination that already matches its source can be taken as ours, which is
+    // how that heals. While a manifest exists it is the whole truth about what
+    // we own, so a dir it doesn't name is the project's and stays unprunable.
+    let recorded = previously_managed(&base);
+    let adoptable = recorded.is_none();
+    let previous = recorded.unwrap_or_default();
     let mut managed: Vec<String> = Vec::new();
-    for (name, src) in source_dirs(root, mirrored, Some(skills_dir_rel)) {
-        let Some(src_tally) = within_budget(&src) else {
-            continue;
-        };
+    for (name, src, src_tally) in source_dirs(root, mirrored, Some(skills_dir_rel)) {
         let dest = base.join(&name);
         let current = dest_matches_source(&src, src_tally, &dest);
-        // A destination we didn't write is the project's own committed skill —
-        // it wins, untouched. One that already matches is ours whatever the
-        // manifest says, which is how a lost manifest heals itself.
-        if dest.exists() && !current && !previous.contains(&name) {
-            continue;
+        if dest.exists() && !previous.contains(&name) && !(adoptable && current) {
+            continue; // the project ships a skill by this name — it wins, untouched
         }
         if !current {
             if dest.exists() {
@@ -691,28 +697,29 @@ fn write_into_session_in(
     Ok(())
 }
 
-/// The names we wrote last turn. The manifest sits in the agent-writable
-/// worktree, so a name from it is untrusted: `join` on an absolute or `..` path
-/// escapes `base`, and these names are handed to `remove_dir_all`.
-fn previously_managed(base: &Path) -> Vec<String> {
-    fs::read_to_string(base.join(MANAGED_MANIFEST))
-        .map(|manifest| {
-            manifest
-                .lines()
-                .filter(|name| is_valid_slug(name))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+/// The names we wrote last turn, or `None` when there is no manifest to read.
+/// The manifest sits in the agent-writable worktree, so a name from it is
+/// untrusted: `join` on an absolute or `..` path escapes `base`, and these names
+/// are handed to `remove_dir_all`.
+fn previously_managed(base: &Path) -> Option<Vec<String>> {
+    let manifest = fs::read_to_string(base.join(MANAGED_MANIFEST)).ok()?;
+    Some(
+        manifest
+            .lines()
+            .filter(|name| is_valid_slug(name))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
-/// Whether `dest` already holds this exact skill, so the turn can skip a full
-/// re-copy. Timestamps are no witness — macOS's `fs::copy` carries the source's
-/// mtime across and Linux's doesn't — so the comparison is the source's
-/// [`Tally`] plus a byte-identical `SKILL.md`, the one file that always changes
-/// when someone edits a skill.
+/// Whether `dest` already holds this skill, so the turn can skip a full re-copy.
+/// Timestamps are no witness — macOS's `fs::copy` carries the source's mtime
+/// across and Linux's doesn't — so the comparison is the source's [`Tally`] plus
+/// a byte-identical `SKILL.md`. That misses an edit to a supporting file that
+/// preserves its length; `SKILL.md` is the file worth reading in full because it
+/// is the one an edit almost always touches.
 fn dest_matches_source(src: &Path, src_tally: Tally, dest: &Path) -> bool {
-    if !dest.is_dir() || tally(dest, u64::MAX, u64::MAX) != Some(src_tally) {
+    if !dest.is_dir() || tally_all(dest) != src_tally {
         return false;
     }
     match (
@@ -740,8 +747,8 @@ pub fn instructions(name: &str) -> Option<String> {
 fn instructions_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
     source_dirs(root, mirrored, None)
         .into_iter()
-        .find(|(n, _)| n == name)
-        .map(|(name, _)| format!("Use the `{name}` skill."))
+        .find(|(n, ..)| n == name)
+        .map(|(name, ..)| format!("Use the `{name}` skill."))
 }
 
 // --- fs helpers ---------------------------------------------------------------
@@ -820,10 +827,13 @@ pub(crate) fn tally(dir: &Path, max_files: u64, max_bytes: u64) -> Option<Tally>
     Some(out)
 }
 
+/// [`tally`] with no budget to blow, so it always answers.
+pub(crate) fn tally_all(dir: &Path) -> Tally {
+    tally(dir, u64::MAX, u64::MAX).unwrap_or_default()
+}
+
 pub(crate) fn dir_size(dir: &Path) -> u64 {
-    tally(dir, u64::MAX, u64::MAX)
-        .map(|tally| tally.bytes)
-        .unwrap_or(0)
+    tally_all(dir).bytes
 }
 
 pub(crate) fn mtime_ms(path: &Path) -> i64 {
@@ -1229,6 +1239,10 @@ mod tests {
             fs::write(dir.join("SKILL.md"), skill_md_desc(name, "PROJECT")).unwrap();
         }
 
+        // Finder junk at either level would otherwise keep the tree non-empty.
+        fs::write(root.join("projects/.DS_Store"), b"junk").unwrap();
+        fs::write(root.join("projects/p2/.DS_Store"), b"junk").unwrap();
+
         migrate_project_scoped(&root);
         let names: Vec<String> = list_in(&root, &[]).into_iter().map(|s| s.name).collect();
         assert_eq!(names, ["dup", "moved", "other"]);
@@ -1243,6 +1257,12 @@ mod tests {
             !root.join("projects/p2").exists(),
             "an emptied project goes"
         );
+
+        // Once the collision is resolved the retired tree goes entirely, junk at
+        // either level included — otherwise this walk runs on every call forever.
+        fs::remove_dir_all(root.join("projects/p1/dup")).unwrap();
+        migrate_project_scoped(&root);
+        assert!(!root.join("projects").exists());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1298,6 +1318,39 @@ mod tests {
     }
 
     #[test]
+    fn a_matching_dir_is_adopted_only_when_the_manifest_is_gone() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
+
+        // The repo vendors the same skill, byte-identical, and orx has never
+        // written here. With a manifest present but silent about it, the dir
+        // stays the project's: not replaced, and never pruned.
+        let vendored = wt.join(rel).join("shared");
+        copy_dir_all(&store_dir(&root).join("shared"), &vendored).unwrap();
+        fs::write(wt.join(rel).join(MANAGED_MANIFEST), "something-else\n").unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        delete_in(&root, "shared").unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(
+            vendored.join("SKILL.md").exists(),
+            "a dir the manifest never claimed must not become prunable"
+        );
+
+        // With no manifest at all we can't tell ours from theirs, so a dir that
+        // matches its source is taken as ours — that heals a deleted manifest.
+        save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
+        fs::remove_file(wt.join(rel).join(MANAGED_MANIFEST)).unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(previously_managed(&wt.join(rel))
+            .unwrap()
+            .contains(&"shared".to_string()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
     fn an_unchanged_skill_is_not_recopied_into_the_session() {
         use std::os::unix::fs::MetadataExt;
 
@@ -1348,9 +1401,17 @@ mod tests {
         .unwrap();
         assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
 
-        // So does an edit to SKILL.md of exactly the same length.
+        // So does an edit to SKILL.md of exactly the same length — the tally
+        // can't see that one, so `dest` is rebuilt first to isolate it.
+        fs::remove_dir_all(&dest).unwrap();
         copy_dir_all(&src, &dest).unwrap();
+        assert!(dest_matches_source(&src, fingerprint(&src), &dest));
         fs::write(src.join("SKILL.md"), skill_md("samf")).unwrap();
+        assert_eq!(
+            fingerprint(&src),
+            fingerprint(&dest),
+            "same length, same tally"
+        );
         assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
 
         // A destination that isn't there at all never matches.
@@ -1467,7 +1528,10 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "alpha", "the folder is the id");
         assert_eq!(
-            source_dirs(&root, &[], None),
+            source_dirs(&root, &[], None)
+                .into_iter()
+                .map(|(name, dir, _)| (name, dir))
+                .collect::<Vec<_>>(),
             vec![("alpha".to_string(), root.join("global/alpha"))]
         );
         assert!(instructions_in(&root, &[], "alpha").is_some());

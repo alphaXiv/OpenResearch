@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
 use crate::local::user_skills::{
-    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir, tally,
+    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir, tally_all,
 };
 
 /// Where templates land inside a session worktree. Under `.orx/` because they
@@ -322,8 +322,8 @@ fn delete_in(root: &Path, name: &str) -> Result<()> {
 }
 
 /// Copy every template into the session worktree, replacing what was
-/// there and pruning templates the user has since deleted — same freshness
-/// contract as the skills dir.
+/// there and pruning templates the user has since deleted — the same freshness
+/// contract the skills dir gets.
 pub fn write_into_session(worktree: &Path) -> Result<()> {
     write_into_session_in(&root(), worktree)
 }
@@ -339,9 +339,10 @@ fn write_into_session_in(root: &Path, worktree: &Path) -> Result<()> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let dest = base.join(&name);
-            let src_tally = tally(&src, u64::MAX, u64::MAX);
             // A bundle that hasn't changed is left alone; this runs every turn.
-            if src_tally.is_none() || tally(&dest, u64::MAX, u64::MAX) != src_tally {
+            // Only shape, not content — a template changes by re-upload, which
+            // rewrites the folder.
+            if tally_all(&dest) != tally_all(&src) {
                 if dest.exists() {
                     let _ = fs::remove_dir_all(&dest);
                 }
