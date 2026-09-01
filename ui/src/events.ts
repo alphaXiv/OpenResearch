@@ -138,6 +138,35 @@ function emitUpdateStatus(status: UpdateStatus) {
   updateStatusListeners.forEach((fn) => fn(status));
 }
 
+// Connection state for the whole dashboard: the one EventSource is also the only
+// evidence the local server is there. Starts true — it served this page moments ago.
+let connected = true;
+type ConnectionListener = () => void;
+const connectionListeners = new Set<ConnectionListener>();
+
+export function onConnectionChange(fn: ConnectionListener): () => void {
+  connectionListeners.add(fn);
+  return () => {
+    connectionListeners.delete(fn);
+  };
+}
+
+export function isConnected(): boolean {
+  return connected;
+}
+
+function setConnected(next: boolean) {
+  if (next === connected) return;
+  connected = next;
+  connectionListeners.forEach((fn) => fn());
+}
+
+// Chrome and Safari re-try a dropped stream after ~3s, so an outage is only
+// distinguishable from a blip once a couple of those attempts have failed; the
+// manual reopen below keeps to that same cadence.
+const OFFLINE_AFTER_MS = 8_000;
+const REOPEN_AFTER_MS = 3_000;
+
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
   onExperiment: (experiment: Experiment) => void;
@@ -152,7 +181,10 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
   const ref = useRef(handlers);
   ref.current = handlers;
   useEffect(() => {
-    const es = new EventSource("/api/events");
+    let source: EventSource | null = null;
+    let stopped = false;
+    let offlineTimer: number | undefined;
+    let reopenTimer: number | undefined;
     // The browser auto-reconnects a dropped EventSource and fires `open` again
     // on each re-open. Emit on any open that follows a drop — including a
     // FAILED first connect (page loaded while the backend was briefly down):
@@ -160,118 +192,148 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     // first successful open needs the same repair. A clean first open emits
     // nothing.
     let needsRepair = false;
-    es.onerror = () => {
-      needsRepair = true;
+
+    const connect = () => {
+      // connect() owns exactly one live source.
+      source?.close();
+      const es = new EventSource("/api/events");
+      source = es;
+      es.onerror = () => {
+        // An error landing after cleanup would otherwise arm a timer whose id no
+        // longer reaches anyone, leaving the banner up over a healthy stream.
+        if (stopped) return;
+        needsRepair = true;
+        offlineTimer ??= window.setTimeout(() => setConnected(false), OFFLINE_AFTER_MS);
+        // CLOSED is the browser giving up for good, which it does for any
+        // non-SSE response — including the 500 the dev proxy returns while the
+        // backend restarts. Nothing reopens the stream after that but us.
+        if (es.readyState === EventSource.CLOSED && reopenTimer === undefined) {
+          reopenTimer = window.setTimeout(() => {
+            reopenTimer = undefined;
+            connect();
+          }, REOPEN_AFTER_MS);
+        }
+      };
+      es.onopen = () => {
+        if (stopped) return;
+        window.clearTimeout(offlineTimer);
+        offlineTimer = undefined;
+        setConnected(true);
+        if (needsRepair) {
+          emitChat({ type: "reconnected" });
+          emitProjectActivityEvent();
+          emitHarnessAuth({ harness: "*", authState: "unknown" });
+          ref.current.onReconnect?.();
+        }
+        // Every open after this one follows a drop by definition.
+        needsRepair = true;
+      };
+      const parse = <T>(e: MessageEvent): T | null => {
+        try {
+          return JSON.parse(e.data as string) as T;
+        } catch {
+          return null;
+        }
+      };
+      es.addEventListener("run.updated", (e) => {
+        const d = parse<{ run: Run }>(e as MessageEvent);
+        if (d?.run) {
+          emitProjectActivityEvent();
+          ref.current.onRun(d.run);
+        }
+      });
+      es.addEventListener("experiment.updated", (e) => {
+        const d = parse<{ experiment: Experiment }>(e as MessageEvent);
+        if (d?.experiment) {
+          emitProjectActivityEvent();
+          ref.current.onExperiment(d.experiment);
+        }
+      });
+      es.addEventListener("project.updated", (e) => {
+        const d = parse<{ project: Project }>(e as MessageEvent);
+        if (d?.project) {
+          emitProjectActivityEvent();
+          ref.current.onProject(d.project);
+        }
+      });
+      es.addEventListener("files.updated", (e) => {
+        const d = parse<{ projectId: string }>(e as MessageEvent);
+        if (d?.projectId) ref.current.onArtifacts?.(d.projectId);
+      });
+      es.addEventListener("run.log", (e) => {
+        const d = parse<RunLogEvent>(e as MessageEvent);
+        if (d?.runId) emitRunLog(d);
+      });
+      es.addEventListener("chat.session", (e) => {
+        const d = parse<{ session: ChatSession }>(e as MessageEvent);
+        if (d?.session) {
+          emitProjectActivityEvent();
+          emitChat({ type: "session", session: d.session });
+        }
+      });
+      es.addEventListener("chat.session.deleted", (e) => {
+        const d = parse<{ sessionId: string }>(e as MessageEvent);
+        if (d?.sessionId) {
+          emitProjectActivityEvent();
+          emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
+        }
+      });
+      es.addEventListener("chat.message", (e) => {
+        const d = parse<{ sessionId: string; message: ChatMessage }>(e as MessageEvent);
+        if (d?.message) {
+          emitProjectActivityEvent();
+          emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
+        }
+      });
+      es.addEventListener("chat.busy", (e) => {
+        const d = parse<{ sessionId: string; busy: boolean }>(e as MessageEvent);
+        if (d?.sessionId) {
+          emitProjectActivityEvent();
+          emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
+        }
+      });
+      es.addEventListener("chat.usage", (e) => {
+        const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);
+        if (d?.sessionId && d.usage) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
+      });
+      es.addEventListener("chat.queued", (e) => {
+        const d = parse<{ sessionId: string; items: QueuedMessage[] }>(e as MessageEvent);
+        if (d?.sessionId) emitChat({ type: "queued", sessionId: d.sessionId, items: d.items ?? [] });
+      });
+      es.addEventListener("chat.branch", (e) => {
+        const d = parse<{ sessionId: string; activeLeafId: string | null }>(e as MessageEvent);
+        if (d?.sessionId)
+          emitChat({ type: "branch", sessionId: d.sessionId, activeLeafId: d.activeLeafId ?? null });
+      });
+      es.addEventListener("harness.auth", (e) => {
+        const d = parse<HarnessAuthEvent>(e as MessageEvent);
+        if (d?.harness && d.authState) emitHarnessAuth(d);
+      });
+      es.addEventListener("datadir.move.progress", (e) => {
+        const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
+          e as MessageEvent,
+        );
+        if (d) emitDataDirMove({ type: "progress", ...d });
+      });
+      es.addEventListener("datadir.move.done", (e) => {
+        const d = parse<{ path: string; oldPathLeft?: string }>(e as MessageEvent);
+        if (d) emitDataDirMove({ type: "done", path: d.path, oldPathLeft: d.oldPathLeft });
+      });
+      es.addEventListener("datadir.move.error", (e) => {
+        const d = parse<{ error: string }>(e as MessageEvent);
+        if (d) emitDataDirMove({ type: "error", error: d.error });
+      });
+      es.addEventListener("update.status", (e) => {
+        const d = parse<UpdateStatus>(e as MessageEvent);
+        if (d) emitUpdateStatus(d);
+      });
     };
-    es.onopen = () => {
-      if (needsRepair) {
-        emitChat({ type: "reconnected" });
-        emitProjectActivityEvent();
-        emitHarnessAuth({ harness: "*", authState: "unknown" });
-        ref.current.onReconnect?.();
-      }
-      // Every open after this one follows a drop by definition.
-      needsRepair = true;
+    connect();
+    return () => {
+      stopped = true;
+      window.clearTimeout(offlineTimer);
+      window.clearTimeout(reopenTimer);
+      source?.close();
     };
-    const parse = <T>(e: MessageEvent): T | null => {
-      try {
-        return JSON.parse(e.data as string) as T;
-      } catch {
-        return null;
-      }
-    };
-    es.addEventListener("run.updated", (e) => {
-      const d = parse<{ run: Run }>(e as MessageEvent);
-      if (d?.run) {
-        emitProjectActivityEvent();
-        ref.current.onRun(d.run);
-      }
-    });
-    es.addEventListener("experiment.updated", (e) => {
-      const d = parse<{ experiment: Experiment }>(e as MessageEvent);
-      if (d?.experiment) {
-        emitProjectActivityEvent();
-        ref.current.onExperiment(d.experiment);
-      }
-    });
-    es.addEventListener("project.updated", (e) => {
-      const d = parse<{ project: Project }>(e as MessageEvent);
-      if (d?.project) {
-        emitProjectActivityEvent();
-        ref.current.onProject(d.project);
-      }
-    });
-    es.addEventListener("files.updated", (e) => {
-      const d = parse<{ projectId: string }>(e as MessageEvent);
-      if (d?.projectId) ref.current.onArtifacts?.(d.projectId);
-    });
-    es.addEventListener("run.log", (e) => {
-      const d = parse<RunLogEvent>(e as MessageEvent);
-      if (d?.runId) emitRunLog(d);
-    });
-    es.addEventListener("chat.session", (e) => {
-      const d = parse<{ session: ChatSession }>(e as MessageEvent);
-      if (d?.session) {
-        emitProjectActivityEvent();
-        emitChat({ type: "session", session: d.session });
-      }
-    });
-    es.addEventListener("chat.session.deleted", (e) => {
-      const d = parse<{ sessionId: string }>(e as MessageEvent);
-      if (d?.sessionId) {
-        emitProjectActivityEvent();
-        emitChat({ type: "sessionDeleted", sessionId: d.sessionId });
-      }
-    });
-    es.addEventListener("chat.message", (e) => {
-      const d = parse<{ sessionId: string; message: ChatMessage }>(e as MessageEvent);
-      if (d?.message) {
-        emitProjectActivityEvent();
-        emitChat({ type: "message", sessionId: d.sessionId, message: d.message });
-      }
-    });
-    es.addEventListener("chat.busy", (e) => {
-      const d = parse<{ sessionId: string; busy: boolean }>(e as MessageEvent);
-      if (d?.sessionId) {
-        emitProjectActivityEvent();
-        emitChat({ type: "busy", sessionId: d.sessionId, busy: d.busy });
-      }
-    });
-    es.addEventListener("chat.usage", (e) => {
-      const d = parse<{ sessionId: string; usage: ContextUsage }>(e as MessageEvent);
-      if (d?.sessionId && d.usage) emitChat({ type: "usage", sessionId: d.sessionId, usage: d.usage });
-    });
-    es.addEventListener("chat.queued", (e) => {
-      const d = parse<{ sessionId: string; items: QueuedMessage[] }>(e as MessageEvent);
-      if (d?.sessionId) emitChat({ type: "queued", sessionId: d.sessionId, items: d.items ?? [] });
-    });
-    es.addEventListener("chat.branch", (e) => {
-      const d = parse<{ sessionId: string; activeLeafId: string | null }>(e as MessageEvent);
-      if (d?.sessionId)
-        emitChat({ type: "branch", sessionId: d.sessionId, activeLeafId: d.activeLeafId ?? null });
-    });
-    es.addEventListener("harness.auth", (e) => {
-      const d = parse<HarnessAuthEvent>(e as MessageEvent);
-      if (d?.harness && d.authState) emitHarnessAuth(d);
-    });
-    es.addEventListener("datadir.move.progress", (e) => {
-      const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
-        e as MessageEvent,
-      );
-      if (d) emitDataDirMove({ type: "progress", ...d });
-    });
-    es.addEventListener("datadir.move.done", (e) => {
-      const d = parse<{ path: string; oldPathLeft?: string }>(e as MessageEvent);
-      if (d) emitDataDirMove({ type: "done", path: d.path, oldPathLeft: d.oldPathLeft });
-    });
-    es.addEventListener("datadir.move.error", (e) => {
-      const d = parse<{ error: string }>(e as MessageEvent);
-      if (d) emitDataDirMove({ type: "error", error: d.error });
-    });
-    es.addEventListener("update.status", (e) => {
-      const d = parse<UpdateStatus>(e as MessageEvent);
-      if (d) emitUpdateStatus(d);
-    });
-    return () => es.close();
   }, []);
 }

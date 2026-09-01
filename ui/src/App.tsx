@@ -53,6 +53,7 @@ import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { OfflineBanner } from "./components/OfflineBanner";
 import { Onboarding } from "./components/Onboarding";
 import { NewProjectDialog, ProjectsHome } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
@@ -1677,6 +1678,7 @@ export default function App() {
   if (projects.length === 0) {
     return (
       <div className="app flex flex-col h-full">
+        <OfflineBanner />
         {onboarded ? (
           <ProjectsHome
             projects={projects}
@@ -1716,6 +1718,7 @@ export default function App() {
 
   return (
     <div className="app flex flex-col h-full">
+      <OfflineBanner />
       <UpdateBanner />
       {homeOpen ? (
         <ProjectsHome
