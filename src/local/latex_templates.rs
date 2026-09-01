@@ -1,14 +1,11 @@
 //! User-uploaded LaTeX templates — a conference class, a lab preprint style, or
 //! a bare preamble the agent should follow instead of the built-in one.
 //!
-//! Stored beside the user's skills, with the same two scopes:
-//!
-//! * **Global** — `data_dir()/latex-templates/global/<name>/` — every project.
-//! * **Project** — `data_dir()/latex-templates/projects/<project_id>/<name>/`,
-//!   which shadows a global of the same name.
+//! Stored beside the user's skills, in one place — `data_dir()/latex-templates/global/<name>/`
+//! — and available to every project.
 //!
 //! A template is a folder: one `.tex` entry point plus whatever `.cls`, `.sty`,
-//! `.bst`, or `.bib` files it needs. Every applicable template is copied into
+//! `.bst`, or `.bib` files it needs. Every template is copied into
 //! the session worktree under [`SESSION_DIR_REL`] each turn, which is what lets
 //! the agent read one *and* lets the compiler find its class files once the
 //! agent copies them next to the paper (see the `orx-paper` skill).
@@ -16,11 +13,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::error::{anyhow, Result};
-pub use crate::local::user_skills::Scope;
-use crate::local::user_skills::{basename, copy_dir_all, depth, dir_size, mtime_ms, scope_dir};
+use crate::local::user_skills::{
+    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir, tally_all,
+};
 
 /// Where templates land inside a session worktree. Under `.orx/` because they
 /// are inputs the agent copies from, not part of the paper itself.
@@ -34,11 +30,9 @@ const MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_NAME_LEN: usize = 48;
 
 /// One uploaded template, as served to the UI.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct LatexTemplate {
     pub name: String,
-    pub scope: Scope,
     /// Relative path of the `.tex` the agent should start from.
     pub entry: String,
     /// Every other file shipped with it — styles, logos, bibliographies.
@@ -47,8 +41,12 @@ pub struct LatexTemplate {
     pub updated_at: i64,
 }
 
+/// Same shape as the skills store, down to the retired per-project layout it
+/// folds in on the way past — see [`super::user_skills::migrate_project_scoped`].
 fn root() -> PathBuf {
-    crate::store::data_dir().join("latex-templates")
+    let root = crate::store::data_dir().join("latex-templates");
+    migrate_project_scoped(&root);
+    root
 }
 
 /// `^[a-z0-9]+(-[a-z0-9]+)*$` from an arbitrary upload filename.
@@ -105,22 +103,11 @@ fn pick_entry(files: &[(String, Vec<u8>)]) -> Option<String> {
 }
 
 /// Save an uploaded `.tex` or `.zip` as a template folder.
-pub fn save_upload(
-    filename: &str,
-    bytes: &[u8],
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<LatexTemplate> {
-    save_upload_in(&root(), filename, bytes, scope, project_id)
+pub fn save_upload(filename: &str, bytes: &[u8]) -> Result<LatexTemplate> {
+    save_upload_in(&root(), filename, bytes)
 }
 
-fn save_upload_in(
-    root: &Path,
-    filename: &str,
-    bytes: &[u8],
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<LatexTemplate> {
+fn save_upload_in(root: &Path, filename: &str, bytes: &[u8]) -> Result<LatexTemplate> {
     let name = name_from_filename(filename)?;
     let files = match extension(filename).as_str() {
         "zip" => read_zip(bytes)?,
@@ -138,7 +125,7 @@ fn save_upload_in(
             ))
         }
     };
-    write_template(root, scope, project_id, &name, files)
+    write_template(root, &name, files)
 }
 
 fn read_zip(bytes: &[u8]) -> Result<Vec<(String, Vec<u8>)>> {
@@ -227,17 +214,11 @@ fn common_directory(files: &[(String, Vec<u8>)]) -> String {
     }
 }
 
-fn write_template(
-    root: &Path,
-    scope: Scope,
-    project_id: Option<&str>,
-    name: &str,
-    files: Vec<(String, Vec<u8>)>,
-) -> Result<LatexTemplate> {
+fn write_template(root: &Path, name: &str, files: Vec<(String, Vec<u8>)>) -> Result<LatexTemplate> {
     if pick_entry(&files).is_none() {
         return Err(anyhow!("a template must contain at least one .tex file"));
     }
-    let dir = scope_dir(root, scope, project_id)?.join(name);
+    let dir = store_dir(root).join(name);
     // A re-upload fully replaces the prior version — no stale sibling files.
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| anyhow!("could not replace template: {e}"))?;
@@ -250,11 +231,11 @@ fn write_template(
         }
         fs::write(&dest, buf).map_err(|e| anyhow!("could not write {}: {e}", dest.display()))?;
     }
-    read_template_at(scope, &dir)
+    read_template_at(&dir)
 }
 
 /// Read a stored template folder back into its serialized form.
-fn read_template_at(scope: Scope, dir: &Path) -> Result<LatexTemplate> {
+fn read_template_at(dir: &Path) -> Result<LatexTemplate> {
     let name = dir
         .file_name()
         .ok_or_else(|| anyhow!("template has no name"))?
@@ -273,7 +254,6 @@ fn read_template_at(scope: Scope, dir: &Path) -> Result<LatexTemplate> {
         updated_at: mtime_ms(&dir.join(&entry)),
         bytes: dir_size(dir),
         name,
-        scope,
         entry,
         support_files,
     })
@@ -304,54 +284,36 @@ fn collect(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<
     Ok(())
 }
 
-/// Templates in one scope, name-sorted. Unreadable folders are skipped rather
+/// Every uploaded template, name-sorted. Unreadable folders are skipped rather
 /// than failing the whole listing.
-fn list_scope(root: &Path, scope: Scope, project_id: Option<&str>) -> Vec<LatexTemplate> {
-    let Ok(dir) = scope_dir(root, scope, project_id) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&dir) else {
+pub fn list() -> Vec<LatexTemplate> {
+    list_in(&root())
+}
+
+fn list_in(root: &Path) -> Vec<LatexTemplate> {
+    let Ok(entries) = fs::read_dir(store_dir(root)) else {
         return Vec::new();
     };
     let mut out: Vec<LatexTemplate> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
-        .filter_map(|e| read_template_at(scope, &e.path()).ok())
+        .filter_map(|e| read_template_at(&e.path()).ok())
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-/// Every template that applies to a project: globals first, then the project's
-/// own, which shadow a global of the same name.
-pub fn list_for_project(project_id: Option<&str>) -> Vec<LatexTemplate> {
-    list_for_project_in(&root(), project_id)
+pub fn delete(name: &str) -> Result<()> {
+    delete_in(&root(), name)
 }
 
-fn list_for_project_in(root: &Path, project_id: Option<&str>) -> Vec<LatexTemplate> {
-    let mut out = list_scope(root, Scope::Global, None);
-    if let Some(id) = project_id {
-        for template in list_scope(root, Scope::Project, Some(id)) {
-            match out.iter_mut().find(|t| t.name == template.name) {
-                Some(existing) => *existing = template,
-                None => out.push(template),
-            }
-        }
-    }
-    out
-}
-
-pub fn delete(name: &str, scope: Scope, project_id: Option<&str>) -> Result<()> {
-    delete_in(&root(), name, scope, project_id)
-}
-
-fn delete_in(root: &Path, name: &str, scope: Scope, project_id: Option<&str>) -> Result<()> {
+fn delete_in(root: &Path, name: &str) -> Result<()> {
     // `Path::join("")` returns the parent, so an empty name would delete the
-    // whole scope directory — every template the user has uploaded.
+    // whole store directory — every template the user has uploaded.
     if name.is_empty() || name != slug(name) {
         return Err(anyhow!("unknown template `{name}`"));
     }
-    let dir = scope_dir(root, scope, project_id)?.join(name);
+    let dir = store_dir(root).join(name);
     if !dir.is_dir() {
         return Err(anyhow!("unknown template `{name}`"));
     }
@@ -359,23 +321,17 @@ fn delete_in(root: &Path, name: &str, scope: Scope, project_id: Option<&str>) ->
     Ok(())
 }
 
-/// Copy every applicable template into the session worktree, replacing what was
-/// there and pruning templates the user has since deleted — same freshness
-/// contract as the skills dir.
-pub fn write_into_session(worktree: &Path, project_id: &str) -> Result<()> {
-    write_into_session_in(&root(), worktree, project_id)
+/// Copy every template into the session worktree, replacing what was
+/// there and pruning templates the user has since deleted — the same freshness
+/// contract the skills dir gets.
+pub fn write_into_session(worktree: &Path) -> Result<()> {
+    write_into_session_in(&root(), worktree)
 }
 
-fn write_into_session_in(root: &Path, worktree: &Path, project_id: &str) -> Result<()> {
+fn write_into_session_in(root: &Path, worktree: &Path) -> Result<()> {
     let base = worktree.join(SESSION_DIR_REL);
     let mut managed: Vec<String> = Vec::new();
-    for (scope, pid) in [(Scope::Global, None), (Scope::Project, Some(project_id))] {
-        let Ok(src_base) = scope_dir(root, scope, pid) else {
-            continue;
-        };
-        let Ok(entries) = fs::read_dir(&src_base) else {
-            continue; // no templates for this scope yet
-        };
+    if let Ok(entries) = fs::read_dir(store_dir(root)) {
         for entry in entries.flatten() {
             let src = entry.path();
             if !src.is_dir() {
@@ -383,10 +339,20 @@ fn write_into_session_in(root: &Path, worktree: &Path, project_id: &str) -> Resu
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let dest = base.join(&name);
-            if dest.exists() {
-                let _ = fs::remove_dir_all(&dest);
+            // A bundle that hasn't changed is left alone; this runs every turn.
+            // Only shape, not content — a template changes by re-upload, which
+            // rewrites the folder.
+            if tally_all(&dest) != tally_all(&src) {
+                if dest.exists() {
+                    let _ = fs::remove_dir_all(&dest);
+                }
+                // One unreadable template folder skips its turn rather than
+                // failing the session, the same as a skill that won't copy.
+                if copy_dir_all(&src, &dest).is_err() {
+                    let _ = fs::remove_dir_all(&dest);
+                    continue;
+                }
             }
-            copy_dir_all(&src, &dest)?;
             if !managed.contains(&name) {
                 managed.push(name);
             }
@@ -443,8 +409,6 @@ mod tests {
             &root,
             "NeurIPS 2024 Preprint.tex",
             b"\\documentclass{article}\n",
-            Scope::Global,
-            None,
         )
         .expect("save");
         assert_eq!(saved.name, "neurips-2024-preprint");
@@ -468,8 +432,7 @@ mod tests {
             ("neurips_2024/include/logo.png", b"\x89PNG"),
             ("__MACOSX/._x", b"junk"),
         ]);
-        let saved =
-            save_upload_in(&root, "neurips-2024.zip", &bytes, Scope::Global, None).expect("save");
+        let saved = save_upload_in(&root, "neurips-2024.zip", &bytes).expect("save");
         assert_eq!(saved.name, "neurips-2024");
         // The wrapping directory is stripped, so the .sty sits beside the entry.
         assert_eq!(saved.entry, "example_paper.tex");
@@ -487,7 +450,7 @@ mod tests {
             ("t/sections/intro.tex", b"Some prose."),
             ("t/main.tex", b"\\documentclass{article}\n"),
         ]);
-        let saved = save_upload_in(&root, "t.zip", &bytes, Scope::Global, None).expect("save");
+        let saved = save_upload_in(&root, "t.zip", &bytes).expect("save");
         assert_eq!(saved.entry, "main.tex");
         let _ = fs::remove_dir_all(&root);
     }
@@ -496,87 +459,54 @@ mod tests {
     fn uploads_without_a_tex_are_rejected() {
         let root = tmp();
         let bytes = zip_of(&[("style/only.sty", b"% style")]);
-        let err = save_upload_in(&root, "style.zip", &bytes, Scope::Global, None)
-            .expect_err("must reject");
+        let err = save_upload_in(&root, "style.zip", &bytes).expect_err("must reject");
         assert!(err.to_string().contains(".tex"));
-        assert!(save_upload_in(&root, "notes.md", b"# hi", Scope::Global, None).is_err());
+        assert!(save_upload_in(&root, "notes.md", b"# hi").is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_filename_with_no_usable_characters_is_refused() {
         let root = tmp();
-        let err = save_upload_in(
-            &root,
-            "___.tex",
-            b"\\documentclass{article}",
-            Scope::Global,
-            None,
-        )
-        .expect_err("must refuse");
+        let err =
+            save_upload_in(&root, "___.tex", b"\\documentclass{article}").expect_err("must refuse");
         assert!(err.to_string().contains("could not derive a template name"));
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn a_project_template_shadows_a_global_of_the_same_name() {
+    fn a_re_upload_replaces_the_template_of_the_same_name() {
         let root = tmp();
         save_upload_in(
             &root,
-            "house.tex",
-            b"\\documentclass{article}% global",
-            Scope::Global,
-            None,
+            "house.zip",
+            &zip_of(&[
+                ("house.tex", b"\\documentclass{article}"),
+                ("old.sty", b"% stale"),
+            ]),
         )
-        .expect("global");
-        save_upload_in(
-            &root,
-            "house.tex",
-            b"\\documentclass{report}% project\n\\usepackage{x}",
-            Scope::Project,
-            Some("proj-1"),
-        )
-        .expect("project");
+        .expect("first");
+        let saved = save_upload_in(&root, "house.tex", b"\\documentclass{report}").expect("second");
 
-        let listed = list_for_project_in(&root, Some("proj-1"));
-        assert_eq!(listed.len(), 1, "one entry per name");
-        assert_eq!(listed[0].scope, Scope::Project);
-        // Another project still sees the global.
-        assert_eq!(
-            list_for_project_in(&root, Some("other"))[0].scope,
-            Scope::Global
-        );
+        assert_eq!(list_in(&root).len(), 1, "one entry per name");
+        assert!(saved.support_files.is_empty(), "stale siblings are dropped");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn a_session_gets_every_applicable_template_and_loses_deleted_ones() {
+    fn a_session_gets_every_template_and_loses_deleted_ones() {
         let root = tmp();
         let worktree = tmp();
-        save_upload_in(
-            &root,
-            "shared.tex",
-            b"\\documentclass{article}",
-            Scope::Global,
-            None,
-        )
-        .expect("global");
-        save_upload_in(
-            &root,
-            "mine.tex",
-            b"\\documentclass{article}",
-            Scope::Project,
-            Some("proj-1"),
-        )
-        .expect("project");
+        save_upload_in(&root, "shared.tex", b"\\documentclass{article}").expect("shared");
+        save_upload_in(&root, "mine.tex", b"\\documentclass{article}").expect("mine");
 
-        write_into_session_in(&root, &worktree, "proj-1").expect("write");
+        write_into_session_in(&root, &worktree).expect("write");
         let base = worktree.join(SESSION_DIR_REL);
         assert!(base.join("shared/shared.tex").is_file());
         assert!(base.join("mine/mine.tex").is_file());
 
-        delete_in(&root, "mine", Scope::Project, Some("proj-1")).expect("delete");
-        write_into_session_in(&root, &worktree, "proj-1").expect("rewrite");
+        delete_in(&root, "mine").expect("delete");
+        write_into_session_in(&root, &worktree).expect("rewrite");
         assert!(base.join("shared/shared.tex").is_file());
         assert!(
             !base.join("mine").exists(),
@@ -584,6 +514,31 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&worktree);
+    }
+
+    #[test]
+    fn project_scoped_templates_migrate_into_the_store() {
+        let root = tmp();
+        save_upload_in(&root, "house.tex", b"\\documentclass{article}% global").expect("global");
+        for (project, name) in [("p1", "house"), ("p1", "moved")] {
+            let dir = root.join("projects").join(project).join(name);
+            fs::create_dir_all(&dir).expect("mkdir");
+            fs::write(
+                dir.join(format!("{name}.tex")),
+                b"\\documentclass{report}% project",
+            )
+            .expect("write");
+        }
+
+        migrate_project_scoped(&root);
+        let names: Vec<String> = list_in(&root).into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["house", "moved"]);
+        // The global of a colliding name keeps the name, and the project copy it
+        // shadowed stays on disk rather than being deleted.
+        let house = fs::read_to_string(root.join("global/house/house.tex")).expect("read");
+        assert!(house.contains("global"));
+        assert!(root.join("projects/p1/house/house.tex").is_file());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -595,8 +550,7 @@ mod tests {
         ]);
         // A traversal entry fails the whole archive rather than being skipped —
         // an archive that tried is not one to extract the rest of.
-        let err = save_upload_in(&root, "t.zip", &bytes, Scope::Global, None)
-            .expect_err("must reject the archive");
+        let err = save_upload_in(&root, "t.zip", &bytes).expect_err("must reject the archive");
         assert!(err.to_string().contains("unsafe path"));
         assert!(!root.parent().unwrap().join("escape.tex").exists());
         let _ = fs::remove_dir_all(&root);
@@ -612,7 +566,7 @@ mod tests {
             ("icml2024.bst", b"% bib style"),
             ("example/example_paper.tex", b"\\documentclass{article}\n"),
         ]);
-        let saved = save_upload_in(&root, "icml.zip", &bytes, Scope::Global, None).expect("save");
+        let saved = save_upload_in(&root, "icml.zip", &bytes).expect("save");
         assert_eq!(saved.entry, "example/example_paper.tex");
         assert_eq!(
             saved.support_files,
@@ -629,38 +583,27 @@ mod tests {
             ("bundle/main.tex", b"\\documentclass{article}"),
             ("bundle/styles/x.sty", b"% style"),
         ]);
-        let saved = save_upload_in(&root, "b.zip", &bytes, Scope::Global, None).expect("save");
+        let saved = save_upload_in(&root, "b.zip", &bytes).expect("save");
         assert_eq!(saved.entry, "main.tex");
         assert_eq!(saved.support_files, vec!["styles/x.sty"]);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn an_empty_name_cannot_delete_the_whole_scope() {
+    fn an_empty_name_cannot_delete_the_whole_store() {
         let root = tmp();
-        save_upload_in(
-            &root,
-            "keep.tex",
-            b"\\documentclass{article}",
-            Scope::Global,
-            None,
-        )
-        .expect("save");
+        save_upload_in(&root, "keep.tex", b"\\documentclass{article}").expect("save");
         // `Path::join("")` yields the parent, so this once wiped every template.
-        assert!(delete_in(&root, "", Scope::Global, None).is_err());
-        assert_eq!(
-            list_for_project_in(&root, None).len(),
-            1,
-            "template survived"
-        );
+        assert!(delete_in(&root, "").is_err());
+        assert_eq!(list_in(&root).len(), 1, "template survived");
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn delete_rejects_a_crafted_name() {
         let root = tmp();
-        assert!(delete_in(&root, "../../etc", Scope::Global, None).is_err());
-        assert!(delete_in(&root, "missing", Scope::Global, None).is_err());
+        assert!(delete_in(&root, "../../etc").is_err());
+        assert!(delete_in(&root, "missing").is_err());
         let _ = fs::remove_dir_all(&root);
     }
 }

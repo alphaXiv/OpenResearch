@@ -298,12 +298,12 @@ pub fn ensure_playbook(
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
         super::agent_skills::ensure_session_skills(&workdir, dir)?;
-        // User-uploaded skills land beside the built-ins, same freshness.
-        super::user_skills::write_into_session(&workdir, dir, &project.id)?;
+        // The user's skills — uploaded and mirrored — land beside the built-ins.
+        super::user_skills::write_into_session(&workdir, dir)?;
     }
     // LaTeX templates the agent copies from, written fresh for the same reason —
     // and independent of the skills dir, since no harness owns them.
-    super::latex_templates::write_into_session(&workdir, &project.id)?;
+    super::latex_templates::write_into_session(&workdir)?;
     // One shared exclude covers every worktree.
     exclude_agent_files(Path::new(&project.repo_path));
     // The playbook points the agent at the artifacts dir — make sure it exists.

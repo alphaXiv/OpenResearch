@@ -741,6 +741,55 @@ impl Harness for ClaudeCode {
     fn session_skills_dir(&self) -> Option<&'static str> {
         Some(".claude/skills")
     }
+
+    fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
+        self.config_home()
+            .map(|home| installed_plugin_skills_dirs(&home))
+            .unwrap_or_default()
+    }
+}
+
+/// The `skills/` dir of every plugin installed in Claude Code, labeled with the
+/// plugin's own name. Keyed off `installed_plugins.json`, whose `installPath` is
+/// the only thing that knows whether an install resolved to the version cache or
+/// a marketplace checkout — and which of the marketplace's plugins are actually
+/// installed rather than merely on offer.
+fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
+    let manifest = config_home.join("plugins").join("installed_plugins.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(plugins) = json.get("plugins").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for (key, installs) in plugins {
+        // Keys are `<plugin>@<marketplace>`, and a plugin name can itself be
+        // scoped (`@acme/tools@market`) — so the marketplace is the last `@`.
+        let label = key.rsplit_once('@').map_or(key.as_str(), |(name, _)| name);
+        let Some(installs) = installs.as_array() else {
+            continue;
+        };
+        for install in installs {
+            let Some(path) = install.get("installPath").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let dir = PathBuf::from(path).join("skills");
+            // Only absolute installs; a relative path would resolve against the
+            // server's working dir, which is not what the manifest meant.
+            if dir.is_absolute()
+                && dir.is_dir()
+                && !out.iter().any(|(_, existing)| *existing == dir)
+            {
+                out.push((label.to_string(), dir));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Internal policy → Claude Code `--permission-mode` value. Each provider-owned
@@ -2050,6 +2099,46 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    /// Plugins live in the version cache or a marketplace checkout, and a
+    /// marketplace holds plugins that are merely on offer — so only the
+    /// `installPath` of an actual install counts, and only when it ships skills.
+    #[test]
+    fn plugin_skills_dirs_follow_the_install_manifest() {
+        let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
+        let installed = home.join("cache/runpod/runpod/1.2.0");
+        let scoped = home.join("cache/market/acme-tools/0.2.0");
+        let no_skills = home.join("cache/other/other/0.1.0");
+        std::fs::create_dir_all(installed.join("skills/flash")).expect("mkdir");
+        std::fs::create_dir_all(scoped.join("skills/lint")).expect("mkdir");
+        std::fs::create_dir_all(&no_skills).expect("mkdir");
+        std::fs::create_dir_all(home.join("plugins")).expect("mkdir");
+        std::fs::write(
+            home.join("plugins/installed_plugins.json"),
+            serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "runpod@runpod": [{"installPath": installed.to_string_lossy(), "version": "1.2.0"}],
+                    "@acme/tools@market": [{"installPath": scoped.to_string_lossy()}],
+                    "skill-less@market": [{"installPath": no_skills.to_string_lossy()}],
+                },
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        assert_eq!(
+            installed_plugin_skills_dirs(&home),
+            vec![
+                // A plugin name can itself be scoped: the marketplace is the last `@`.
+                ("@acme/tools".to_string(), scoped.join("skills")),
+                ("runpod".to_string(), installed.join("skills")),
+            ]
+        );
+        // No manifest at all is no plugins, not an error.
+        assert!(installed_plugin_skills_dirs(&home.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`

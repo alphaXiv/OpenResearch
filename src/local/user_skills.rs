@@ -1,38 +1,30 @@
-//! User-uploaded agent skills — the dashboard's Customize tab.
+//! The skills the agent gets in every session — the dashboard's Customize tab.
 //!
 //! Unlike the built-in `orx-*` modules in [`super::agent_skills`] (embedded in
-//! the binary), these are authored by the user and stored on disk under the
-//! data dir:
+//! the binary), these come from the user, from two sources that share one flat
+//! list:
 //!
-//! * **Global** — `data_dir()/user-skills/global/<name>/` — every project.
-//! * **Project** — `data_dir()/user-skills/projects/<project_id>/<name>/` — one
-//!   project only; shadows a global of the same name for that project.
+//! * **Uploaded** — `data_dir()/user-skills/global/<name>/`, added from the
+//!   Customize tab.
+//! * **Mirrored** — the skills dirs of the coding agents installed on this
+//!   machine (`~/.claude/skills`, `~/.agents/skills`, …) plus the skills their
+//!   installed plugins ship, read live so a skill the user edits in Claude Code
+//!   or Codex is the one the next session runs. An upload of the same name
+//!   shadows the mirrored copy.
 //!
 //! Each skill is a real skill folder (`SKILL.md` plus any supporting files),
-//! written into every session worktree's skills dir alongside the built-ins
-//! (see [`write_into_session`]) so the harness auto-discovers it, and surfaced
-//! in the composer's `/` menu so the user can invoke it by name (see
-//! [`expand`]). The `SKILL.md` frontmatter's `name:` is the canonical id — it
-//! is the skill dir name and the `/name` the user types.
+//! written into every session worktree's skills dir alongside the built-ins (see
+//! [`write_into_session`]) so the harness auto-discovers it, and surfaced in the
+//! composer's `/` menu so the user can invoke it by name. The folder name is the
+//! canonical id — the `/name` the user types and the dir written into a session;
+//! an upload's `SKILL.md` frontmatter `name:` only seeds it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::error::{anyhow, Result};
 use crate::local::agent_skills::SkillSet;
 use crate::local::harness::registry;
-
-/// Where an uploaded skill applies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Scope {
-    /// Available in every project's sessions.
-    Global,
-    /// Available only in one project's sessions.
-    Project,
-}
 
 /// Reject pathological archives: a skill is a handful of small text files, not
 /// a tarball. Caps guard the extract path against zip bombs (the composer also
@@ -42,13 +34,15 @@ const MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 2048;
 
-/// One uploaded skill, as served to the UI.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// One skill available to every session, as served to the UI.
+#[derive(Clone, Debug)]
 pub struct UserSkill {
     pub name: String,
     pub description: String,
-    pub scope: Scope,
+    /// The coding agent or plugin this skill is mirrored from — `None` when
+    /// uploaded here. A mirrored skill is read-only: it is managed where it
+    /// lives.
+    pub origin: Option<String>,
     /// Total size of the skill folder on disk.
     pub bytes: u64,
     /// `SKILL.md` mtime in epoch millis (0 if unavailable).
@@ -57,31 +51,61 @@ pub struct UserSkill {
 
 // --- storage layout -----------------------------------------------------------
 
+/// Every entry path resolves the store through here, which is also where the
+/// retired per-project layout gets folded in: after the first run that costs one
+/// `is_dir`, and no other choke point covers the CLI and the dashboard alike.
 fn root() -> PathBuf {
-    crate::store::data_dir().join("user-skills")
+    let root = crate::store::data_dir().join("user-skills");
+    migrate_project_scoped(&root);
+    root
 }
 
-/// The directory holding a scope's skill folders under `root`. Validates
-/// `project_id` so a crafted id can never escape the store root.
-pub(crate) fn scope_dir(root: &Path, scope: Scope, project_id: Option<&str>) -> Result<PathBuf> {
-    match scope {
-        Scope::Global => Ok(root.join("global")),
-        Scope::Project => {
-            let id = project_id.ok_or_else(|| anyhow!("project scope requires a project id"))?;
-            if !is_valid_project_id(id) {
-                return Err(anyhow!("invalid project id"));
+/// Uploaded skills all live in one directory — the store had a per-project scope
+/// before, kept here as the on-disk name so existing installs need no move.
+pub(crate) fn store_dir(root: &Path) -> PathBuf {
+    root.join("global")
+}
+
+/// Lift what the retired per-project scope held into the single store. Anything
+/// that can't move — a name the global store already uses, or a rename that
+/// failed — stays exactly where it is, because it is the user's only copy; the
+/// old tree is removed only once emptied, so a later run retries. Shared with
+/// [`super::latex_templates`], whose store has the same shape.
+pub(crate) fn migrate_project_scoped(root: &Path) {
+    let projects = root.join("projects");
+    if !projects.is_dir() {
+        return;
+    }
+    let dest_base = store_dir(root);
+    if let Ok(entries) = fs::read_dir(&projects) {
+        for project in entries.flatten() {
+            if project.file_name() == ".DS_Store" {
+                let _ = fs::remove_file(project.path());
+                continue;
             }
-            Ok(root.join("projects").join(id))
+            let Ok(items) = fs::read_dir(project.path()) else {
+                continue;
+            };
+            for item in items.flatten() {
+                // Junk keeps a dir non-empty, which would keep the retired tree
+                // — and this walk — alive on every call forever.
+                if item.file_name() == ".DS_Store" {
+                    let _ = fs::remove_file(item.path());
+                    continue;
+                }
+                let dest = dest_base.join(item.file_name());
+                if dest.exists() || !item.path().is_dir() {
+                    continue;
+                }
+                if fs::create_dir_all(&dest_base).is_ok() {
+                    let _ = fs::rename(item.path(), &dest);
+                }
+            }
+            // Non-recursive: succeeds only when everything moved out.
+            let _ = fs::remove_dir(project.path());
         }
     }
-}
-
-fn is_valid_project_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    let _ = fs::remove_dir(&projects);
 }
 
 // --- frontmatter --------------------------------------------------------------
@@ -92,8 +116,10 @@ struct Frontmatter {
 }
 
 /// Parse the `name:`/`description:` from a `SKILL.md` YAML frontmatter block.
-/// Deliberately minimal (single-line scalars, quoted or bare) — the same shape
-/// the built-in skills use and the shape Claude Code / Codex require.
+/// Covers the shapes skills are actually written in: a plain or quoted scalar,
+/// a folded/literal block (`>-`, `|`), and a value continued on the following
+/// indented lines. A skill whose frontmatter we can't read is a skill the user
+/// never sees, so this errs towards reading it.
 fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
     let content = content.strip_prefix('\u{feff}').unwrap_or(content);
     let after_open = content
@@ -107,31 +133,103 @@ fn parse_frontmatter(content: &str) -> Result<Frontmatter> {
 
     let mut name = None;
     let mut description = None;
-    for line in block.lines() {
-        if let Some(v) = line.strip_prefix("name:") {
-            name = Some(parse_scalar(v.trim()));
-        } else if let Some(v) = line.strip_prefix("description:") {
-            description = Some(parse_scalar(v.trim()));
+    let lines: Vec<&str> = block.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((key, rest)) = top_level_key(lines[i]) else {
+            i += 1;
+            continue;
+        };
+        i += 1;
+        if key != "name" && key != "description" {
+            continue;
+        }
+        // Everything indented under the key (blank lines included) belongs to
+        // its value; a line back at column 0 starts the next key, and a comment
+        // there ends the value rather than joining it.
+        let mut continuation: Vec<&str> = Vec::new();
+        while i < lines.len() && top_level_key(lines[i]).is_none() && !is_comment(lines[i]) {
+            continuation.push(lines[i].trim());
+            i += 1;
+        }
+        let value = parse_scalar(&join_value(rest.trim(), &continuation));
+        if key == "name" {
+            name = Some(value);
+        } else {
+            description = Some(value);
         }
     }
 
     let name = name
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("SKILL.md frontmatter is missing a `name:` field"))?;
-    let description = description
+    let mut description = description
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("SKILL.md frontmatter is missing a `description:` field"))?;
+    // Truncated rather than rejected: the cap bounds what we hold and show, and
+    // a long description in a skill the user already installed elsewhere is no
+    // reason to make that skill disappear.
     if description.chars().count() > MAX_DESCRIPTION_LEN {
-        return Err(anyhow!("SKILL.md `description` is too long"));
+        description = description.chars().take(MAX_DESCRIPTION_LEN).collect();
     }
     Ok(Frontmatter { name, description })
 }
 
-/// Decode a single-line YAML scalar: JSON/double-quoted, single-quoted, or bare.
+/// A comment at column 0. An indented `#` is content inside a block scalar.
+fn is_comment(line: &str) -> bool {
+    line.starts_with('#')
+}
+
+/// `("name", "the rest")` for a mapping key at column 0. Indented lines (a
+/// value's continuation, or a nested mapping's own keys) return `None`.
+fn top_level_key(line: &str) -> Option<(&str, &str)> {
+    if line.starts_with(char::is_whitespace) || is_comment(line) {
+        return None;
+    }
+    let (key, rest) = line.split_once(':')?;
+    let key = key.trim();
+    (!key.is_empty() && !key.contains(char::is_whitespace)).then_some((key, rest))
+}
+
+/// One value from its first line plus the indented lines under it. A `|` block
+/// keeps its line breaks; everything else folds onto one line, which is how a
+/// wrapped description was meant to read.
+fn join_value(first: &str, continuation: &[&str]) -> String {
+    if is_block_indicator(first, '|') {
+        return continuation.join("\n").trim().to_string();
+    }
+    let folded = if is_block_indicator(first, '>') {
+        ""
+    } else {
+        first
+    };
+    std::iter::once(folded)
+        .chain(continuation.iter().copied())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A `|`/`>` block header, with only YAML's chomping and indent modifiers after
+/// it — so a value that merely starts with the character (`>50 tests run.`) is
+/// still read as text.
+fn is_block_indicator(value: &str, indicator: char) -> bool {
+    value.starts_with(indicator)
+        && value[indicator.len_utf8()..]
+            .chars()
+            .all(|c| c == '-' || c == '+' || c.is_ascii_digit())
+}
+
+/// Decode a YAML scalar: JSON/double-quoted, single-quoted, or bare.
 fn parse_scalar(v: &str) -> String {
     if v.starts_with('"') {
         if let Ok(s) = serde_json::from_str::<String>(v) {
             return s;
+        }
+        // A YAML double-quoted scalar JSON rejects (a stray escape, say) still
+        // reads fine once unwrapped — better that than dropping the skill.
+        if v.len() >= 2 && v.ends_with('"') {
+            return v[1..v.len() - 1].replace("\\\"", "\"");
         }
     }
     if v.len() >= 2 && v.starts_with('\'') && v.ends_with('\'') {
@@ -181,23 +279,16 @@ fn validate_name(name: &str) -> Result<()> {
 // --- save ---------------------------------------------------------------------
 
 /// Save a single-file `SKILL.md` upload. The name comes from its frontmatter.
-pub fn save_skill_md(content: &[u8], scope: Scope, project_id: Option<&str>) -> Result<UserSkill> {
-    save_skill_md_in(&root(), content, scope, project_id)
+pub fn save_skill_md(content: &[u8]) -> Result<UserSkill> {
+    save_skill_md_in(&root(), content)
 }
 
-fn save_skill_md_in(
-    root: &Path,
-    content: &[u8],
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<UserSkill> {
+fn save_skill_md_in(root: &Path, content: &[u8]) -> Result<UserSkill> {
     let text = std::str::from_utf8(content).map_err(|_| anyhow!("SKILL.md must be UTF-8 text"))?;
     let fm = parse_frontmatter(text)?;
     validate_name(&fm.name)?;
     write_skill(
         root,
-        scope,
-        project_id,
         &fm.name,
         vec![("SKILL.md".to_string(), content.to_vec())],
     )
@@ -207,16 +298,11 @@ fn save_skill_md_in(
 /// wrapping dir), rebases every sibling file beneath it, and writes the folder
 /// verbatim. Rejects unsafe paths, oversized archives, and a missing/ambiguous
 /// `SKILL.md`.
-pub fn save_zip(bytes: &[u8], scope: Scope, project_id: Option<&str>) -> Result<UserSkill> {
-    save_zip_in(&root(), bytes, scope, project_id)
+pub fn save_zip(bytes: &[u8]) -> Result<UserSkill> {
+    save_zip_in(&root(), bytes)
 }
 
-fn save_zip_in(
-    root: &Path,
-    bytes: &[u8],
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<UserSkill> {
+fn save_zip_in(root: &Path, bytes: &[u8]) -> Result<UserSkill> {
     use std::io::{Cursor, Read};
 
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
@@ -298,20 +384,14 @@ fn save_zip_in(
         rebased.push((rel.to_string(), buf));
     }
 
-    write_skill(root, scope, project_id, &fm.name, rebased)
+    write_skill(root, &fm.name, rebased)
 }
 
-fn write_skill(
-    root: &Path,
-    scope: Scope,
-    project_id: Option<&str>,
-    name: &str,
-    files: Vec<(String, Vec<u8>)>,
-) -> Result<UserSkill> {
+fn write_skill(root: &Path, name: &str, files: Vec<(String, Vec<u8>)>) -> Result<UserSkill> {
     if !files.iter().any(|(rel, _)| rel == "SKILL.md") {
         return Err(anyhow!("skill folder must contain a SKILL.md at its root"));
     }
-    let dir = scope_dir(root, scope, project_id)?.join(name);
+    let dir = store_dir(root).join(name);
     // A re-upload fully replaces the prior version — no stale sibling files.
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| anyhow!("could not replace skill: {e}"))?;
@@ -324,89 +404,206 @@ fn write_skill(
         }
         fs::write(&dest, buf).map_err(|e| anyhow!("could not write {}: {e}", dest.display()))?;
     }
-    read_skill_at(scope, &dir)
+    read_uploaded_at(&dir)
+}
+
+// --- mirrored coding-agent skills ---------------------------------------------
+
+/// A skill folder belonging to an installed coding agent — its own, or one from
+/// a plugin it has installed — mirrored into every session as-is.
+struct Mirrored {
+    /// Display name of the agent or plugin it came from, for the UI badge.
+    origin: String,
+    /// The session skills dir whose agent already loads this skill under this
+    /// same bare name, so a session it hosts isn't handed a second copy.
+    session_skills_dir: Option<&'static str>,
+    dir: PathBuf,
+    name: String,
+    description: String,
+}
+
+/// Every mirrorable skill across the harnesses on this machine: each one's own
+/// global skills dir, plus the skills that come with its installed plugins.
+/// Sorted by name (then origin) so the first of a duplicated name always wins.
+fn mirrored() -> Vec<Mirrored> {
+    let mut out = Vec::new();
+    for harness in registry() {
+        if let Some(dir) = harness.global_skills_dir() {
+            collect_mirrored(&dir, harness.name(), harness.session_skills_dir(), &mut out);
+        }
+        // A plugin's skills are registered namespaced (`runpod:flash`), never
+        // bare, so the `/name` the composer offers resolves only from a copy —
+        // including in a session the plugin's own agent hosts.
+        for (plugin, dir) in harness.plugin_skills_dirs() {
+            collect_mirrored(&dir, &plugin, None, &mut out);
+        }
+    }
+    out.sort_by(|a, b| {
+        (a.name.as_str(), a.origin.as_str()).cmp(&(b.name.as_str(), b.origin.as_str()))
+    });
+    out
+}
+
+/// Read one skills dir — a folder per skill, each with a `SKILL.md` — skipping
+/// the `orx` shim, the built-in namespace, and anything malformed or oddly
+/// named. A dir that isn't there yet is simply no skills.
+fn collect_mirrored(
+    dir: &Path,
+    origin: &str,
+    session_skills_dir: Option<&'static str>,
+    out: &mut Vec<Mirrored>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        if dir_name == "orx" || dir_name.starts_with("orx-") {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(path.join("SKILL.md")) else {
+            continue; // not a skill dir
+        };
+        let Ok(fm) = parse_frontmatter(&content) else {
+            continue;
+        };
+        // The frontmatter name is the `/name` and the dir we write into a
+        // session, so skip anything that isn't a clean, free slug.
+        if !is_valid_slug(&fm.name) || is_reserved(&fm.name) {
+            continue;
+        }
+        out.push(Mirrored {
+            origin: origin.to_string(),
+            session_skills_dir,
+            dir: path,
+            name: fm.name,
+            description: fm.description,
+        });
+    }
 }
 
 // --- list / find / delete -----------------------------------------------------
 
-fn read_skill_at(scope: Scope, dir: &Path) -> Result<UserSkill> {
+/// Read an uploaded skill folder. Its **directory name** is the id, not the
+/// frontmatter `name` that created it: everything else — `/name` invocation,
+/// delete, the copy into a session — resolves through the directory, and a
+/// hand-edited `name:` must not detach the two.
+fn read_uploaded_at(dir: &Path) -> Result<UserSkill> {
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| is_valid_slug(n))
+        .ok_or_else(|| anyhow!("`{}` is not a skill folder", dir.display()))?;
+    let tally = within_budget(dir)
+        .ok_or_else(|| anyhow!("`{}` is larger than a skill folder may be", dir.display()))?;
     let md_path = dir.join("SKILL.md");
     let content = fs::read_to_string(&md_path)
         .map_err(|e| anyhow!("could not read {}: {e}", md_path.display()))?;
     let fm = parse_frontmatter(&content)?;
     Ok(UserSkill {
-        name: fm.name,
+        name,
         description: fm.description,
-        scope,
-        bytes: dir_size(dir),
+        origin: None,
+        bytes: tally.bytes,
         updated_at: mtime_ms(&md_path),
     })
 }
 
-/// Skills in one scope, name-sorted. Unreadable/malformed folders are skipped
-/// rather than failing the whole listing.
-fn list_scope_in(root: &Path, scope: Scope, project_id: Option<&str>) -> Vec<UserSkill> {
-    let Ok(base) = scope_dir(root, scope, project_id) else {
-        return Vec::new();
-    };
-    let Ok(entries) = fs::read_dir(&base) else {
+/// Uploaded skills, name-sorted. Unreadable/malformed folders are skipped rather
+/// than failing the whole listing.
+fn list_uploaded_in(root: &Path) -> Vec<UserSkill> {
+    let Ok(entries) = fs::read_dir(store_dir(root)) else {
         return Vec::new();
     };
     let mut out: Vec<UserSkill> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
-        .filter_map(|e| read_skill_at(scope, &e.path()).ok())
+        .filter_map(|e| read_uploaded_at(&e.path()).ok())
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-/// Every skill that applies to a project's sessions: globals plus the project's
-/// own. Both scopes are returned (the UI manages each separately); a project
-/// skill and a global of the same name both appear.
-pub fn list_for_project(project_id: Option<&str>) -> Vec<UserSkill> {
-    let root = root();
-    let mut out = list_scope_in(&root, Scope::Global, None);
-    if let Some(id) = project_id {
-        out.extend(list_scope_in(&root, Scope::Project, Some(id)));
+/// Every skill the agent gets: the user's uploads plus whatever the installed
+/// coding agents and their plugins have, name-sorted. One entry per `/name` — an
+/// upload shadows a mirrored skill of the same name.
+pub fn list() -> Vec<UserSkill> {
+    list_in(&root(), &mirrored())
+}
+
+fn list_in(root: &Path, mirrored: &[Mirrored]) -> Vec<UserSkill> {
+    let mut out = list_uploaded_in(root);
+    for m in mirrored {
+        if out.iter().any(|s| s.name == m.name) {
+            continue;
+        }
+        // Same budget the session write applies, so the tab can't offer a `/name`
+        // that never reaches the worktree.
+        let Some(tally) = within_budget(&m.dir) else {
+            continue;
+        };
+        out.push(UserSkill {
+            name: m.name.clone(),
+            description: m.description.clone(),
+            origin: Some(m.origin.clone()),
+            bytes: tally.bytes,
+            updated_at: mtime_ms(&m.dir.join("SKILL.md")),
+        });
     }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     out
 }
 
-/// Resolve an applicable skill by name for `/`-invocation. Project scope wins
-/// over global.
-fn find_in(root: &Path, name: &str, project_id: Option<&str>) -> Option<UserSkill> {
-    if let Some(id) = project_id {
-        if let Some(s) = list_scope_in(root, Scope::Project, Some(id))
-            .into_iter()
-            .find(|s| s.name == name)
-        {
-            return Some(s);
+/// The folder each `/name` resolves to, uploads shadowing mirrored skills — the
+/// same one-per-name resolution [`list_in`] shows.
+///
+/// `skills_dir_rel` is the session dir the folders are headed for, when they are
+/// headed for one. A skill whose winning source is the agent hosting that
+/// session is dropped *after* it has claimed the name, so a same-named skill
+/// from a second agent can't quietly take its place in the worktree while the
+/// dashboard shows the first.
+fn source_dirs(
+    root: &Path,
+    mirrored: &[Mirrored],
+    skills_dir_rel: Option<&str>,
+) -> Vec<(String, PathBuf, Tally)> {
+    // Through `list_uploaded_in`, so a folder the listing drops as unreadable
+    // can't still win the name here and shadow a mirrored skill that works.
+    let mut out: Vec<(String, PathBuf, Option<&'static str>)> = list_uploaded_in(root)
+        .into_iter()
+        .map(|skill| {
+            let dir = store_dir(root).join(&skill.name);
+            (skill.name, dir, None)
+        })
+        .collect();
+    for m in mirrored {
+        if !out.iter().any(|(name, ..)| *name == m.name) {
+            out.push((m.name.clone(), m.dir.clone(), m.session_skills_dir));
         }
     }
-    list_scope_in(root, Scope::Global, None)
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.into_iter()
+        .filter(|(_, _, host)| !matches!((host, skills_dir_rel), (Some(h), Some(rel)) if *h == rel))
+        // Budget here rather than at the write, so a `/name` the session can't
+        // be given isn't one the menu, the preview or the tab offer either.
+        .filter_map(|(name, dir, _)| within_budget(&dir).map(|tally| (name, dir, tally)))
+        .collect()
+}
+
+/// The Markdown body of a skill's `SKILL.md`, for the composer hover preview.
+pub fn content(name: &str) -> Option<String> {
+    content_in(&root(), &mirrored(), name)
+}
+
+fn content_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
+    let (_, dir, _) = source_dirs(root, mirrored, None)
         .into_iter()
-        .find(|s| s.name == name)
-}
-
-/// The Markdown body of the applicable skill's `SKILL.md`, for the composer
-/// hover preview. Project scope wins over global just as invocation does.
-pub fn content(name: &str, project_id: Option<&str>) -> Option<String> {
-    content_in(&root(), name, project_id)
-}
-
-fn content_in(root: &Path, name: &str, project_id: Option<&str>) -> Option<String> {
-    let skill = find_in(root, name, project_id)?;
-    let scope_project = if skill.scope == Scope::Project {
-        Some(project_id?)
-    } else {
-        None
-    };
-    let path = scope_dir(root, skill.scope, scope_project)
-        .ok()?
-        .join(&skill.name)
-        .join("SKILL.md");
-    let content = fs::read_to_string(path).ok()?;
+        .find(|(n, ..)| n == name)?;
+    let content = fs::read_to_string(dir.join("SKILL.md")).ok()?;
     let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
     let after_open = content
         .strip_prefix("---\n")
@@ -419,218 +616,81 @@ fn content_in(root: &Path, name: &str, project_id: Option<&str>) -> Option<Strin
     )
 }
 
-pub fn delete(name: &str, scope: Scope, project_id: Option<&str>) -> Result<()> {
-    delete_in(&root(), name, scope, project_id)
+/// Delete an uploaded skill. Mirrored ones are managed in the agent that owns
+/// them, so they are not deletable here.
+pub fn delete(name: &str) -> Result<()> {
+    delete_in(&root(), name)
 }
 
-fn delete_in(root: &Path, name: &str, scope: Scope, project_id: Option<&str>) -> Result<()> {
+fn delete_in(root: &Path, name: &str) -> Result<()> {
     if !is_valid_slug(name) {
         return Err(anyhow!("invalid skill name"));
     }
-    let dir = scope_dir(root, scope, project_id)?.join(name);
+    let dir = store_dir(root).join(name);
     if !dir.exists() {
         return Err(anyhow!("skill `{name}` not found"));
     }
     fs::remove_dir_all(&dir).map_err(|e| anyhow!("could not delete skill: {e}"))
 }
 
-// --- import from a coding agent -----------------------------------------------
-
-/// A skill already installed in a coding agent, offered for one-click import.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HarnessSkill {
-    pub harness_id: String,
-    pub harness_name: String,
-    pub name: String,
-    pub description: String,
-}
-
-/// Every importable skill across installed harnesses (their global skill dirs),
-/// minus the `orx` shim, the built-in namespace, and anything malformed or
-/// name-reserved. Name-sorted within each harness.
-pub fn list_harness_skills() -> Vec<HarnessSkill> {
-    let mut out = Vec::new();
-    for harness in registry() {
-        if !harness.is_installed_locally() {
-            continue;
-        }
-        let Some(dir) = harness.global_skills_dir() else {
-            continue;
-        };
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue; // agent installed but no skills dir yet
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let dir_name = entry.file_name().to_string_lossy().into_owned();
-            if dir_name == "orx" || dir_name.starts_with("orx-") {
-                continue;
-            }
-            let Ok(content) = fs::read_to_string(path.join("SKILL.md")) else {
-                continue; // not a skill dir
-            };
-            let Ok(fm) = parse_frontmatter(&content) else {
-                continue;
-            };
-            // Import keys off the frontmatter name (it becomes the store dir and
-            // the `/name`); skip skills whose name isn't a clean, free slug so
-            // the folder==name invariant always holds after import.
-            let name = fm.name;
-            if !is_valid_slug(&name) || is_reserved(&name) {
-                continue;
-            }
-            out.push(HarnessSkill {
-                harness_id: harness.id().to_string(),
-                harness_name: harness.name().to_string(),
-                name,
-                description: fm.description,
-            });
-        }
-    }
-    out.sort_by(|a, b| {
-        (a.harness_name.as_str(), a.name.as_str()).cmp(&(b.harness_name.as_str(), b.name.as_str()))
-    });
-    out
-}
-
-/// Copy a named skill from an installed harness's global skills dir into the
-/// store at `scope`, resources and all.
-pub fn import_from_harness(
-    harness_id: &str,
-    name: &str,
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<UserSkill> {
-    import_from_harness_in(&root(), harness_id, name, scope, project_id)
-}
-
-fn import_from_harness_in(
-    root: &Path,
-    harness_id: &str,
-    name: &str,
-    scope: Scope,
-    project_id: Option<&str>,
-) -> Result<UserSkill> {
-    validate_name(name)?;
-    let harness = registry()
-        .into_iter()
-        .find(|h| h.id() == harness_id)
-        .ok_or_else(|| anyhow!("unknown harness `{harness_id}`"))?;
-    let skills_dir = harness
-        .global_skills_dir()
-        .ok_or_else(|| anyhow!("{} has no skills directory", harness.name()))?;
-    let src = locate_harness_skill(&skills_dir, name)?;
-    let files = collect_files(&src, &src)?;
-    write_skill(root, scope, project_id, name, files)
-}
-
-/// The skill folder in `skills_dir` whose `SKILL.md` frontmatter name matches
-/// `name` — the same key `list_harness_skills` surfaces, so the folder stored on
-/// import always equals its frontmatter name.
-fn locate_harness_skill(skills_dir: &Path, name: &str) -> Result<PathBuf> {
-    let entries = fs::read_dir(skills_dir)
-        .map_err(|e| anyhow!("could not read {}: {e}", skills_dir.display()))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let Ok(content) = fs::read_to_string(path.join("SKILL.md")) else {
-            continue;
-        };
-        let Ok(fm) = parse_frontmatter(&content) else {
-            continue;
-        };
-        if fm.name == name {
-            return Ok(path);
-        }
-    }
-    Err(anyhow!("skill `{name}` not found in the harness"))
-}
-
-/// Every file under `dir`, as (base-relative path, bytes).
-fn collect_files(base: &Path, dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(dir).map_err(|e| anyhow!("could not read {}: {e}", dir.display()))? {
-        let entry = entry.map_err(|e| anyhow!("could not read dir entry: {e}"))?;
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(collect_files(base, &path)?);
-        } else {
-            let rel = path
-                .strip_prefix(base)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let bytes =
-                fs::read(&path).map_err(|e| anyhow!("could not read {}: {e}", path.display()))?;
-            out.push((rel, bytes));
-        }
-    }
-    Ok(out)
-}
-
 // --- session wiring -----------------------------------------------------------
 
-/// A manifest of the skill dirs [`write_into_session`] wrote last turn, so it can
-/// prune ones the user has since deleted without touching built-in `orx-*` or
-/// repo-committed skills. Lives inside the (git-excluded) session skills dir; a
-/// dotfile, so the harness never treats it as a skill.
+/// A manifest of the skill dirs [`write_into_session`] wrote last turn. It is
+/// the record of what we own: only a dir named here may be replaced or pruned,
+/// which keeps us off the built-in `orx-*` skills and off any `.claude/skills`
+/// the project itself commits. It lives inside the (git-excluded) session skills
+/// dir as a dotfile, so the harness never treats it as a skill — and the agent
+/// can write to it, so every name read back out is re-validated.
 const MANAGED_MANIFEST: &str = ".orx-user-skills";
 
-/// Copy every applicable skill folder (globals first, then the project's, so a
-/// project skill shadows a global of the same name) into the session worktree's
-/// native skills dir, beside the built-in `orx-*` skills. Called fresh each turn
-/// from `ensure_playbook`: each managed dir is fully replaced, and any skill the
-/// user deleted since last turn is removed — so a session's skills track the
-/// store with no drift.
-pub fn write_into_session(worktree: &Path, skills_dir_rel: &str, project_id: &str) -> Result<()> {
-    write_into_session_in(&root(), worktree, skills_dir_rel, project_id)
+/// Copy every applicable skill folder into the session worktree's native skills
+/// dir, beside the built-in `orx-*` skills. Called fresh each turn from
+/// `ensure_playbook`: a folder whose source changed is replaced, one that no
+/// longer applies is pruned, and one we don't own is left alone — so a session's
+/// skills track their sources with no drift and no collateral damage.
+pub fn write_into_session(worktree: &Path, skills_dir_rel: &str) -> Result<()> {
+    write_into_session_in(&root(), &mirrored(), worktree, skills_dir_rel)
 }
 
 fn write_into_session_in(
     root: &Path,
+    mirrored: &[Mirrored],
     worktree: &Path,
     skills_dir_rel: &str,
-    project_id: &str,
 ) -> Result<()> {
     let base = worktree.join(skills_dir_rel);
+    // No manifest at all — the agent can delete it — is the one case where a
+    // destination that already matches its source can be taken as ours, which is
+    // how that heals. While a manifest exists it is the whole truth about what
+    // we own, so a dir it doesn't name is the project's and stays unprunable.
+    let recorded = previously_managed(&base);
+    let adoptable = recorded.is_none();
+    let previous = recorded.unwrap_or_default();
     let mut managed: Vec<String> = Vec::new();
-    for (scope, pid) in [(Scope::Global, None), (Scope::Project, Some(project_id))] {
-        let Ok(src_base) = scope_dir(root, scope, pid) else {
-            continue;
-        };
-        let Ok(entries) = fs::read_dir(&src_base) else {
-            continue; // no skills for this scope yet
-        };
-        for entry in entries.flatten() {
-            let src = entry.path();
-            if !src.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let dest = base.join(&name);
-            // Replace, don't merge: a re-upload with fewer files, or a project
-            // skill shadowing a global, must not keep stale siblings.
+    for (name, src, src_tally) in source_dirs(root, mirrored, Some(skills_dir_rel)) {
+        let dest = base.join(&name);
+        let current = dest_matches_source(&src, src_tally, &dest);
+        if dest.exists() && !previous.contains(&name) && !(adoptable && current) {
+            continue; // the project ships a skill by this name — it wins, untouched
+        }
+        if !current {
             if dest.exists() {
                 let _ = fs::remove_dir_all(&dest);
             }
-            copy_dir_all(&src, &dest)?;
-            if !managed.contains(&name) {
-                managed.push(name);
+            // Replace, don't merge: a re-upload with fewer files, or an upload
+            // shadowing a mirrored skill, must not keep stale siblings. A copy
+            // that fails skips this turn rather than failing the session.
+            if copy_dir_all(&src, &dest).is_err() {
+                let _ = fs::remove_dir_all(&dest);
+                continue;
             }
         }
+        managed.push(name);
     }
-    // Prune skills we wrote before but that no longer apply (deleted or renamed).
-    if let Ok(prev) = fs::read_to_string(base.join(MANAGED_MANIFEST)) {
-        for name in prev.lines().filter(|n| !n.is_empty()) {
-            if !managed.iter().any(|m| m == name) {
-                let _ = fs::remove_dir_all(base.join(name));
-            }
+    // Prune what we wrote before and no longer applies — never a path we didn't.
+    for name in &previous {
+        if !managed.contains(name) {
+            let _ = fs::remove_dir_all(base.join(name));
         }
     }
     if base.exists() {
@@ -639,26 +699,78 @@ fn write_into_session_in(
     Ok(())
 }
 
-/// Build the instruction for one selected user skill. Its complete `SKILL.md`
-/// is already in the worktree; the chat layer supplies the shared user request.
-pub fn instructions(name: &str, project_id: &str) -> Option<String> {
-    instructions_in(&root(), name, project_id)
+/// The names we wrote last turn, or `None` when there is no manifest to read.
+/// The manifest sits in the agent-writable worktree, so a name from it is
+/// untrusted: `join` on an absolute or `..` path escapes `base`, and these names
+/// are handed to `remove_dir_all`.
+fn previously_managed(base: &Path) -> Option<Vec<String>> {
+    let manifest = fs::read_to_string(base.join(MANAGED_MANIFEST)).ok()?;
+    Some(
+        manifest
+            .lines()
+            .filter(|name| is_valid_slug(name))
+            .map(str::to_string)
+            .collect(),
+    )
 }
 
-fn instructions_in(root: &Path, name: &str, project_id: &str) -> Option<String> {
-    let skill = find_in(root, name, Some(project_id))?;
-    Some(format!("Use the `{}` skill.", skill.name))
+/// Whether `dest` already holds this skill, so the turn can skip a full re-copy.
+/// Timestamps are no witness — macOS's `fs::copy` carries the source's mtime
+/// across and Linux's doesn't — so the comparison is the source's [`Tally`] plus
+/// a byte-identical `SKILL.md`. That misses an edit to a supporting file that
+/// preserves its length; `SKILL.md` is the file worth reading in full because it
+/// is the one an edit almost always touches.
+fn dest_matches_source(src: &Path, src_tally: Tally, dest: &Path) -> bool {
+    if !dest.is_dir() || tally_all(dest) != src_tally {
+        return false;
+    }
+    match (
+        fs::read(src.join("SKILL.md")),
+        fs::read(dest.join("SKILL.md")),
+    ) {
+        (Ok(from), Ok(to)) => from == to,
+        _ => false,
+    }
+}
+
+/// The tally of a folder we're about to mirror, or `None` when it blows the same
+/// budget an upload has to fit — not something to copy into every session, every
+/// turn.
+fn within_budget(dir: &Path) -> Option<Tally> {
+    tally(dir, MAX_FILES as u64, MAX_TOTAL_BYTES)
+}
+
+/// Build the instruction for one selected user skill. Its complete `SKILL.md`
+/// is already in the worktree; the chat layer supplies the shared user request.
+pub fn instructions(name: &str) -> Option<String> {
+    instructions_in(&root(), &mirrored(), name)
+}
+
+fn instructions_in(root: &Path, mirrored: &[Mirrored], name: &str) -> Option<String> {
+    source_dirs(root, mirrored, None)
+        .into_iter()
+        .find(|(n, ..)| n == name)
+        .map(|(name, ..)| format!("Use the `{name}` skill."))
 }
 
 // --- fs helpers ---------------------------------------------------------------
 
+/// Copy a skill folder. Symlinks are skipped rather than followed: a mirrored
+/// folder is often a symlinked checkout, and a link pointing back up its own
+/// tree would never terminate.
 pub(crate) fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest).map_err(|e| anyhow!("could not create {}: {e}", dest.display()))?;
     for entry in fs::read_dir(src).map_err(|e| anyhow!("could not read {}: {e}", src.display()))? {
         let entry = entry.map_err(|e| anyhow!("could not read dir entry: {e}"))?;
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_symlink() {
+            continue;
+        }
         let from = entry.path();
         let to = dest.join(entry.file_name());
-        if from.is_dir() {
+        if kind.is_dir() {
             copy_dir_all(&from, &to)?;
         } else {
             fs::copy(&from, &to).map_err(|e| anyhow!("could not copy {}: {e}", from.display()))?;
@@ -667,20 +779,63 @@ pub(crate) fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn dir_size(dir: &Path) -> u64 {
-    let mut total = 0;
-    let Ok(entries) = fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            total += dir_size(&path);
-        } else if let Ok(meta) = entry.metadata() {
-            total += meta.len();
+/// What a folder holds, cheaply enough to compute every turn: how many files,
+/// how many bytes, and a digest folded over every (relative path, size) pair so
+/// that a rename or a move inside the folder shows up even when the totals
+/// don't. Summed, not sequenced, because `read_dir` order isn't stable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    files: u64,
+    pub(crate) bytes: u64,
+    digest: u64,
+}
+
+/// Walk `dir`, giving up (`None`) as soon as either cap is passed. Iterative and
+/// symlink-skipping for the same reason as [`copy_dir_all`] — this walks
+/// directories orx doesn't own.
+pub(crate) fn tally(dir: &Path, max_files: u64, max_bytes: u64) -> Option<Tally> {
+    use std::hash::{Hash, Hasher};
+
+    let mut out = Tally::default();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        let Ok(entries) = fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let len = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            out.files += 1;
+            out.bytes += len;
+            if out.files > max_files || out.bytes > max_bytes {
+                return None;
+            }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.strip_prefix(dir).unwrap_or(&path).hash(&mut hasher);
+            len.hash(&mut hasher);
+            out.digest = out.digest.wrapping_add(hasher.finish());
         }
     }
-    total
+    Some(out)
+}
+
+/// [`tally`] with no budget to blow, so it always answers.
+pub(crate) fn tally_all(dir: &Path) -> Tally {
+    tally(dir, u64::MAX, u64::MAX).unwrap_or_default()
+}
+
+pub(crate) fn dir_size(dir: &Path) -> u64 {
+    tally_all(dir).bytes
 }
 
 pub(crate) fn mtime_ms(path: &Path) -> i64 {
@@ -716,6 +871,33 @@ mod tests {
         format!("---\nname: {name}\ndescription: {desc}\n---\n\n# {name}\nbody\n")
     }
 
+    /// A skill folder standing in for one installed in a coding agent.
+    fn mirrored_skill(origin: &str, dir: &Path, md: &str, extra: &[(&str, &[u8])]) -> Mirrored {
+        mirrored_from(origin, None, dir, md, extra)
+    }
+
+    fn mirrored_from(
+        origin: &str,
+        session_skills_dir: Option<&'static str>,
+        dir: &Path,
+        md: &str,
+        extra: &[(&str, &[u8])],
+    ) -> Mirrored {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("SKILL.md"), md).unwrap();
+        for (rel, body) in extra {
+            fs::write(dir.join(rel), body).unwrap();
+        }
+        let fm = parse_frontmatter(md).unwrap();
+        Mirrored {
+            origin: origin.to_string(),
+            session_skills_dir,
+            dir: dir.to_path_buf(),
+            name: fm.name,
+            description: fm.description,
+        }
+    }
+
     fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         use std::io::Write;
         let mut buf = Vec::new();
@@ -745,6 +927,70 @@ mod tests {
     }
 
     #[test]
+    fn frontmatter_reads_multi_line_values() {
+        // A quoted description wrapped over several indented lines — the shape
+        // that used to drop the skill entirely.
+        let fm = parse_frontmatter(concat!(
+            "---\n",
+            "name: math-olympiad\n",
+            "description:\n",
+            "  \"Solve competition math problems with adversarial\n",
+            "  verification. Use when asked to 'prove this'.\"\n",
+            "---\nbody",
+        ))
+        .unwrap();
+        assert_eq!(fm.name, "math-olympiad");
+        assert_eq!(
+            fm.description,
+            "Solve competition math problems with adversarial verification. Use when asked to 'prove this'."
+        );
+
+        // A folded block scalar.
+        let fm =
+            parse_frontmatter("---\nname: folded\ndescription: >-\n  one\n  two\n---\nb").unwrap();
+        assert_eq!(fm.description, "one two");
+
+        // A literal block keeps its line breaks.
+        let fm =
+            parse_frontmatter("---\nname: literal\ndescription: |\n  one\n  two\n---\nb").unwrap();
+        assert_eq!(fm.description, "one\ntwo");
+
+        // A comment ends the value above it instead of joining it.
+        let fm = parse_frontmatter(concat!(
+            "---\n",
+            "name: commented\n",
+            "# keep the description short\n",
+            "description: Short. Use when testing.\n",
+            "---\nbody",
+        ))
+        .unwrap();
+        assert_eq!(fm.name, "commented");
+        assert_eq!(fm.description, "Short. Use when testing.");
+
+        // A value that merely starts with `>` is text, not a folded block.
+        let fm = parse_frontmatter("---\nname: gt\ndescription: >50 tests run.\n---\nb").unwrap();
+        assert_eq!(fm.description, ">50 tests run.");
+
+        // A double-quoted scalar JSON rejects is unwrapped, not dropped.
+        let fm = parse_frontmatter("---\nname: esc\ndescription: \"a \\q b\"\n---\nb").unwrap();
+        assert_eq!(fm.description, "a \\q b");
+
+        // A nested mapping's own keys are not mistaken for the top-level ones,
+        // and don't swallow the value above them.
+        let fm = parse_frontmatter(concat!(
+            "---\n",
+            "name: nested\n",
+            "description: real one\n",
+            "metadata:\n",
+            "  name: not-the-skill\n",
+            "---\nbody",
+        ))
+        .unwrap();
+        assert_eq!(fm.name, "nested");
+        assert_eq!(fm.description, "real one");
+    }
+
+    #[test]
     fn name_validation() {
         assert!(is_valid_slug("data-cleaner"));
         assert!(is_valid_slug("skill1"));
@@ -763,43 +1009,29 @@ mod tests {
     #[test]
     fn save_list_find_delete_roundtrip() {
         let root = temp_root();
-        let saved =
-            save_skill_md_in(&root, skill_md("alpha").as_bytes(), Scope::Global, None).unwrap();
+        let saved = save_skill_md_in(&root, skill_md("alpha").as_bytes()).unwrap();
         assert_eq!(saved.name, "alpha");
-        assert_eq!(saved.scope, Scope::Global);
+        assert_eq!(saved.origin, None);
         assert!(root.join("global/alpha/SKILL.md").exists());
 
-        let list = list_scope_in(&root, Scope::Global, None);
+        let list = list_in(&root, &[]);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "alpha");
-        assert!(find_in(&root, "alpha", None).is_some());
 
-        delete_in(&root, "alpha", Scope::Global, None).unwrap();
-        assert!(list_scope_in(&root, Scope::Global, None).is_empty());
+        delete_in(&root, "alpha").unwrap();
+        assert!(list_in(&root, &[]).is_empty());
         // Deleting a missing skill is an error.
-        assert!(delete_in(&root, "alpha", Scope::Global, None).is_err());
+        assert!(delete_in(&root, "alpha").is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn rejects_reserved_and_bad_names() {
         let root = temp_root();
-        assert!(save_skill_md_in(
-            &root,
-            skill_md("orx-compute").as_bytes(),
-            Scope::Global,
-            None
-        )
-        .is_err());
-        assert!(save_skill_md_in(
-            &root,
-            skill_md("lit-review").as_bytes(),
-            Scope::Global,
-            None
-        )
-        .is_err());
+        assert!(save_skill_md_in(&root, skill_md("orx-compute").as_bytes()).is_err());
+        assert!(save_skill_md_in(&root, skill_md("lit-review").as_bytes()).is_err());
         let bad = "---\nname: Bad_Name\ndescription: nope. Use.\n---\nbody\n";
-        assert!(save_skill_md_in(&root, bad.as_bytes(), Scope::Global, None).is_err());
+        assert!(save_skill_md_in(&root, bad.as_bytes()).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -812,7 +1044,7 @@ mod tests {
             ("packager/scripts/run.py", b"print(1)\n"),
             ("__MACOSX/packager/._SKILL.md", b"junk"),
         ]);
-        let saved = save_zip_in(&root, &zip, Scope::Global, None).unwrap();
+        let saved = save_zip_in(&root, &zip).unwrap();
         assert_eq!(saved.name, "packager");
         assert!(root.join("global/packager/SKILL.md").exists());
         assert!(root.join("global/packager/scripts/run.py").exists());
@@ -825,7 +1057,7 @@ mod tests {
     fn save_zip_requires_a_skill_md() {
         let root = temp_root();
         let zip = make_zip(&[("foo/readme.txt", b"hi")]);
-        assert!(save_zip_in(&root, &zip, Scope::Global, None).is_err());
+        assert!(save_zip_in(&root, &zip).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -836,179 +1068,510 @@ mod tests {
             ("s/SKILL.md", skill_md("s").as_bytes()),
             ("s/old.txt", b"stale"),
         ]);
-        save_zip_in(&root, &zip, Scope::Global, None).unwrap();
+        save_zip_in(&root, &zip).unwrap();
         assert!(root.join("global/s/old.txt").exists());
         // Re-upload without old.txt must drop it.
-        save_skill_md_in(&root, skill_md("s").as_bytes(), Scope::Global, None).unwrap();
+        save_skill_md_in(&root, skill_md("s").as_bytes()).unwrap();
         assert!(!root.join("global/s/old.txt").exists());
         assert!(root.join("global/s/SKILL.md").exists());
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn project_scope_shadows_global() {
+    fn mirrored_skills_are_listed_and_shadowed_by_uploads() {
         let root = temp_root();
-        save_skill_md_in(
-            &root,
-            skill_md_desc("dup", "GLOBAL body").as_bytes(),
-            Scope::Global,
-            None,
-        )
-        .unwrap();
-        save_skill_md_in(
-            &root,
-            skill_md_desc("dup", "PROJECT body").as_bytes(),
-            Scope::Project,
-            Some("proj1"),
-        )
-        .unwrap();
+        let agent_dir = temp_root();
+        let mirrored = vec![
+            mirrored_skill(
+                "Claude Code",
+                &agent_dir.join("dup"),
+                &skill_md_desc("dup", "MIRRORED body"),
+                &[],
+            ),
+            mirrored_skill(
+                "Claude Code",
+                &agent_dir.join("solo"),
+                &skill_md("solo"),
+                &[],
+            ),
+        ];
+        save_skill_md_in(&root, skill_md_desc("dup", "UPLOADED body").as_bytes()).unwrap();
 
-        let found = find_in(&root, "dup", Some("proj1")).unwrap();
-        assert_eq!(found.scope, Scope::Project);
-        assert!(found.description.contains("PROJECT"));
-        // A different project falls back to the global.
-        let other = find_in(&root, "dup", Some("proj2")).unwrap();
-        assert_eq!(other.scope, Scope::Global);
+        let list = list_in(&root, &mirrored);
+        assert_eq!(
+            list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            ["dup", "solo"]
+        );
+        let dup = &list[0];
+        assert!(dup.description.contains("UPLOADED"), "upload must shadow");
+        assert_eq!(dup.origin, None);
+        assert_eq!(list[1].origin.as_deref(), Some("Claude Code"));
+
         let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
     }
 
     #[test]
-    fn write_into_session_copies_scopes_with_project_shadow() {
+    fn write_into_session_copies_uploads_and_mirrored() {
         let root = temp_root();
-        save_skill_md_in(&root, skill_md("g-only").as_bytes(), Scope::Global, None).unwrap();
-        save_skill_md_in(
-            &root,
-            skill_md_desc("dup", "GLOBAL").as_bytes(),
-            Scope::Global,
-            None,
-        )
-        .unwrap();
-        save_skill_md_in(
-            &root,
-            skill_md_desc("dup", "PROJECT").as_bytes(),
-            Scope::Project,
-            Some("p1"),
-        )
-        .unwrap();
-
+        let agent_dir = temp_root();
         let wt = temp_root();
-        write_into_session_in(&root, &wt, ".claude/skills", "p1").unwrap();
-        assert!(wt.join(".claude/skills/g-only/SKILL.md").exists());
+        // The mirrored `dup` carries an extra file the upload lacks.
+        let mirrored = vec![
+            mirrored_skill(
+                "Codex",
+                &agent_dir.join("dup"),
+                &skill_md_desc("dup", "MIRRORED"),
+                &[("extra.txt", b"mirrored-only")],
+            ),
+            mirrored_skill("Codex", &agent_dir.join("solo"), &skill_md("solo"), &[]),
+        ];
+        save_skill_md_in(&root, skill_md_desc("dup", "UPLOADED").as_bytes()).unwrap();
+
+        write_into_session_in(&root, &mirrored, &wt, ".claude/skills").unwrap();
+        assert!(wt.join(".claude/skills/solo/SKILL.md").exists());
         let dup = fs::read_to_string(wt.join(".claude/skills/dup/SKILL.md")).unwrap();
+        assert!(dup.contains("UPLOADED"), "upload must shadow the mirror");
         assert!(
-            dup.contains("PROJECT"),
-            "project skill must shadow the global"
+            !wt.join(".claude/skills/dup/extra.txt").exists(),
+            "a shadowing upload must not keep the mirrored skill's files"
         );
+
         let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_session_is_not_handed_back_its_own_agents_skills() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        let mirrored = vec![
+            mirrored_from(
+                "Claude Code",
+                Some(".claude/skills"),
+                &agent_dir.join("native"),
+                &skill_md("native"),
+                &[],
+            ),
+            mirrored_from(
+                "Codex",
+                Some(".agents/skills"),
+                &agent_dir.join("foreign"),
+                &skill_md("foreign"),
+                &[],
+            ),
+        ];
+
+        write_into_session_in(&root, &mirrored, &wt, ".claude/skills").unwrap();
+        assert!(
+            !wt.join(".claude/skills/native").exists(),
+            "Claude Code already loads its own skills from the user's home dir"
+        );
+        assert!(wt.join(".claude/skills/foreign/SKILL.md").exists());
+        // Both are still listed and invocable — one just needs no copy.
+        assert_eq!(list_in(&root, &mirrored).len(), 2);
+        assert!(instructions_in(&root, &mirrored, "native").is_some());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
         let _ = fs::remove_dir_all(&wt);
     }
 
     #[test]
     fn instructions_invoke_user_skill() {
         let root = temp_root();
-        save_skill_md_in(&root, skill_md("greeter").as_bytes(), Scope::Global, None).unwrap();
+        save_skill_md_in(&root, skill_md("greeter").as_bytes()).unwrap();
         assert_eq!(
-            instructions_in(&root, "greeter", "p1").unwrap(),
+            instructions_in(&root, &[], "greeter").unwrap(),
             "Use the `greeter` skill."
         );
         assert_eq!(
-            content_in(&root, "greeter", Some("p1")).unwrap(),
+            content_in(&root, &[], "greeter").unwrap(),
             "# greeter\nbody\n"
         );
-        assert!(content_in(&root, "../../etc/passwd", Some("p1")).is_none());
-        assert!(instructions_in(&root, "unknown", "p1").is_none());
+        assert!(content_in(&root, &[], "../../etc/passwd").is_none());
+        assert!(instructions_in(&root, &[], "unknown").is_none());
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
-    fn collect_files_walks_nested_dirs() {
-        let base = temp_root();
-        fs::create_dir_all(base.join("scripts")).unwrap();
-        fs::write(base.join("SKILL.md"), b"x").unwrap();
-        fs::write(base.join("scripts/run.py"), b"y").unwrap();
-        let mut files = collect_files(&base, &base).unwrap();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0].0, "SKILL.md");
-        assert_eq!(files[1].0, "scripts/run.py");
-        let _ = fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn locate_harness_skill_matches_frontmatter_name() {
-        let skills = temp_root();
-        // Match on the frontmatter name even when the dir name differs, and
-        // never on the dir name alone.
-        fs::create_dir_all(skills.join("weird-dir")).unwrap();
-        fs::write(skills.join("weird-dir/SKILL.md"), skill_md("canonical")).unwrap();
-
-        assert_eq!(
-            locate_harness_skill(&skills, "canonical").unwrap(),
-            skills.join("weird-dir")
-        );
-        assert!(locate_harness_skill(&skills, "weird-dir").is_err());
-        assert!(locate_harness_skill(&skills, "missing").is_err());
-        let _ = fs::remove_dir_all(&skills);
-    }
-
-    #[test]
-    fn write_into_session_prunes_deleted_skills() {
+    fn write_into_session_prunes_skills_that_no_longer_apply() {
         let root = temp_root();
+        let agent_dir = temp_root();
         let wt = temp_root();
         let rel = ".claude/skills";
-        save_skill_md_in(&root, skill_md("keep").as_bytes(), Scope::Global, None).unwrap();
-        save_skill_md_in(&root, skill_md("gone").as_bytes(), Scope::Global, None).unwrap();
-        write_into_session_in(&root, &wt, rel, "p1").unwrap();
+        let mirrored = vec![mirrored_skill(
+            "Claude Code",
+            &agent_dir.join("mirrored"),
+            &skill_md("mirrored"),
+            &[],
+        )];
+        save_skill_md_in(&root, skill_md("keep").as_bytes()).unwrap();
+        save_skill_md_in(&root, skill_md("gone").as_bytes()).unwrap();
+        write_into_session_in(&root, &mirrored, &wt, rel).unwrap();
         assert!(wt.join(rel).join("keep/SKILL.md").exists());
         assert!(wt.join(rel).join("gone/SKILL.md").exists());
+        assert!(wt.join(rel).join("mirrored/SKILL.md").exists());
 
-        // Delete one skill from the store, re-run: it must leave the worktree.
-        delete_in(&root, "gone", Scope::Global, None).unwrap();
-        write_into_session_in(&root, &wt, rel, "p1").unwrap();
+        // Delete one skill and uninstall the mirrored one, re-run: both must go.
+        delete_in(&root, "gone").unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
         assert!(wt.join(rel).join("keep/SKILL.md").exists());
         assert!(
             !wt.join(rel).join("gone").exists(),
             "deleted skill must be pruned"
+        );
+        assert!(
+            !wt.join(rel).join("mirrored").exists(),
+            "a skill removed from its coding agent must be pruned"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn project_scoped_skills_migrate_into_the_store() {
+        let root = temp_root();
+        save_skill_md_in(&root, skill_md_desc("dup", "GLOBAL").as_bytes()).unwrap();
+        for (project, name) in [("p1", "dup"), ("p1", "moved"), ("p2", "other")] {
+            let dir = root.join("projects").join(project).join(name);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("SKILL.md"), skill_md_desc(name, "PROJECT")).unwrap();
+        }
+
+        // Finder junk at either level would otherwise keep the tree non-empty.
+        fs::write(root.join("projects/.DS_Store"), b"junk").unwrap();
+        fs::write(root.join("projects/p2/.DS_Store"), b"junk").unwrap();
+
+        migrate_project_scoped(&root);
+        let names: Vec<String> = list_in(&root, &[]).into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["dup", "moved", "other"]);
+        // The global of a colliding name keeps the `/name`...
+        let dup = fs::read_to_string(root.join("global/dup/SKILL.md")).unwrap();
+        assert!(dup.contains("GLOBAL"));
+        // ...and the project copy it shadowed is left on disk rather than
+        // deleted, since this is the user's only copy of it.
+        let kept = fs::read_to_string(root.join("projects/p1/dup/SKILL.md")).unwrap();
+        assert!(kept.contains("PROJECT"));
+        assert!(
+            !root.join("projects/p2").exists(),
+            "an emptied project goes"
+        );
+
+        // Once the collision is resolved the retired tree goes entirely, junk at
+        // either level included — otherwise this walk runs on every call forever.
+        fs::remove_dir_all(root.join("projects/p1/dup")).unwrap();
+        migrate_project_scoped(&root);
+        assert!(!root.join("projects").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_mirrored_takes_only_usable_skill_folders() {
+        let agent_dir = temp_root();
+        for (dir, md) in [
+            ("good", skill_md("good")),
+            ("orx-git", skill_md("orx-git")),
+            ("shim", skill_md("plan")),
+            ("shouty", skill_md_desc("Bad_Name", "Nope. Use never.")),
+            ("builtin", skill_md("lit-review")),
+        ] {
+            let path = agent_dir.join(dir);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("SKILL.md"), md).unwrap();
+        }
+        // A plain directory with no SKILL.md, and a stray file.
+        fs::create_dir_all(agent_dir.join("notes")).unwrap();
+        fs::write(agent_dir.join("README.md"), b"hi").unwrap();
+
+        let mut out = Vec::new();
+        collect_mirrored(&agent_dir, "Claude Code", None, &mut out);
+        assert_eq!(
+            out.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+            ["good"]
+        );
+        let _ = fs::remove_dir_all(&agent_dir);
+    }
+
+    #[test]
+    fn a_session_keeps_a_skill_the_repo_ships_itself() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        // The project commits its own `code-review` skill into the worktree.
+        let committed = wt.join(rel).join("code-review");
+        fs::create_dir_all(&committed).unwrap();
+        fs::write(committed.join("SKILL.md"), "REPO COPY").unwrap();
+        save_skill_md_in(&root, skill_md("code-review").as_bytes()).unwrap();
+
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert_eq!(
+            fs::read_to_string(committed.join("SKILL.md")).unwrap(),
+            "REPO COPY",
+            "a skill dir we never wrote is not ours to replace"
+        );
+        // ...and it is never pruned either, since it never enters the manifest.
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(committed.join("SKILL.md").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_matching_dir_is_adopted_only_when_the_manifest_is_gone() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
+
+        // The repo vendors the same skill, byte-identical, and orx has never
+        // written here. With a manifest present but silent about it, the dir
+        // stays the project's: not replaced, and never pruned.
+        let vendored = wt.join(rel).join("shared");
+        copy_dir_all(&store_dir(&root).join("shared"), &vendored).unwrap();
+        fs::write(wt.join(rel).join(MANAGED_MANIFEST), "something-else\n").unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        delete_in(&root, "shared").unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(
+            vendored.join("SKILL.md").exists(),
+            "a dir the manifest never claimed must not become prunable"
+        );
+
+        // With no manifest at all we can't tell ours from theirs, so a dir that
+        // matches its source is taken as ours — that heals a deleted manifest.
+        save_skill_md_in(&root, skill_md("shared").as_bytes()).unwrap();
+        fs::remove_file(wt.join(rel).join(MANAGED_MANIFEST)).unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(previously_managed(&wt.join(rel))
+            .unwrap()
+            .contains(&"shared".to_string()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn an_unchanged_skill_is_not_recopied_into_the_session() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        save_skill_md_in(&root, skill_md("steady").as_bytes()).unwrap();
+
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        let written = wt.join(rel).join("steady/SKILL.md");
+        let first = fs::metadata(&written).unwrap().ino();
+
+        // A second turn with an unchanged source must leave the file alone. The
+        // inode is the witness: a re-copy removes the dir and writes a new file.
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert_eq!(fs::metadata(&written).unwrap().ino(), first);
+
+        // Editing the source does bring the copy forward.
+        save_skill_md_in(
+            &root,
+            skill_md_desc("steady", "Now it says something else. Use when testing.").as_bytes(),
+        )
+        .unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(fs::read_to_string(&written)
+            .unwrap()
+            .contains("something else"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_folder_fingerprint_notices_edits_renames_and_extra_files() {
+        let src = temp_root();
+        let dest = temp_root();
+        fs::create_dir_all(src.join("references")).unwrap();
+        fs::write(src.join("SKILL.md"), skill_md("same")).unwrap();
+        fs::write(src.join("references/palette.md"), b"blue").unwrap();
+        copy_dir_all(&src, &dest).unwrap();
+        let fingerprint = |dir: &Path| tally(dir, u64::MAX, u64::MAX).unwrap();
+        assert!(dest_matches_source(&src, fingerprint(&src), &dest));
+
+        // A rename keeps the file count and the byte total identical.
+        fs::rename(
+            src.join("references/palette.md"),
+            src.join("references/colors.md"),
+        )
+        .unwrap();
+        assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
+
+        // So does an edit to SKILL.md of exactly the same length — the tally
+        // can't see that one, so `dest` is rebuilt first to isolate it.
+        fs::remove_dir_all(&dest).unwrap();
+        copy_dir_all(&src, &dest).unwrap();
+        assert!(dest_matches_source(&src, fingerprint(&src), &dest));
+        fs::write(src.join("SKILL.md"), skill_md("samf")).unwrap();
+        assert_eq!(
+            fingerprint(&src),
+            fingerprint(&dest),
+            "same length, same tally"
+        );
+        assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
+
+        // A destination that isn't there at all never matches.
+        assert!(!dest_matches_source(
+            &src,
+            fingerprint(&src),
+            &src.join("nope")
+        ));
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn a_mirrored_folder_over_the_upload_budget_is_neither_listed_nor_copied() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        let mirrored = vec![mirrored_skill(
+            "Claude Code",
+            &agent_dir.join("huge"),
+            &skill_md("huge"),
+            &[],
+        )];
+        fs::write(
+            agent_dir.join("huge/corpus.bin"),
+            vec![0u8; (MAX_TOTAL_BYTES + 1) as usize],
+        )
+        .unwrap();
+
+        assert!(list_in(&root, &mirrored).is_empty());
+        write_into_session_in(&root, &mirrored, &wt, ".claude/skills").unwrap();
+        assert!(!wt.join(".claude/skills/huge").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_long_description_is_kept_and_truncated_not_dropped() {
+        let long = "Sprawls on. ".repeat(400);
+        let fm = parse_frontmatter(&skill_md_desc("verbose", &long)).unwrap();
+        assert_eq!(fm.name, "verbose");
+        assert_eq!(fm.description.chars().count(), MAX_DESCRIPTION_LEN);
+        assert!(fm.description.starts_with("Sprawls on."));
+    }
+
+    #[test]
+    fn an_unreadable_upload_does_not_shadow_a_working_mirrored_skill() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        let mirrored = vec![mirrored_skill(
+            "runpod",
+            &agent_dir.join("flash"),
+            &skill_md_desc("flash", "MIRRORED. Use when testing."),
+            &[],
+        )];
+        // An upload interrupted mid-write leaves a folder with no usable
+        // SKILL.md; the listing skips it, so the session must skip it too.
+        fs::create_dir_all(store_dir(&root).join("flash")).unwrap();
+        fs::write(store_dir(&root).join("flash/SKILL.md"), b"not frontmatter").unwrap();
+
+        let listed = list_in(&root, &mirrored);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].origin.as_deref(), Some("runpod"));
+
+        write_into_session_in(&root, &mirrored, &wt, ".agents/skills").unwrap();
+        let written = fs::read_to_string(wt.join(".agents/skills/flash/SKILL.md")).unwrap();
+        assert!(
+            written.contains("MIRRORED"),
+            "the worktree must run what the dashboard shows"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_crafted_manifest_cannot_delete_outside_the_skills_dir() {
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        let outsider = wt.join("keep-me");
+        fs::create_dir_all(&outsider).unwrap();
+        fs::create_dir_all(wt.join(rel)).unwrap();
+        // The agent can write in its own worktree, so the manifest is untrusted.
+        fs::write(
+            wt.join(rel).join(MANAGED_MANIFEST),
+            format!("../keep-me\n{}\n", outsider.display()),
+        )
+        .unwrap();
+
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(
+            outsider.is_dir(),
+            "a `..` name must never reach remove_dir_all"
         );
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&wt);
     }
 
     #[test]
-    fn write_into_session_shadow_replaces_not_merges() {
+    fn an_uploaded_skill_is_keyed_by_its_folder_not_its_frontmatter() {
         let root = temp_root();
-        let wt = temp_root();
-        let rel = ".agents/skills";
-        // Global `dup` carries an extra file the project version lacks.
-        write_skill(
-            &root,
-            Scope::Global,
-            None,
-            "dup",
-            vec![
-                (
-                    "SKILL.md".into(),
-                    skill_md_desc("dup", "GLOBAL").into_bytes(),
-                ),
-                ("extra.txt".into(), b"global-only".to_vec()),
-            ],
+        save_skill_md_in(&root, skill_md("alpha").as_bytes()).unwrap();
+        // Hand-edit the stored SKILL.md to claim a different name.
+        fs::write(
+            root.join("global/alpha/SKILL.md"),
+            skill_md_desc("beta", "Renamed in place. Use when testing."),
         )
         .unwrap();
-        save_skill_md_in(
-            &root,
-            skill_md_desc("dup", "PROJECT").as_bytes(),
-            Scope::Project,
-            Some("p1"),
-        )
-        .unwrap();
-        write_into_session_in(&root, &wt, rel, "p1").unwrap();
-        let md = fs::read_to_string(wt.join(rel).join("dup/SKILL.md")).unwrap();
-        assert!(md.contains("PROJECT"));
-        assert!(
-            !wt.join(rel).join("dup/extra.txt").exists(),
-            "shadowing project skill must not keep the global's files"
+
+        let listed = list_in(&root, &[]);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "alpha", "the folder is the id");
+        assert_eq!(
+            source_dirs(&root, &[], None)
+                .into_iter()
+                .map(|(name, dir, _)| (name, dir))
+                .collect::<Vec<_>>(),
+            vec![("alpha".to_string(), root.join("global/alpha"))]
         );
+        assert!(instructions_in(&root, &[], "alpha").is_some());
+        assert!(delete_in(&root, "alpha").is_ok());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_hosting_agents_skill_is_dropped_only_after_it_wins_its_name() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        // Both agents ship a `pdf`; Claude Code sorts first, so it owns the name.
+        let mirrored = vec![
+            mirrored_from(
+                "Claude Code",
+                Some(".claude/skills"),
+                &agent_dir.join("claude-pdf"),
+                &skill_md_desc("pdf", "CLAUDE copy. Use when testing."),
+                &[],
+            ),
+            mirrored_from(
+                "Codex",
+                Some(".agents/skills"),
+                &agent_dir.join("codex-pdf"),
+                &skill_md_desc("pdf", "CODEX copy. Use when testing."),
+                &[],
+            ),
+        ];
+
+        write_into_session_in(&root, &mirrored, &wt, ".claude/skills").unwrap();
+        assert!(
+            !wt.join(".claude/skills/pdf").exists(),
+            "the session must not run Codex's `pdf` while the dashboard shows Claude Code's"
+        );
+        assert_eq!(list_in(&root, &mirrored).len(), 1);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
         let _ = fs::remove_dir_all(&wt);
     }
 
@@ -1021,7 +1584,7 @@ mod tests {
             ("s/SKILL.md", skill_md("s").as_bytes()),
             ("s/big.bin", &vec![0u8; (MAX_TOTAL_BYTES + 1) as usize]),
         ]);
-        assert!(save_zip_in(&root, &big, Scope::Global, None).is_err());
+        assert!(save_zip_in(&root, &big).is_err());
 
         let skill = skill_md("s");
         let many: Vec<(String, Vec<u8>)> = (0..MAX_FILES + 1)
@@ -1031,7 +1594,7 @@ mod tests {
         for (n, b) in &many {
             entries.push((n.as_str(), b.as_slice()));
         }
-        assert!(save_zip_in(&root, &make_zip(&entries), Scope::Global, None).is_err());
+        assert!(save_zip_in(&root, &make_zip(&entries)).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1040,7 +1603,7 @@ mod tests {
         let root = temp_root();
         let md =
             "---\nname: \"data-cleaner\"\ndescription: Clean CSVs. Use when asked.\n---\nbody\n";
-        let saved = save_skill_md_in(&root, md.as_bytes(), Scope::Global, None).unwrap();
+        let saved = save_skill_md_in(&root, md.as_bytes()).unwrap();
         assert_eq!(saved.name, "data-cleaner");
         let _ = fs::remove_dir_all(&root);
     }

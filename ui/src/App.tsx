@@ -1764,7 +1764,7 @@ export default function App() {
             onPreferredAgentChange={persistPreferredAgent}
           >
             {mainView === "skills" ? (
-              <SkillsTab project={activeProject} />
+              <SkillsTab />
             ) : mainView !== "chat" ? (
               <SettingsView
                 tab={mainView}
