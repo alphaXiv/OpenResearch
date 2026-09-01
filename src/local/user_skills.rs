@@ -498,6 +498,8 @@ fn read_uploaded_at(dir: &Path) -> Result<UserSkill> {
         .map(|n| n.to_string_lossy().into_owned())
         .filter(|n| is_valid_slug(n))
         .ok_or_else(|| anyhow!("`{}` is not a skill folder", dir.display()))?;
+    let tally = within_budget(dir)
+        .ok_or_else(|| anyhow!("`{}` is larger than a skill folder may be", dir.display()))?;
     let md_path = dir.join("SKILL.md");
     let content = fs::read_to_string(&md_path)
         .map_err(|e| anyhow!("could not read {}: {e}", md_path.display()))?;
@@ -506,7 +508,7 @@ fn read_uploaded_at(dir: &Path) -> Result<UserSkill> {
         name,
         description: fm.description,
         origin: None,
-        bytes: dir_size(dir),
+        bytes: tally.bytes,
         updated_at: mtime_ms(&md_path),
     })
 }
