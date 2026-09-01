@@ -2,6 +2,7 @@ import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
 import {
+  ArrowDown,
   ArrowUpRight,
   Blocks,
   BookOpen,
@@ -84,6 +85,13 @@ import {
   type SkillInfo,
 } from "../api";
 import { activePath, forkPositions } from "../transcriptTree";
+import {
+  isTurnStatusPart,
+  partIsVisible,
+  partsTailToolId,
+  streamTailIsText,
+  streamTailTool,
+} from "../chatRendering";
 import { onChatEvent } from "../events";
 import {
   queuedRetryLabel,
@@ -140,10 +148,7 @@ import {
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
-const TOOL_LINE_CLASS_NAME = [
-  "tool-line flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
-  "text-base",
-].join(" ");
+const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
 const TOOL_TARGET_LIMIT = 256;
 const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
@@ -940,6 +945,7 @@ type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" |
 interface ToolActivity {
   kind: ToolActivityKind;
   label: string;
+  progressLabel?: string;
   searchPattern?: string;
   filePath?: string;
   fileRef?: string;
@@ -1900,8 +1906,12 @@ function toolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
-    case "interrupted":
-      return { kind: "command", label: m.chat_panel_tool_was_interrupted() };
+    case "contextcompaction":
+      return {
+        kind: "command",
+        label: m.activity_compacted_context(),
+        progressLabel: m.activity_compacting_context(),
+      };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
@@ -1948,27 +1958,36 @@ function subagentLine(input: Record<string, unknown>): string {
 }
 
 function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity; className?: string }) {
+  const props = { size: 16, strokeWidth: 1.75, className: "tool-kind-icon" };
+  let icon: React.ReactNode = <SquareTerminal {...props} />;
   if (activity.litCall) {
-    return <LitSourceLogo source={activity.litCall.source} size={16} className={`tool-kind-icon shrink-0 ${className}`} />;
+    icon = <LitSourceLogo source={activity.litCall.source} size={16} className="tool-kind-icon" />;
+  } else {
+    switch (activity.kind) {
+      case "skill":
+        icon = <Blocks {...props} />;
+        break;
+      case "read":
+      case "project":
+        icon = <BookOpen {...props} />;
+        break;
+      case "search":
+        icon = <Search {...props} />;
+        break;
+      case "edit":
+        icon = <Pencil {...props} />;
+        break;
+      case "web":
+        icon = <Globe {...props} />;
+        break;
+      case "agent":
+        icon = <Users {...props} />;
+        break;
+      case "command":
+        break;
+    }
   }
-  const props = { size: 16, strokeWidth: 1.75, className: `tool-kind-icon shrink-0 ${className}` };
-  switch (activity.kind) {
-    case "skill":
-      return <Blocks {...props} />;
-    case "read":
-    case "project":
-      return <BookOpen {...props} />;
-    case "search":
-      return <Search {...props} />;
-    case "edit":
-      return <Pencil {...props} />;
-    case "web":
-      return <Globe {...props} />;
-    case "agent":
-      return <Users {...props} />;
-    case "command":
-      return <SquareTerminal {...props} />;
-  }
+  return <span className={`flex h-6 shrink-0 items-center ${className}`}>{icon}</span>;
 }
 
 function ToolTargetOverflow({
@@ -2210,12 +2229,8 @@ function ToolActivityLabel({
   return activity.label;
 }
 
-function summarizeToolGroup(_activities: ToolActivity[]): string {
-  return m.chat_panel_used_tools();
-}
-
 function activityInProgress(activity: ToolActivity): ToolActivity {
-  const label = {
+  const label = activity.progressLabel ?? {
     skill: m.activity_loading(),
     read: m.activity_reading(),
     search: m.activity_searching(),
@@ -2245,14 +2260,6 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     agent: m.activity_delegate(),
     command: m.activity_run(),
   }[activity.kind];
-}
-
-function resolvedActivityLabel(
-  activity: ToolActivity,
-  _runExperimentName?: (runId: string) => string,
-  _experimentName?: (experimentId: string) => string,
-): string {
-  return activity.label;
 }
 
 function emptyToolInput(input: unknown): boolean {
@@ -2333,12 +2340,12 @@ function groupIconActivity(activities: ToolActivity[]): ToolActivity {
 
 interface SquashedToolPart {
   part: ChatPart;
+  activity: ToolActivity;
   count: number;
 }
 
-function squashableToolPartKey(part: ChatPart): string | null {
+function squashableToolPartKey(part: ChatPart, activity: ToolActivity): string | null {
   if (part.state?.status !== "completed") return null;
-  const activity = toolActivity(part);
   return JSON.stringify([
     activity.kind,
     activity.label,
@@ -2353,14 +2360,17 @@ function squashableToolPartKey(part: ChatPart): string | null {
 
 function squashToolParts(parts: ChatPart[]): SquashedToolPart[] {
   const squashed: SquashedToolPart[] = [];
+  let previousKey: string | null = null;
   for (const part of parts) {
-    const key = squashableToolPartKey(part);
+    const activity = toolActivity(part);
+    const key = squashableToolPartKey(part, activity);
     const previous = squashed[squashed.length - 1];
-    if (key && previous && squashableToolPartKey(previous.part) === key) {
+    if (key && previous && previousKey === key) {
       previous.count++;
     } else {
-      squashed.push({ part, count: 1 });
+      squashed.push({ part, activity, count: 1 });
     }
+    previousKey = key;
   }
   return squashed;
 }
@@ -2453,11 +2463,13 @@ function ToolRow({
     <>
       {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {failed ? (
-        <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon shrink-0 text-accent-red self-start mt-[5px]" aria-hidden="true" />
+        <span className="flex h-6 shrink-0 items-center text-accent-red">
+          <CircleX size={16} strokeWidth={1.75} className="tool-kind-icon" aria-hidden="true" />
+        </span>
       ) : (
-        <ToolActivityIcon activity={activity} className="text-muted self-start mt-[5px]" />
+        <ToolActivityIcon activity={activity} className="text-muted" />
       )}
-      <span className={`tool-line flex-1 min-w-0 whitespace-normal break-words text-base ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2477,22 +2489,22 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-center gap-2 min-w-0 py-[3px] px-1">{line}</div>;
+    return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{line}</div>;
   }
 
   return (
     <div className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-center gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
+      <div className="flex items-start gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
         {line}
         <button
           type="button"
-          className="tool-row-detail-toggle shrink-0 inline-flex items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
+          className="tool-row-detail-toggle inline-flex h-6 shrink-0 items-center justify-center p-0.5 rounded-sm cursor-pointer hover:bg-surface"
           aria-expanded={detailOpen}
           aria-controls={detailId}
           aria-label={detailOpen ? m.a11y_hide_error_details({ activity: activity.label }) : m.a11y_show_error_details({ activity: activity.label })}
           onClick={() => setDetailOpen((current) => !current)}
         >
-          <ChevronRight size={12} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
+          <ChevronRight size={16} className={`text-accent-red transition-transform duration-120 ease-standard ${detailOpen ? "rotate-90" : ""}`} />
         </button>
       </div>
       {detailOpen && (
@@ -2529,31 +2541,32 @@ function ToolGroup({
 }) {
   const [open, setOpen] = useState(false);
   const displayParts = squashToolParts(parts);
-  const activities = displayParts.map(({ part }) => toolActivity(part));
-  const tailPart = pendingTail ? parts.at(-1) : undefined;
+  const activities = displayParts.map(({ activity }) => activity);
+  const tail = pendingTail ? displayParts.at(-1) : undefined;
+  const tailPart = tail?.part;
+  const tailActivity = tail?.activity;
   const rawPending = tailPart?.state?.status !== "error"
-    ? (tailPart && activityInProgress(toolActivity(tailPart))) ?? null
+    ? (tailActivity && activityInProgress(tailActivity)) ?? null
     : null;
-  // A running call is unclassified while its input hasn't streamed in (or its
-  // command is still blank) — its generic label would immediately re-resolve,
-  // that re-resolves moments later, so the header holds the prior label instead.
+  // Hold the prior label while a call lacks input, unless its name provides a
+  // specific progress label already.
   const tailUnclassified = !!tailPart && tailPart.state?.status === "running" &&
+    !rawPending?.progressLabel &&
     (emptyToolInput(tailPart.state?.input) || (rawPending?.kind === "command" && !inputString(tailPart.state?.input ?? {}, "command", "cmd")));
   const pendingActivity = useDwelledActivity(rawPending, tailUnclassified);
   const shimmering = useDelayedToolShimmer(pendingActivity != null);
-  const summary = summarizeToolGroup(activities);
   const iconActivity = pendingActivity ?? groupIconActivity(activities);
   const summaryLabel = pendingActivity
-    ? resolvedActivityLabel(pendingActivity, runExperimentName, experimentName)
-    : summary;
+    ? pendingActivity.label
+    : m.chat_panel_used_tools();
   if (parts.length === 1) {
     if (pendingActivity) {
       return (
         <div className="tool-group my-3.5 mx-0">
-          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base text-subtext">
-            <ToolActivityIcon activity={pendingActivity} className={`${shimmering ? "tool-running-shimmer-icon" : "text-muted"} self-start mt-[5px]`} />
+          <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1 text-base leading-6 text-subtext">
+            <ToolActivityIcon activity={pendingActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
             <span
-              className={`${shimmering ? "tool-running-shimmer" : ""} tool-active-label min-w-0 whitespace-normal break-words`}
+              className={`${shimmering ? "tool-running-shimmer" : ""} min-w-0 line-clamp-2 break-words`}
               title={summaryLabel}
             >
               <ToolActivityLabel
@@ -2585,14 +2598,13 @@ function ToolGroup({
     );
   }
 
-  const expanded = open;
   return (
     <div className="tool-group my-3.5 mx-0">
-      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base text-subtext text-start">
-        <ToolActivityIcon activity={iconActivity} className={`${shimmering ? "tool-running-shimmer-icon" : "text-muted"} mt-[5px]`} />
+      <div className="tool-group-summary flex items-start gap-2 w-fit max-w-full py-[3px] px-1 text-base leading-6 text-subtext text-start">
+        <ToolActivityIcon activity={iconActivity} className={shimmering ? "tool-running-shimmer-icon" : "text-muted"} />
         {pendingActivity ? (
           <span
-            className={`tool-group-label tool-active-label min-w-0 whitespace-normal break-words ${shimmering ? "tool-running-shimmer" : ""}`}
+            className={`tool-group-label min-w-0 line-clamp-2 break-words ${shimmering ? "tool-running-shimmer" : ""}`}
             title={summaryLabel}
           >
             <ToolActivityLabel
@@ -2610,25 +2622,25 @@ function ToolGroup({
             type="button"
             className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
             onClick={() => setOpen((value) => !value)}
-            aria-expanded={expanded}
+            aria-expanded={open}
           >
             {summaryLabel}
           </button>
         )}
         <button
           type="button"
-          className="tool-group-chevron-button inline-flex items-center justify-center self-center shrink-0 p-px cursor-pointer rounded-sm"
+          className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
           onClick={() => setOpen((value) => !value)}
-          aria-expanded={expanded}
-            aria-label={expanded ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
+          aria-expanded={open}
+          aria-label={open ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
-          <ChevronRight size={16} className={`tool-chevron text-muted transition-[transform,color] duration-120 ease-standard [&.open]:rotate-90 ${expanded ? "open" : ""}`} />
+          <ChevronRight size={16} className={`tool-chevron text-muted transition-[transform,color] duration-120 ease-standard [&.open]:rotate-90 ${open ? "open" : ""}`} />
         </button>
       </div>
       <div
-        className={`tool-group-disclosure ${expanded ? "open" : ""}`}
-        aria-hidden={!expanded}
-        inert={!expanded}
+        className={`tool-group-disclosure ${open ? "open" : ""}`}
+        aria-hidden={!open}
+        inert={!open}
       >
         <div className="tool-group-disclosure-inner">
           <div className="tool-group-rows flex flex-col gap-px mt-0.5 me-0 mb-1 ms-6">
@@ -2887,32 +2899,6 @@ function PromptCard({
       )}
     </div>
   );
-}
-
-/** Whether a part paints anything in the transcript. The single source of
- * truth for "invisible": ALL reasoning (deliberately never rendered — see the
- * comment inside), empty text, and resolved permission cards (which leave no
- * trace). Shared by `messageHasVisibleContent`, the stream-tail computation,
- * and `renderParts` so they can't drift. */
-function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
-  if (part.type === "prompt") {
-    if (!part.prompt) return false;
-    if (part.prompt.kind === "permission") {
-      if (part.prompt.resolved) return false;
-      if (activePermissionId !== undefined) return part.id === activePermissionId;
-    }
-    return true;
-  }
-  // Reasoning is stored but never rendered, so it is invisible to every layout
-  // decision too — in particular a sub-second thinking burst between tool calls
-  // must not steal the stream tail and flash the group shimmer off.
-  if (part.type === "reasoning") return false;
-  if (part.type === "text") return !!part.text;
-  return true; // tool, image, …
-}
-
-function isTurnStatusPart(part: ChatPart): boolean {
-  return part.id === "turn-retry" || part.id === "turn-recovery";
 }
 
 /** Whether a message renders anything once resolved-permission cards vanish —
@@ -3478,9 +3464,11 @@ function SubagentBlock({
     <>
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
-        <CircleX size={16} strokeWidth={1.75} className="subagent-icon shrink-0 text-accent-red" aria-hidden="true" />
+        <span className="flex h-6 shrink-0 items-center text-accent-red">
+          <CircleX size={16} strokeWidth={1.75} className="subagent-icon" aria-hidden="true" />
+        </span>
       ) : (
-        <ToolActivityIcon activity={activity} className={`subagent-icon shrink-0 ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
+        <ToolActivityIcon activity={activity} className={`subagent-icon ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
       )}
       {/* Spawn rows read as activity, not prose — gray like the tool rows
           around them. */}
@@ -3492,14 +3480,14 @@ function SubagentBlock({
   // children — offering a transcript there opens an empty pane.
   if (inert) {
     return (
-      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm [&_.tool-line]:text-base">
+      <div className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm">
         {line}
       </div>
     );
   }
   return (
     <button
-      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-base"
+      className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3507,7 +3495,9 @@ function SubagentBlock({
       disabled={!onOpenSubagent}
     >
       {line}
-      <ChevronRight size={12} className="subagent-row-chevron shrink-0 text-muted" />
+      <span className="subagent-row-chevron flex h-6 shrink-0 items-center text-muted">
+        <ChevronRight size={12} />
+      </span>
     </button>
   );
 }
@@ -3647,28 +3637,6 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
     }
   }, [messages]);
   return announcement;
-}
-
-/** The tail tool of a parts list: the last *visible* part, iff it is a
- * non-errored tool — completed still counts, so the shimmer holds steady in the
- * gap between consecutive calls. Shared by the main transcript
- * (`streamTailTool`) and the sub-agent tab so the two can't drift. */
-function partsTailToolId(parts: ChatPart[]): string | null {
-  for (let index = parts.length - 1; index >= 0; index--) {
-    const part = parts[index];
-    // A steer lands at the tail without ending the tool that is still running.
-    if (part.type === "steer" || isTurnStatusPart(part) || !partIsVisible(part)) continue;
-    if (part.type !== "tool" || part.state?.status === "error") return null;
-    return part.id;
-  }
-  return null;
-}
-
-function streamTailTool(messages: ChatMessage[]): { messageId: string; toolId: string } | null {
-  const message = messages.at(-1);
-  if (message?.role !== "assistant") return null;
-  const toolId = partsTailToolId(message.parts);
-  return toolId ? { messageId: message.id, toolId } : null;
 }
 
 const Transcript = memo(function Transcript({
@@ -4210,6 +4178,7 @@ export function ChatPanel({
   const threadRef = useRef<HTMLDivElement>(null);
   const threadInnerRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
+  const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
@@ -4809,6 +4778,7 @@ export function ChatPanel({
   const busy = activeId ? state.busySessions.has(activeId) : false;
   const canFork = !busy && !!activeHarness?.agentReady;
   const hasPendingTailTool = busy && streamTailTool(messages) != null;
+  const hasStreamingText = busy && streamTailIsText(messages);
   // Messages the user parked behind the running turn (oldest first). Populated
   // by chat.queued events and the seed snapshot; each runs when its turn ends.
   const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
@@ -5014,18 +4984,26 @@ export function ChatPanel({
 
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
-  useLayoutEffect(() => {
+  const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    stickToBottom.current = atBottom;
+    setTranscriptAtBottom(atBottom);
+  }, []);
+  const pinTranscriptToBottom = useCallback(() => {
     stickToBottom.current = true;
+    setTranscriptAtBottom(true);
     const el = threadRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [activeId, threadMounted]);
+  }, []);
+  useLayoutEffect(() => {
+    pinTranscriptToBottom();
+  }, [activeId, threadMounted, pinTranscriptToBottom]);
 
   // Autoscroll while pinned. Layout effect, so history seeds and streamed
   // messages land already scrolled (no flash of the top of the thread).
   useLayoutEffect(() => {
-    const el = threadRef.current;
-    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
+    if (stickToBottom.current) pinTranscriptToBottom();
+  }, [messages, busy, pinTranscriptToBottom]);
 
   // Re-pin when the thread resizes without a message change — images loading,
   // tool rows expanding, the pane resizing.
@@ -5034,12 +5012,21 @@ export function ChatPanel({
     const inner = threadInnerRef.current;
     if (!el || !inner) return;
     const ro = new ResizeObserver(() => {
-      if (stickToBottom.current) el.scrollTop = el.scrollHeight;
+      if (stickToBottom.current) {
+        el.scrollTop = el.scrollHeight;
+        return;
+      }
+      updateTranscriptBottom(el);
     });
     ro.observe(inner);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [threadMounted]);
+  }, [threadMounted, updateTranscriptBottom]);
+
+  const scrollToTranscriptBottom = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
+    event.currentTarget.blur();
+    pinTranscriptToBottom();
+  }, [pinTranscriptToBottom]);
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
@@ -5256,7 +5243,7 @@ export function ChatPanel({
         annotations: pendingAnnotations,
       });
       dispatch({ type: "busy", sessionId: sid, busy: true });
-      stickToBottom.current = true;
+      pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
       // leave the Archived-only view so its row stays visible.
@@ -5366,14 +5353,14 @@ export function ChatPanel({
       if (!activeId || busy || !activeHarness?.agentReady) return;
       const sid = activeId;
       dispatch({ type: "busy", sessionId: sid, busy: true });
-      stickToBottom.current = true;
+      pinTranscriptToBottom();
       void queueSessionMutation(() => forkChatTurn(sid, messageId, text)).catch((err) => {
         dispatch({ type: "busy", sessionId: sid, busy: false });
         const detail = err instanceof Error ? err.message : String(err);
         dispatch({ type: "localError", sessionId: sid, text: m.chat_resend_failed({ error: ltr(detail) }) });
       });
     },
-    [activeId, busy, activeHarness?.agentReady, queueSessionMutation],
+    [activeId, busy, activeHarness?.agentReady, pinTranscriptToBottom, queueSessionMutation],
   );
 
   /** Show a different fork. The server descends to that branch's newest tip and
@@ -5776,8 +5763,7 @@ export function ChatPanel({
           className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
           ref={threadRef}
           onScroll={(e) => {
-            const el = e.currentTarget;
-            stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+            updateTranscriptBottom(e.currentTarget);
             transcriptSelection.dismiss();
           }}
         >
@@ -5802,14 +5788,14 @@ export function ChatPanel({
               onRecover={recoverFailedTurn}
               skills={commands}
            />
-            {busy &&
-              (awaitingInput ? (
-                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
-              ) : (
-                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic">
-                  <Spinner /> {hasPendingTailTool ? m.chat_working() : m.chat_thinking()}
-                </div>
-              ))}
+            {busy && awaitingInput && (
+              <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
+            )}
+            {busy && !awaitingInput && !hasPendingTailTool && !hasStreamingText && (
+              <div className="text-base pt-0.5 px-1 pb-2">
+                <span className="tool-running-shimmer">{m.chat_thinking()}</span>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -5834,7 +5820,22 @@ export function ChatPanel({
 
       {/* Docked while a plan awaits a decision, so the approval controls never
           scroll away. Actions mirror the (now compact) inline card's wire. */}
-      <div className="composer py-5 px-3 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&::before]:content-[''] [&::before]:absolute [&::before]:bottom-full [&::before]:start-0 [&::before]:end-0 [&::before]:h-6 [&::before]:bg-[linear-gradient(to_top,_var(--base),_transparent)] [&::before]:pointer-events-none [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+      <div className="composer px-3 pb-5 shrink-0 relative z-4 bg-background w-full max-w-readable my-0 mx-auto [&_textarea]:border-0 [&_textarea]:bg-none [&_textarea]:bg-transparent [&_textarea]:resize-none [&_textarea]:pt-2.5 [&_textarea]:px-3 [&_textarea]:pb-1 [&_textarea]:text-base [&_textarea]:field-sizing-content [&_textarea]:min-h-18 [&_textarea]:max-h-45">
+        {threadMounted && (
+          <IconButton
+            className={`absolute bottom-full left-1/2 z-5 mb-6 h-9 w-9 -translate-x-1/2 rounded-full border border-border bg-background shadow-control transition-opacity duration-150 ease-standard ${transcriptAtBottom ? "opacity-0" : "opacity-100"}`}
+            title={m.chat_scroll_to_bottom()}
+            aria-label={m.chat_scroll_to_bottom()}
+            inert={transcriptAtBottom}
+            onClick={scrollToTranscriptBottom}
+          >
+            {busy && !awaitingInput ? (
+              <MoreHorizontal size={18} className="tool-running-shimmer-icon" />
+            ) : (
+              <ArrowDown size={16} />
+            )}
+          </IconButton>
+        )}
         {/* Inside the composer so the composer's popovers (mode/model pickers,
             z 50 within this stacking context) layer above the strip — as a
             sibling, the composer's own z-index: 4 capped them below it. */}

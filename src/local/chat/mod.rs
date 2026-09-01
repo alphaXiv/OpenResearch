@@ -892,8 +892,8 @@ impl WirePart {
     }
 
     /// A synthetic tool part — a status row (`error`, `interrupted`, …) that
-    /// isn't a real tool call. The UI renders it through the same tool-row path
-    /// as harness tools.
+    /// isn't a real tool call. The UI renders errors like harness tools and
+    /// keeps interruption markers for history consumers only.
     pub fn tool(
         id: impl Into<String>,
         tool: impl Into<String>,
@@ -4923,13 +4923,11 @@ impl ChatHost {
     }
 
     /// User-facing interrupt (the Stop button / Escape): abort like
-    /// [`Self::interrupt`], and when a turn was actually in flight persist a
-    /// visible "Interrupted" marker in the transcript. An aborted turn that had
-    /// streamed nothing would otherwise vanish without a trace — the user's
-    /// message sits unanswered and the stop reads as "orx did nothing".
+    /// [`Self::interrupt`], and when a turn was actually in flight persist an
+    /// interruption marker. The dashboard hides the standalone row, but history
+    /// consumers use it to distinguish a stopped turn from a silent one.
     /// Internal interrupts (plan-approval resume, session/project delete) stay
-    /// markerless on purpose: their stories are told elsewhere (the resolved
-    /// card, the row disappearing).
+    /// markerless on purpose.
     pub async fn interrupt_by_user(self: &Arc<Self>, session_id: &str) -> Result<()> {
         // Stamped before the abort: a fast resend can claim the freed slot and
         // persist its user message before this runs, and a later timestamp
