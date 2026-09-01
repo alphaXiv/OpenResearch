@@ -192,6 +192,29 @@ pub fn repository_state(path: &Path) -> RepositoryState {
     }
 }
 
+/// Whether `path` is the root of its own work tree, rather than a folder that
+/// merely sits inside an enclosing checkout.
+pub fn is_repository_root(path: &Path) -> bool {
+    match (repository_root(path), std::fs::canonicalize(path)) {
+        (Ok(root), Ok(path)) => root == path,
+        _ => false,
+    }
+}
+
+/// Like [`repository_state`], but only reports a repository rooted at `path`.
+/// A folder nested in an unrelated checkout — a dotfiles repository at `$HOME`,
+/// for example — reports `NotRepository` so it can get a repository of its own.
+pub fn own_repository_state(path: &Path) -> RepositoryState {
+    let state = repository_state(path);
+    if matches!(
+        (repository_root(path), std::fs::canonicalize(path)),
+        (Ok(root), Ok(path)) if root != path
+    ) {
+        return RepositoryState::NotRepository;
+    }
+    state
+}
+
 pub fn repository_root(path: &Path) -> Result<PathBuf> {
     let root = git(Some(path), &["rev-parse", "--show-toplevel"])?;
     std::fs::canonicalize(root).map_err(Into::into)
@@ -264,7 +287,9 @@ fn git_context_bytes(
 }
 
 fn scan_git_dir(work_tree: &Path, operation: &TemporaryDirectory) -> Result<PathBuf> {
-    if is_repository(work_tree) {
+    // Only the work tree's own repository describes it. An enclosing checkout
+    // would answer for its own root, so scan those folders from a scratch index.
+    if is_repository_root(work_tree) {
         return repository_git_dir(work_tree);
     }
     let git_dir = operation.0.join("scan.git");
@@ -699,8 +724,20 @@ fn create_initial_commit(
     Ok(())
 }
 
+/// Initialize the repository `path` belongs to, which is the enclosing
+/// checkout when `path` is a subdirectory of one.
 pub fn initialize_repository(path: &Path) -> Result<()> {
-    let state = repository_state(path);
+    initialize(path, repository_state(path))
+}
+
+/// Initialize a repository rooted at `path` itself, so a folder inside an
+/// unrelated checkout gets a nested repository of its own rather than adopting
+/// the enclosing one.
+pub fn initialize_own_repository(path: &Path) -> Result<()> {
+    initialize(path, own_repository_state(path))
+}
+
+fn initialize(path: &Path, state: RepositoryState) -> Result<()> {
     if state == RepositoryState::Ready {
         return Ok(());
     }
@@ -2245,6 +2282,16 @@ mod tests {
         assert_eq!(repository_state(&dir), RepositoryState::Ready);
         run(&dir, &["checkout", "-q", "--detach"]);
         assert_eq!(repository_state(&dir), RepositoryState::Detached);
+        let nested = dir.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/\n").unwrap();
+        assert_eq!(repository_state(&dir), RepositoryState::Invalid);
+        assert_eq!(own_repository_state(&dir), RepositoryState::Invalid);
+        assert_eq!(repository_state(&nested), RepositoryState::Invalid);
+        assert_eq!(
+            own_repository_state(&nested),
+            RepositoryState::NotRepository
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

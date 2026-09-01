@@ -71,19 +71,6 @@ fn prepare_path(
     paper_pdf: Option<&[u8]>,
 ) -> Result<PathBuf> {
     let path = expand_path(path)?;
-    if require_new_folder && !path.exists() {
-        let existing_parent = path
-            .parent()
-            .and_then(|parent| parent.ancestors().find(|ancestor| ancestor.is_dir()));
-        if let Some(parent) = existing_parent {
-            if git::repository_state(parent) != git::RepositoryState::NotRepository {
-                return Err(crate::error::anyhow!(
-                    "{} is already inside a Git repository; a blank project needs a folder of its own",
-                    path.display()
-                ));
-            }
-        }
-    }
     if let Some(url) = clone_url.map(str::trim).filter(|url| !url.is_empty()) {
         if path.exists() {
             let mut entries = std::fs::read_dir(&path)?;
@@ -122,24 +109,20 @@ fn prepare_path(
         ));
     }
 
-    let repository_state = git::repository_state(&path);
+    // A blank or paper project owns the folder it was given — it was empty or
+    // freshly created — so it gets a repository of its own even when it sits
+    // inside an unrelated checkout, such as a dotfiles repository at `$HOME`.
+    // Adopting an existing folder keeps looking outwards, where the enclosing
+    // repository is the project the user means.
+    let owns_folder = require_new_folder || paper_pdf.is_some();
+    let repository_state = if owns_folder {
+        git::own_repository_state(&path)
+    } else {
+        git::repository_state(&path)
+    };
     if repository_state == git::RepositoryState::Invalid {
         return Err(crate::error::anyhow!(
             "{} is not a valid Git repository",
-            path.display()
-        ));
-    }
-    // Seeding an existing repository would leave the paper uncommitted, and in a
-    // subdirectory it would land outside the project root.
-    if paper_pdf.is_some() && repository_state != git::RepositoryState::NotRepository {
-        return Err(crate::error::anyhow!(
-            "{} is already inside a Git repository; a paper project needs a folder of its own",
-            path.display()
-        ));
-    }
-    if require_new_folder && repository_state != git::RepositoryState::NotRepository {
-        return Err(crate::error::anyhow!(
-            "{} is already inside a Git repository; a blank project needs a folder of its own",
             path.display()
         ));
     }
@@ -160,7 +143,11 @@ fn prepare_path(
                 crate::error::anyhow!("Could not write {}: {}", pdf_path.display(), e)
             })?;
         }
-        git::initialize_repository(&path)?;
+        if owns_folder {
+            git::initialize_own_repository(&path)?;
+        } else {
+            git::initialize_repository(&path)?;
+        }
     }
     let root = git::repository_root(&path)?;
     git::validate_project_repository(&root)?;
@@ -383,14 +370,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_blank_project_nested_in_an_existing_repository() {
+    fn creates_a_blank_project_nested_in_an_existing_repository() {
         let root = root();
         let repository = root.join("repository");
         initialized(&repository);
         let project_path = repository.join("blank-project");
         let store = Store::open_at(root.join("data")).unwrap();
 
-        let error = create_project(
+        let project = create_project(
             &store,
             "Blank project",
             project_path.to_str().unwrap(),
@@ -401,11 +388,13 @@ mod tests {
                 ..Default::default()
             },
         )
-        .unwrap_err();
+        .unwrap();
 
-        assert!(error.to_string().contains("folder of its own"));
-        assert!(store.list_local_projects().unwrap().is_empty());
-        assert!(!project_path.exists());
+        // The nested folder is its own repository, not the enclosing checkout.
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(&project_path).unwrap()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -441,22 +430,28 @@ mod tests {
     }
 
     #[test]
-    fn refuses_to_seed_a_paper_project_inside_an_existing_repository() {
+    fn seeds_a_paper_project_in_a_folder_inside_an_existing_repository() {
         let root = root();
         let store = Store::open_at(root.join("data")).unwrap();
         let repository = root.join("repository");
         initialized(&repository);
         let nested = repository.join("nested");
-        let error = paper_project(&store, &nested).unwrap_err().to_string();
-        assert!(error.contains("already inside a Git repository"), "{error}");
-        assert!(!nested.join(PAPER_PDF_NAME).exists());
+        let project = paper_project(&store, &nested).unwrap();
+        // The paper is committed to the nested folder's own repository.
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(&nested).unwrap()
+        );
+        assert_eq!(
+            git_output(&nested, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            PAPER_PDF_NAME
+        );
 
         let error = paper_project(&store, &repository).unwrap_err().to_string();
         assert!(error.contains("must be empty"), "{error}");
         assert!(!repository.join(PAPER_PDF_NAME).exists());
         std::fs::remove_dir_all(root).unwrap();
     }
-
     #[test]
     fn imports_files_inside_plain_subdirectories() {
         let root = root();

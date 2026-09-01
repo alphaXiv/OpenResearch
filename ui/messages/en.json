@@ -821,7 +821,7 @@
   "new_project_destination_is_file": "Choose a different destination. This path is a file, not a folder.",
   "new_project_folder_exists": "A folder already exists here. Choose a different name or location, or use Existing folder.",
   "new_project_paper_needs_empty_folder": "Choose a different destination. The paper repository needs a new or empty folder.",
-  "new_project_blank_paper_needs_folder": "Choose a different destination. A paper project needs a new or empty folder of its own, outside any Git repository.",
+  "new_project_blank_paper_needs_folder": "Choose a different destination. A paper project needs a new or empty folder of its own.",
   "new_project_searching_alphaxiv": "Searching alphaXiv…",
   "new_project_public_repo_cloned": "A linked public code repository is cloned without credentials.",
   "new_project_clone_destination": "Clone destination",
