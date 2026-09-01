@@ -1,6 +1,7 @@
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { useLocale } from "./locale";
+import { autoDir } from "./i18n";
 import {
   ChartSpline,
   Check,
@@ -801,6 +802,14 @@ export default function App() {
     openDemoWelcome();
   }, [projectId, homeOpen, onboarded, openDemoWelcome, uiState?.tourCompleted]);
 
+  const activeProject = projects?.find((p) => p.id === projectId) ?? null;
+
+  // The home, error, and loading screens leave projects populated but show no project.
+  useEffect(() => {
+    const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
+    document.title = name ? `${autoDir(name)} - OpenResearch` : "OpenResearch";
+  }, [homeOpen, startupError, uiState, activeProject]);
+
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
 
@@ -1572,7 +1581,6 @@ export default function App() {
       onClose={() => closeFileTab(tab)}
    />
   );
-  const activeProject = projects?.find((p) => p.id === projectId) ?? null;
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
   const codeExperiment = codeTab
     ? (experiments.find((experiment) => experiment.id === codeTab.experimentId) ?? null)
