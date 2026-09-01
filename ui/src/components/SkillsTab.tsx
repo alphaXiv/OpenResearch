@@ -65,7 +65,7 @@ function DropZone({
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <div
-      className={`flex flex-col items-center justify-center gap-2 py-6.5 px-4.5 border-[1.5px] border-dashed rounded-md text-center text-sm text-text transition-[border-color,background] duration-120 [&_code]:font-mono [&_code]:text-sm [&_code]:text-text ${
+      className={`flex flex-col items-center justify-center gap-2 py-6.5 px-4.5 border-[1.5px] border-dashed rounded-md text-center text-sm text-text transition-[border-color,background] duration-120 ${
         busy ? "cursor-default" : "cursor-pointer"
       } ${
         dragging
@@ -316,7 +316,7 @@ function SkillsCard() {
           <Spinner /> {m.skills_tab_loading_skills()}
         </div>
       ) : loadError ? (
-        <div className="pt-3 text-base text-accent-red">
+        <div role="alert" className="pt-3 text-base text-accent-red">
           {m.skills_tab_could_not_load_skills()} {loadError}
         </div>
       ) : skills.length === 0 ? (
@@ -391,9 +391,7 @@ function LatexTemplatesCard() {
   return (
     <section className={CARD_CLASS_NAME}>
       <h3>{m.skills_tab_la_te_x_templates()}</h3>
-      <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-sm [&_code]:text-text`}>
-        {m.skills_templates_description()}
-      </p>
+      <p className={CARD_SUB_CLASS_NAME}>{m.skills_templates_description()}</p>
 
       <DropZone
         accept=".tex,.zip"
@@ -413,7 +411,7 @@ function LatexTemplatesCard() {
           <Spinner /> {m.skills_tab_loading_templates()}
         </div>
       ) : loadError ? (
-        <div className="pt-3 text-base text-accent-red">
+        <div role="alert" className="pt-3 text-base text-accent-red">
           {m.skills_tab_could_not_load_templates()} {loadError}
         </div>
       ) : templates.length === 0 ? (

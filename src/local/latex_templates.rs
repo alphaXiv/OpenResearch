@@ -5,7 +5,7 @@
 //! — and available to every project.
 //!
 //! A template is a folder: one `.tex` entry point plus whatever `.cls`, `.sty`,
-//! `.bst`, or `.bib` files it needs. Every applicable template is copied into
+//! `.bst`, or `.bib` files it needs. Every template is copied into
 //! the session worktree under [`SESSION_DIR_REL`] each turn, which is what lets
 //! the agent read one *and* lets the compiler find its class files once the
 //! agent copies them next to the paper (see the `orx-paper` skill).
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{anyhow, Result};
 use crate::local::user_skills::{
-    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir,
+    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir, tally,
 };
 
 /// Where templates land inside a session worktree. Under `.orx/` because they
@@ -321,7 +321,7 @@ fn delete_in(root: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Copy every applicable template into the session worktree, replacing what was
+/// Copy every template into the session worktree, replacing what was
 /// there and pruning templates the user has since deleted — same freshness
 /// contract as the skills dir.
 pub fn write_into_session(worktree: &Path) -> Result<()> {
@@ -339,14 +339,18 @@ fn write_into_session_in(root: &Path, worktree: &Path) -> Result<()> {
             }
             let name = entry.file_name().to_string_lossy().into_owned();
             let dest = base.join(&name);
-            if dest.exists() {
-                let _ = fs::remove_dir_all(&dest);
-            }
-            // One unreadable template folder skips its turn rather than failing
-            // the session, the same as a skill that won't copy.
-            if copy_dir_all(&src, &dest).is_err() {
-                let _ = fs::remove_dir_all(&dest);
-                continue;
+            let src_tally = tally(&src, u64::MAX, u64::MAX);
+            // A bundle that hasn't changed is left alone; this runs every turn.
+            if src_tally.is_none() || tally(&dest, u64::MAX, u64::MAX) != src_tally {
+                if dest.exists() {
+                    let _ = fs::remove_dir_all(&dest);
+                }
+                // One unreadable template folder skips its turn rather than
+                // failing the session, the same as a skill that won't copy.
+                if copy_dir_all(&src, &dest).is_err() {
+                    let _ = fs::remove_dir_all(&dest);
+                    continue;
+                }
             }
             if !managed.contains(&name) {
                 managed.push(name);

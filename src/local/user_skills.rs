@@ -15,9 +15,9 @@
 //! Each skill is a real skill folder (`SKILL.md` plus any supporting files),
 //! written into every session worktree's skills dir alongside the built-ins (see
 //! [`write_into_session`]) so the harness auto-discovers it, and surfaced in the
-//! composer's `/` menu so the user can invoke it by name. The `SKILL.md`
-//! frontmatter's `name:` is the canonical id — it is the skill dir name and the
-//! `/name` the user types.
+//! composer's `/` menu so the user can invoke it by name. The folder name is the
+//! canonical id — the `/name` the user types and the dir written into a session;
+//! an upload's `SKILL.md` frontmatter `name:` only seeds it.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -83,6 +83,12 @@ pub(crate) fn migrate_project_scoped(root: &Path) {
                 continue;
             };
             for item in items.flatten() {
+                // Junk keeps the dir non-empty, which would keep the retired
+                // tree — and this walk — alive on every call forever.
+                if item.file_name() == ".DS_Store" {
+                    let _ = fs::remove_file(item.path());
+                    continue;
+                }
                 let dest = dest_base.join(item.file_name());
                 if dest.exists() || !item.path().is_dir() {
                     continue;
@@ -529,11 +535,16 @@ fn list_in(root: &Path, mirrored: &[Mirrored]) -> Vec<UserSkill> {
         if out.iter().any(|s| s.name == m.name) {
             continue;
         }
+        // Same budget the session write applies, so the tab can't offer a `/name`
+        // that never reaches the worktree.
+        let Some(tally) = within_budget(&m.dir) else {
+            continue;
+        };
         out.push(UserSkill {
             name: m.name.clone(),
             description: m.description.clone(),
             origin: Some(m.origin.clone()),
-            bytes: dir_size(&m.dir),
+            bytes: tally.bytes,
             updated_at: mtime_ms(&m.dir.join("SKILL.md")),
         });
     }
@@ -554,15 +565,15 @@ fn source_dirs(
     mirrored: &[Mirrored],
     skills_dir_rel: Option<&str>,
 ) -> Vec<(String, PathBuf)> {
-    let mut out: Vec<(String, PathBuf, Option<&'static str>)> = Vec::new();
-    if let Ok(entries) = fs::read_dir(store_dir(root)) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if entry.path().is_dir() && is_valid_slug(&name) {
-                out.push((name, entry.path(), None));
-            }
-        }
-    }
+    // Through `list_uploaded_in`, so a folder the listing drops as unreadable
+    // can't still win the name here and shadow a mirrored skill that works.
+    let mut out: Vec<(String, PathBuf, Option<&'static str>)> = list_uploaded_in(root)
+        .into_iter()
+        .map(|skill| {
+            let dir = store_dir(root).join(&skill.name);
+            (skill.name, dir, None)
+        })
+        .collect();
     for m in mirrored {
         if !out.iter().any(|(name, ..)| *name == m.name) {
             out.push((m.name.clone(), m.dir.clone(), m.session_skills_dir));
@@ -643,17 +654,18 @@ fn write_into_session_in(
     let previous = previously_managed(&base);
     let mut managed: Vec<String> = Vec::new();
     for (name, src) in source_dirs(root, mirrored, Some(skills_dir_rel)) {
+        let Some(src_tally) = within_budget(&src) else {
+            continue;
+        };
         let dest = base.join(&name);
-        if dest.exists() && !previous.contains(&name) {
-            continue; // the repo ships a skill by this name — it wins, untouched
-        }
-        // A mirrored folder is whatever the agent has on disk, including a
-        // symlinked checkout; one over the upload budget is not something to
-        // re-copy into every session.
-        if tally(&src, MAX_FILES as u64, MAX_TOTAL_BYTES).is_none() {
+        let current = dest_matches_source(&src, src_tally, &dest);
+        // A destination we didn't write is the project's own committed skill —
+        // it wins, untouched. One that already matches is ours whatever the
+        // manifest says, which is how a lost manifest heals itself.
+        if dest.exists() && !current && !previous.contains(&name) {
             continue;
         }
-        if !is_current(&src, &dest) {
+        if !current {
             if dest.exists() {
                 let _ = fs::remove_dir_all(&dest);
             }
@@ -695,14 +707,12 @@ fn previously_managed(base: &Path) -> Vec<String> {
 }
 
 /// Whether `dest` already holds this exact skill, so the turn can skip a full
-/// re-copy. `fs::copy` doesn't carry mtimes across, so the comparison is the
-/// file count, the total bytes, and a byte-identical `SKILL.md` — which is the
-/// file that actually changes when someone edits a skill.
-fn is_current(src: &Path, dest: &Path) -> bool {
-    if !dest.is_dir() {
-        return false;
-    }
-    if tally(src, u64::MAX, u64::MAX) != tally(dest, u64::MAX, u64::MAX) {
+/// re-copy. Timestamps are no witness — macOS's `fs::copy` carries the source's
+/// mtime across and Linux's doesn't — so the comparison is the source's
+/// [`Tally`] plus a byte-identical `SKILL.md`, the one file that always changes
+/// when someone edits a skill.
+fn dest_matches_source(src: &Path, src_tally: Tally, dest: &Path) -> bool {
+    if !dest.is_dir() || tally(dest, u64::MAX, u64::MAX) != Some(src_tally) {
         return false;
     }
     match (
@@ -712,6 +722,13 @@ fn is_current(src: &Path, dest: &Path) -> bool {
         (Ok(from), Ok(to)) => from == to,
         _ => false,
     }
+}
+
+/// The tally of a folder we're about to mirror, or `None` when it blows the same
+/// budget an upload has to fit — not something to copy into every session, every
+/// turn.
+fn within_budget(dir: &Path) -> Option<Tally> {
+    tally(dir, MAX_FILES as u64, MAX_TOTAL_BYTES)
 }
 
 /// Build the instruction for one selected user skill. Its complete `SKILL.md`
@@ -753,11 +770,24 @@ pub(crate) fn copy_dir_all(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Files and total bytes under `dir`, giving up (`None`) as soon as either cap
-/// is passed. Iterative and symlink-skipping for the same reason as
-/// [`copy_dir_all`] — this walks directories orx doesn't own.
-pub(crate) fn tally(dir: &Path, max_files: u64, max_bytes: u64) -> Option<(u64, u64)> {
-    let (mut files, mut bytes) = (0u64, 0u64);
+/// What a folder holds, cheaply enough to compute every turn: how many files,
+/// how many bytes, and a digest folded over every (relative path, size) pair so
+/// that a rename or a move inside the folder shows up even when the totals
+/// don't. Summed, not sequenced, because `read_dir` order isn't stable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    files: u64,
+    pub(crate) bytes: u64,
+    digest: u64,
+}
+
+/// Walk `dir`, giving up (`None`) as soon as either cap is passed. Iterative and
+/// symlink-skipping for the same reason as [`copy_dir_all`] — this walks
+/// directories orx doesn't own.
+pub(crate) fn tally(dir: &Path, max_files: u64, max_bytes: u64) -> Option<Tally> {
+    use std::hash::{Hash, Hasher};
+
+    let mut out = Tally::default();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
         let Ok(entries) = fs::read_dir(&next) else {
@@ -770,23 +800,29 @@ pub(crate) fn tally(dir: &Path, max_files: u64, max_bytes: u64) -> Option<(u64, 
             if kind.is_symlink() {
                 continue;
             }
+            let path = entry.path();
             if kind.is_dir() {
-                pending.push(entry.path());
+                pending.push(path);
                 continue;
             }
-            files += 1;
-            bytes += entry.metadata().map(|meta| meta.len()).unwrap_or(0);
-            if files > max_files || bytes > max_bytes {
+            let len = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+            out.files += 1;
+            out.bytes += len;
+            if out.files > max_files || out.bytes > max_bytes {
                 return None;
             }
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.strip_prefix(dir).unwrap_or(&path).hash(&mut hasher);
+            len.hash(&mut hasher);
+            out.digest = out.digest.wrapping_add(hasher.finish());
         }
     }
-    Some((files, bytes))
+    Some(out)
 }
 
 pub(crate) fn dir_size(dir: &Path) -> u64 {
     tally(dir, u64::MAX, u64::MAX)
-        .map(|(_, bytes)| bytes)
+        .map(|tally| tally.bytes)
         .unwrap_or(0)
 }
 
@@ -1262,25 +1298,134 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_skill_is_not_recopied() {
+    fn an_unchanged_skill_is_not_recopied_into_the_session() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = temp_root();
+        let wt = temp_root();
+        let rel = ".claude/skills";
+        save_skill_md_in(&root, skill_md("steady").as_bytes()).unwrap();
+
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        let written = wt.join(rel).join("steady/SKILL.md");
+        let first = fs::metadata(&written).unwrap().ino();
+
+        // A second turn with an unchanged source must leave the file alone. The
+        // inode is the witness: a re-copy removes the dir and writes a new file.
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert_eq!(fs::metadata(&written).unwrap().ino(), first);
+
+        // Editing the source does bring the copy forward.
+        save_skill_md_in(
+            &root,
+            skill_md_desc("steady", "Now it says something else. Use when testing.").as_bytes(),
+        )
+        .unwrap();
+        write_into_session_in(&root, &[], &wt, rel).unwrap();
+        assert!(fs::read_to_string(&written)
+            .unwrap()
+            .contains("something else"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_folder_fingerprint_notices_edits_renames_and_extra_files() {
         let src = temp_root();
         let dest = temp_root();
-        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(src.join("references")).unwrap();
         fs::write(src.join("SKILL.md"), skill_md("same")).unwrap();
+        fs::write(src.join("references/palette.md"), b"blue").unwrap();
         copy_dir_all(&src, &dest).unwrap();
-        assert!(is_current(&src, &dest));
+        let fingerprint = |dir: &Path| tally(dir, u64::MAX, u64::MAX).unwrap();
+        assert!(dest_matches_source(&src, fingerprint(&src), &dest));
 
-        // An edit that keeps the byte count is still an edit.
+        // A rename keeps the file count and the byte total identical.
+        fs::rename(
+            src.join("references/palette.md"),
+            src.join("references/colors.md"),
+        )
+        .unwrap();
+        assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
+
+        // So does an edit to SKILL.md of exactly the same length.
+        copy_dir_all(&src, &dest).unwrap();
         fs::write(src.join("SKILL.md"), skill_md("samf")).unwrap();
-        assert!(!is_current(&src, &dest));
+        assert!(!dest_matches_source(&src, fingerprint(&src), &dest));
 
-        // So is a new sibling file, and a destination that isn't there at all.
-        copy_dir_all(&src, &dest).unwrap();
-        fs::write(src.join("extra.txt"), b"x").unwrap();
-        assert!(!is_current(&src, &dest));
-        assert!(!is_current(&src, &src.join("nope")));
+        // A destination that isn't there at all never matches.
+        assert!(!dest_matches_source(
+            &src,
+            fingerprint(&src),
+            &src.join("nope")
+        ));
         let _ = fs::remove_dir_all(&src);
         let _ = fs::remove_dir_all(&dest);
+    }
+
+    #[test]
+    fn a_mirrored_folder_over_the_upload_budget_is_neither_listed_nor_copied() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        let mirrored = vec![mirrored_skill(
+            "Claude Code",
+            &agent_dir.join("huge"),
+            &skill_md("huge"),
+            &[],
+        )];
+        fs::write(
+            agent_dir.join("huge/corpus.bin"),
+            vec![0u8; (MAX_TOTAL_BYTES + 1) as usize],
+        )
+        .unwrap();
+
+        assert!(list_in(&root, &mirrored).is_empty());
+        write_into_session_in(&root, &mirrored, &wt, ".claude/skills").unwrap();
+        assert!(!wt.join(".claude/skills/huge").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
+    }
+
+    #[test]
+    fn a_long_description_is_kept_and_truncated_not_dropped() {
+        let long = "Sprawls on. ".repeat(400);
+        let fm = parse_frontmatter(&skill_md_desc("verbose", &long)).unwrap();
+        assert_eq!(fm.name, "verbose");
+        assert_eq!(fm.description.chars().count(), MAX_DESCRIPTION_LEN);
+        assert!(fm.description.starts_with("Sprawls on."));
+    }
+
+    #[test]
+    fn an_unreadable_upload_does_not_shadow_a_working_mirrored_skill() {
+        let root = temp_root();
+        let agent_dir = temp_root();
+        let wt = temp_root();
+        let mirrored = vec![mirrored_skill(
+            "runpod",
+            &agent_dir.join("flash"),
+            &skill_md_desc("flash", "MIRRORED. Use when testing."),
+            &[],
+        )];
+        // An upload interrupted mid-write leaves a folder with no usable
+        // SKILL.md; the listing skips it, so the session must skip it too.
+        fs::create_dir_all(store_dir(&root).join("flash")).unwrap();
+        fs::write(store_dir(&root).join("flash/SKILL.md"), b"not frontmatter").unwrap();
+
+        let listed = list_in(&root, &mirrored);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].origin.as_deref(), Some("runpod"));
+
+        write_into_session_in(&root, &mirrored, &wt, ".agents/skills").unwrap();
+        let written = fs::read_to_string(wt.join(".agents/skills/flash/SKILL.md")).unwrap();
+        assert!(
+            written.contains("MIRRORED"),
+            "the worktree must run what the dashboard shows"
+        );
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&agent_dir);
+        let _ = fs::remove_dir_all(&wt);
     }
 
     #[test]

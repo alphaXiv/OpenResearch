@@ -770,10 +770,8 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
         // Keys are `<plugin>@<marketplace>`, and a plugin name can itself be
         // scoped (`@acme/tools@market`) — so the marketplace is the last `@`.
         let label = key.rsplit_once('@').map_or(key.as_str(), |(name, _)| name);
-        let label = label.to_string();
-        let installs = match installs {
-            Value::Array(entries) => entries.clone(),
-            other => vec![other.clone()],
+        let Some(installs) = installs.as_array() else {
+            continue;
         };
         for install in installs {
             let Some(path) = install.get("installPath").and_then(|v| v.as_str()) else {
@@ -786,7 +784,7 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
                 && dir.is_dir()
                 && !out.iter().any(|(_, existing)| *existing == dir)
             {
-                out.push((label.clone(), dir));
+                out.push((label.to_string(), dir));
             }
         }
     }
@@ -2109,8 +2107,10 @@ mod tests {
     fn plugin_skills_dirs_follow_the_install_manifest() {
         let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
         let installed = home.join("cache/runpod/runpod/1.2.0");
+        let scoped = home.join("cache/market/acme-tools/0.2.0");
         let no_skills = home.join("cache/other/other/0.1.0");
         std::fs::create_dir_all(installed.join("skills/flash")).expect("mkdir");
+        std::fs::create_dir_all(scoped.join("skills/lint")).expect("mkdir");
         std::fs::create_dir_all(&no_skills).expect("mkdir");
         std::fs::create_dir_all(home.join("plugins")).expect("mkdir");
         std::fs::write(
@@ -2119,6 +2119,7 @@ mod tests {
                 "version": 2,
                 "plugins": {
                     "runpod@runpod": [{"installPath": installed.to_string_lossy(), "version": "1.2.0"}],
+                    "@acme/tools@market": [{"installPath": scoped.to_string_lossy()}],
                     "skill-less@market": [{"installPath": no_skills.to_string_lossy()}],
                 },
             })
@@ -2128,7 +2129,11 @@ mod tests {
 
         assert_eq!(
             installed_plugin_skills_dirs(&home),
-            vec![("runpod".to_string(), installed.join("skills"))]
+            vec![
+                // A plugin name can itself be scoped: the marketplace is the last `@`.
+                ("@acme/tools".to_string(), scoped.join("skills")),
+                ("runpod".to_string(), installed.join("skills")),
+            ]
         );
         // No manifest at all is no plugins, not an error.
         assert!(installed_plugin_skills_dirs(&home.join("nope")).is_empty());

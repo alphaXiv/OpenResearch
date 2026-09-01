@@ -298,7 +298,7 @@ pub fn ensure_playbook(
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
         super::agent_skills::ensure_session_skills(&workdir, dir)?;
-        // User-uploaded skills land beside the built-ins, same freshness.
+        // The user's skills — uploaded and mirrored — land beside the built-ins.
         super::user_skills::write_into_session(&workdir, dir)?;
     }
     // LaTeX templates the agent copies from, written fresh for the same reason —
