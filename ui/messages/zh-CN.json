@@ -448,6 +448,7 @@
   "skill_chips_loading_skill": "正在加载技能…",
   "skill_chips_badge": "技能",
   "skills_tab_could_not_load_templates": "无法加载模板：",
+  "skills_tab_could_not_load_skills": "无法加载技能：",
   "skills_tab_customize": "自定义",
   "skills_tab_skills": "技能",
   "skills_tab_delete_skill": "删除技能",

@@ -448,6 +448,7 @@
   "skill_chips_loading_skill": "در حال بارگیری مهارت…",
   "skill_chips_badge": "مهارت",
   "skills_tab_could_not_load_templates": "بارگیری قالب‌ها ممکن نشد:",
+  "skills_tab_could_not_load_skills": "بارگیری مهارت‌ها ممکن نشد:",
   "skills_tab_customize": "سفارشی‌سازی",
   "skills_tab_skills": "مهارت‌ها",
   "skills_tab_delete_skill": "حذف مهارت",

@@ -370,7 +370,7 @@ pub trait Harness: Send + Sync {
     }
 
     /// Further skills dirs this agent loads from, each labeled by where it came
-    /// from — the plugins installed into Claude Code. Same shape as
+    /// from — the plugins installed into this agent. Same shape as
     /// [`global_skills_dir`](Self::global_skills_dir): one skill folder per
     /// entry. Default: none.
     fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {

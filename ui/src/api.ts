@@ -1342,12 +1342,12 @@ export const deleteLatexTemplate = (name: string) =>
   );
 
 /** A skill the agent gets in every session: a SKILL.md folder uploaded in the
- * Customize tab, or one mirrored from an installed coding agent. */
+ * Customize tab, or one mirrored from an installed coding agent or its plugins. */
 export interface UserSkill {
   name: string;
-  description: string;
-  /** The coding agent this skill comes from; absent when uploaded here. */
-  agent?: string | null;
+  /** The coding agent or plugin it comes from; absent when uploaded here, which
+   * is also the only case the user can delete. */
+  origin?: string | null;
   bytes: number;
   updatedAt: number;
 }

@@ -13,10 +13,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-
 use crate::error::{anyhow, Result};
-use crate::local::user_skills::{basename, copy_dir_all, depth, dir_size, mtime_ms};
+use crate::local::user_skills::{
+    basename, copy_dir_all, depth, dir_size, migrate_project_scoped, mtime_ms, store_dir,
+};
 
 /// Where templates land inside a session worktree. Under `.orx/` because they
 /// are inputs the agent copies from, not part of the paper itself.
@@ -30,8 +30,7 @@ const MAX_TOTAL_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_NAME_LEN: usize = 48;
 
 /// One uploaded template, as served to the UI.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct LatexTemplate {
     pub name: String,
     /// Relative path of the `.tex` the agent should start from.
@@ -42,44 +41,12 @@ pub struct LatexTemplate {
     pub updated_at: i64,
 }
 
+/// Same shape as the skills store, down to the retired per-project layout it
+/// folds in on the way past — see [`super::user_skills::migrate_project_scoped`].
 fn root() -> PathBuf {
     let root = crate::store::data_dir().join("latex-templates");
     migrate_project_scoped(&root);
     root
-}
-
-/// Templates all live in one directory — the store had a per-project scope
-/// before, kept here as the on-disk name so existing installs need no move.
-fn store_dir(root: &Path) -> PathBuf {
-    root.join("global")
-}
-
-/// Lift templates from the retired per-project scope into the single store, then
-/// drop the old tree. A project template that collides with a global one is
-/// discarded — the global was already the one every other project saw.
-fn migrate_project_scoped(root: &Path) {
-    let projects = root.join("projects");
-    if !projects.is_dir() {
-        return;
-    }
-    let dest_base = store_dir(root);
-    if let Ok(projects) = fs::read_dir(&projects) {
-        for project in projects.flatten() {
-            let Ok(templates) = fs::read_dir(project.path()) else {
-                continue;
-            };
-            for template in templates.flatten() {
-                let dest = dest_base.join(template.file_name());
-                if dest.exists() || !template.path().is_dir() {
-                    continue;
-                }
-                if fs::create_dir_all(&dest_base).is_ok() {
-                    let _ = fs::rename(template.path(), &dest);
-                }
-            }
-        }
-    }
-    let _ = fs::remove_dir_all(root.join("projects"));
 }
 
 /// `^[a-z0-9]+(-[a-z0-9]+)*$` from an arbitrary upload filename.
@@ -375,7 +342,12 @@ fn write_into_session_in(root: &Path, worktree: &Path) -> Result<()> {
             if dest.exists() {
                 let _ = fs::remove_dir_all(&dest);
             }
-            copy_dir_all(&src, &dest)?;
+            // One unreadable template folder skips its turn rather than failing
+            // the session, the same as a skill that won't copy.
+            if copy_dir_all(&src, &dest).is_err() {
+                let _ = fs::remove_dir_all(&dest);
+                continue;
+            }
             if !managed.contains(&name) {
                 managed.push(name);
             }
@@ -554,13 +526,13 @@ mod tests {
         }
 
         migrate_project_scoped(&root);
-        assert!(!root.join("projects").exists());
         let names: Vec<String> = list_in(&root).into_iter().map(|t| t.name).collect();
         assert_eq!(names, ["house", "moved"]);
-        // The global of a colliding name wins; it was already what every other
-        // project saw.
+        // The global of a colliding name keeps the name, and the project copy it
+        // shadowed stays on disk rather than being deleted.
         let house = fs::read_to_string(root.join("global/house/house.tex")).expect("read");
         assert!(house.contains("global"));
+        assert!(root.join("projects/p1/house/house.tex").is_file());
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -4242,7 +4242,7 @@ export function ChatPanel({
   // freshly uploaded skills appear in the `/` menu without a reload.
   useEffect(() => {
     getSkills().then(setSkills).catch(() => {});
-  }, [projectId, mainView]);
+  }, [mainView]);
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;

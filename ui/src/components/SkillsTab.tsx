@@ -25,7 +25,7 @@ const CARD_SUB_CLASS_NAME = "mt-0 mx-0 mb-3 text-sm leading-relaxed text-text";
 const SKILL_ROW_CLASS_NAME =
   "flex items-start gap-3 py-2.5 border-t border-t-border first:border-t-0";
 const SKILL_NAME_CLASS_NAME = "font-mono text-base font-medium text-text";
-const SKILL_DESC_CLASS_NAME = "mt-1 mb-0 text-sm leading-relaxed text-text";
+const ROW_DETAIL_CLASS_NAME = "mt-1 mb-0 text-sm leading-relaxed text-text";
 
 /** Read a File into base64 (strips the `data:...;base64,` prefix). */
 function fileToBase64(file: File): Promise<string> {
@@ -80,14 +80,19 @@ function DropZone({
       onDrop={(e) => {
         e.preventDefault();
         setDragging(false);
+        if (busy) return;
         const file = e.dataTransfer.files?.[0];
         if (file) onFile(file);
       }}
-      onClick={() => inputRef.current?.click()}
+      onClick={() => {
+        if (!busy) inputRef.current?.click();
+      }}
       role="button"
       tabIndex={0}
+      aria-disabled={busy}
+      aria-busy={busy}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        if ((e.key === "Enter" || e.key === " ") && !busy) {
           e.preventDefault();
           inputRef.current?.click();
         }
@@ -145,10 +150,10 @@ function SkillRow({
     <div className={SKILL_ROW_CLASS_NAME}>
       <div className="flex-1 min-w-0 flex items-center gap-2">
         <code className={SKILL_NAME_CLASS_NAME}>/{skill.name}</code>
-        {skill.agent && <Badge>{skill.agent}</Badge>}
+        {skill.origin && <Badge>{skill.origin}</Badge>}
       </div>
       <RowMeta bytes={skill.bytes} updatedAt={skill.updatedAt} />
-      {!skill.agent && (
+      {!skill.origin && (
         <IconButton
           data-tip={m.skills_tab_delete_skill()}
           data-tip-align="end"
@@ -187,7 +192,7 @@ function LatexTemplateRow({
     <div className={SKILL_ROW_CLASS_NAME}>
       <div className="flex-1 min-w-0">
         <span className="text-base font-medium text-text">{template.name}</span>
-        <p className={SKILL_DESC_CLASS_NAME}>
+        <p className={ROW_DETAIL_CLASS_NAME}>
           {template.entry}
           {support > 0 &&
             (support === 1
@@ -225,12 +230,21 @@ function SkillsCard() {
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
     setRefreshing(true);
     listUserSkills()
-      .then(setSkills)
-      .catch(() => setSkills([]))
+      .then((next) => {
+        setSkills(next);
+        setLoadError(null);
+      })
+      .catch((e) => {
+        // An empty list is a real outcome here, so a failed fetch must not look
+        // like one — it would read as "your agents' skills weren't found".
+        setSkills([]);
+        setLoadError(e instanceof Error ? e.message : String(e));
+      })
       .finally(() => setRefreshing(false));
   }, []);
 
@@ -274,8 +288,7 @@ function SkillsCard() {
       {/* Baseline-aligned so the heading's own bottom margin still spaces the card. */}
       <div className="flex items-baseline gap-2.5">
         <h3>{m.skills_tab_skills()}</h3>
-        <div className="flex-1" />
-        <Button size="small" onClick={refresh} disabled={refreshing}>
+        <Button className="ms-auto" size="small" onClick={refresh} disabled={refreshing}>
           <RefreshCw
             size={12}
             className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""}
@@ -283,9 +296,7 @@ function SkillsCard() {
           {m.settings_page_refresh()}
         </Button>
       </div>
-      <p className={`${CARD_SUB_CLASS_NAME} [&_code]:font-mono [&_code]:text-sm [&_code]:text-text`}>
-        {m.skills_description()}
-      </p>
+      <p className={CARD_SUB_CLASS_NAME}>{m.skills_description()}</p>
 
       <DropZone
         accept=".md,.markdown,.zip"
@@ -294,11 +305,19 @@ function SkillsCard() {
         onFile={(file) => void upload(file)}
      />
 
-      {error && <div className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">{error}</div>}
+      {error && (
+        <div role="alert" className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">
+          {error}
+        </div>
+      )}
 
       {skills === null ? (
         <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
           <Spinner /> {m.skills_tab_loading_skills()}
+        </div>
+      ) : loadError ? (
+        <div className="pt-3 text-base text-accent-red">
+          {m.skills_tab_could_not_load_skills()} {loadError}
         </div>
       ) : skills.length === 0 ? (
         <div className="pt-3 text-sm text-subtext">{m.skills_tab_no_skills_yet()}</div>
@@ -383,7 +402,11 @@ function LatexTemplatesCard() {
         onFile={(file) => void upload(file)}
      />
 
-      {error && <div className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">{error}</div>}
+      {error && (
+        <div role="alert" className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">
+          {error}
+        </div>
+      )}
 
       {templates === null ? (
         <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
@@ -414,7 +437,7 @@ export function SkillsTab() {
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl">
       <h1>{m.skills_tab_customize()}</h1>
-      <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text [&_code]:font-mono [&_code]:text-sm [&_code]:text-text">
+      <p className="mt-0 mx-0 mb-5 text-base leading-relaxed text-text">
         {m.skills_overview_description()}
       </p>
 

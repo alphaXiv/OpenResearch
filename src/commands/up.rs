@@ -743,8 +743,7 @@ async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiRes
 fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
     json!({
         "name": s.name,
-        "description": s.description,
-        "agent": s.agent,
+        "origin": s.origin,
         "bytes": s.bytes,
         "updatedAt": s.updated_at,
     })

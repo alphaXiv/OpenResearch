@@ -767,9 +767,10 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
     };
     let mut out: Vec<(String, PathBuf)> = Vec::new();
     for (key, installs) in plugins {
-        // Keys are `<plugin>@<marketplace>`; the plugin half is what the user
-        // knows it by, and what the dashboard badges the skill with.
-        let label = key.split('@').next().unwrap_or(key).to_string();
+        // Keys are `<plugin>@<marketplace>`, and a plugin name can itself be
+        // scoped (`@acme/tools@market`) — so the marketplace is the last `@`.
+        let label = key.rsplit_once('@').map_or(key.as_str(), |(name, _)| name);
+        let label = label.to_string();
         let installs = match installs {
             Value::Array(entries) => entries.clone(),
             other => vec![other.clone()],
@@ -779,7 +780,12 @@ fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
                 continue;
             };
             let dir = PathBuf::from(path).join("skills");
-            if dir.is_dir() && !out.iter().any(|(_, existing)| *existing == dir) {
+            // Only absolute installs; a relative path would resolve against the
+            // server's working dir, which is not what the manifest meant.
+            if dir.is_absolute()
+                && dir.is_dir()
+                && !out.iter().any(|(_, existing)| *existing == dir)
+            {
                 out.push((label.clone(), dir));
             }
         }
@@ -2129,7 +2135,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
-    /// A `list_models` response in the live 2.1.212 shape    /// A `list_models` response in the live 2.1.212 shape (fields we don't
+    /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`
     /// entry is skipped, `value` (the alias the CLI's own picker submits) is
     /// the id, a model without `supportedEffortLevels` hides the picker, and
