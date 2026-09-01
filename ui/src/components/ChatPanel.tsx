@@ -140,10 +140,7 @@ import {
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
-const TOOL_LINE_CLASS_NAME = [
-  "tool-line flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap",
-  "text-base",
-].join(" ");
+const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base";
 const TOOL_TARGET_LIMIT = 256;
 const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
@@ -940,6 +937,7 @@ type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" |
 interface ToolActivity {
   kind: ToolActivityKind;
   label: string;
+  progressLabel?: string;
   searchPattern?: string;
   filePath?: string;
   fileRef?: string;
@@ -1900,8 +1898,12 @@ function toolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
-    case "interrupted":
-      return { kind: "command", label: m.chat_panel_tool_was_interrupted() };
+    case "contextcompaction":
+      return {
+        kind: "command",
+        label: m.activity_compacted_context(),
+        progressLabel: m.activity_compacting_context(),
+      };
     default: {
       const detail = description ?? filePath ?? rawCommand ?? part.state?.title ?? "";
       return { kind: "command", label: detail ? `${tool}: ${detail}` : tool };
@@ -2215,7 +2217,7 @@ function summarizeToolGroup(_activities: ToolActivity[]): string {
 }
 
 function activityInProgress(activity: ToolActivity): ToolActivity {
-  const label = {
+  const label = activity.progressLabel ?? {
     skill: m.activity_loading(),
     read: m.activity_reading(),
     search: m.activity_searching(),
@@ -2457,7 +2459,7 @@ function ToolRow({
       ) : (
         <ToolActivityIcon activity={activity} className="text-muted self-start mt-[5px]" />
       )}
-      <span className={`tool-line flex-1 min-w-0 whitespace-normal break-words text-base ${failed ? "text-accent-red" : "text-subtext"}`}>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${failed ? "text-accent-red" : "text-subtext"}`}>
         <ToolActivityLabel
           activity={activity}
           onOpenFile={onOpenFile}
@@ -2477,12 +2479,12 @@ function ToolRow({
   );
 
   if (!hasDetail) {
-    return <div className="tool-row flex items-center gap-2 min-w-0 py-[3px] px-1">{line}</div>;
+    return <div className="tool-row flex items-start gap-2 min-w-0 py-[3px] px-1">{line}</div>;
   }
 
   return (
     <div className="tool-row tool-row-error flex flex-col min-w-0">
-      <div className="flex items-center gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
+      <div className="flex items-start gap-2 w-fit max-w-full py-[3px] px-1 min-w-0 rounded-sm">
         {line}
         <button
           type="button"
@@ -2534,10 +2536,10 @@ function ToolGroup({
   const rawPending = tailPart?.state?.status !== "error"
     ? (tailPart && activityInProgress(toolActivity(tailPart))) ?? null
     : null;
-  // A running call is unclassified while its input hasn't streamed in (or its
-  // command is still blank) — its generic label would immediately re-resolve,
-  // that re-resolves moments later, so the header holds the prior label instead.
+  // Hold the prior label while a call lacks input, unless its name provides a
+  // specific progress label already.
   const tailUnclassified = !!tailPart && tailPart.state?.status === "running" &&
+    !rawPending?.progressLabel &&
     (emptyToolInput(tailPart.state?.input) || (rawPending?.kind === "command" && !inputString(tailPart.state?.input ?? {}, "command", "cmd")));
   const pendingActivity = useDwelledActivity(rawPending, tailUnclassified);
   const shimmering = useDelayedToolShimmer(pendingActivity != null);
@@ -2895,6 +2897,8 @@ function PromptCard({
  * trace). Shared by `messageHasVisibleContent`, the stream-tail computation,
  * and `renderParts` so they can't drift. */
 function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
+  // The persisted marker still delimits stopped turns for history consumers.
+  if (part.type === "tool" && part.tool?.toLowerCase() === "interrupted") return false;
   if (part.type === "prompt") {
     if (!part.prompt) return false;
     if (part.prompt.kind === "permission") {
@@ -3478,9 +3482,9 @@ function SubagentBlock({
     <>
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errored ? (
-        <CircleX size={16} strokeWidth={1.75} className="subagent-icon shrink-0 text-accent-red" aria-hidden="true" />
+        <CircleX size={16} strokeWidth={1.75} className="subagent-icon shrink-0 self-start mt-[5px] text-accent-red" aria-hidden="true" />
       ) : (
-        <ToolActivityIcon activity={activity} className={`subagent-icon shrink-0 ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
+        <ToolActivityIcon activity={activity} className={`subagent-icon shrink-0 self-start mt-[5px] ${shimmering ? "tool-running-shimmer-icon" : "text-muted"}`} />
       )}
       {/* Spawn rows read as activity, not prose — gray like the tool rows
           around them. */}
@@ -3492,14 +3496,14 @@ function SubagentBlock({
   // children — offering a transcript there opens an empty pane.
   if (inert) {
     return (
-      <div className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm [&_.tool-line]:text-base">
+      <div className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 text-text text-base text-start rounded-sm">
         {line}
       </div>
     );
   }
   return (
     <button
-      className="subagent-row flex items-center gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default [&_.tool-line]:text-base"
+      className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
         onOpenSubagent?.(part.id, activity.label, intent),
@@ -3507,7 +3511,7 @@ function SubagentBlock({
       disabled={!onOpenSubagent}
     >
       {line}
-      <ChevronRight size={12} className="subagent-row-chevron shrink-0 text-muted" />
+      <ChevronRight size={12} className="subagent-row-chevron shrink-0 mt-[7px] text-muted" />
     </button>
   );
 }
@@ -4808,7 +4812,6 @@ export function ChatPanel({
   const messages = useMemo(() => activePath(allMessages, activeLeafId), [allMessages, activeLeafId]);
   const busy = activeId ? state.busySessions.has(activeId) : false;
   const canFork = !busy && !!activeHarness?.agentReady;
-  const hasPendingTailTool = busy && streamTailTool(messages) != null;
   // Messages the user parked behind the running turn (oldest first). Populated
   // by chat.queued events and the seed snapshot; each runs when its turn ends.
   const queued = activeId ? (state.queuedBySession[activeId] ?? []) : [];
@@ -5802,14 +5805,9 @@ export function ChatPanel({
               onRecover={recoverFailedTurn}
               skills={commands}
            />
-            {busy &&
-              (awaitingInput ? (
-                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
-              ) : (
-                <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 [&.awaiting]:italic">
-                  <Spinner /> {hasPendingTailTool ? m.chat_working() : m.chat_thinking()}
-                </div>
-              ))}
+            {busy && awaitingInput && (
+              <div className="working flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic awaiting">{m.chat_panel_waiting_for_your_input()}</div>
+            )}
           </div>
         </div>
       )}
