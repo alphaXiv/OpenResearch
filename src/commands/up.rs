@@ -5294,6 +5294,15 @@ async fn send_chat_message(
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let project = store
+        .get_local_project(&session.project_id)?
+        .ok_or_else(|| not_found("project"))?;
+    let harness = session.harness;
+    let slash_skills = local::chat::builtin_slash_skill_names(&project, &req.text);
     let text = req.text.trim().to_string();
     let annotations = req
         .annotations
@@ -5313,7 +5322,7 @@ async fn send_chat_message(
         reasoning_level: req.reasoning_level,
     };
     // The turn runs in the background; progress streams over /api/events.
-    let response = if matches!(req.mode, Some(SendMode::Steer)) {
+    let (response, capture_message) = if matches!(req.mode, Some(SendMode::Steer)) {
         let result = state
             .chat
             .steer_message(
@@ -5333,8 +5342,11 @@ async fn send_chat_message(
                 }
             })?;
         match result {
-            Some(turn) => json!({ "ok": true, "turn": turn }),
-            None => json!({ "ok": true, "steered": true }),
+            Some(turn) => {
+                let capture = !turn.existing;
+                (json!({ "ok": true, "turn": turn }), capture)
+            }
+            None => (json!({ "ok": true, "steered": true }), true),
         }
     } else {
         let result = state
@@ -5355,9 +5367,15 @@ async fn send_chat_message(
                     bad_request(error)
                 }
             })?;
-        json!({ "ok": true, "turn": result })
+        let capture = !result.existing;
+        (json!({ "ok": true, "turn": result }), capture)
     };
-    crate::telemetry::capture_chat_message_sent();
+    if capture_message {
+        crate::telemetry::capture_chat_message_sent(&harness);
+        for skill in slash_skills {
+            crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
+        }
+    }
     Ok(Json(response))
 }
 
@@ -5426,20 +5444,41 @@ async fn fork_chat_turn(
     Json(req): Json<ForkChatReq>,
 ) -> ApiResult {
     reject_if_moving(&state)?;
-    let (kind, is_edited_resubmission) = match req.text {
-        Some(text) if !text.trim().is_empty() => (local::chat::ForkKind::Edit(text), true),
+    let edit_text = match req.text {
+        Some(text) if !text.trim().is_empty() => Some(text),
         Some(_) => return Err(bad_request("text is required")),
-        None => (local::chat::ForkKind::Retry, false),
+        None => None,
     };
+    let invocation = if let Some(text) = edit_text.as_deref() {
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        let skills = local::chat::builtin_slash_skill_names(&project, text);
+        Some((session.harness, skills))
+    } else {
+        None
+    };
+    let kind = edit_text
+        .map(local::chat::ForkKind::Edit)
+        .unwrap_or(local::chat::ForkKind::Retry);
     // A fork re-samples under the session's current settings, so it takes no
     // overrides — the turn runs in the background and streams over /api/events.
-    state
+    let started = state
         .chat
         .fork_turn(&id, &req.message_id, kind)
         .await
         .map_err(bad_request)?;
-    if is_edited_resubmission {
-        crate::telemetry::capture_chat_message_sent();
+    if started {
+        if let Some((harness, skills)) = invocation {
+            crate::telemetry::capture_chat_message_sent(&harness);
+            for skill in skills {
+                crate::telemetry::capture_skill_invoked(skill, "slash", Some(&harness));
+            }
+        }
     }
     Ok(Json(json!({ "ok": true })))
 }

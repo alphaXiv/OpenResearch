@@ -584,7 +584,7 @@ async fn spawn_client(
     // Stamp the launching session (one app-server child per orx session) so a
     // run the agent starts via `orx exp run` is tagged with it and can be
     // explicitly subscribed to. After prepare_env so it isn't shadowed.
-    crate::local::chat::set_chat_session_env(&mut cmd, session_id, up_port);
+    crate::local::chat::set_chat_session_env(&mut cmd, session_id, "codex", up_port);
     // Pin the child's store to the same canonicalized dir the sandbox policy
     // grants (see harness/codex.rs `ensure_orx_data_dir`) — after prepare_env
     // so the pin beats a dashboard-synced ORX_DATA_DIR. Unconditional: the

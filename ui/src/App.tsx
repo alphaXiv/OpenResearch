@@ -1,6 +1,7 @@
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { useLocale } from "./locale";
+import { autoDir } from "./i18n";
 import {
   ChartSpline,
   Check,
@@ -52,6 +53,7 @@ import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner } from "./components/UpdateBanner";
+import { OfflineBanner } from "./components/OfflineBanner";
 import { Onboarding } from "./components/Onboarding";
 import { NewProjectDialog, ProjectsHome } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
@@ -800,6 +802,14 @@ export default function App() {
     if (uiState?.tourCompleted) return;
     openDemoWelcome();
   }, [projectId, homeOpen, onboarded, openDemoWelcome, uiState?.tourCompleted]);
+
+  const activeProject = projects?.find((p) => p.id === projectId) ?? null;
+
+  // The home, error, and loading screens leave projects populated but show no project.
+  useEffect(() => {
+    const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
+    document.title = name ? `${autoDir(name)} - OpenResearch` : "OpenResearch";
+  }, [homeOpen, startupError, uiState, activeProject]);
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
@@ -1572,7 +1582,6 @@ export default function App() {
       onClose={() => closeFileTab(tab)}
    />
   );
-  const activeProject = projects?.find((p) => p.id === projectId) ?? null;
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
   const codeExperiment = codeTab
     ? (experiments.find((experiment) => experiment.id === codeTab.experimentId) ?? null)
@@ -1669,6 +1678,7 @@ export default function App() {
   if (projects.length === 0) {
     return (
       <div className="app flex flex-col h-full">
+        <OfflineBanner />
         {onboarded ? (
           <ProjectsHome
             projects={projects}
@@ -1708,6 +1718,7 @@ export default function App() {
 
   return (
     <div className="app flex flex-col h-full">
+      <OfflineBanner />
       <UpdateBanner />
       {homeOpen ? (
         <ProjectsHome

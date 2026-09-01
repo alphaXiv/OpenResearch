@@ -3364,7 +3364,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
     // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
-    set_chat_session_env(&mut cmd, &ctx.session_id, ctx.host.up_port());
+    set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port());
     // Pin the sandboxed turn's store to the exact path granted above. The
     // grant was resolved from the host's env, but the child could resolve a
     // different data dir — `prepare_env` injects dashboard-synced vars (a
