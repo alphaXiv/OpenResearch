@@ -90,15 +90,7 @@
   animation: tool-running-shimmer-icon 1.75s ease-in-out infinite;
 }
 
-.tool-active-label {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
 .tool-group-summary .tool-group-label {
-  transform: translateY(-1px);
   transition: color 120ms ease;
 }
 
