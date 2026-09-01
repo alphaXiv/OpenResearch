@@ -151,6 +151,8 @@
   "file_viewer_download": "Download",
   "file_viewer_failed_to_load_file": "Failed to load file:",
   "file_viewer_file_truncated_showing_the_first_512_kb": "File truncated — showing the first 512 KB.",
+  "file_viewer_html_partial": "The page below stops partway — the full file could not be loaded.",
+  "file_viewer_html_preview": "Rendered HTML: {name}",
   "file_viewer_loading": "Loading…",
   "file_viewer_open_in_default_editor": "Open in default editor",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "Overleaf's copy of this file was pulled while you had unsaved edits, so what you see is no longer what is on disk. Saving now sends this draft to Overleaf instead.",

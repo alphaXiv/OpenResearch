@@ -151,6 +151,8 @@
   "file_viewer_download": "بارگیری",
   "file_viewer_failed_to_load_file": "بارگیری فایل ناموفق بود:",
   "file_viewer_file_truncated_showing_the_first_512_kb": "فایل کوتاه شده است — فقط ۵۱۲ کیلوبایت نخست نمایش داده می‌شود.",
+  "file_viewer_html_partial": "صفحهٔ زیر در میانه متوقف می‌شود — فایل کامل بارگیری نشد.",
+  "file_viewer_html_preview": "HTML رندرشده: {name}",
   "file_viewer_loading": "در حال بارگیری…",
   "file_viewer_open_in_default_editor": "باز کردن در ویرایشگر پیش‌فرض",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "هنگامی که ویرایش‌های ذخیره‌نشده داشتید، نسخهٔ Overleaf این فایل دریافت شد؛ بنابراین آنچه می‌بینید دیگر با فایل روی دیسک یکی نیست. ذخیره‌سازی اکنون این پیش‌نویس را به Overleaf می‌فرستد.",

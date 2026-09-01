@@ -82,7 +82,7 @@ fn range_not_satisfiable(size: u64) -> Result<Response> {
 }
 
 fn response(
-    path: &str,
+    type_path: &str,
     presentation: FilePresentation,
     size: u64,
     range: Option<ByteRange>,
@@ -96,10 +96,13 @@ fn response(
         } else {
             StatusCode::OK
         })
-        .header(header::CONTENT_TYPE, files::content_type_for_path(path))
+        .header(
+            header::CONTENT_TYPE,
+            files::content_type_for_path(type_path),
+        )
         .header(
             header::CONTENT_DISPOSITION,
-            files::content_disposition_for_path(path),
+            files::content_disposition_for_path(type_path),
         )
         .header(header::CACHE_CONTROL, cache_control)
         .header(header::ACCEPT_RANGES, "bytes")
@@ -118,7 +121,7 @@ fn response(
         );
     }
     if matches!(
-        files::content_type_for_path(path),
+        files::content_type_for_path(type_path),
         "image/svg+xml" | "text/html; charset=utf-8" | "application/xml"
     ) {
         response = response.header(
@@ -142,8 +145,11 @@ fn range_for(
     requested_byte_range(headers, size)
 }
 
+/// `type_path` must be the path the bytes actually came from: content type and
+/// disposition are derived from its extension, and an in-repo symlink would
+/// otherwise let a requested name dictate the type of another file's contents.
 pub async fn disk_response(
-    display_path: &str,
+    type_path: &str,
     file: std::fs::File,
     presentation: FilePresentation,
     method: &Method,
@@ -162,7 +168,7 @@ pub async fn disk_response(
     };
     if method == Method::HEAD || size == 0 {
         return response(
-            display_path,
+            type_path,
             presentation,
             size,
             range,
@@ -181,7 +187,7 @@ pub async fn disk_response(
             .map_err(|error| anyhow!("seek failed: {error}"))?;
     }
     response(
-        display_path,
+        type_path,
         presentation,
         size,
         range,
@@ -190,8 +196,9 @@ pub async fn disk_response(
     )
 }
 
+/// See [`disk_response`] for `type_path`.
 pub async fn git_response(
-    display_path: &str,
+    type_path: &str,
     repo: PathBuf,
     spec: String,
     size: u64,
@@ -205,7 +212,7 @@ pub async fn git_response(
     };
     if method == Method::HEAD || size == 0 {
         return response(
-            display_path,
+            type_path,
             presentation,
             size,
             range,
@@ -249,7 +256,7 @@ pub async fn git_response(
         let _ = child.wait().await;
     });
     response(
-        display_path,
+        type_path,
         presentation,
         size,
         range,
@@ -274,6 +281,38 @@ mod tests {
             .await
             .unwrap()
             .to_vec()
+    }
+
+    /// The typing contract `type_path` states: a symlink named `logo.png` must
+    /// not pass a `.env` off as an image. The HTML preview's inlining allow-list
+    /// reads this header to decide what it may hand an untrusted document.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn types_a_symlink_by_the_path_it_resolved_to() {
+        let dir = std::env::temp_dir().join(format!("orx-http-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("secret.env"), b"TOKEN=1").unwrap();
+        std::os::unix::fs::symlink("secret.env", dir.join("logo.png")).unwrap();
+        let resolved = std::fs::canonicalize(dir.join("logo.png")).unwrap();
+
+        let response = disk_response(
+            &resolved.to_string_lossy(),
+            std::fs::File::open(&resolved).unwrap(),
+            files::presentation_for_path(&resolved.to_string_lossy()),
+            &Method::GET,
+            &HeaderMap::new(),
+            "no-cache",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(response.headers()["x-openresearch-presentation"], "text");
+        // The name asked for is what it would have been typed as.
+        assert_eq!(files::content_type_for_path("logo.png"), "image/png");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]

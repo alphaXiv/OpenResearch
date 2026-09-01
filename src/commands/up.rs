@@ -2908,6 +2908,8 @@ async fn project_raw_file(
                 .ok_or_else(|| not_found("branch"))?;
             let size =
                 local::git::file_size_at(&root, &sha, &rel)?.ok_or_else(|| not_found("file"))?;
+            // `rel` is right here: git never follows a symlink in a tree, it
+            // serves the blob at that path.
             return Ok((
                 rel.clone(),
                 RawProjectFileSource::Git {
@@ -2934,16 +2936,21 @@ async fn project_raw_file(
         }
         let file =
             std::fs::File::open(&full).map_err(|e| ApiError::from(anyhow!("read failed: {e}")))?;
-        Ok((rel, RawProjectFileSource::Disk(file)))
+        // The resolved path, not `rel`: an in-repo symlink named `logo.png` must
+        // not make `.env`'s bytes an image.
+        Ok((
+            full.to_string_lossy().into_owned(),
+            RawProjectFileSource::Disk(file),
+        ))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("file task failed: {e}")))??;
 
-    let (display_path, source) = source;
-    let presentation = local::files::presentation_for_path(&display_path);
+    let (type_path, source) = source;
+    let presentation = local::files::presentation_for_path(&type_path);
     match source {
         RawProjectFileSource::Disk(file) => crate::commands::file_serve::disk_response(
-            &display_path,
+            &type_path,
             file,
             presentation,
             &method,
@@ -2954,7 +2961,7 @@ async fn project_raw_file(
         .map_err(ApiError::from),
         RawProjectFileSource::Git { repo, spec, size } => {
             crate::commands::file_serve::git_response(
-                &display_path,
+                &type_path,
                 repo,
                 spec,
                 size,
@@ -3080,9 +3087,9 @@ async fn absolute_raw_file(
     method: Method,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    let (display, file) = tokio::task::spawn_blocking(
+    let (type_path, file) = tokio::task::spawn_blocking(
         move || -> std::result::Result<(String, std::fs::File), ApiError> {
-            let (display, abs) = validated_absolute_file_path(&q.path)?;
+            let (_, abs) = validated_absolute_file_path(&q.path)?;
             let full = std::fs::canonicalize(&abs).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     not_found("file")
@@ -3095,14 +3102,16 @@ async fn absolute_raw_file(
             }
             let file = std::fs::File::open(&full)
                 .map_err(|e| ApiError::from(anyhow!("read failed: {e}")))?;
-            Ok((display, file))
+            // The resolved path: a symlink must not let the requested name
+            // dictate the type of another file's contents.
+            Ok((full.to_string_lossy().into_owned(), file))
         },
     )
     .await
     .map_err(|e| ApiError::from(anyhow!("file task failed: {e}")))??;
-    let presentation = local::files::presentation_for_path(&display);
+    let presentation = local::files::presentation_for_path(&type_path);
     crate::commands::file_serve::disk_response(
-        &display,
+        &type_path,
         file,
         presentation,
         &method,
@@ -3160,8 +3169,7 @@ async fn serve_artifact(
     method: Method,
     headers: HeaderMap,
 ) -> std::result::Result<Response, ApiError> {
-    let display_path = q.path.clone();
-    let file = tokio::task::spawn_blocking(move || {
+    let (type_path, file) = tokio::task::spawn_blocking(move || {
         let store = Store::open()?;
         let project = store
             .get_local_project(&id)?
@@ -3174,13 +3182,14 @@ async fn serve_artifact(
         if !metadata.is_file() {
             return Err(not_found("file"));
         }
-        Ok(file)
+        // `file_path` canonicalized: type the response by what it resolved to.
+        Ok((path.to_string_lossy().into_owned(), file))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("file task failed: {e}")))??;
-    let presentation = local::files::presentation_for_path(&display_path);
+    let presentation = local::files::presentation_for_path(&type_path);
     crate::commands::file_serve::disk_response(
-        &display_path,
+        &type_path,
         file,
         presentation,
         &method,
@@ -5415,22 +5424,22 @@ async fn chat_attachment(
     {
         return Err(bad_request("invalid attachment name"));
     }
-    let display_name = name.clone();
-    let file = tokio::task::spawn_blocking(move || {
+    let (type_path, file) = tokio::task::spawn_blocking(move || {
         let path = local::chat::attachments_dir()?.join(&name);
         let file = std::fs::File::open(&path).map_err(|_| not_found("attachment"))?;
         let metadata = file.metadata().map_err(|_| not_found("attachment"))?;
         if !metadata.is_file() {
             return Err(not_found("attachment"));
         }
-        Ok(file)
+        let resolved = std::fs::canonicalize(&path).map_err(|_| not_found("attachment"))?;
+        Ok((resolved.to_string_lossy().into_owned(), file))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("attachment task failed: {e}")))??;
     crate::commands::file_serve::disk_response(
-        &display_name,
+        &type_path,
         file,
-        local::files::presentation_for_path(&display_name),
+        local::files::presentation_for_path(&type_path),
         &method,
         &headers,
         "max-age=31536000, immutable",
