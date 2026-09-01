@@ -13,14 +13,21 @@ fn current_skill_set() -> SkillSet {
     }
 }
 
+fn capture_invocation(skill: &str) {
+    let harness = crate::local::chat::launching_chat_harness();
+    crate::telemetry::capture_skill_invoked(skill, "orx_skill", harness.as_deref());
+}
+
 pub async fn run(args: crate::SkillArgs) -> Result<()> {
     if let Some(path) = args.path {
         if let Some(skill) = agent_skills::find(&path, current_skill_set()) {
             println!("{}", skill.content.trim_end());
+            capture_invocation(skill.name);
             return Ok(());
         }
-        if let Some((_, resource)) = agent_skills::find_resource(&path, current_skill_set()) {
+        if let Some((skill, resource)) = agent_skills::find_resource(&path, current_skill_set()) {
             println!("{}", resource.content.trim_end());
+            capture_invocation(skill.name);
             return Ok(());
         }
         let available = agent_skills::skills(current_skill_set())
@@ -39,6 +46,8 @@ pub async fn run(args: crate::SkillArgs) -> Result<()> {
     for s in agent_skills::skills(current_skill_set()) {
         println!("  {:<20} {}", s.name, s.description);
     }
+
+    capture_invocation("overview");
 
     Ok(())
 }

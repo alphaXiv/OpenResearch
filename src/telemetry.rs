@@ -3,8 +3,8 @@
 //! Why this exists: `orx` shipped with no telemetry, so we had no way to see
 //! installs, DAU/WAU, retention, or which commands people actually use. This
 //! module sends events under a random per-install UUID that is not tied to an
-//! account. Only coarse research-area categories and paper count are included
-//! from the onboarding profile; free text and paper identifiers stay local.
+//! account. The onboarding research profile includes selected categories and
+//! user-entered area/background text; paper identifiers stay local.
 //!
 //! Guarantees, enforced by this module:
 //! - **Official builds only.** Source builds never send production telemetry or
@@ -891,6 +891,8 @@ pub(crate) fn capture_onboarding_research_profile(profile: &ResearchProfile) {
         "onboarding_research_profile_submitted",
         json!({
             "researchAreas": profile.research_areas,
+            "otherArea": profile.other_area,
+            "background": profile.background,
             "paperCount": profile.papers.len(),
         }),
     );
@@ -904,8 +906,16 @@ pub(crate) fn capture_chat_session_started(harness: &str) {
     capture("chat_session_started", json!({ "harness": harness }));
 }
 
-pub(crate) fn capture_chat_message_sent() {
-    capture("chat_message_sent", json!({}));
+pub(crate) fn capture_chat_message_sent(harness: &str) {
+    capture("chat_message_sent", json!({ "harness": harness }));
+}
+
+pub(crate) fn capture_skill_invoked(skill: &str, source: &str, harness: Option<&str>) {
+    let mut properties = json!({ "skill": skill, "source": source });
+    if let Some(harness) = harness {
+        properties["harness"] = json!(harness);
+    }
+    capture("skill_invoked", properties);
 }
 
 /// Flush every pending event send (the session's `cli_command` plus any key
@@ -1511,6 +1521,7 @@ mod tests {
             ("chat_retry_started", "cli_chat_retry_started"),
             ("chat_retry_exhausted", "cli_chat_retry_exhausted"),
             ("chat_recovery_action", "cli_chat_recovery_action"),
+            ("skill_invoked", "cli_skill_invoked"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
         ] {
@@ -1716,7 +1727,11 @@ mod tests {
                 "cli-release-contract-test",
                 json!({ "harness": "codex" }),
             ),
-            build_payload("chat_message_sent", "cli-release-contract-test", json!({})),
+            build_payload(
+                "chat_message_sent",
+                "cli-release-contract-test",
+                json!({ "harness": "codex" }),
+            ),
             build_payload(
                 "chat_retry_started",
                 "cli-release-contract-test",
@@ -1731,6 +1746,11 @@ mod tests {
                 "chat_recovery_action",
                 "cli-release-contract-test",
                 json!({ "harness": "codex", "owner": "orx", "reason": "terminal_turn", "attempt": 2, "action": "continue" }),
+            ),
+            build_payload(
+                "skill_invoked",
+                "cli-release-contract-test",
+                json!({ "skill": "reproduce-paper", "source": "slash", "harness": "codex" }),
             ),
             build_payload(
                 "experiment_started",
@@ -1786,6 +1806,8 @@ mod tests {
             "did",
             json!({
                 "researchAreas": ["AI/ML", "Other"],
+                "otherArea": "AI for theorem proving",
+                "background": "I study formal reasoning systems.",
                 "paperCount": 1,
             }),
         );
@@ -1797,9 +1819,17 @@ mod tests {
             research_profile["events"][0]["properties"]["researchAreas"][1],
             "Other"
         );
+        assert_eq!(
+            research_profile["events"][0]["properties"]["otherArea"],
+            "AI for theorem proving"
+        );
+        assert_eq!(
+            research_profile["events"][0]["properties"]["background"],
+            "I study formal reasoning systems."
+        );
         assert_eq!(research_profile["events"][0]["properties"]["paperCount"], 1);
         let profile_text = serde_json::to_string(&research_profile).unwrap();
-        for forbidden in ["otherArea", "background", "paperId", "title"] {
+        for forbidden in ["paperId", "title"] {
             assert!(!profile_text.contains(forbidden));
         }
 
@@ -1813,9 +1843,21 @@ mod tests {
         assert_eq!(chat["events"][0]["properties"]["harness"], "codex");
         assert_eq!(property_keys(&chat), vec!["harness"]);
 
-        let message = build_payload("chat_message_sent", "did", json!({}));
+        let message = build_payload("chat_message_sent", "did", json!({ "harness": "codex" }));
         assert_eq!(message["events"][0]["name"], "cli_chat_message_sent");
-        assert!(property_keys(&message).is_empty());
+        assert_eq!(message["events"][0]["properties"]["harness"], "codex");
+        assert_eq!(property_keys(&message), vec!["harness"]);
+
+        let skill = build_payload(
+            "skill_invoked",
+            "did",
+            json!({ "skill": "reproduce-paper", "source": "slash", "harness": "codex" }),
+        );
+        assert_eq!(skill["events"][0]["name"], "cli_skill_invoked");
+        assert_eq!(skill["events"][0]["properties"]["skill"], "reproduce-paper");
+        assert_eq!(skill["events"][0]["properties"]["source"], "slash");
+        assert_eq!(skill["events"][0]["properties"]["harness"], "codex");
+        assert_eq!(property_keys(&skill), vec!["harness", "skill", "source"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1866,6 +1908,8 @@ mod tests {
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true);
         capture_chat_session_started("codex");
+        capture_chat_message_sent("codex");
+        capture_skill_invoked("reproduce-paper", "slash", Some("codex"));
         capture_experiment_started("run", true, Some("local"));
 
         assert!(pending().lock().unwrap().is_empty());

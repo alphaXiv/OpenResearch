@@ -560,7 +560,12 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.
-    crate::local::chat::set_chat_session_env(&mut cmd, &spec.session_id, spec.chat.up_port());
+    crate::local::chat::set_chat_session_env(
+        &mut cmd,
+        &spec.session_id,
+        "claude-code",
+        spec.chat.up_port(),
+    );
     // Own process group: a terminal SIGINT reaches orx up alone, which then
     // tears the resident child down deliberately (kill_session / shutdown). A
     // shared group would let Ctrl-C kill a persistent child mid-turn.
