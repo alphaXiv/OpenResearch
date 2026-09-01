@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 const MD_RE = /\.(md|mdx|markdown)$/i;
 const LATEX_RE = /\.tex$/i;
+const HTML_RE = /\.html?$/i;
 const IMAGE_RE = /\.(apng|avif|bmp|gif|heic|heif|ico|jpe?g|jfif|jxl|pbm|pgm|png|pnm|ppm|svg|tiff?|webp)$/i;
 const SPREADSHEET_RE = /\.(csv|tsv|xlsx?|ods)$/i;
 const CODE_RE = /\.(c|cc|cpp|css|go|html?|java|js|jsx|json|mjs|py|rs|sh|toml|ts|tsx|ya?ml)$/i;
@@ -19,6 +20,10 @@ export function isMarkdownFile(name: string): boolean {
 
 export function isLatexFile(name: string): boolean {
   return LATEX_RE.test(name);
+}
+
+export function isHtmlFile(name: string): boolean {
+  return HTML_RE.test(name);
 }
 
 export function FileTypeIcon({ name }: { name: string }) {

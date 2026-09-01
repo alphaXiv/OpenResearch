@@ -46,7 +46,8 @@ import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
-import { isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { HtmlPreview } from "./HtmlPreview";
 import { OverleafPanel } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
@@ -174,6 +175,9 @@ export function FileViewer({
   // .tex behaves like markdown — rendered by default, source behind the toggle —
   // and adds the real compiler on top.
   const isLatex = isLatexFile(path);
+  // .html likewise, and its scripts run — see HtmlPreview.
+  const isHtml = isHtmlFile(path);
+  const rendersByDefault = isMarkdown || isHtml;
   const [showSource, setShowSource] = useState(false);
   // Live edit buffer for the code file. It IS the view for editable files (no
   // edit mode); it tracks the loaded content and diverges as the user types.
@@ -189,28 +193,35 @@ export function FileViewer({
   // This file's parent dir: the artifact report folder for image resolution,
   // and the anchor for a relative link inside an abs file.
   const parentFolder = filePath.split("/").slice(0, -1).join("/");
+  // An artifacts tab that fell back must render as the checkout, not the store.
+  const artifactsMode = loaded?.source === "artifact";
   const resolveMarkdownFilePath = useCallback(
     (target: string) =>
       resolveMarkdownTarget(parentFolder, target, isAbsolute)?.path ?? null,
     [isAbsolute, parentFolder],
   );
-  const resolveMarkdownImageSrc = useCallback(
+  /** Raw bytes of a file in whichever store answered for this tab. */
+  const rawFileUrl = useCallback(
+    (target: string) =>
+      isAbsolute
+        ? absoluteFileUrl(target)
+        : artifactsMode
+          ? artifactUrl(projectId, target)
+          : projectFileUrl(projectId, target, { sessionId, ref: gitRef }),
+    [artifactsMode, gitRef, isAbsolute, projectId, sessionId],
+  );
+  const resolveAssetSrc = useCallback(
     (src: string) => {
       if (isExternalMarkdownTarget(src)) return src;
       const target = resolveMarkdownTarget(parentFolder, src, isAbsolute);
       if (!target) return null;
-      const url = isAbsolute
-        ? absoluteFileUrl(target.path)
-        : projectFileUrl(projectId, target.path, { sessionId, ref: gitRef });
-      return markdownTargetUrl(url, target);
+      return markdownTargetUrl(rawFileUrl(target.path), target);
     },
-    [gitRef, isAbsolute, parentFolder, projectId, sessionId],
+    [isAbsolute, parentFolder, rawFileUrl],
   );
   const mediaKind = mediaPreviewKind(data?.presentation);
   const viaArtifacts = loaded?.source === "artifact" && !isArtifacts;
   const viaCheckout = isArtifacts && loaded?.source === "checkout";
-  // An artifacts tab that fell back must render as the checkout, not the store.
-  const artifactsMode = loaded?.source === "artifact";
   // A file that exists in the live checkout on disk (not a committed branch tree
   // or an artifact) — the only source the write/open endpoints can resolve.
   const onDisk = !gitRef && loaded?.source === "checkout" && data != null && !data.notFound;
@@ -327,7 +338,7 @@ export function FileViewer({
 
   // A .tex shows its compiled PDF or its source — nothing in between.
   const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
-  const showingEditor = editable && !(isMarkdown && !showSource) && !showingPdf;
+  const showingEditor = editable && !(rendersByDefault && !showSource) && !showingPdf;
 
   // `#toolbar=0` asks the browser's PDF viewer to drop its own chrome, so the
   // pane shows the document and this view's header owns the controls.
@@ -371,12 +382,8 @@ export function FileViewer({
       setOpeningEditor(false);
     }
   };
-  const rawUrlBase = isAbsolute
-    ? absoluteFileUrl(path)
-    : artifactsMode
-      ? artifactUrl(projectId, path)
-      : projectFileUrl(projectId, filePath, { sessionId, ref: gitRef });
-  const rawUrl = `${rawUrlBase}&v=${nonce}`;
+  // filePath is `path` in every store but the checkout, so this covers all four.
+  const rawUrl = `${rawFileUrl(filePath)}&v=${nonce}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -562,7 +569,7 @@ export function FileViewer({
             {latex.compiling ? <Spinner /> : <FileOutput size={13} />}
           </IconButton>
         )}
-        {isMarkdown && (
+        {rendersByDefault && (
           <IconButton
             active={showSource}
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
@@ -740,7 +747,7 @@ export function FileViewer({
               <Md
                 text={data.content}
                 resolveFilePath={resolveMarkdownFilePath}
-                resolveImageSrc={resolveMarkdownImageSrc}
+                resolveImageSrc={resolveAssetSrc}
                 onOpenFile={
                   onOpenFile &&
                   ((p, _line, _exp, _ref, intent) =>
@@ -749,6 +756,14 @@ export function FileViewer({
              />
             )}
           </div>
+        ) : isHtml && !showSource ? (
+          <HtmlPreview
+            html={data.content}
+            truncated={data.truncated}
+            url={rawUrl}
+            name={filePath}
+            resolveSrc={resolveAssetSrc}
+         />
         ) : showingEditor ? (
           // Editable files open straight into the editor — click and type.
           <CodeEditor
