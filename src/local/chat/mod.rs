@@ -1910,9 +1910,7 @@ fn selected_slash_skills(project: &LocalProject, text: &str) -> (Vec<SelectedSla
                     instructions,
                 });
             }
-        } else if let Some(instructions) =
-            crate::local::user_skills::instructions(&name, &project.id)
-        {
+        } else if let Some(instructions) = crate::local::user_skills::instructions(&name) {
             seen.insert(name);
             selected.push(SelectedSlashSkill::User { instructions });
         }

@@ -441,8 +441,6 @@ fn router(state: AppState) -> Router {
                 .post(upload_user_skill)
                 .delete(delete_user_skill),
         )
-        .route("/api/user-skills/import", post(import_user_skill))
-        .route("/api/harness-skills", get(list_harness_skills))
         .route(
             "/api/latex-templates",
             get(list_latex_templates)
@@ -693,14 +691,14 @@ async fn complete_onboarding(
 
 #[derive(Deserialize)]
 struct SkillsQ {
-    /// Include the project's own uploaded skills (plus globals) in the menu.
+    /// The open project, so a built-in skill's instructions can account for it.
     project: Option<String>,
 }
 
 /// Slash-skills the composer's `/` dropdown offers (expanded server-side): the
-/// built-in catalog plus any user-uploaded skills that apply (globals, and the
-/// named project's own).
-async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
+/// built-in catalog plus the user's own — uploaded here or mirrored from a
+/// coding agent.
+async fn list_skills() -> Json<Value> {
     let mut skills: Vec<Value> = crate::local::skills::CATALOG
         .iter()
         .map(|s| {
@@ -711,16 +709,7 @@ async fn list_skills(Query(q): Query<SkillsQ>) -> Json<Value> {
             })
         })
         .collect();
-    // One `/name` per skill: a project skill shadows a same-named global
-    // (list_for_project returns globals first, then the project's own).
-    let mut user: Vec<crate::local::user_skills::UserSkill> = Vec::new();
-    for s in crate::local::user_skills::list_for_project(q.project.as_deref()) {
-        match user.iter_mut().find(|e| e.name == s.name) {
-            Some(existing) => *existing = s,
-            None => user.push(s),
-        }
-    }
-    for s in user {
+    for s in crate::local::user_skills::list() {
         skills.push(json!({
             "name": s.name,
             "description": s.description,
@@ -745,58 +734,26 @@ async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiRes
     if let Some(content) = crate::local::skills::instructions(&name, false, github_enabled) {
         return Ok(Json(json!({ "name": name, "content": content })));
     }
-    let content = crate::local::user_skills::content(&name, q.project.as_deref())
-        .ok_or_else(|| not_found("skill"))?;
+    let content = crate::local::user_skills::content(&name).ok_or_else(|| not_found("skill"))?;
     Ok(Json(json!({ "name": name, "content": content })))
 }
 
-// --- user-uploaded skills -----------------------------------------------------
-
-fn parse_scope(scope: &str) -> std::result::Result<crate::local::user_skills::Scope, ApiError> {
-    match scope {
-        "global" => Ok(crate::local::user_skills::Scope::Global),
-        "project" => Ok(crate::local::user_skills::Scope::Project),
-        other => Err(bad_request(format!("unknown scope `{other}`"))),
-    }
-}
+// --- user skills --------------------------------------------------------------
 
 fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
     json!({
         "name": s.name,
         "description": s.description,
-        "scope": s.scope,
+        "agent": s.agent,
         "bytes": s.bytes,
         "updatedAt": s.updated_at,
     })
 }
 
-/// Resolve the target scope and validate the project exists for project scope.
-fn resolve_skill_scope(
-    scope: crate::local::user_skills::Scope,
-    project_id: Option<&str>,
-) -> std::result::Result<Option<String>, ApiError> {
-    match scope {
-        crate::local::user_skills::Scope::Global => Ok(None),
-        crate::local::user_skills::Scope::Project => {
-            let id = project_id
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| bad_request("project scope requires a projectId"))?;
-            Store::open()?
-                .get_local_project(id)?
-                .ok_or_else(|| not_found("project"))?;
-            Ok(Some(id.to_string()))
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct UserSkillsListQ {
-    project: Option<String>,
-}
-
-/// Both scopes for the Customize tab: globals plus the project's own.
-async fn list_user_skills(Query(q): Query<UserSkillsListQ>) -> ApiResult {
-    let skills: Vec<Value> = crate::local::user_skills::list_for_project(q.project.as_deref())
+/// Everything the Customize tab lists: uploads plus the skills mirrored from the
+/// coding agents installed on this machine.
+async fn list_user_skills() -> ApiResult {
+    let skills: Vec<Value> = crate::local::user_skills::list()
         .iter()
         .map(user_skill_json)
         .collect();
@@ -806,8 +763,6 @@ async fn list_user_skills(Query(q): Query<UserSkillsListQ>) -> ApiResult {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UploadSkillReq {
-    scope: String,
-    project_id: Option<String>,
     /// Original upload filename — its extension picks `.zip` vs single file.
     filename: String,
     /// The file bytes, base64 (same convention as chat attachments).
@@ -815,17 +770,15 @@ struct UploadSkillReq {
 }
 
 async fn upload_user_skill(Json(req): Json<UploadSkillReq>) -> ApiResult {
-    let scope = parse_scope(&req.scope)?;
-    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(req.content_base64.trim())
         .map_err(|e| bad_request(format!("invalid file data: {e}")))?;
 
     let lower = req.filename.to_ascii_lowercase();
     let saved = if lower.ends_with(".zip") {
-        crate::local::user_skills::save_zip(&bytes, scope, project.as_deref())
+        crate::local::user_skills::save_zip(&bytes)
     } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
-        crate::local::user_skills::save_skill_md(&bytes, scope, project.as_deref())
+        crate::local::user_skills::save_skill_md(&bytes)
     } else {
         return Err(bad_request(
             "upload a SKILL.md file or a .zip of a skill folder",
@@ -837,23 +790,18 @@ async fn upload_user_skill(Json(req): Json<UploadSkillReq>) -> ApiResult {
 }
 
 #[derive(Deserialize)]
-struct DeleteSkillQ {
-    scope: String,
+struct DeleteByNameQ {
     name: String,
-    project: Option<String>,
 }
 
-async fn delete_user_skill(Query(q): Query<DeleteSkillQ>) -> ApiResult {
-    let scope = parse_scope(&q.scope)?;
-    let project = resolve_skill_scope(scope, q.project.as_deref())?;
-    crate::local::user_skills::delete(&q.name, scope, project.as_deref()).map_err(bad_request)?;
+async fn delete_user_skill(Query(q): Query<DeleteByNameQ>) -> ApiResult {
+    crate::local::user_skills::delete(&q.name).map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 
 fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Value {
     json!({
         "name": t.name,
-        "scope": t.scope,
         "entry": t.entry,
         "supportFiles": t.support_files,
         "bytes": t.bytes,
@@ -861,76 +809,26 @@ fn latex_template_json(t: &crate::local::latex_templates::LatexTemplate) -> Valu
     })
 }
 
-/// Both scopes for the Customize tab's templates card.
-async fn list_latex_templates(Query(q): Query<UserSkillsListQ>) -> ApiResult {
-    let templates: Vec<Value> =
-        crate::local::latex_templates::list_for_project(q.project.as_deref())
-            .iter()
-            .map(latex_template_json)
-            .collect();
+async fn list_latex_templates() -> ApiResult {
+    let templates: Vec<Value> = crate::local::latex_templates::list()
+        .iter()
+        .map(latex_template_json)
+        .collect();
     Ok(Json(json!({ "templates": templates })))
 }
 
 async fn upload_latex_template(Json(req): Json<UploadSkillReq>) -> ApiResult {
-    let scope = parse_scope(&req.scope)?;
-    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(req.content_base64.trim())
         .map_err(|e| bad_request(format!("invalid file data: {e}")))?;
-    let saved = crate::local::latex_templates::save_upload(
-        &req.filename,
-        &bytes,
-        scope,
-        project.as_deref(),
-    )
-    .map_err(bad_request)?;
+    let saved =
+        crate::local::latex_templates::save_upload(&req.filename, &bytes).map_err(bad_request)?;
     Ok(Json(json!({ "template": latex_template_json(&saved) })))
 }
 
-async fn delete_latex_template(Query(q): Query<DeleteSkillQ>) -> ApiResult {
-    let scope = parse_scope(&q.scope)?;
-    let project = resolve_skill_scope(scope, q.project.as_deref())?;
-    crate::local::latex_templates::delete(&q.name, scope, project.as_deref())
-        .map_err(bad_request)?;
+async fn delete_latex_template(Query(q): Query<DeleteByNameQ>) -> ApiResult {
+    crate::local::latex_templates::delete(&q.name).map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
-}
-
-/// Skills already installed in the user's coding agents, offered for import.
-async fn list_harness_skills() -> ApiResult {
-    let skills: Vec<Value> = crate::local::user_skills::list_harness_skills()
-        .iter()
-        .map(|s| {
-            json!({
-                "harnessId": s.harness_id,
-                "harnessName": s.harness_name,
-                "name": s.name,
-                "description": s.description,
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "skills": skills })))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ImportSkillReq {
-    harness: String,
-    name: String,
-    scope: String,
-    project_id: Option<String>,
-}
-
-async fn import_user_skill(Json(req): Json<ImportSkillReq>) -> ApiResult {
-    let scope = parse_scope(&req.scope)?;
-    let project = resolve_skill_scope(scope, req.project_id.as_deref())?;
-    let saved = crate::local::user_skills::import_from_harness(
-        &req.harness,
-        &req.name,
-        scope,
-        project.as_deref(),
-    )
-    .map_err(bad_request)?;
-    Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
 
 /// Serialize a project for the UI, injecting the absolute artifacts directory

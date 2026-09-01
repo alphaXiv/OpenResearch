@@ -4241,7 +4241,7 @@ export function ChatPanel({
   // Refetch when navigating (esp. back to chat after a Skills-tab upload) so
   // freshly uploaded skills appear in the `/` menu without a reload.
   useEffect(() => {
-    getSkills(projectId).then(setSkills).catch(() => {});
+    getSkills().then(setSkills).catch(() => {});
   }, [projectId, mainView]);
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {

@@ -1309,10 +1309,7 @@ export interface SkillInfo {
   source?: "builtin" | "user" | "command";
 }
 
-export const getSkills = (projectId?: string) =>
-  get<{ skills: SkillInfo[] }>(
-    `/api/skills${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
-  ).then((r) => r.skills);
+export const getSkills = () => get<{ skills: SkillInfo[] }>("/api/skills").then((r) => r.skills);
 
 export const getSkillContent = (name: string, projectId?: string) =>
   get<{ content: string }>(
@@ -1321,14 +1318,10 @@ export const getSkillContent = (name: string, projectId?: string) =>
     }`,
   ).then((r) => r.content);
 
-/** Where an uploaded skill applies. */
-export type SkillScope = "global" | "project";
-
 /** A user-uploaded LaTeX template the paper skill follows, managed in the
- * Customize tab. Global, or scoped to one project (which shadows a global). */
+ * Customize tab. */
 export interface LatexTemplate {
   name: string;
-  scope: SkillScope;
   /** Relative path of the .tex the agent starts from. */
   entry: string;
   /** Class/style files shipped alongside it. */
@@ -1337,82 +1330,40 @@ export interface LatexTemplate {
   updatedAt: number;
 }
 
-export const listLatexTemplates = (projectId?: string) =>
-  get<{ templates: LatexTemplate[] }>(
-    `/api/latex-templates${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
-  ).then((r) => r.templates);
+export const listLatexTemplates = () =>
+  get<{ templates: LatexTemplate[] }>("/api/latex-templates").then((r) => r.templates);
 
-export const uploadLatexTemplate = (body: {
-  scope: SkillScope;
-  projectId?: string;
-  filename: string;
-  contentBase64: string;
-}) => post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
+export const uploadLatexTemplate = (body: { filename: string; contentBase64: string }) =>
+  post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
 
-export const deleteLatexTemplate = (req: {
-  scope: SkillScope;
-  name: string;
-  projectId?: string;
-}) => {
-  const params = new URLSearchParams({ scope: req.scope, name: req.name });
-  if (req.projectId) params.set("project", req.projectId);
-  return fetch(`/api/latex-templates?${params.toString()}`, { method: "DELETE" }).then((r) =>
+export const deleteLatexTemplate = (name: string) =>
+  fetch(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
-};
 
-/** A user-uploaded agent skill (a SKILL.md folder), managed in the Customize tab. */
+/** A skill the agent gets in every session: a SKILL.md folder uploaded in the
+ * Customize tab, or one mirrored from an installed coding agent. */
 export interface UserSkill {
   name: string;
   description: string;
-  scope: SkillScope;
+  /** The coding agent this skill comes from; absent when uploaded here. */
+  agent?: string | null;
   bytes: number;
   updatedAt: number;
 }
 
-/** Global skills plus (when a project is given) that project's own. */
-export const listUserSkills = (projectId?: string) =>
-  get<{ skills: UserSkill[] }>(
-    `/api/user-skills${projectId ? `?project=${encodeURIComponent(projectId)}` : ""}`,
-  ).then((r) => r.skills);
+export const listUserSkills = () =>
+  get<{ skills: UserSkill[] }>("/api/user-skills").then((r) => r.skills);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
-export const uploadUserSkill = (req: {
-  scope: SkillScope;
-  projectId?: string;
-  filename: string;
-  contentBase64: string;
-}) => post<{ skill: UserSkill }>("/api/user-skills", req).then((r) => r.skill);
+export const uploadUserSkill = (req: { filename: string; contentBase64: string }) =>
+  post<{ skill: UserSkill }>("/api/user-skills", req).then((r) => r.skill);
 
-export const deleteUserSkill = (req: { scope: SkillScope; name: string; projectId?: string }) => {
-  const params = new URLSearchParams({ scope: req.scope, name: req.name });
-  if (req.projectId) params.set("project", req.projectId);
-  return fetch(`/api/user-skills?${params.toString()}`, { method: "DELETE" }).then((r) =>
+export const deleteUserSkill = (name: string) =>
+  fetch(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
-};
-
-/** A skill already installed in one of the user's coding agents, importable
- * into the managed store. */
-export interface HarnessSkill {
-  harnessId: string;
-  harnessName: string;
-  name: string;
-  description: string;
-}
-
-/** Skills found in every installed harness's global skills dir. */
-export const listHarnessSkills = () =>
-  get<{ skills: HarnessSkill[] }>("/api/harness-skills").then((r) => r.skills);
-
-/** Copy a harness skill into the managed store at the given scope. */
-export const importHarnessSkill = (req: {
-  harness: string;
-  name: string;
-  scope: SkillScope;
-  projectId?: string;
-}) => post<{ skill: UserSkill }>("/api/user-skills/import", req).then((r) => r.skill);
 
 /** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
 export function modelLabel(id: string): string {

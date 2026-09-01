@@ -369,6 +369,14 @@ pub trait Harness: Send + Sync {
         Some(self.skill_target()?.parent()?.parent()?.to_path_buf())
     }
 
+    /// Further skills dirs this agent loads from, each labeled by where it came
+    /// from — the plugins installed into Claude Code. Same shape as
+    /// [`global_skills_dir`](Self::global_skills_dir): one skill folder per
+    /// entry. Default: none.
+    fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
+        Vec::new()
+    }
+
     // --- session-skills capability ----------------------------------------
 
     /// The worktree-relative dir this harness discovers native `SKILL.md` skill
