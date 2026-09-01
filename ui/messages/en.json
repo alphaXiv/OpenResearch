@@ -613,6 +613,8 @@
   "announcement_running_tool": "Running a tool",
   "announcement_tool_completed": "Tool activity completed",
   "chat_working": "Working…",
+  "chat_thinking": "Thinking",
+  "chat_scroll_to_bottom": "Scroll to bottom",
   "chat_no_activity": "No activity",
   "chat_recents": "Recents",
   "chat_all_sessions": "All sessions",

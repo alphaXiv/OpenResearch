@@ -613,6 +613,8 @@
   "announcement_running_tool": "正在运行工具",
   "announcement_tool_completed": "工具活动已完成",
   "chat_working": "正在工作…",
+  "chat_thinking": "正在思考",
+  "chat_scroll_to_bottom": "滚动到底部",
   "chat_no_activity": "无活动",
   "chat_recents": "最近",
   "chat_all_sessions": "所有会话",

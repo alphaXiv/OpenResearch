@@ -613,6 +613,8 @@
   "announcement_running_tool": "در حال اجرای ابزار",
   "announcement_tool_completed": "فعالیت ابزار کامل شد",
   "chat_working": "در حال کار…",
+  "chat_thinking": "در حال فکر کردن",
+  "chat_scroll_to_bottom": "رفتن به پایین گفتگو",
   "chat_no_activity": "بدون فعالیت",
   "chat_recents": "اخیر",
   "chat_all_sessions": "همهٔ نشست‌ها",
