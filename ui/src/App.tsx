@@ -807,7 +807,7 @@ export default function App() {
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
     const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
-    document.title = name ? `OpenResearch - ${autoDir(name)}` : "OpenResearch";
+    document.title = name ? `${autoDir(name)} - OpenResearch` : "OpenResearch";
   }, [homeOpen, startupError, uiState, activeProject]);
 
   const projectIdRef = useRef(projectId);
