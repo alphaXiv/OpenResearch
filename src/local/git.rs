@@ -206,7 +206,10 @@ pub fn is_repository_root(path: &Path) -> bool {
 /// for example — reports `NotRepository` so it can get a repository of its own.
 pub fn own_repository_state(path: &Path) -> RepositoryState {
     let state = repository_state(path);
-    if state.is_initialized() && !is_repository_root(path) {
+    if matches!(
+        (repository_root(path), std::fs::canonicalize(path)),
+        (Ok(root), Ok(path)) if root != path
+    ) {
         return RepositoryState::NotRepository;
     }
     state
@@ -2279,6 +2282,16 @@ mod tests {
         assert_eq!(repository_state(&dir), RepositoryState::Ready);
         run(&dir, &["checkout", "-q", "--detach"]);
         assert_eq!(repository_state(&dir), RepositoryState::Detached);
+        let nested = dir.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(dir.join(".git/HEAD"), "ref: refs/heads/\n").unwrap();
+        assert_eq!(repository_state(&dir), RepositoryState::Invalid);
+        assert_eq!(own_repository_state(&dir), RepositoryState::Invalid);
+        assert_eq!(repository_state(&nested), RepositoryState::Invalid);
+        assert_eq!(
+            own_repository_state(&nested),
+            RepositoryState::NotRepository
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

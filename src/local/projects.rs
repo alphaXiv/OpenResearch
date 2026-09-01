@@ -395,7 +395,6 @@ mod tests {
             Path::new(&project.repo_path),
             std::fs::canonicalize(&project_path).unwrap()
         );
-        assert!(git::is_repository_root(&project_path));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -443,8 +442,10 @@ mod tests {
             Path::new(&project.repo_path),
             std::fs::canonicalize(&nested).unwrap()
         );
-        assert!(git::is_repository_root(&nested));
-        assert!(nested.join(PAPER_PDF_NAME).exists());
+        assert_eq!(
+            git_output(&nested, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            PAPER_PDF_NAME
+        );
 
         let error = paper_project(&store, &repository).unwrap_err().to_string();
         assert!(error.contains("must be empty"), "{error}");

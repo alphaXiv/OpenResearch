@@ -105,7 +105,7 @@ export function NewProjectForm({
       ? automaticPaperProjectPath
       : path;
   const existingGithubRepo = paperGithubRepo ?? (
-    pathStatus?.githubOwner && pathStatus.githubRepo
+    mode === "folder" && pathStatus?.githubOwner && pathStatus.githubRepo
       ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
       : null
   );
