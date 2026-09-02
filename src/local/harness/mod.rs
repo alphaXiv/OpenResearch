@@ -295,8 +295,8 @@ pub trait Harness: Send + Sync {
     /// configuration. `None` = can't or failed — the caller keeps the
     /// first-line placeholder.
     ///
-    /// Default: no generation (e.g. Cursor has no chat capability). OpenCode
-    /// also still adopts a native `session.updated` title (minus its creation
+    /// Default: the shared title one-shot, sanitized; a harness without
+    /// `one_shot` (Cursor) gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.

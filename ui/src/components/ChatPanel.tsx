@@ -4993,9 +4993,7 @@ export function ChatPanel({
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
 
-  // Starter prompts, keyed by project and harness so a switch never shows
-  // another project's; refetched each time the empty state returns because
-  // the project files the brief reads may have changed.
+  // Keyed by project+harness so a switch never shows another project's prompts.
   const starterHarness = composerSelection?.harness ?? null;
   const [starter, setStarter] = useState<{
     key: string;

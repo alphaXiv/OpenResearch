@@ -331,16 +331,11 @@ export function NewProjectForm({
     }
   }
 
-  // Start the starter-prompt model call while the user is still on the form;
-  // debounced so typing a name is one request.
-  // Only cases whose brief will match the created project: a paper that also
-  // clones a repository, or a folder git will initialize, would differ.
+  // Debounced pre-warm; only cases whose brief will match the created project.
   const prewarmName = name.trim();
   const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl ? paper.paperId : null;
   const prewarmPath =
-    mode === "folder" && pathStatus?.gitState && pathStatus.gitState !== "notRepository"
-      ? (pathStatus.resolvedPath ?? null)
-      : null;
+    mode === "folder" && pathStatus?.gitState === "ready" ? (pathStatus.resolvedPath ?? null) : null;
   const prewarmReady =
     prewarmName !== "" &&
     (mode === "blank" || prewarmPaperId !== null || prewarmPath !== null);

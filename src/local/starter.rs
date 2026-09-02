@@ -34,8 +34,8 @@ const GENERATION_TIMEOUT: Duration = Duration::from_secs(90);
 const FAILURE_TTL: Duration = Duration::from_secs(60);
 /// Model children running at once, across on-demand, warm, and pre-warm.
 const MAX_CONCURRENT: usize = 2;
-const TITLE_MAX_CHARS: usize = 60;
-const PROMPT_MAX_CHARS: usize = 600;
+const STARTER_TITLE_CHARS: usize = 60;
+const STARTER_PROMPT_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StarterPrompt {
@@ -87,9 +87,7 @@ pub async fn prompts(
 /// Generate for a project that does not exist yet, from what the new-project
 /// form already knows: the name, and a paper id or an existing repository.
 /// The brief is built exactly as it will be once the project is created, so
-/// the cache entry is found by content the moment the empty chat opens. A
-/// brief that ends up differing (the form only sends cases that match) just
-/// regenerates after creation.
+/// the cache entry is found by content the moment the empty chat opens.
 pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, locale: String) {
     tokio::spawn(async move {
         let harness = resolve_harness().await?;
@@ -104,8 +102,7 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
                     Some(brief_parts(&name, None, paper_id.as_deref(), &repo, &files))
                 }
                 None => {
-                    let files: Vec<String> =
-                        paper_id.iter().map(|_| PAPER_PDF.to_string()).collect();
+                    let files = Vec::from_iter(paper_id.is_some().then(|| PAPER_PDF.to_string()));
                     Some(brief_parts(
                         &name,
                         None,
@@ -297,9 +294,9 @@ fn parse_prompts(raw: &str) -> Option<Vec<StarterPrompt>> {
         .map(|p| StarterPrompt {
             title: clip(
                 &p.title.split_whitespace().collect::<Vec<_>>().join(" "),
-                TITLE_MAX_CHARS,
+                STARTER_TITLE_CHARS,
             ),
-            prompt: clip(p.prompt.trim(), PROMPT_MAX_CHARS),
+            prompt: clip(p.prompt.trim(), STARTER_PROMPT_CHARS),
         })
         .filter(|p| !p.title.is_empty() && !p.prompt.is_empty())
         .take(4)
@@ -448,6 +445,9 @@ fn list_files(repo: &Path) -> Vec<String> {
     };
     files.sort();
     files.dedup();
+    // Keep the shallow paths when capping: README, manifests, and launch
+    // scripts live near the root, and deep trees sort ahead of them by name.
+    files.sort_by_key(|f| f.matches('/').count());
     files.truncate(MAX_LISTED_FILES);
     files
 }
@@ -629,8 +629,8 @@ mod tests {
             "p".repeat(1000)
         );
         let clipped = parse_prompts(&long).unwrap();
-        assert_eq!(clipped[0].title.chars().count(), TITLE_MAX_CHARS);
-        assert_eq!(clipped[0].prompt.chars().count(), PROMPT_MAX_CHARS);
+        assert_eq!(clipped[0].title.chars().count(), STARTER_TITLE_CHARS);
+        assert_eq!(clipped[0].prompt.chars().count(), STARTER_PROMPT_CHARS);
         assert_eq!(
             parse_prompts("[{\"title\": \"a\", \"prompt\": \"1\"}]"),
             None
