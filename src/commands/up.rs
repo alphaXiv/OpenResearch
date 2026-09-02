@@ -295,6 +295,10 @@ fn router(state: AppState) -> Router {
         .route("/api/project-path/status", get(project_path_status))
         .route("/api/project-path/pick", post(pick_project_folder))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route(
+            "/api/projects/starter-prompts/prewarm",
+            post(prewarm_starter_prompts),
+        )
         .route("/api/projects/activity", get(list_project_activity))
         .route(
             "/api/projects/{id}",
@@ -304,6 +308,10 @@ fn router(state: AppState) -> Router {
         )
         .route("/api/projects/{id}/open", post(open_project))
         .route("/api/projects/{id}/git", get(project_git_status))
+        .route(
+            "/api/projects/{id}/starter-prompts",
+            get(project_starter_prompts),
+        )
         .route("/api/projects/{id}/git/init", post(initialize_project_git))
         .route("/api/projects/{id}/github", post(enable_project_github))
         .route(
@@ -1005,6 +1013,8 @@ struct CreateProjectReq {
     #[serde(default)]
     initialize_git: bool,
     github_sync_enabled: Option<bool>,
+    /// UI locale, for the starter prompts warmed up in the background.
+    locale: Option<String>,
 }
 
 async fn create_project(
@@ -1021,6 +1031,7 @@ async fn create_project(
     if name.is_empty() {
         return Err(bad_request("name is required"));
     }
+    let locale = req.locale.unwrap_or_else(|| "en".to_string());
     let path = req.path;
     let create_folder = req.create_folder;
     let require_new_folder = req.require_new_folder;
@@ -1072,6 +1083,9 @@ async fn create_project(
     .await
     .map_err(|e| anyhow!("project task failed: {e}"))?;
     let project = result.map_err(bad_request)?;
+    // Starter prompts take a model call; start it now so the empty chat that
+    // opens next usually finds them cached.
+    local::starter::warm(project.clone(), locale);
     drop(creation_guard);
     let _project_admission = state
         .project_lifecycle
@@ -1968,6 +1982,83 @@ async fn experiment_commit_diff(Path((id, sha)): Path<(String, String)>) -> ApiR
         Ok(Json(diff_json(payload)))
     })
     .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrewarmStarterPromptsReq {
+    name: String,
+    paper_id: Option<String>,
+    /// An existing folder the project will be created from.
+    path: Option<String>,
+    locale: Option<String>,
+}
+
+/// Start generating starter prompts for a project the user is still naming in
+/// the new-project form, so they are cached before the project exists.
+async fn prewarm_starter_prompts(Json(req): Json<PrewarmStarterPromptsReq>) -> ApiResult {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return Err(bad_request("name is required"));
+    }
+    let paper_id = req
+        .paper_id
+        .as_deref()
+        .map(super::paper::parse_paper_id)
+        .filter(|id| !id.is_empty());
+    let path = req
+        .path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    local::starter::prewarm(
+        name,
+        paper_id,
+        path,
+        req.locale.unwrap_or_else(|| "en".to_string()),
+    );
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct StarterPromptsQuery {
+    /// Chat harness whose one-shot child writes the prompts; the composer's
+    /// current pick. Unknown or missing = no prompts.
+    harness: Option<String>,
+    /// UI locale the prompts are written in.
+    locale: Option<String>,
+}
+
+/// Four starter prompts for the empty chat, written by a model that has read
+/// the project (paper, README, code). Slow on a cache miss — one headless
+/// model call — so the UI shows a placeholder while it waits.
+async fn project_starter_prompts(
+    Path(id): Path<String>,
+    Query(q): Query<StarterPromptsQuery>,
+) -> ApiResult {
+    let (project, experiment_count) = tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let experiment_count = store.list_experiments_by_project(&project.id)?.len();
+        Ok::<_, ApiError>((project, experiment_count))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("starter task failed: {e}")))??;
+    let harness = q
+        .harness
+        .as_deref()
+        .map(str::trim)
+        .filter(|h| local::harness::is_chat_harness(h));
+    // A project with experiments is past "getting started"; skip the model call.
+    let prompts = match harness {
+        Some(harness) if experiment_count == 0 => {
+            let locale = q.locale.as_deref().unwrap_or("en");
+            local::starter::prompts(&project, harness, locale).await
+        }
+        _ => None,
+    };
+    Ok(Json(json!({ "prompts": prompts })))
 }
 
 /// Live uncommitted changes in the project's clone (the agent's working

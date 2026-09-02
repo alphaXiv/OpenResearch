@@ -304,6 +304,14 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// Run one headless, tool-less request on a throwaway child at the
+    /// requested [`OneShotQuality`] and return the model's reply verbatim.
+    /// Nothing is recorded in the harness's own session store. `None` = can't
+    /// or failed.
+    async fn one_shot(&self, _request: OneShot<'_>) -> Option<String> {
+        None
+    }
+
     /// Decide how an answered prompt flows back, and (for inline harnesses)
     /// deliver it. See [`ResumeAction`] for the two shapes. This runs *before*
     /// `ChatHost::respond` marks the card resolved, so returning an `Err` (e.g.
@@ -467,6 +475,26 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
     ]
+}
+
+/// A single self-contained request for [`Harness::one_shot`].
+#[derive(Debug, Clone, Copy)]
+pub struct OneShot<'a> {
+    /// Replaces the harness's agent system prompt where the CLI allows it;
+    /// otherwise it is folded into the message.
+    pub system: &'a str,
+    pub prompt: &'a str,
+    pub quality: OneShotQuality,
+    pub timeout: Duration,
+}
+
+/// How much model to spend on a one-shot: `Cheap` is the smallest/fastest
+/// configuration (titles), `Standard` the harness's regular model at modest
+/// effort (anything that has to read and reason about a project).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneShotQuality {
+    Cheap,
+    Standard,
 }
 
 /// The chat-capable harness with this id, if any (used by chat dispatch).

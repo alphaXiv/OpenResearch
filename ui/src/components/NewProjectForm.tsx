@@ -1,4 +1,5 @@
 import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, CircleAlert, FolderOpen } from "lucide-react";
@@ -16,6 +17,7 @@ import {
   type Project,
   type ProjectPathStatus,
   type ResolvedPaper,
+  prewarmStarterPrompts,
 } from "../api";
 import { Button } from "./ui";
 import { PaperTitle } from "./PaperTitle";
@@ -316,6 +318,7 @@ export function NewProjectForm({
         requireNewFolder: mode === "blank",
         initializeGit: true,
         githubSyncEnabled,
+        locale: getLocale(),
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
           : {}),
@@ -327,6 +330,28 @@ export function NewProjectForm({
       setPending(false);
     }
   }
+
+  // Start the starter-prompt model call while the user is still on the form;
+  // debounced so typing a name is one request.
+  const prewarmName = name.trim();
+  const prewarmPaperId = mode === "paper" ? (paper?.paperId ?? null) : null;
+  const prewarmPath =
+    mode === "folder" && pathStatus?.directory ? (pathStatus.resolvedPath ?? null) : null;
+  const prewarmReady =
+    prewarmName !== "" &&
+    (mode === "blank" || prewarmPaperId !== null || prewarmPath !== null);
+  useEffect(() => {
+    if (!prewarmReady) return;
+    const timer = window.setTimeout(() => {
+      void prewarmStarterPrompts({
+        name: prewarmName,
+        paperId: prewarmPaperId ?? undefined,
+        path: prewarmPath ?? undefined,
+        locale: getLocale(),
+      }).catch(() => {});
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [prewarmReady, prewarmName, prewarmPaperId, prewarmPath]);
 
   const gitMissing = pathStatus?.gitVersion === null;
   const missingLocalFolder =

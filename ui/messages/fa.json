@@ -98,6 +98,8 @@
   "chat_panel_session_title": "عنوان نشست",
   "chat_panel_show_sidebar": "نمایش نوار کناری",
   "chat_panel_started_an_experiment_run": "اجرای آزمایش آغاز شد",
+  "chat_panel_starter_prompts": "پیشنهادهای شروع",
+  "chat_panel_starter_generating": "در حال خواندن پروژه برای پیشنهاد نقطهٔ شروع…",
   "chat_panel_stop": "توقف",
   "chat_panel_submit": "ارسال",
   "chat_panel_task": "وظیفه",

@@ -58,7 +58,9 @@ import {
   forkChatTurn,
   fmtNumber,
   getChatMessages,
+  getProjectStarterPrompts,
   getSkills,
+  type StarterPrompt,
   interruptChat,
   listChatSessions,
   reasoningFor,
@@ -84,6 +86,7 @@ import {
   type QueuedMessage,
   type SkillInfo,
 } from "../api";
+import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   isTurnStatusPart,
@@ -4021,6 +4024,11 @@ function SessionRow({
 
 // --- panel -------------------------------------------------------------------
 
+// The four starter prompts progress understand → gap → baseline → experiment.
+const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
+const STARTER_GRID_CLASS =
+  "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -4984,6 +4992,43 @@ export function ChatPanel({
 
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
+
+  // Starter prompts, keyed by project and harness so a switch never shows
+  // another project's; refetched whenever the empty state returns because the
+  // brief they are generated from moves between sessions.
+  const starterHarness = composerSelection?.harness ?? null;
+  const [starter, setStarter] = useState<{
+    key: string;
+    prompts: StarterPrompt[] | null;
+  } | null>(null);
+  const starterKey = `${projectId}\0${starterHarness ?? ""}`;
+  useEffect(() => {
+    if (threadMounted || !starterHarness) return;
+    let current = true;
+    getProjectStarterPrompts(projectId, starterHarness, getLocale())
+      .then((result) => {
+        if (current) setStarter({ key: starterKey, prompts: result.prompts });
+      })
+      .catch(() => {
+        if (current) setStarter({ key: starterKey, prompts: null });
+      });
+    return () => {
+      current = false;
+    };
+  }, [projectId, starterHarness, starterKey, threadMounted]);
+  const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
+  const starterLoading = starterHarness !== null && starter?.key !== starterKey;
+  const applyStarterPrompt = (prompt: string) => {
+    setDraft(prompt);
+    setSkillMenuDismissed(false);
+    window.requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(prompt.length, prompt.length);
+      setComposerCursor(prompt.length);
+    });
+  };
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = atBottom;
@@ -5757,6 +5802,47 @@ export function ChatPanel({
             <FolderOpen size={19} />
             <span>{projectName}</span>
           </div>
+          {starterLoading && (
+            <div
+              className={STARTER_GRID_CLASS}
+              aria-label={m.chat_panel_starter_generating()}
+              aria-busy="true"
+            >
+              {STARTER_ICONS.map((Icon, index) => (
+                <div
+                  key={index}
+                  className="flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border border-border bg-background px-5 py-4"
+                >
+                  <span className="flex w-full items-center gap-2.5 text-muted">
+                    <Icon size={17} />
+                    <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
+                  </span>
+                  <span className="h-3 w-4/5 rounded bg-surface" />
+                </div>
+              ))}
+            </div>
+          )}
+          {starterPrompts && (
+            <div className={STARTER_GRID_CLASS} aria-label={m.chat_panel_starter_prompts()}>
+              {starterPrompts.map((item, index) => {
+                const Icon = STARTER_ICONS[index];
+                return (
+                  <button
+                    key={index}
+                    type="button"
+                    className="flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border border-border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface"
+                    onClick={() => applyStarterPrompt(item.prompt)}
+                  >
+                    <span className="flex items-center gap-2.5 text-base font-medium text-text">
+                      <Icon size={17} />
+                      {item.title}
+                    </span>
+                    <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
       ) : (
         <div
