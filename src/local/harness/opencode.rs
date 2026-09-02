@@ -22,14 +22,18 @@
 //! fallback for a CLI too old for `--verbose`).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// A key probe is one short reply; a cold CLI start is most of it.
+const KEY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{probe_bin, read_json, HarnessInfo};
+use super::detect::{probe_bin, read_json, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
@@ -70,11 +74,12 @@ impl Harness for OpenCode {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
-        if let Ok(bin) = find_opencode() {
-            info.record_bin(&bin, probe_bin(&bin).await);
+        let bin = find_opencode().ok();
+        if let Some(bin) = &bin {
+            info.record_bin(bin, probe_bin(bin).await);
             // A binary that failed `--version` has no catalog to give either.
             if !info.install_broken {
-                models = opencode_models(&bin).await;
+                models = opencode_models(bin).await;
             }
         }
         let providers = opencode_providers();
@@ -116,14 +121,10 @@ impl Harness for OpenCode {
         // asked to sign in before continuing.
         info.agent_ready = info.ready();
         if info.agent_ready {
-            // A stored key can be revoked or expired: opencode still lists the
-            // provider's models and would fail every turn on them. Probe each
-            // signed-in provider once (per auth.json version) and hide the
-            // models of any that reject its key.
-            let dead = if let Some(bin) = info.bin_path.as_deref().map(PathBuf::from) {
-                dead_providers(&bin, &providers, &models).await
-            } else {
-                Vec::new()
+            // Hide the models of providers whose stored key a live request rejects.
+            let dead = match &bin {
+                Some(bin) => dead_providers(bin, &providers, &models).await,
+                None => Vec::new(),
             };
             if !dead.is_empty() {
                 models.retain(|model| !dead.iter().any(|p| model_provider(&model.id) == p));
@@ -144,6 +145,11 @@ impl Harness for OpenCode {
                     "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
                     dead.join(", ")
                 ));
+            }
+            // Every key rejected and nothing free left: nothing can run a turn.
+            if models.is_empty() {
+                info.agent_ready = false;
+                info.auth_state = HarnessAuthState::NeedsLogin;
             }
             info.models = models;
         } else if info.install_broken {
@@ -262,18 +268,13 @@ fn opencode_providers() -> Vec<String> {
     }
 }
 
-/// Providers whose stored key a live request rejects. One tiny read-only
-/// request per provider on its first catalogued model, remembered per
-/// auth.json version so a paid probe runs once, not once per detection.
-/// Failures that are not an auth rejection (network, timeout, no model)
-/// leave the provider alone.
-async fn dead_providers(
-    bin: &PathBuf,
-    providers: &[String],
-    models: &[super::ModelInfo],
-) -> Vec<String> {
-    static VERDICTS: std::sync::OnceLock<std::sync::Mutex<HashMap<String, bool>>> =
-        std::sync::OnceLock::new();
+/// Providers whose stored key a live request rejects: one tiny read-only
+/// request per provider on its first catalogued model. Verdicts are kept per
+/// auth.json version so a paid probe runs once, not once per detection, and
+/// only when the child actually answered — a timeout or spawn failure is not
+/// remembered, so a dead key is still found on the next detection.
+async fn dead_providers(bin: &Path, providers: &[String], models: &[ModelInfo]) -> Vec<String> {
+    static VERDICTS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
     let verdicts = VERDICTS.get_or_init(Default::default);
     let version = opencode_auth_path()
         .and_then(|p| std::fs::metadata(p).ok())
@@ -282,27 +283,29 @@ async fn dead_providers(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let probes = providers.iter().filter_map(|provider| {
+        let model = models
+            .iter()
+            .find(|model| model_provider(&model.id) == provider)?
+            .id
+            .clone();
         let key = format!("{version}:{provider}");
         let cached = verdicts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
             .copied();
-        let model = models
-            .iter()
-            .find(|model| model_provider(&model.id) == provider)?
-            .id
-            .clone();
         Some(async move {
             let dead = match cached {
                 Some(dead) => dead,
                 None => {
                     let dead = probe_rejects_key(bin, &model).await;
-                    verdicts
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(key, dead);
-                    dead
+                    if let Some(dead) = dead {
+                        verdicts
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, dead);
+                    }
+                    dead.unwrap_or(false)
                 }
             };
             dead.then(|| provider.clone())
@@ -315,43 +318,26 @@ async fn dead_providers(
         .collect()
 }
 
-/// True only when the provider answered with an authentication error; any
-/// other outcome (a reply, a timeout, a network failure) is not a dead key.
-async fn probe_rejects_key(bin: &PathBuf, model: &str) -> bool {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args([
-        "run",
-        "--agent",
-        "plan",
-        "--pure",
-        "--model",
-        model,
+/// `Some(true)` when the provider answered with an authentication error,
+/// `Some(false)` for any other answer, `None` when the child never answered.
+async fn probe_rejects_key(bin: &Path, model: &str) -> Option<bool> {
+    let out = opencode_child(
+        bin,
+        Some(model),
         "Reply with the single word ok",
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped())
-    .kill_on_drop(true)
-    .current_dir(std::env::temp_dir());
-    crate::local::chat::prepare_env(&mut cmd);
-    if let Ok(db) = native_store::prepare_opencode(NativeStore::Isolated) {
-        cmd.env("OPENCODE_DB", db);
-    }
-    cmd.env("NO_COLOR", "1");
-    let Ok(Ok(out)) = tokio::time::timeout(KEY_PROBE_TIMEOUT, cmd.output()).await else {
-        return false;
-    };
+        KEY_PROBE_TIMEOUT,
+    )
+    .await?;
     let text = format!(
         "{}\n{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    !out.status.success() && is_auth_rejection(&text)
+    Some(!out.status.success() && is_auth_rejection(&text))
 }
 
-const KEY_PROBE_TIMEOUT: Duration = Duration::from_secs(25);
-
 /// Phrases the major providers use when a key is invalid, revoked, or expired.
+/// A bare `401` is deliberately absent: line numbers and counts contain it.
 const AUTH_REJECTION_MARKERS: &[&str] = &[
     "api key not valid",
     "invalid api key",
@@ -361,7 +347,11 @@ const AUTH_REJECTION_MARKERS: &[&str] = &[
     "authentication_error",
     "authentication failed",
     "unauthorized",
-    "401",
+    "status 401",
+    "http 401",
+    "code 401",
+    "error 401",
+    "(401)",
     "key has expired",
     "api key expired",
     "no auth credentials",
@@ -404,28 +394,42 @@ async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
 }
 
 /// One headless request on a throwaway `opencode run` child on
-/// `request.model`, else the user's default model. opencode's server no longer retitles parent sessions itself
-/// (only sub-agent child sessions get task-description titles), so titles run
-/// through here like the claude/codex one-shot children. opencode has no
-/// system-prompt flag, so `system` leads the message. Any failure lands on
-/// `None` and the caller keeps its fallback.
-async fn opencode_one_shot(bin: &PathBuf, request: OneShot<'_>) -> Option<String> {
+/// `request.model`, else the user's default model. opencode's server no
+/// longer retitles parent sessions itself (only sub-agent child sessions get
+/// task-description titles), so titles run through here like the
+/// claude/codex one-shot children. opencode has no system-prompt flag, so
+/// `system` leads the message. Any failure lands on `None` and the caller
+/// keeps its fallback.
+async fn opencode_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     let message = format!("{}\n\n{}", request.system, request.prompt);
+    let out = opencode_child(bin, request.model, &message, request.timeout).await?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run one unattended `opencode run` to completion, or `None` if it could
+/// not be started, had no isolated store, or ran past `timeout`.
+///
+/// The message embeds untrusted text, so the child must not be able to act on
+/// it: the built-in read-only `plan` agent denies writes, `--pure` skips
+/// external plugins, and the temp cwd keeps any residual reads away from real
+/// repos. A tool call that still asks for permission just blocks the child
+/// until the timeout kills it.
+async fn opencode_child(
+    bin: &Path,
+    model: Option<&str>,
+    message: &str,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     let mut cmd = tokio::process::Command::new(bin);
-    // The request embeds user-controlled text, so the child must not be able
-    // to act on it: the built-in read-only `plan` agent denies writes,
-    // `--pure` skips external plugins, and the temp cwd keeps any residual
-    // reads away from real repos. A tool call that still asks for permission
-    // just blocks the unattended child until the timeout kills it.
     cmd.args(["run", "--agent", "plan", "--pure"])
-        .args(request.model.iter().flat_map(|model| ["--model", model]))
-        .arg(&message)
+        .args(model.iter().flat_map(|model| ["--model", model]))
+        .arg(message)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        // Outside any repository, so the child doesn't ingest the server cwd's
-        // AGENTS.md into a request that carries its own context.
         .current_dir(std::env::temp_dir());
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env(
@@ -435,14 +439,7 @@ async fn opencode_one_shot(bin: &PathBuf, request: OneShot<'_>) -> Option<String
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(request.timeout, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    tokio::time::timeout(timeout, cmd.output()).await.ok()?.ok()
 }
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
@@ -1799,6 +1796,9 @@ opencode/glm-5
         assert!(is_auth_rejection("{\"type\":\"authentication_error\"}"));
         assert!(is_auth_rejection("HTTP 401 Unauthorized"));
         assert!(!is_auth_rejection("Error: fetch failed (ENOTFOUND)"));
+        assert!(!is_auth_rejection(
+            "    at plugin.ts:401:12\ncontext: 1401 tokens"
+        ));
         assert!(!is_auth_rejection("ok"));
         assert!(!is_auth_rejection("model not found: google/nope"));
     }

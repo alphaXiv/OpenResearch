@@ -559,6 +559,10 @@ impl Harness for ClaudeCode {
         claude_one_shot(&find_claude()?, request).await
     }
 
+    fn one_shot_honours_model(&self) -> bool {
+        false
+    }
+
     fn options(&self) -> HarnessOptions {
         // Claude owns planning as one of its five native permission modes. The
         // permission bridge makes Manual and Accept edits actionable in

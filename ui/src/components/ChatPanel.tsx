@@ -4364,18 +4364,20 @@ export function ChatPanel({
   // Reconciling at the point the composer derives its state covers both, so the
   // displayed value and the value `send` transmits can never be one the model
   // rejects.
+  // A saved model the harness no longer lists (a provider whose key was
+  // rejected, a retired id) falls back to the harness's first model.
+  const composerModel =
+    rawSelection &&
+    activeHarness &&
+    activeHarness.models.length > 0 &&
+    !activeHarness.models.some((model) => model.id === rawSelection.model)
+      ? activeHarness.models[0].id
+      : (rawSelection?.model ?? null);
   const composerSelection: ModelSelection | null = rawSelection && {
     ...rawSelection,
-    serviceTier: reconcileServiceTier(
-      activeHarness,
-      rawSelection.model,
-      rawSelection.serviceTier,
-    ),
-    reasoningLevel: reconcileReasoning(
-      activeHarness,
-      rawSelection.model,
-      rawSelection.reasoningLevel,
-    ),
+    model: composerModel,
+    serviceTier: reconcileServiceTier(activeHarness, composerModel, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(activeHarness, composerModel, rawSelection.reasoningLevel),
   };
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's

@@ -67,6 +67,23 @@ const ENTRYPOINT_PREFIXES: &[&str] = &[
     "eval",
 ];
 
+/// The chat harness that writes the prompts, and the model it runs on.
+#[derive(Debug, Clone)]
+pub struct Agent {
+    pub harness: String,
+    pub model: Option<String>,
+}
+
+impl Agent {
+    /// The model as far as the harness's one-shot cares: dropped for a
+    /// harness that ignores it, so a picker change doesn't regenerate.
+    fn effective_model(&self) -> Option<&str> {
+        let honours =
+            super::harness::chat_harness(&self.harness).is_some_and(|h| h.one_shot_honours_model());
+        honours.then_some(self.model.as_deref()).flatten()
+    }
+}
+
 /// Four prompts about this project, from the cache or a fresh model call.
 /// `None` when the harness can't answer (not installed, timed out, replied
 /// with something that isn't four prompts).
@@ -82,14 +99,6 @@ pub async fn prompts(
     .await
     .ok()?;
     generate(brief, project.paper_id.as_deref(), agent, locale).await
-}
-
-/// The chat harness that writes the prompts and, when the user has picked
-/// one, the model it runs on.
-#[derive(Debug, Clone)]
-pub struct Agent {
-    pub harness: String,
-    pub model: Option<String>,
 }
 
 /// Generate for a project that does not exist yet, from what the new-project
@@ -183,7 +192,7 @@ async fn generate_uncached(
             system: SYSTEM_PROMPT,
             prompt: &prompt,
             quality: OneShotQuality::Standard,
-            model: agent.model.as_deref(),
+            model: agent.effective_model(),
             timeout: GENERATION_TIMEOUT,
         })
         .await?;
@@ -214,7 +223,8 @@ async fn resolve_agent() -> Option<Agent> {
             .find(|info| info.agent_ready)
             .map(|info| Agent {
                 harness: info.id.to_string(),
-                model: None,
+                // What the composer seeds a fresh session with.
+                model: info.models.first().map(|m| m.id.clone()),
             }),
     }
 }
@@ -263,7 +273,7 @@ fn fingerprint(brief: &str, agent: &Agent, locale: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(agent.harness.as_bytes());
     hasher.update(b"\0");
-    hasher.update(agent.model.as_deref().unwrap_or("").as_bytes());
+    hasher.update(agent.effective_model().unwrap_or("").as_bytes());
     hasher.update(b"\0");
     hasher.update(locale.as_bytes());
     hasher.update(b"\0");
@@ -694,9 +704,14 @@ mod tests {
             fingerprint("brief2", &agent("claude-code", None), "en")
         );
         assert_ne!(base, fingerprint("brief", &agent("codex", None), "en"));
-        assert_ne!(
+        // Claude's one-shot ignores the picked model, so neither does the key.
+        assert_eq!(
             base,
             fingerprint("brief", &agent("claude-code", Some("opus")), "en")
+        );
+        assert_ne!(
+            fingerprint("brief", &agent("codex", None), "en"),
+            fingerprint("brief", &agent("codex", Some("gpt-5.5")), "en")
         );
         assert_ne!(
             base,
