@@ -4026,12 +4026,12 @@ function SessionRow({
 
 // The four starter prompts progress understand → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
-// One tint per step so the four boxes read as distinct choices at a glance.
+// One outline colour per step so the four boxes read as distinct choices.
 const STARTER_TONES = [
-  { box: "bg-accent-blue-subtle", icon: "text-accent-blue" },
-  { box: "bg-accent-green-subtle", icon: "text-accent-green" },
-  { box: "bg-accent-amber-subtle", icon: "text-accent-amber" },
-  { box: "bg-primary-subtle", icon: "text-primary" },
+  { box: "border-accent-blue", icon: "text-accent-blue" },
+  { box: "border-accent-green", icon: "text-accent-green" },
+  { box: "border-accent-amber", icon: "text-accent-amber" },
+  { box: "border-primary", icon: "text-primary" },
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
@@ -5820,7 +5820,7 @@ export function ChatPanel({
               {STARTER_ICONS.map((Icon, index) => (
                 <div
                   key={index}
-                  className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border border-border px-5 py-4 ${STARTER_TONES[index].box}`}
+                  className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
                 >
                   <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
                     <Icon size={17} />
@@ -5840,7 +5840,7 @@ export function ChatPanel({
                   <button
                     key={index}
                     type="button"
-                    className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border border-border px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:border-text ${tone.box}`}
+                    className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
                     onClick={() => applyStarterPrompt(item.prompt)}
                   >
                     <span className="flex items-center gap-2.5 text-base font-medium text-text">
