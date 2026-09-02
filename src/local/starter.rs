@@ -67,12 +67,29 @@ const ENTRYPOINT_PREFIXES: &[&str] = &[
     "eval",
 ];
 
+/// The chat harness that writes the prompts, and the model it runs on.
+#[derive(Debug, Clone)]
+pub struct Agent {
+    pub harness: String,
+    pub model: Option<String>,
+}
+
+impl Agent {
+    /// The model as far as the harness's one-shot cares: dropped for a
+    /// harness that ignores it, so a picker change doesn't regenerate.
+    fn effective_model(&self) -> Option<&str> {
+        let honours =
+            super::harness::chat_harness(&self.harness).is_some_and(|h| h.one_shot_honours_model());
+        honours.then_some(self.model.as_deref()).flatten()
+    }
+}
+
 /// Four prompts about this project, from the cache or a fresh model call.
 /// `None` when the harness can't answer (not installed, timed out, replied
 /// with something that isn't four prompts).
 pub async fn prompts(
     project: &LocalProject,
-    harness_id: &str,
+    agent: &Agent,
     locale: &str,
 ) -> Option<Vec<StarterPrompt>> {
     let brief = tokio::task::spawn_blocking({
@@ -81,7 +98,7 @@ pub async fn prompts(
     })
     .await
     .ok()?;
-    generate(brief, project.paper_id.as_deref(), harness_id, locale).await
+    generate(brief, project.paper_id.as_deref(), agent, locale).await
 }
 
 /// Generate for a project that does not exist yet, from what the new-project
@@ -90,7 +107,7 @@ pub async fn prompts(
 /// the cache entry is found by content the moment the empty chat opens.
 pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, locale: String) {
     tokio::spawn(async move {
-        let harness = resolve_harness().await?;
+        let agent = resolve_agent().await?;
         let brief = tokio::task::spawn_blocking({
             let paper_id = paper_id.clone();
             move || match path {
@@ -115,7 +132,7 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
         })
         .await
         .ok()??;
-        generate(brief, paper_id.as_deref(), &harness, &locale).await
+        generate(brief, paper_id.as_deref(), &agent, &locale).await
     });
 }
 
@@ -125,10 +142,10 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
 async fn generate(
     brief: String,
     paper_id: Option<&str>,
-    harness_id: &str,
+    agent: &Agent,
     locale: &str,
 ) -> Option<Vec<StarterPrompt>> {
-    let key = fingerprint(&brief, harness_id, locale);
+    let key = fingerprint(&brief, agent, locale);
     // Serialize per brief: an in-flight pre-warm, the dev double-effect, and a
     // reopened empty state all wait on the first call's cache entry.
     let lock = brief_lock(&key);
@@ -138,7 +155,7 @@ async fn generate(
         Some(Cached::Failed(at)) if at.elapsed() < FAILURE_TTL => return None,
         _ => {}
     }
-    let prompts = generate_uncached(brief, paper_id, harness_id, locale).await;
+    let prompts = generate_uncached(brief, paper_id, agent, locale).await;
     let mut cache = lock_map(cache());
     if cache.len() >= MAX_CACHED {
         cache.clear();
@@ -154,10 +171,10 @@ async fn generate(
 async fn generate_uncached(
     mut brief: String,
     paper_id: Option<&str>,
-    harness_id: &str,
+    agent: &Agent,
     locale: &str,
 ) -> Option<Vec<StarterPrompt>> {
-    let harness = super::harness::chat_harness(harness_id)?;
+    let harness = super::harness::chat_harness(&agent.harness)?;
     if let Some(paper_id) = paper_id {
         if let Some(text) = paper_text(paper_id).await {
             push(&mut brief, "Paper overview", &head(&text, PAPER_CHARS));
@@ -175,32 +192,40 @@ async fn generate_uncached(
             system: SYSTEM_PROMPT,
             prompt: &prompt,
             quality: OneShotQuality::Standard,
+            model: agent.effective_model(),
             timeout: GENERATION_TIMEOUT,
         })
         .await?;
     parse_prompts(&raw)
 }
 
-/// The user's preferred chat harness, else the first one that is ready.
-async fn resolve_harness() -> Option<String> {
+/// The user's preferred chat agent, else the first harness that is ready.
+async fn resolve_agent() -> Option<Agent> {
     let preferred = tokio::task::spawn_blocking(|| {
         crate::store::Store::open()
             .and_then(|store| store.ui_state())
             .ok()
             .and_then(|state| state.preferred_agent)
-            .map(|agent| agent.harness)
+            .map(|agent| Agent {
+                harness: agent.harness,
+                model: agent.model,
+            })
     })
     .await
     .ok()
     .flatten()
-    .filter(|harness| super::harness::is_chat_harness(harness));
+    .filter(|agent| super::harness::is_chat_harness(&agent.harness));
     match preferred {
-        Some(harness) => Some(harness),
+        Some(agent) => Some(agent),
         None => super::harness::detect_harnesses()
             .await
             .into_iter()
             .find(|info| info.agent_ready)
-            .map(|info| info.id.to_string()),
+            .map(|info| Agent {
+                harness: info.id.to_string(),
+                // What the composer seeds a fresh session with.
+                model: info.models.first().map(|m| m.id.clone()),
+            }),
     }
 }
 
@@ -209,8 +234,8 @@ async fn resolve_harness() -> Option<String> {
 /// the on-demand path to run.
 pub fn warm(project: LocalProject, locale: String) {
     tokio::spawn(async move {
-        let harness = resolve_harness().await?;
-        prompts(&project, &harness, &locale).await
+        let agent = resolve_agent().await?;
+        prompts(&project, &agent, &locale).await
     });
 }
 
@@ -244,9 +269,11 @@ fn brief_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     locks.entry(key.to_string()).or_default().clone()
 }
 
-fn fingerprint(brief: &str, harness_id: &str, locale: &str) -> String {
+fn fingerprint(brief: &str, agent: &Agent, locale: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(harness_id.as_bytes());
+    hasher.update(agent.harness.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(agent.effective_model().unwrap_or("").as_bytes());
     hasher.update(b"\0");
     hasher.update(locale.as_bytes());
     hasher.update(b"\0");
@@ -666,11 +693,33 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_changes_with_brief_harness_and_locale() {
-        let base = fingerprint("brief", "claude-code", "en");
-        assert_ne!(base, fingerprint("brief2", "claude-code", "en"));
-        assert_ne!(base, fingerprint("brief", "codex", "en"));
-        assert_ne!(base, fingerprint("brief", "claude-code", "fa"));
-        assert_eq!(base, fingerprint("brief", "claude-code", "en"));
+    fn fingerprint_changes_with_brief_agent_and_locale() {
+        let agent = |harness: &str, model: Option<&str>| Agent {
+            harness: harness.into(),
+            model: model.map(String::from),
+        };
+        let base = fingerprint("brief", &agent("claude-code", None), "en");
+        assert_ne!(
+            base,
+            fingerprint("brief2", &agent("claude-code", None), "en")
+        );
+        assert_ne!(base, fingerprint("brief", &agent("codex", None), "en"));
+        // Claude's one-shot ignores the picked model, so neither does the key.
+        assert_eq!(
+            base,
+            fingerprint("brief", &agent("claude-code", Some("opus")), "en")
+        );
+        assert_ne!(
+            fingerprint("brief", &agent("codex", None), "en"),
+            fingerprint("brief", &agent("codex", Some("gpt-5.5")), "en")
+        );
+        assert_ne!(
+            base,
+            fingerprint("brief", &agent("claude-code", None), "fa")
+        );
+        assert_eq!(
+            base,
+            fingerprint("brief", &agent("claude-code", None), "en")
+        );
     }
 }

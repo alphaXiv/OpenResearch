@@ -4026,6 +4026,13 @@ function SessionRow({
 
 // The four starter prompts progress understand → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
+// One outline colour per step so the four boxes read as distinct choices.
+const STARTER_TONES = [
+  { box: "border-accent-blue/45", icon: "text-accent-blue" },
+  { box: "border-accent-green/45", icon: "text-accent-green" },
+  { box: "border-accent-amber/45", icon: "text-accent-amber" },
+  { box: "border-primary/45", icon: "text-primary" },
+];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
@@ -4357,18 +4364,20 @@ export function ChatPanel({
   // Reconciling at the point the composer derives its state covers both, so the
   // displayed value and the value `send` transmits can never be one the model
   // rejects.
+  // A saved model the harness no longer lists (a provider whose key was
+  // rejected, a retired id) falls back to the harness's first model.
+  const composerModel =
+    rawSelection &&
+    activeHarness &&
+    activeHarness.models.length > 0 &&
+    !activeHarness.models.some((model) => model.id === rawSelection.model)
+      ? activeHarness.models[0].id
+      : (rawSelection?.model ?? null);
   const composerSelection: ModelSelection | null = rawSelection && {
     ...rawSelection,
-    serviceTier: reconcileServiceTier(
-      activeHarness,
-      rawSelection.model,
-      rawSelection.serviceTier,
-    ),
-    reasoningLevel: reconcileReasoning(
-      activeHarness,
-      rawSelection.model,
-      rawSelection.reasoningLevel,
-    ),
+    model: composerModel,
+    serviceTier: reconcileServiceTier(activeHarness, composerModel, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(activeHarness, composerModel, rawSelection.reasoningLevel),
   };
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
@@ -4995,16 +5004,17 @@ export function ChatPanel({
 
   // Keyed by project+harness so a switch never shows another project's prompts.
   const starterHarness = composerSelection?.harness ?? null;
+  const starterModel = composerSelection?.model ?? null;
   const [starter, setStarter] = useState<{
     key: string;
     prompts: StarterPrompt[] | null;
   } | null>(null);
-  const starterKey = `${projectId}\0${starterHarness ?? ""}`;
+  const starterKey = `${projectId}\0${starterHarness ?? ""}\0${starterModel ?? ""}`;
   const starterVisible = mainView === "chat" && !threadMounted && !historyLoading;
   useEffect(() => {
     if (!starterVisible || !starterHarness) return;
     let current = true;
-    getProjectStarterPrompts(projectId, starterHarness, getLocale())
+    getProjectStarterPrompts(projectId, starterHarness, starterModel, getLocale())
       .then((result) => {
         if (current) setStarter({ key: starterKey, prompts: result.prompts });
       })
@@ -5014,7 +5024,7 @@ export function ChatPanel({
     return () => {
       current = false;
     };
-  }, [projectId, starterHarness, starterKey, starterVisible]);
+  }, [projectId, starterHarness, starterModel, starterKey, starterVisible]);
   const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
   const starterLoading = starterHarness !== null && starter?.key !== starterKey;
   const applyStarterPrompt = (prompt: string) => {
@@ -5812,9 +5822,9 @@ export function ChatPanel({
               {STARTER_ICONS.map((Icon, index) => (
                 <div
                   key={index}
-                  className="flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border border-border bg-background px-5 py-4"
+                  className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
                 >
-                  <span className="flex w-full items-center gap-2.5 text-muted">
+                  <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
                     <Icon size={17} />
                     <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
                   </span>
@@ -5827,15 +5837,16 @@ export function ChatPanel({
             <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
               {starterPrompts.map((item, index) => {
                 const Icon = STARTER_ICONS[index];
+                const tone = STARTER_TONES[index];
                 return (
                   <button
                     key={index}
                     type="button"
-                    className="flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border border-border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface"
+                    className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
                     onClick={() => applyStarterPrompt(item.prompt)}
                   >
                     <span className="flex items-center gap-2.5 text-base font-medium text-text">
-                      <Icon size={17} />
+                      <Icon size={17} className={tone.icon} />
                       {item.title}
                     </span>
                     <span className="w-full truncate text-sm text-subtext">{item.prompt}</span>

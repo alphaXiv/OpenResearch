@@ -315,6 +315,12 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// Whether `one_shot` runs on `OneShot::model`; callers caching by model
+    /// should not vary the key for a harness that ignores it.
+    fn one_shot_honours_model(&self) -> bool {
+        true
+    }
+
     /// Decide how an answered prompt flows back, and (for inline harnesses)
     /// deliver it. See [`ResumeAction`] for the two shapes. This runs *before*
     /// `ChatHost::respond` marks the card resolved, so returning an `Err` (e.g.
@@ -488,6 +494,10 @@ pub struct OneShot<'a> {
     pub system: &'a str,
     pub prompt: &'a str,
     pub quality: OneShotQuality,
+    /// The model the user has picked for chat, in the harness's own id form.
+    /// Codex and OpenCode run on it (their configured default may point at a
+    /// provider with no working key); Claude keeps its per-quality alias.
+    pub model: Option<&'a str>,
     pub timeout: Duration,
 }
 

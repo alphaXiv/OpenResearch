@@ -394,9 +394,8 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
 /// *not* the session's own thread — a request there would pollute the real
 /// conversation history.
 ///
-/// No `-m`: the user's default model is the pin, and the session's own
-/// (possibly expensive) model selection is irrelevant here; `Cheap` drops
-/// reasoning effort to `low`. `--ephemeral` keeps the throwaway thread out of
+/// Runs on `request.model` when given, else the user's default model;
+/// `Cheap` drops reasoning effort to `low`. `--ephemeral` keeps the throwaway thread out of
 /// every session store. Codex has no system-prompt flag, so `system` leads the
 /// message.
 ///
@@ -414,6 +413,7 @@ async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
             .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
+            .args(request.model.iter().flat_map(|model| ["-m", model]))
             // A one-shot needs no MCP: booting the user's servers for a
             // single request would cost far more than the request itself.
             .args(["-c", "mcp_servers={}"])

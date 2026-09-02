@@ -29,6 +29,7 @@ pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
         system: "You generate short chat titles.",
         prompt,
         quality: super::OneShotQuality::Cheap,
+        model: None,
         timeout: TITLE_TIMEOUT,
     }
 }

@@ -2028,6 +2028,8 @@ struct StarterPromptsQuery {
     /// Chat harness whose one-shot child writes the prompts; the composer's
     /// current pick. Unknown or missing = no prompts.
     harness: Option<String>,
+    /// The composer's model, so the child runs on what the chat will use.
+    model: Option<String>,
     /// UI locale the prompts are written in.
     locale: Option<String>,
 }
@@ -2058,7 +2060,16 @@ async fn project_starter_prompts(
     let prompts = match harness {
         Some(harness) if experiment_count == 0 => {
             let locale = q.locale.as_deref().unwrap_or("en");
-            local::starter::prompts(&project, harness, locale).await
+            let agent = local::starter::Agent {
+                harness: harness.to_string(),
+                model: q
+                    .model
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|m| !m.is_empty())
+                    .map(String::from),
+            };
+            local::starter::prompts(&project, &agent, locale).await
         }
         _ => None,
     };
