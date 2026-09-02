@@ -1,13 +1,13 @@
 //! Starter prompts for a project's empty chat: a brief of what the project
 //! actually contains — paper, README, code, manifests — handed to a headless
-//! harness child that writes four prompts about *this*
-//! project. Results are cached per brief fingerprint so reopening the empty
-//! state doesn't pay for another model call.
+//! harness child that writes four prompts about *this* project. Results are
+//! cached per brief fingerprint so reopening the empty state doesn't pay for
+//! another model call.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,13 @@ const MANIFEST_CHARS: usize = 1200;
 const PAPER_FETCH_TIMEOUT: Duration = Duration::from_secs(12);
 /// A cold CLI start plus one reasoning-model round trip over a long brief.
 const GENERATION_TIMEOUT: Duration = Duration::from_secs(90);
+/// A failed generation (harness missing, not signed in, garbage reply) is
+/// remembered this long so re-entering the empty state fails fast.
+const FAILURE_TTL: Duration = Duration::from_secs(60);
+/// Model children running at once, across on-demand, warm, and pre-warm.
+const MAX_CONCURRENT: usize = 2;
+const TITLE_MAX_CHARS: usize = 60;
+const PROMPT_MAX_CHARS: usize = 600;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StarterPrompt {
@@ -68,16 +75,21 @@ pub async fn prompts(
     harness_id: &str,
     locale: &str,
 ) -> Option<Vec<StarterPrompt>> {
-    let brief = brief(project);
+    let brief = tokio::task::spawn_blocking({
+        let project = project.clone();
+        move || brief(&project)
+    })
+    .await
+    .ok()?;
     generate(brief, project.paper_id.as_deref(), harness_id, locale).await
 }
 
 /// Generate for a project that does not exist yet, from what the new-project
-/// form already knows: the name, and a paper id or an existing folder. The
-/// brief is built exactly as it will be once the project is created, so the
-/// cache entry is found by content the moment the empty chat opens. A paper
-/// project that also clones a repository ends up with a different brief and
-/// simply regenerates after creation.
+/// form already knows: the name, and a paper id or an existing repository.
+/// The brief is built exactly as it will be once the project is created, so
+/// the cache entry is found by content the moment the empty chat opens. A
+/// brief that ends up differing (the form only sends cases that match) just
+/// regenerates after creation.
 pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, locale: String) {
     tokio::spawn(async move {
         let harness = resolve_harness().await?;
@@ -85,19 +97,27 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
             let paper_id = paper_id.clone();
             move || match path {
                 Some(path) => {
-                    let repo = Path::new(&path);
-                    let files = list_files(repo);
-                    brief_parts(&name, None, paper_id.as_deref(), repo, &files)
+                    // Creation registers the enclosing repository, not the
+                    // typed folder, so brief the same root.
+                    let repo = super::git::repository_root(Path::new(&path)).ok()?;
+                    let files = list_files(&repo);
+                    Some(brief_parts(&name, None, paper_id.as_deref(), &repo, &files))
                 }
                 None => {
                     let files: Vec<String> =
                         paper_id.iter().map(|_| PAPER_PDF.to_string()).collect();
-                    brief_parts(&name, None, paper_id.as_deref(), Path::new(""), &files)
+                    Some(brief_parts(
+                        &name,
+                        None,
+                        paper_id.as_deref(),
+                        Path::new(""),
+                        &files,
+                    ))
                 }
             }
         })
         .await
-        .ok()?;
+        .ok()??;
         generate(brief, paper_id.as_deref(), &harness, &locale).await
     });
 }
@@ -106,7 +126,7 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
 /// project created after it. The paper text (a network fetch) is fixed for a
 /// paper id, so it is fetched only on a miss and never decides staleness.
 async fn generate(
-    mut brief: String,
+    brief: String,
     paper_id: Option<&str>,
     harness_id: &str,
     locale: &str,
@@ -116,9 +136,30 @@ async fn generate(
     // reopened empty state all wait on the first call's cache entry.
     let lock = brief_lock(&key);
     let _guard = lock.lock().await;
-    if let Some(cached) = lock_map(cache()).get(&key) {
-        return Some(cached.clone());
+    match lock_map(cache()).get(&key) {
+        Some(Cached::Prompts(prompts)) => return Some(prompts.clone()),
+        Some(Cached::Failed(at)) if at.elapsed() < FAILURE_TTL => return None,
+        _ => {}
     }
+    let prompts = generate_uncached(brief, paper_id, harness_id, locale).await;
+    let mut cache = lock_map(cache());
+    if cache.len() >= MAX_CACHED {
+        cache.clear();
+    }
+    let entry = match &prompts {
+        Some(prompts) => Cached::Prompts(prompts.clone()),
+        None => Cached::Failed(Instant::now()),
+    };
+    cache.insert(key, entry);
+    prompts
+}
+
+async fn generate_uncached(
+    mut brief: String,
+    paper_id: Option<&str>,
+    harness_id: &str,
+    locale: &str,
+) -> Option<Vec<StarterPrompt>> {
     let harness = super::harness::chat_harness(harness_id)?;
     if let Some(paper_id) = paper_id {
         if let Some(text) = paper_text(paper_id).await {
@@ -126,6 +167,12 @@ async fn generate(
         }
     }
     let prompt = generation_prompt(&brief, locale);
+    static SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    let _slot = SLOTS
+        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT))
+        .acquire()
+        .await
+        .ok()?;
     let raw = harness
         .one_shot(OneShot {
             system: SYSTEM_PROMPT,
@@ -134,13 +181,7 @@ async fn generate(
             timeout: GENERATION_TIMEOUT,
         })
         .await?;
-    let prompts = parse_prompts(&raw)?;
-    let mut cache = lock_map(cache());
-    if cache.len() >= MAX_CACHED {
-        cache.clear();
-    }
-    cache.insert(key, prompts.clone());
-    Some(prompts)
+    parse_prompts(&raw)
 }
 
 /// The user's preferred chat harness, else the first one that is ready.
@@ -176,10 +217,15 @@ pub fn warm(project: LocalProject, locale: String) {
     });
 }
 
-/// Fingerprint → prompts. Small and rebuilt on restart; cleared wholesale
+/// Fingerprint → outcome. Small and rebuilt on restart; cleared wholesale
 /// rather than evicted, since a hit is only ever the current brief anyway.
-type Cache = Mutex<HashMap<String, Vec<StarterPrompt>>>;
+type Cache = Mutex<HashMap<String, Cached>>;
 const MAX_CACHED: usize = 64;
+
+enum Cached {
+    Prompts(Vec<StarterPrompt>),
+    Failed(Instant),
+}
 
 fn cache() -> &'static Cache {
     static CACHE: OnceLock<Cache> = OnceLock::new();
@@ -195,6 +241,7 @@ fn brief_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = OnceLock::new();
     let mut locks = lock_map(LOCKS.get_or_init(Default::default));
     if locks.len() >= MAX_CACHED {
+        // Only an in-flight caller holds a second reference to its entry.
         locks.retain(|_, lock| Arc::strong_count(lock) > 1);
     }
     locks.entry(key.to_string()).or_default().clone()
@@ -248,13 +295,24 @@ fn parse_prompts(raw: &str) -> Option<Vec<StarterPrompt>> {
     let prompts: Vec<StarterPrompt> = parsed
         .into_iter()
         .map(|p| StarterPrompt {
-            title: p.title.split_whitespace().collect::<Vec<_>>().join(" "),
-            prompt: p.prompt.trim().to_string(),
+            title: clip(
+                &p.title.split_whitespace().collect::<Vec<_>>().join(" "),
+                TITLE_MAX_CHARS,
+            ),
+            prompt: clip(p.prompt.trim(), PROMPT_MAX_CHARS),
         })
         .filter(|p| !p.title.is_empty() && !p.prompt.is_empty())
         .take(4)
         .collect();
     (prompts.len() == 4).then_some(prompts)
+}
+
+fn clip(text: &str, chars: usize) -> String {
+    text.chars()
+        .take(chars)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// Everything local the model gets to read about the project, in a stable
@@ -390,6 +448,7 @@ fn list_files(repo: &Path) -> Vec<String> {
     };
     files.sort();
     files.dedup();
+    files.truncate(MAX_LISTED_FILES);
     files
 }
 
@@ -564,6 +623,14 @@ mod tests {
         assert_eq!(prompts.len(), 4);
         assert_eq!(prompts[0].title, "Read the paper");
         assert_eq!(prompts[0].prompt, "Summarize SWA.");
+        let long = format!(
+            "[{{\"title\": \"{}\", \"prompt\": \"{}\"}}, {{\"title\": \"b\", \"prompt\": \"2\"}}, {{\"title\": \"c\", \"prompt\": \"3\"}}, {{\"title\": \"d\", \"prompt\": \"4\"}}]",
+            "t".repeat(100),
+            "p".repeat(1000)
+        );
+        let clipped = parse_prompts(&long).unwrap();
+        assert_eq!(clipped[0].title.chars().count(), TITLE_MAX_CHARS);
+        assert_eq!(clipped[0].prompt.chars().count(), PROMPT_MAX_CHARS);
         assert_eq!(
             parse_prompts("[{\"title\": \"a\", \"prompt\": \"1\"}]"),
             None

@@ -333,17 +333,21 @@ export function NewProjectForm({
 
   // Start the starter-prompt model call while the user is still on the form;
   // debounced so typing a name is one request.
+  // Only cases whose brief will match the created project: a paper that also
+  // clones a repository, or a folder git will initialize, would differ.
   const prewarmName = name.trim();
-  const prewarmPaperId = mode === "paper" ? (paper?.paperId ?? null) : null;
+  const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl ? paper.paperId : null;
   const prewarmPath =
-    mode === "folder" && pathStatus?.directory ? (pathStatus.resolvedPath ?? null) : null;
+    mode === "folder" && pathStatus?.gitState && pathStatus.gitState !== "notRepository"
+      ? (pathStatus.resolvedPath ?? null)
+      : null;
   const prewarmReady =
     prewarmName !== "" &&
     (mode === "blank" || prewarmPaperId !== null || prewarmPath !== null);
   useEffect(() => {
     if (!prewarmReady) return;
     const timer = window.setTimeout(() => {
-      void prewarmStarterPrompts({
+      prewarmStarterPrompts({
         name: prewarmName,
         paperId: prewarmPaperId ?? undefined,
         path: prewarmPath ?? undefined,

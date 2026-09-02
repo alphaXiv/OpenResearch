@@ -555,12 +555,6 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        let prompt = super::title::title_prompt(first_message);
-        let raw = claude_one_shot(&find_claude()?, super::title::title_request(&prompt)).await?;
-        super::title::sanitize_title(&raw)
-    }
-
     async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
         claude_one_shot(&find_claude()?, request).await
     }

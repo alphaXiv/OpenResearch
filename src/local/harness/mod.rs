@@ -300,14 +300,17 @@ pub trait Harness: Send + Sync {
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.
-    async fn generate_title(&self, _first_message: &str) -> Option<String> {
-        None
+    async fn generate_title(&self, first_message: &str) -> Option<String> {
+        let prompt = title::title_prompt(first_message);
+        let raw = self.one_shot(title::title_request(&prompt)).await?;
+        title::sanitize_title(&raw)
     }
 
-    /// Run one headless, tool-less request on a throwaway child at the
-    /// requested [`OneShotQuality`] and return the model's reply verbatim.
-    /// Nothing is recorded in the harness's own session store. `None` = can't
-    /// or failed.
+    /// Run one headless request on a throwaway child at the requested
+    /// [`OneShotQuality`] and return the model's reply verbatim. The child
+    /// cannot write or reach MCP servers (tools are disabled where the CLI
+    /// allows), and nothing is recorded in the harness's own session store.
+    /// `None` = can't or failed.
     async fn one_shot(&self, _request: OneShot<'_>) -> Option<String> {
         None
     }
@@ -489,8 +492,9 @@ pub struct OneShot<'a> {
 }
 
 /// How much model to spend on a one-shot: `Cheap` is the smallest/fastest
-/// configuration (titles), `Standard` the harness's regular model at modest
-/// effort (anything that has to read and reason about a project).
+/// configuration (titles), `Standard` a mid-tier model at modest effort
+/// (anything that has to read and reason about a project). Each harness maps
+/// these onto its own flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OneShotQuality {
     Cheap,

@@ -4994,16 +4994,17 @@ export function ChatPanel({
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
 
   // Starter prompts, keyed by project and harness so a switch never shows
-  // another project's; refetched whenever the empty state returns because the
-  // brief they are generated from moves between sessions.
+  // another project's; refetched each time the empty state returns because
+  // the project files the brief reads may have changed.
   const starterHarness = composerSelection?.harness ?? null;
   const [starter, setStarter] = useState<{
     key: string;
     prompts: StarterPrompt[] | null;
   } | null>(null);
   const starterKey = `${projectId}\0${starterHarness ?? ""}`;
+  const starterVisible = mainView === "chat" && !threadMounted && !historyLoading;
   useEffect(() => {
-    if (threadMounted || !starterHarness) return;
+    if (!starterVisible || !starterHarness) return;
     let current = true;
     getProjectStarterPrompts(projectId, starterHarness, getLocale())
       .then((result) => {
@@ -5015,7 +5016,7 @@ export function ChatPanel({
     return () => {
       current = false;
     };
-  }, [projectId, starterHarness, starterKey, threadMounted]);
+  }, [projectId, starterHarness, starterKey, starterVisible]);
   const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
   const starterLoading = starterHarness !== null && starter?.key !== starterKey;
   const applyStarterPrompt = (prompt: string) => {
@@ -5805,6 +5806,8 @@ export function ChatPanel({
           {starterLoading && (
             <div
               className={STARTER_GRID_CLASS}
+              role="status"
+              aria-live="polite"
               aria-label={m.chat_panel_starter_generating()}
               aria-busy="true"
             >
@@ -5823,7 +5826,7 @@ export function ChatPanel({
             </div>
           )}
           {starterPrompts && (
-            <div className={STARTER_GRID_CLASS} aria-label={m.chat_panel_starter_prompts()}>
+            <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
               {starterPrompts.map((item, index) => {
                 const Icon = STARTER_ICONS[index];
                 return (

@@ -63,13 +63,6 @@ impl Harness for OpenCode {
         true
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        let prompt = super::title::title_prompt(first_message);
-        let raw =
-            opencode_one_shot(&find_opencode().ok()?, super::title::title_request(&prompt)).await?;
-        super::title::sanitize_title(&raw)
-    }
-
     async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
         opencode_one_shot(&find_opencode().ok()?, request).await
     }
