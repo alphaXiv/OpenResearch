@@ -1,4 +1,6 @@
 /target
+# Built macOS .app bundle (scripts/build-macos-app.sh output).
+/dist
 *.log
 .DS_Store
 Claude.local.md

@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "run": {
+    "command": "bash runs/runcpu.sh && python -m scripts.chat_cli -p \"What is the capital of France?\"",
+    "device": "mps",
+    "status": "completed",
+    "baseDirectory": "$ORX_RUN_DIR/repo/.cache/nanochat"
+  },
+  "files": [
+    {
+      "path": "base_checkpoints/d6/meta_005000.json",
+      "kind": "checkpoint_metadata",
+      "bytes": 1334,
+      "sha256": "d06eaa2610b3d415b79dbdbe0e6ae7c6378e5f0e4234b3639d0479bcf4083516",
+      "bundledAt": "evidence/checkpoints/base/meta_005000.json"
+    },
+    {
+      "path": "base_checkpoints/d6/model_005000.pt",
+      "kind": "model_checkpoint",
+      "bytes": 294145379,
+      "sha256": "a334c64d8b4a16f087e179072092f5d1b6c94a55e279bc2fdab9d08655f7fda2",
+      "bundledAt": null
+    },
+    {
+      "path": "base_checkpoints/d6/optim_005000_rank0.pt",
+      "kind": "optimizer_checkpoint",
+      "bytes": 545905413,
+      "sha256": "6cff47493cf87deaa4d107521bef081a2e8a7ec965d9fbfd50310152905d8d8e",
+      "bundledAt": null
+    },
+    {
+      "path": "chatsft_checkpoints/d6/meta_001499.json",
+      "kind": "checkpoint_metadata",
+      "bytes": 838,
+      "sha256": "0c94c4707e926e07b9d67e98548280aed2eb5fb9f81d279ed218a6186ff1c7fa",
+      "bundledAt": "evidence/checkpoints/sft/meta_001499.json"
+    },
+    {
+      "path": "chatsft_checkpoints/d6/model_001499.pt",
+      "kind": "model_checkpoint",
+      "bytes": 294145379,
+      "sha256": "96570ecb334bc9fd392d5b84c920859e8e69e52071a3357b5293ad45fe7d39f1",
+      "bundledAt": null
+    },
+    {
+      "path": "chatsft_checkpoints/d6/optim_001499_rank0.pt",
+      "kind": "optimizer_checkpoint",
+      "bytes": 545905413,
+      "sha256": "697349059277d209fc6b7cb78ff615651c5a0aed2e74916117d68974d2522834",
+      "bundledAt": null
+    },
+    {
+      "path": "tokenizer/token_bytes.pt",
+      "kind": "tokenizer",
+      "bytes": 132649,
+      "sha256": "409e71bd5a03d0974001eae103c9e880097b972668bbd9b646856c63773b0baf",
+      "bundledAt": "evidence/tokenizer/token_bytes.pt"
+    },
+    {
+      "path": "tokenizer/tokenizer.pkl",
+      "kind": "tokenizer",
+      "bytes": 412105,
+      "sha256": "387cfc082b0bee45467774fd6f1310a922ad170886a58ccddcb468f275e06a6c",
+      "bundledAt": "evidence/tokenizer/tokenizer.pkl"
+    }
+  ],
+  "omittedDirectories": [
+    {
+      "path": "base_data_climbmix",
+      "files": 9,
+      "bytes": 825645585
+    },
+    {
+      "path": "task_data",
+      "files": 24,
+      "bytes": 1024743258
+    },
+    {
+      "path": "eval_bundle",
+      "files": 77,
+      "bytes": 168977052
+    }
+  ]
+}

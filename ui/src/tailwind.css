@@ -1,0 +1,13 @@
+@layer theme, base, vendor, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "./theme.css";
+@import "./base.css";
+@import "@xyflow/react/dist/style.css" layer(vendor);
+@import "@xterm/xterm/css/xterm.css" layer(vendor);
+/* Must match rehype-katex's bundled version; skew breaks \boxed. */
+@import "katex/dist/katex.min.css" layer(vendor);
+@import "react-diff-view/style/index.css" layer(vendor);
+@import "./app.css";
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "../index.html";
+@source ".";

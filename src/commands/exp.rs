@@ -1,18 +1,12 @@
 //! The `exp` command group: operate on a single experiment node by id.
 //!
 //!   orx exp status <expId>            inspect status, run command, latest run
-//!   orx exp cmd    <expId> [--set …]  view or set the run command
-//!   orx exp run    <expId> …          launch a run on new or existing compute
+//!   orx exp run    <expId> …          launch a local orx-supervised run
 //!   orx exp cancel <expId>            cancel the in-flight run
+//!   orx exp wake   <expId>            resume this agent when the run succeeds or fails
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
-//! *experiment* id (from `orx experiments <projectId>`).
-//!
-//! This module is now thin: it parses args and resolves the id to a
-//! `ControlPlane`, then calls one verb. The per-plane bodies live in
-//! `crate::plane::{server_plane, local_plane}`. Only the three job-launch helpers
-//! (`hf_clone_script` / `default_hf_image` / `spawn_detached_supervise`) stay
-//! here — every `src/local/*` backend imports them as `crate::commands::exp::*`.
+//! *experiment* id from `orx project view <projectId>`.
 
 use std::time::{Duration, Instant};
 
@@ -22,22 +16,16 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
-    // Local-mode detection first: an id in `local_experiments` takes the local
-    // path, and credentials are only required on the server path (a local-only
-    // user may never have logged in). The plane resolver encodes that.
     let store = Store::open()?;
     match args.command {
         ExpCommand::Status { exp_id } => {
+            crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
                 .experiment_status()
                 .await
         }
-        ExpCommand::Cmd { exp_id, set } => {
-            resolve_experiment(store, &exp_id)?
-                .set_experiment_command(set)
-                .await
-        }
         ExpCommand::Desc { exp_id, set, stdin } => {
+            crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
                 .experiment_desc(set, stdin)
                 .await
@@ -49,6 +37,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
                 .await
         }
         ExpCommand::Cancel { exp_id } => resolve_experiment(store, &exp_id)?.cancel().await,
+        ExpCommand::Wake { exp_id } => wake(&store, &exp_id),
         ExpCommand::Wait {
             exp_id,
             project,
@@ -56,6 +45,39 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             interval,
         } => wait(store, exp_id, project, timeout, interval).await,
     }
+}
+
+fn wake(store: &Store, exp_id: &str) -> Result<()> {
+    if !crate::local::chat::in_local_session() {
+        return Err(anyhow!(
+            "`orx exp wake` is only available inside a local `orx up` agent session."
+        ));
+    }
+    let session_id = crate::local::chat::launching_chat_session()
+        .ok_or_else(|| anyhow!("This agent session has no chat id to wake."))?;
+    if store.get_chat_session(&session_id)?.is_none() {
+        return Err(anyhow!("The current chat session no longer exists."));
+    }
+    let run = store
+        .latest_run_for_experiment(exp_id)?
+        .ok_or_else(|| anyhow!("Experiment {exp_id} has no runs to wake for."))?;
+    if run.status == "cancelled" {
+        store.remove_run_wakeup(&run.id, &session_id)?;
+        println!("Run {} was cancelled; no wake-up scheduled.", run.id);
+        return Ok(());
+    }
+    match store.register_run_wakeup(&run.id, &session_id)? {
+        crate::store::RunWakeupRegistration::Scheduled => {
+            println!("Wake-up scheduled for run {}.", run.id);
+        }
+        crate::store::RunWakeupRegistration::AlreadyPending => {
+            println!("Wake-up already scheduled for run {}.", run.id);
+        }
+        crate::store::RunWakeupRegistration::AlreadyDelivered => {
+            println!("Run {} already delivered its wake-up.", run.id);
+        }
+    }
+    Ok(())
 }
 
 /// `orx exp wait …` — block on run state, for agents driving a research loop.
@@ -66,7 +88,7 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
 ///
 /// Polls every `--interval` seconds (default 5), gives up after `--timeout`
 /// seconds (default 1800) with a non-zero exit so callers can branch on it. The
-/// per-plane polling loops are `ControlPlane::{wait_experiment, wait_project}`.
+/// Polling reads only the local run store.
 async fn wait(
     store: Store,
     exp_id: Option<String>,
@@ -98,34 +120,6 @@ async fn wait(
 
 // --- job-launch helpers shared with the src/local/* backends -----------------
 
-/// Fetch one recorded commit and run the fixed command. GITHUB_TOKEN
-/// (passed as a job secret when present locally) authenticates private repos
-/// through an ephemeral credential helper; the URL and git config stay tokenless.
-pub(crate) fn hf_clone_script(git_ref: &str, owner: &str, repo: &str, cmd: &str) -> String {
-    let url = shell_quote(&format!("https://github.com/{owner}/{repo}.git"));
-    format!(
-        "set -eo pipefail; command -v git >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq git); \
-         git init -q repo; cd repo; \
-         git remote add origin {url}; \
-         git -c credential.helper= -c credential.helper='!f() {{ echo username=x-access-token; echo \"password=$GITHUB_TOKEN\"; }}; f' \
-         fetch --depth 1 origin {git_ref}; git checkout --detach FETCH_HEAD; {cmd}",
-        git_ref = shell_quote(git_ref),
-    )
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-pub(crate) fn local_clone_script(repo_path: &str, commit_sha: &str, cmd: &str) -> String {
-    format!(
-        "set -eo pipefail; git clone --no-checkout --local {} repo; cd repo; git checkout --detach {}; {}",
-        shell_quote(repo_path),
-        shell_quote(commit_sha),
-        cmd
-    )
-}
-
 /// Default docker image per flavor family: plain python for CPU flavors, a
 /// CUDA-ready pytorch image for GPU flavors. Override with --image.
 pub(crate) fn default_hf_image(flavor: &str) -> String {
@@ -151,6 +145,15 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // The supervisor re-resolves its directories from its own environment, so
+    // without this a run launched from the macOS app is tracked in a different
+    // store than the app is reading.
+    if let Some(path) = crate::local::shell_env::search_path() {
+        cmd.env("PATH", path);
+    }
+    crate::local::shell_env::export_to(|key, value| {
+        cmd.env(key, value);
+    });
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -307,19 +310,5 @@ mod tests {
         assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
         drop(store);
         std::fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-#[cfg(test)]
-mod clone_script_tests {
-    use super::*;
-
-    #[test]
-    fn remote_clone_fetches_recorded_commit_detached() {
-        let script = hf_clone_script("abc123", "owner", "repo", "python run.py");
-        assert!(script.contains("fetch --depth 1 origin 'abc123'"));
-        assert!(script.contains("checkout --detach FETCH_HEAD"));
-        assert!(!script.contains("--branch"));
-        assert!(!script.contains("x-access-token:${GITHUB_TOKEN}@"));
     }
 }

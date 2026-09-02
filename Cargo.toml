@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.1.94"
+version = "0.1.118"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/openresearch-cli"
@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
+tokio-util = { version = "0.7", features = ["io"] }
 # rustls instead of the default native-tls: avoids an OpenSSL dependency so the
 # static musl Linux builds link cleanly (native-tls/openssl won't build for musl).
 reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "http2", "rustls-tls", "stream"] }
@@ -29,18 +30,33 @@ uuid = { version = "1", features = ["v4"] }
 semver = "1"
 fd-lock = "4"
 base64 = "0.22"
+# Extract user-uploaded skills shipped as a .zip of a SKILL.md folder. Lean:
+# deflate only, no bzip2/zstd/time/aes.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for
 # the stream plumbing. TLS-free, so the rustls-only musl build stays intact.
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 rust-embed = "8"
 futures = "0.3"
+portable-pty = "0.9"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
+sha2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
 # transitively; taken as a direct dep only on unix, where we call it.
 libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS `.app` mode (src/commands/app.rs): an NSApplication + delegate run loop
+# on the main thread so the downloadable app gets a Dock icon and click handling
+# while the dashboard server runs on background threads. macOS-only so the
+# static musl Linux builds are untouched.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSRunningApplication", "NSWorkspace"] }
+# Default-browser lookup for the Dock-click handler (NSWorkspace takes NSURLs).
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSEnumerator", "NSURL", "NSString"] }
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -4,10 +4,8 @@
 //! except `openresearch`, whose *compute* is a platform box by definition
 //! (the run rows still live only in the local store).
 //!
-//! Detection rule: an experiment/run is "local" iff its experiment id exists
-//! in `local_experiments`. CLI commands check the local store FIRST and only
-//! require credentials on the server path — dispatch on it via
-//! `resolve::{resolve_project, resolve_experiment, resolve_run}`, never by hand.
+//! Experiment and run identifiers resolve only when their records belong to a
+//! project registered in the local store.
 
 pub mod agent_skills;
 pub mod chat;
@@ -22,38 +20,34 @@ pub mod github;
 pub mod harness;
 pub mod hf;
 pub mod k8s;
+pub mod latex;
+pub mod latex_templates;
 pub mod localrun;
 pub mod modal;
 pub mod model;
+pub mod native_store;
 pub mod opencode;
 pub mod openresearch;
+pub mod overleaf;
 pub mod projects;
 pub mod ray;
 pub mod resolve;
+pub mod shell_env;
 pub mod skills;
 pub mod slurm;
 pub mod ssh;
 pub mod ssh_identity;
+pub mod user_skills;
 
-use crate::error::{anyhow, Error, Result};
+use crate::error::{anyhow, Result};
 use crate::store::{now_ms, Store, StoredRun};
-
-/// Graceful error for commands outside the local-mode v1 surface.
-pub fn unsupported(cmd: &str) -> Error {
-    anyhow!(
-        "`orx {cmd}` is not supported in local mode yet.\n\
-         Local mode supports: projects, project view/edit, create-experiment, \
-         exp run/status/cancel/wait/desc, runs, logs."
-    )
-}
 
 /// Terminal run states — the run is finished and won't change further.
 pub fn is_terminal(status: &str) -> bool {
     matches!(status, "done" | "failed" | "cancelled")
 }
 
-/// The stored run, but only when it belongs to a local experiment. Server-mode
-/// HF runs also live in the runs table, so membership there is not enough.
+/// The stored run, but only when it belongs to a registered local experiment.
 pub fn local_run(store: &Store, run_id: &str) -> Result<Option<StoredRun>> {
     match store.get_run(run_id)? {
         Some(run) => Ok(store.get_local_experiment(&run.experiment_id)?.map(|_| run)),
@@ -85,6 +79,7 @@ pub fn slugify(text: &str) -> String {
 /// agree on these strings.
 pub const BACKENDS: &[&str] = &[
     "local",
+    "tinker",
     "hf",
     "modal",
     "k8s",
@@ -279,7 +274,7 @@ mod tests {
                 "{b} flavored"
             );
         }
-        for b in ["k8s", "ssh", "local"] {
+        for b in ["k8s", "ssh", "tinker", "local"] {
             assert!(
                 validate_compute_default(b, Some("x")).is_err(),
                 "{b} must reject a flavor"

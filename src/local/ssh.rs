@@ -6,10 +6,10 @@
 
 use std::collections::HashMap;
 
-use crate::commands::exp::{hf_clone_script, spawn_detached_supervise};
+use crate::commands::exp::spawn_detached_supervise;
+use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{ssh, BackendDescriptor};
-use crate::local::git;
 use crate::store::{now_ms, Store, StoredRun};
 
 /// CLI wrapper around `submit_local_ssh`: submit, then print the summary.
@@ -24,8 +24,8 @@ pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
     );
     println!("  run  {}", run.id);
     println!(
-        "  Follow it with `orx exp wait {}` or `orx logs {}`.",
-        run.experiment_id, run.id
+        "{}",
+        crate::invocation::follow_up(&run.experiment_id, &run.id)
     );
     Ok(())
 }
@@ -34,12 +34,14 @@ pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
 /// detach a supervisor. Requires `--backend ssh` and `--flavor <host>` where
 /// the host is an `~/.ssh/config` alias.
 pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    if args.sandbox.is_some() || args.gpu.is_some() || args.cpu.is_some() {
-        return Err(anyhow!(
-            "--backend ssh runs on your own box; drop --gpu/--cpu/--sandbox and pass \
-             --host <alias> (an ~/.ssh/config alias) instead."
-        ));
-    }
+    crate::compute::submit(args).await
+}
+
+pub async fn submit_local_ssh_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
     if args.flavor.is_some() {
         return Err(anyhow!(
             "--backend ssh has no flavors — a machine is an address, not a shape. \
@@ -71,71 +73,31 @@ pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let run_command = Some(exp.run_command.clone())
         .filter(|c| !c.trim().is_empty())
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
-        .ok_or_else(|| {
-            anyhow!(
-                "No run command set for this experiment or its project. Set the project \
-                 default with `orx project edit {} --run-command '<cmd>'`, or pass \
-                 `--run-command '<cmd>'` to `orx create-experiment` — then relaunch.",
-                project.id
-            )
-        })?;
+        .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    // One run in flight per experiment unless deliberately forced.
-    if !args.force {
-        if let Some(r) = store
-            .list_runs_by_experiment(&exp.id)?
-            .into_iter()
-            .find(|r| !crate::local::is_terminal(&r.status))
-        {
-            return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). \
-                 Cancel it with `orx exp cancel {}` or pass --force to launch anyway.",
-                r.id,
-                r.status,
-                exp.id
-            ));
-        }
-    }
-
-    // The remote clones from GitHub, so the branch tip must exist there.
-    let commit_sha = {
-        let project = project.clone();
-        let branch = exp.branch_name.clone();
-        tokio::task::spawn_blocking(move || git::publish_branch_commit(&project, &branch))
-            .await
-            .map_err(|e| anyhow!("git task failed: {e}"))??
-    };
-
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let script = hf_clone_script(
-        &commit_sha,
-        &project.github_owner,
-        &project.github_repo,
-        &run_command,
-    );
+    let target = ssh::SshTarget::alias(&host);
+    ssh::stage_source(&target, &run_id, &source.path, &source.digest).await?;
+    let script = crate::compute::staged_script(&run_command);
 
     // The remote env: everything the user synced (API keys), plus the tokens
-    // the clone script expects. Exported inside run.sh (written owner-only).
+    // the run script expects. Exported inside run.sh (written owner-only).
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
-    if let Some(gh) = git::resolve_github_token() {
-        env.insert("GITHUB_TOKEN".to_string(), gh);
-    }
 
     let remote_dir = ssh::run_job(&ssh::SshJobSpec {
-        target: ssh::SshTarget::alias(&host),
+        target: target.clone(),
         run_id: run_id.clone(),
         script,
         env,
     })
     .await?;
 
-    let descriptor = BackendDescriptor {
+    let mut descriptor = BackendDescriptor {
         kind: "ssh_job".to_string(),
         namespace: Some(host),
-        job_id: Some(remote_dir),
+        job_id: Some(remote_dir.clone()),
         flavor: None,
         image: None,
         url: None,
@@ -146,7 +108,15 @@ pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        source_digest: None,
+        source_path: None,
+        source_size: None,
     };
+    source.apply_to_descriptor(&mut descriptor);
+    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
+        let _ = ssh::cancel_job(&target, &remote_dir).await;
+        return Err(error);
+    }
     let run = StoredRun {
         id: run_id.clone(),
         experiment_id: exp.id.clone(),
@@ -158,10 +128,12 @@ pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         updated_at: now_ms(),
         ended_at: None,
         exit_code: None,
-        commit_sha: Some(commit_sha),
+        commit_sha: Some(source.revision),
         result_markdown: None,
-        cancel_requested: false,
-        chat_session_id: crate::local::chat::launching_chat_session(),
+        cancel_requested: store
+            .get_run(&run_id)?
+            .is_some_and(|run| run.cancel_requested),
+        chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;
 

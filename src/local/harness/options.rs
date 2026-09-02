@@ -1,18 +1,12 @@
-//! Cross-harness turn options — the permission mode and reasoning level a chat
-//! session runs under. These are the vocabulary the UI toggles speak; each
-//! harness advertises which values it supports (`options()`) and maps the
-//! chosen value onto its own CLI (in its `run_turn`).
+//! Harness-owned turn options — permission choices, plan activation, and the
+//! reasoning level a chat session runs under. Each harness advertises its native
+//! user-facing vocabulary and maps the chosen value onto its own CLI/API.
 //!
 //! The two axes are modeled differently on purpose:
 //!
-//! * Permission mode is a *shared* enum — the concept (ask / accept-edits /
-//!   plan / auto / bypass) is common enough to name once. Its wire ids are
-//!   harness-agnostic (`ask` / `accept-edits` / `plan` / `auto` / `bypass`);
-//!   each harness maps the enum onto its own control surface in `run_turn`
-//!   (Claude → `--permission-mode`, Codex → `--sandbox` policy). The ids were
-//!   neutralized off Claude's `--permission-mode` spelling once Codex landed and
-//!   its sandbox policies didn't map onto Claude's strings — see the store data
-//!   migration in `store.rs` that rewrites the old spellings.
+//! * Permission policies share an internal enum, but the stored/UI ids, labels,
+//!   and descriptions belong to each provider. Plan is part of this enum only
+//!   for Claude; Codex and OpenCode carry it on the independent session axis.
 //! * Reasoning level is deliberately NOT shared, and is now per *model* as well
 //!   as per harness (issue #123). Claude's `--effort` tiers, Codex's
 //!   `model_reasoning_effort` and OpenCode's `variant` genuinely differ, and
@@ -31,20 +25,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// How much the harness should defer to the user before acting. The wire ids
-/// are harness-agnostic (`ask`, `accept-edits`, `plan`, `auto`, `bypass`); each
-/// harness maps the enum onto its own control surface in `run_turn` (Claude →
-/// `--permission-mode`, Codex → `--sandbox`). `auto` is distinct from
-/// `accept-edits` (it's Claude's balanced default mode).
+/// Internal permission semantics shared by the adapters. Stored wire ids are
+/// provider-owned; [`PermissionMode::from_id`] accepts each provider's native
+/// spelling and resolves it to one of these policies.
 ///
-/// Not every harness supports every mode — a harness advertises its supported
-/// subset via `options()` and the composer only offers those. `plan`, for
-/// instance, is Claude + OpenCode + Codex (each with its own machinery): Claude's
-/// plan mode pairs with a `PreToolUse` hook so read-only `orx` inspection still
-/// runs (see `plan_gate`); OpenCode has a native read-only `plan` agent; Codex
-/// attaches a native `collaborationMode` mask over the app-server (its own
-/// plan.md template — restriction is prompt-level, not sandbox-level).
-/// `ask`/`accept-edits` are the modes not every harness carries.
+/// Not every harness supports every policy — validation checks the provider's
+/// advertised choices before this mapper is used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
@@ -61,38 +47,16 @@ pub enum PermissionMode {
 }
 
 impl PermissionMode {
-    /// The stable, harness-agnostic wire id (what the UI stores and sends). Each
-    /// harness maps this to its own CLI/API in `run_turn`.
-    pub fn id(self) -> &'static str {
-        match self {
-            PermissionMode::Ask => "ask",
-            PermissionMode::AcceptEdits => "accept-edits",
-            PermissionMode::Plan => "plan",
-            PermissionMode::Auto => "auto",
-            PermissionMode::Bypass => "bypass",
-        }
-    }
-
-    /// Menu label shown in the composer's permission-mode toggle.
-    pub fn label(self) -> &'static str {
-        match self {
-            PermissionMode::Ask => "Ask permissions",
-            PermissionMode::AcceptEdits => "Accept edits",
-            PermissionMode::Plan => "Plan mode",
-            PermissionMode::Auto => "Auto mode",
-            PermissionMode::Bypass => "Bypass permissions",
-        }
-    }
-
-    /// Parse a wire id back to a mode. Unknown ids fall back to `None` so the
-    /// caller can apply its own default.
+    /// Parse a provider-owned wire id back to its internal policy. Validation
+    /// against the selected harness happens separately, so aliases cannot make
+    /// a Claude value valid for a Codex session.
     pub fn from_id(id: &str) -> Option<Self> {
         match id {
-            "ask" => Some(PermissionMode::Ask),
-            "accept-edits" => Some(PermissionMode::AcceptEdits),
+            "ask" | "manual" | "default" => Some(PermissionMode::Ask),
+            "accept-edits" | "acceptEdits" => Some(PermissionMode::AcceptEdits),
             "plan" => Some(PermissionMode::Plan),
-            "auto" => Some(PermissionMode::Auto),
-            "bypass" => Some(PermissionMode::Bypass),
+            "auto" | "approve-for-me" | "auto-approve" => Some(PermissionMode::Auto),
+            "bypass" | "bypassPermissions" | "full-access" => Some(PermissionMode::Bypass),
             _ => None,
         }
     }
@@ -101,13 +65,14 @@ impl PermissionMode {
 /// One selectable value in a composer toggle (id + human label). Ids are owned
 /// because the reasoning axis is now *model*-derived: OpenCode's choices come
 /// from `opencode models --verbose` at detect time, so they can't be
-/// `&'static str`. Permission modes still pass their static ids in, via
-/// [`OptionChoice::new`].
+/// `&'static str`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OptionChoice {
     pub id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl OptionChoice {
@@ -115,8 +80,31 @@ impl OptionChoice {
         Self {
             id: id.into(),
             label: label.into(),
+            description: None,
         }
     }
+
+    pub fn described(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            description: Some(description.into()),
+        }
+    }
+}
+
+/// How a harness exposes planning to the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PlanActivation {
+    /// Claude Code owns Plan as one of its permission modes.
+    Permission,
+    /// Codex/OpenCode enter Plan through the `/plan` command.
+    Command,
 }
 
 /// The wire id meaning "send no explicit effort/variant — let the harness CLI
@@ -194,6 +182,7 @@ pub fn resolve_reasoning<'a>(level: Option<&'a str>, allowed: &[&str]) -> Option
 pub struct HarnessOptions {
     pub permission_modes: Vec<OptionChoice>,
     pub default_permission_mode: Option<&'static str>,
+    pub plan_activation: Option<PlanActivation>,
     pub reasoning_levels: Vec<OptionChoice>,
     pub default_reasoning_level: Option<String>,
 }
@@ -204,21 +193,21 @@ impl HarnessOptions {
         Self {
             permission_modes: Vec::new(),
             default_permission_mode: None,
+            plan_activation: None,
             reasoning_levels: Vec::new(),
             default_reasoning_level: None,
         }
     }
 
-    pub fn with_permission_modes(
+    pub fn with_permission_choices(
         mut self,
-        modes: &[PermissionMode],
-        default: PermissionMode,
+        modes: Vec<OptionChoice>,
+        default: &'static str,
+        plan_activation: PlanActivation,
     ) -> Self {
-        self.permission_modes = modes
-            .iter()
-            .map(|m| OptionChoice::new(m.id(), m.label()))
-            .collect();
-        self.default_permission_mode = Some(default.id());
+        self.permission_modes = modes;
+        self.default_permission_mode = Some(default);
+        self.plan_activation = Some(plan_activation);
         self
     }
 
@@ -242,52 +231,29 @@ impl HarnessOptions {
 mod tests {
     use super::*;
 
-    /// The wire ids are the store/UI contract — pin them so a rename is a
-    /// deliberate, test-breaking change (and a reminder to add a data migration).
     #[test]
-    fn wire_ids_are_the_neutralized_spelling() {
-        assert_eq!(PermissionMode::Ask.id(), "ask");
-        assert_eq!(PermissionMode::AcceptEdits.id(), "accept-edits");
-        assert_eq!(PermissionMode::Plan.id(), "plan");
-        assert_eq!(PermissionMode::Auto.id(), "auto");
-        assert_eq!(PermissionMode::Bypass.id(), "bypass");
-    }
-
-    #[test]
-    fn from_id_round_trips_every_mode() {
-        for mode in [
-            PermissionMode::Ask,
-            PermissionMode::AcceptEdits,
-            PermissionMode::Plan,
-            PermissionMode::Auto,
-            PermissionMode::Bypass,
-        ] {
-            assert_eq!(PermissionMode::from_id(mode.id()), Some(mode));
-        }
-    }
-
-    #[test]
-    fn from_id_rejects_the_old_claude_spellings_and_junk() {
-        // The pre-migration spellings must NOT parse — a stale row is normalized
-        // by the store migration, not silently reinterpreted here.
-        for old in [
-            "default",
-            "acceptEdits",
-            "bypassPermissions",
-            "",
-            "nonsense",
-        ] {
-            assert_eq!(PermissionMode::from_id(old), None, "{old} should not parse");
-        }
-    }
-
-    #[test]
-    fn permission_mode_serde_uses_kebab_ids() {
-        // The enum is serialized directly in some payloads; its serde form must
-        // match the wire ids (kebab-case), not the Rust variant names.
-        let json = serde_json::to_string(&PermissionMode::AcceptEdits).unwrap();
-        assert_eq!(json, "\"accept-edits\"");
-        let back: PermissionMode = serde_json::from_str("\"bypass\"").unwrap();
-        assert_eq!(back, PermissionMode::Bypass);
+    fn from_id_accepts_provider_owned_spellings() {
+        assert_eq!(PermissionMode::from_id("manual"), Some(PermissionMode::Ask));
+        assert_eq!(
+            PermissionMode::from_id("acceptEdits"),
+            Some(PermissionMode::AcceptEdits)
+        );
+        assert_eq!(
+            PermissionMode::from_id("approve-for-me"),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(
+            PermissionMode::from_id("full-access"),
+            Some(PermissionMode::Bypass)
+        );
+        assert_eq!(
+            PermissionMode::from_id("default"),
+            Some(PermissionMode::Ask)
+        );
+        assert_eq!(
+            PermissionMode::from_id("auto-approve"),
+            Some(PermissionMode::Auto)
+        );
+        assert_eq!(PermissionMode::from_id("nonsense"), None);
     }
 }

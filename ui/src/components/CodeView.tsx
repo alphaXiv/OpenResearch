@@ -1,30 +1,106 @@
 // Shared source-code block: line-number gutter + refractor-highlighted
 // content, used by the repo file viewer and the Artifacts tab preview. Style
 // scoping note: syntax token colors apply under a `.file-view` ancestor.
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
+import {
+  CODE_GUTTER_CLASS_NAME,
+  CODE_TEXT_CLASS_NAME,
+  CODE_WRAP_CLASS_NAME,
+  codeGutter,
+} from "../codeLayout";
 import { detectSyntaxLanguageFromFilePath } from "../syntaxLanguage";
-import { highlight } from "../syntaxHighlight";
+import { highlightLines, isBlankLine } from "../syntaxHighlight";
 
-export function CodeView({ text, path }: { text: string; path: string }) {
-  const rendered = useMemo(
-    () => highlight(text, detectSyntaxLanguageFromFilePath(path)),
-    [text, path],
+export function CodeView({
+  text,
+  path,
+  highlightLine,
+  scrollRequest,
+  onScrollRequestHandled,
+}: {
+  text: string;
+  path: string;
+  /** 1-based line to scroll to and highlight (from a `file:line` chip). */
+  highlightLine?: number;
+  scrollRequest?: number;
+  onScrollRequestHandled?: () => void;
+}) {
+  // A trailing newline ends a line, it doesn't start an empty one. Empty files
+  // render no rows at all — a lone gutter is just a stray bordered strip.
+  const lines = useMemo(() => {
+    if (!text) return [];
+    // CR is a segment break under pre-wrap, so any CR-bearing file would
+    // render every row double-height.
+    const source = text.replace(/\r\n?/g, "\n");
+    const all = highlightLines(source, detectSyntaxLanguageFromFilePath(path));
+    return source.endsWith("\n") ? all.slice(0, -1) : all;
+  }, [text, path]);
+  const targetLine =
+    highlightLine && lines.length > 0
+      ? Math.min(Math.max(Math.trunc(highlightLine), 1), lines.length)
+      : undefined;
+
+  const targetRowRef = useRef<HTMLDivElement>(null);
+
+  // Center the highlighted line in the scroll viewport. Passive, unlike the
+  // editor's: this scrolls the shared viewport, which FileViewer restores in a
+  // layout effect that runs after ours and would otherwise win.
+  useEffect(() => {
+    if (scrollRequest === undefined) return;
+    if (targetLine) {
+      targetRowRef.current?.scrollIntoView({ block: "center" });
+      onScrollRequestHandled?.();
+    } else if (lines.length === 0) {
+      onScrollRequestHandled?.();
+    }
+  }, [lines.length, onScrollRequestHandled, scrollRequest, targetLine]);
+
+  const { ruleCh } = codeGutter(lines.length);
+
+  // Rows are memoized so an unrelated parent re-render (chat streaming) doesn't
+  // reconcile every line of the open file.
+  const rows = useMemo(
+    () =>
+      lines.map((line, i) => (
+        <div
+          key={i}
+          ref={i + 1 === targetLine ? targetRowRef : undefined}
+          className={`file-view-line flex items-stretch ${
+            i + 1 === targetLine
+              ? "file-view-line-highlight bg-accent-blue-subtle shadow-file-line"
+              : ""
+          }`}
+        >
+          {/* The number is generated content so a drag-selection over the
+              code never picks it up. */}
+          <span
+            data-line={i + 1}
+            className={`${CODE_GUTTER_CLASS_NAME} before:content-[attr(data-line)] shrink-0 pe-[1ch]`}
+            style={{ width: `${ruleCh}ch` }}
+            aria-hidden="true"
+         />
+          <code
+            className={`file-view-code flex-1 min-w-0 ps-[2ch] pe-4 ${CODE_TEXT_CLASS_NAME} ${CODE_WRAP_CLASS_NAME}`}
+          >
+            {/* An empty <code> serializes to nothing, dropping blank lines
+                from a copied selection. */}
+            {isBlankLine(line) ? <br /> : line}
+          </code>
+        </div>
+      )),
+    [lines, ruleCh, targetLine],
   );
-  // One number per source line; a trailing newline ends a line, it doesn't
-  // start an empty one.
-  const lineCount = text ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0;
+
   return (
-    <div className="file-view-codewrap">
-      {/* No numbers for an empty file — an empty gutter is just a stray
-          bordered strip. */}
-      {lineCount > 0 && (
-        <pre className="file-view-gutter" aria-hidden="true">
-          {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
-        </pre>
+    <div className={`file-view-codewrap relative py-3.5 ${CODE_TEXT_CLASS_NAME}`}>
+      {lines.length > 0 && (
+        <div
+          className="absolute start-0 top-0 bottom-0 border-e border-e-border-variant pointer-events-none"
+          style={{ width: `${ruleCh}ch` }}
+          aria-hidden="true"
+       />
       )}
-      <pre className="file-view-code">
-        <code>{rendered}</code>
-      </pre>
+      {rows}
     </div>
   );
 }

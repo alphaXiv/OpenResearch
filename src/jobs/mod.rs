@@ -1,10 +1,9 @@
 //! Job backends — external compute that orx launches and supervises itself.
 //!
-//! The api never orchestrates these: orx submits natively (HF Jobs, Modal,
-//! Kubernetes, SSH, Slurm, an OpenResearch box, this machine), a detached
-//! `orx supervise` watches the job beside it, and the api receives status/log
-//! mirrors. The run's `backend_json` descriptor is the serialized handle a
-//! later supervisor uses to reattach.
+//! Orx submits natively (HF Jobs, Modal, Kubernetes, SSH, Slurm, an OpenResearch
+//! box, Tinker through a local controller, or this machine) and a detached
+//! `orx supervise` watches the job beside it. The run's `backend_json` descriptor
+//! is the serialized handle a later supervisor uses to reattach.
 
 pub mod huggingface;
 pub mod kubernetes;
@@ -14,6 +13,7 @@ pub mod openresearch;
 pub mod ray;
 pub mod slurm;
 pub mod ssh;
+pub mod tinker;
 
 use std::collections::HashMap;
 
@@ -39,7 +39,7 @@ pub fn default_unbuffered(env: &HashMap<String, String>) -> HashMap<String, Stri
     env
 }
 
-/// Backend descriptor stored on the run (locally and mirrored to the api).
+/// Backend descriptor stored on the local run.
 /// `kind` discriminates. This is a fixed field list — a key absent here does
 /// NOT survive a parse → to_json round-trip, so anything a backend must keep
 /// needs its own (optional) field.
@@ -80,6 +80,14 @@ pub struct BackendDescriptor {
     /// the supervisor, long after the `--timeout` flag is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
+    /// Immutable local source archive used for this run. These fields make a
+    /// delayed or restarted supervisor independent of the working tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_size: Option<u64>,
 }
 
 impl BackendDescriptor {
@@ -141,9 +149,9 @@ impl BackendDescriptor {
         }
     }
 
-    /// The local run dir (the reattach handle) for an on-this-machine run.
+    /// The local run dir (the reattach handle) for a local controller.
     pub fn local_ref(&self) -> Result<&str> {
-        if self.kind != "local_job" {
+        if !matches!(self.kind.as_str(), "local_job" | "tinker_job") {
             return Err(anyhow!("Unsupported backend kind: {}", self.kind));
         }
         self.job_id.as_deref().ok_or_else(|| {
@@ -213,8 +221,8 @@ impl BackendDescriptor {
     }
 }
 
-/// Map an HF job stage onto the run-status vocabulary the store and the api
-/// share. `UPDATING` appears in the wild as a live state (see huggingface_hub).
+/// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
+/// in the wild as a live state (see huggingface_hub).
 pub fn stage_to_run_status(stage: &str) -> &'static str {
     match stage {
         "SCHEDULING" => "starting",
@@ -249,6 +257,9 @@ mod tests {
             ssh_port: None,
             ssh_user: None,
             timeout_secs: Some(14_400),
+            source_digest: None,
+            source_path: None,
+            source_size: None,
         }
     }
 
@@ -285,6 +296,19 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+    }
+
+    #[test]
+    fn tinker_descriptor_round_trips_as_a_local_handle() {
+        let json = r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#;
+        let descriptor = BackendDescriptor::parse(json).unwrap();
+        assert_eq!(descriptor.local_ref().unwrap(), "/tmp/run");
+        assert_eq!(
+            BackendDescriptor::parse(&descriptor.to_json())
+                .unwrap()
+                .kind,
+            "tinker_job"
+        );
     }
 
     #[test]

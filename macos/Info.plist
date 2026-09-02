@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>OpenResearch</string>
+  <key>CFBundleDisplayName</key>
+  <string>OpenResearch</string>
+  <key>CFBundleIdentifier</key>
+  <string>org.alphaxiv.openresearch</string>
+  <key>CFBundleExecutable</key>
+  <string>OpenResearch</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <!-- __VERSION__ is replaced by scripts/build-macos-app.sh from Cargo.toml. -->
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <!-- Shown when the Dock-icon handler asks the browser to raise the dashboard
+       tab; without it macOS denies the Apple event instead of prompting. -->
+  <key>NSAppleEventsUsageDescription</key>
+  <string>OpenResearch brings the dashboard tab to the front when you click its Dock icon.</string>
+  <!-- Regular Dock app (not an agent/menubar-only app). -->
+  <key>LSUIElement</key>
+  <false/>
+</dict>
+</plist>

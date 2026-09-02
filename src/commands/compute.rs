@@ -5,7 +5,8 @@
 //! provider and region; this command lists all of them, sorted by price
 //! ascending (the order the API returns), and can be narrowed with `--gpu`,
 //! `--count`, and `--provider`. Any provider shown here is launchable as a new
-//! instance via `orx exp run --gpu ... --provider ...` or `orx instance create`.
+//! instance from a local (`orx up`) project via `orx exp run --backend
+//! openresearch --flavor ...`, or directly via `orx instance create`.
 //! CPU offers (`--cpu`) are RunPod-only.
 
 use crate::client::{list_catalog, list_cpu_catalog, Disk};
@@ -82,8 +83,9 @@ fn fmt_disk(disk: &Disk) -> String {
     value.unwrap_or_else(|| "—".to_string())
 }
 
-/// Lists the CPU-only offer catalog as a price-sorted table. Launch one with
-/// `orx exp run --cpu <flavor> --vcpus <n>`.
+/// Lists the CPU-only offer catalog as a price-sorted table. From a local
+/// (`orx up`) project, launch one with `orx exp run --backend openresearch
+/// --flavor <flavor>:<vcpus>`.
 async fn run_cpu(creds: &crate::config::Credentials) -> Result<()> {
     let offers = list_cpu_catalog(creds).await?.offers;
 

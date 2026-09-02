@@ -1,0 +1,37 @@
+{
+  "baseEvaluation": {
+    "trainBpb": 1.152185,
+    "validationBpb": 1.119301
+  },
+  "core": [
+    {
+      "task": "bigbench_qa_wikidata",
+      "accuracy": 0,
+      "centered": 0,
+      "seconds": 0.82
+    },
+    {
+      "task": "openbook_qa",
+      "accuracy": 0.25,
+      "centered": 0,
+      "seconds": 1
+    },
+    {
+      "task": "winogrande",
+      "accuracy": 0.5625,
+      "centered": 0.125,
+      "seconds": 0.79
+    },
+    {
+      "task": "bigbench_operators",
+      "accuracy": 0,
+      "centered": 0,
+      "seconds": 1.2
+    }
+  ],
+  "final": {
+    "baseValidationBpb": 1.165758,
+    "sftValidationBpb": 0.7389,
+    "chatAnswer": "Paris"
+  }
+}

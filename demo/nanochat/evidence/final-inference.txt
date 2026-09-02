@@ -1,0 +1,15 @@
+nanochat CPU / Apple-Silicon final inference
+
+Command: python -m scripts.chat_cli -p "What is the capital of France?"
+Checkpoint: chatsft_checkpoints/d6/model_001499.pt
+Checkpoint step: 1499
+Device: mps
+
+Prompt:
+What is the capital of France?
+
+Response:
+Paris
+Paris is a city known for its historical and cultural significance. The capital of France is Paris, a 1715,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,345,
+
+Run status: completed successfully

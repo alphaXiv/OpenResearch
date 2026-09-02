@@ -1,28 +1,14 @@
-//! `LocalPlane` — the local-store control plane (`store` + `src/local`).
-//!
-//! Holds the owning `Store` and, when the resolver already fetched it, the
-//! resolved `LocalProject` / `LocalExperiment` row (so the verb needs no second
-//! lookup). The verb bodies are the former `commands::{runs,logs,project,exp,
-//! create_experiment,report}` local fns, moved here almost verbatim.
-//!
-//! Verbs that are server-only today return the SAME error the command returned:
-//! `set_experiment_command` → `local::unsupported("exp cmd")`; `report` → the
-//! local artifacts guidance.
+//! Local implementations of project, experiment, run, and log commands.
 
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _};
 use std::time::{Duration, Instant};
 
-use async_trait::async_trait;
-
-use super::server_plane::sleep_until_or_timeout;
-use super::{
-    ControlPlane, CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog,
-};
+use super::{CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog};
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
 use crate::store::{log_path, Store};
-use crate::{ExpRunArgs, ReportCommand};
+use crate::ExpRunArgs;
 
 /// The local-store plane. `project`/`experiment` carry the row the resolver
 /// already fetched (present for project-/experiment-keyed commands); `id` is the
@@ -34,10 +20,11 @@ pub struct LocalPlane {
     pub(super) id: String,
 }
 
+const LOCAL_DEFAULT_BYTES: i64 = 64 * 1024;
+
 impl LocalPlane {
-    /// The resolved project row, or an error if this plane wasn't built from a
-    /// project id. In practice unreachable — the resolvers set `project` for
-    /// every project-keyed command — but avoids an `unwrap`.
+    /// The resolved project row, or an error when called on a plane built by a
+    /// different keyed resolver.
     fn project(&self) -> Result<&LocalProject> {
         self.project
             .as_ref()
@@ -50,20 +37,8 @@ impl LocalPlane {
             .as_ref()
             .ok_or_else(|| anyhow!("internal: local plane missing its experiment row"))
     }
-}
 
-/// Default byte window for local head/tail reads without `--bytes`.
-const LOCAL_DEFAULT_BYTES: i64 = 64 * 1024;
-
-#[async_trait(?Send)]
-impl ControlPlane for LocalPlane {
-    fn is_local(&self) -> bool {
-        true
-    }
-
-    // --- runs -------------------------------------------------------------
-
-    async fn list_runs(&self) -> Result<RunListing> {
+    pub async fn list_runs(&self) -> Result<RunListing> {
         let store = &self.store;
         let project_id = &self.id;
         let titles: HashMap<String, String> = store
@@ -72,15 +47,12 @@ impl ControlPlane for LocalPlane {
             .map(|e| (e.id.clone(), e.display_name().to_string()))
             .collect();
 
-        // Already newest-first (store orders by created_at DESC).
         let runs = store.list_runs_by_project(project_id)?;
         let runs: Vec<Run> = runs.iter().map(Run::from).collect();
         Ok(RunListing { runs, titles })
     }
 
-    // --- logs -------------------------------------------------------------
-
-    async fn read_log(&self, req: LogRequest) -> Result<RunLog> {
+    pub async fn read_log(&self, req: LogRequest) -> Result<RunLog> {
         let run_id = &self.id;
         let path = log_path(run_id);
         let total = match std::fs::metadata(&path) {
@@ -111,9 +83,9 @@ impl ControlPlane for LocalPlane {
 
         let mut content = Vec::new();
         if end > start {
-            let mut f = std::fs::File::open(&path)?;
-            f.seek(std::io::SeekFrom::Start(start as u64))?;
-            f.take((end - start) as u64).read_to_end(&mut content)?;
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(std::io::SeekFrom::Start(start as u64))?;
+            file.take((end - start) as u64).read_to_end(&mut content)?;
         }
 
         Ok(RunLog {
@@ -128,21 +100,13 @@ impl ControlPlane for LocalPlane {
         })
     }
 
-    // --- project ----------------------------------------------------------
-
-    async fn view_project(&self) -> Result<()> {
+    pub async fn view_project(&self) -> Result<()> {
         let store = &self.store;
         let project = self.project()?;
         println!("{} (local)", project.name);
         println!("  id:      {}", project.id);
         println!("  repo:    {}", project.repo_path);
         println!("  branch:  {} (baseline)", project.baseline_branch);
-        if project.github_enabled() {
-            println!(
-                "  GitHub:  {}/{}",
-                project.github_owner, project.github_repo
-            );
-        }
         match project
             .run_command
             .as_deref()
@@ -178,14 +142,7 @@ impl ControlPlane for LocalPlane {
         Ok(())
     }
 
-    async fn edit_project(&self, edit: ProjectEdit) -> Result<()> {
-        // Local projects support --name and --run-command only; the command
-        // validated the combination, but keep the guard for the direct path.
-        if edit.description.is_some() || edit.description_stdin || edit.public || edit.private {
-            return Err(anyhow!(
-                "Local projects support --name and --run-command only."
-            ));
-        }
+    pub async fn edit_project(&self, edit: ProjectEdit) -> Result<()> {
         let mut project = self.project()?.clone();
         let name = edit.name;
         let run_command = edit.run_command;
@@ -217,7 +174,7 @@ impl ControlPlane for LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    async fn experiment_status(&self) -> Result<()> {
+    pub async fn experiment_status(&self) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
         println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
@@ -266,7 +223,7 @@ impl ControlPlane for LocalPlane {
         Ok(())
     }
 
-    async fn experiment_desc(&self, set: Option<String>, stdin: bool) -> Result<()> {
+    pub async fn experiment_desc(&self, set: Option<String>, stdin: bool) -> Result<()> {
         let input = DescInput::resolve(set, stdin).await?;
         let mut exp = self.experiment()?.clone();
         match input {
@@ -287,89 +244,74 @@ impl ControlPlane for LocalPlane {
         Ok(())
     }
 
-    async fn set_experiment_command(&self, _command: Option<String>) -> Result<()> {
-        Err(crate::local::unsupported("exp cmd"))
-    }
-
-    async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
+    pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         // Fill backend/flavor from the persisted default
         // BEFORE the flag validations below, so e.g. `--host box1` with a default
         // of `ssh` is a valid launch, and before `backend_label` is captured, so
         // telemetry records the resolved backend.
-        let project_id = &self.experiment()?.project_id;
-        let github_enabled = self
-            .store
-            .get_local_project(project_id)?
-            .ok_or_else(|| anyhow!("Local project {project_id} not found."))?
-            .github_enabled();
-        if !github_enabled {
-            match args.backend.as_deref() {
-                None => {
-                    args.backend = Some("local".to_string());
-                }
-                Some("local") => {}
-                Some(_) => {
-                    return Err(anyhow!(
-                        "Remote compute requires this project's GitHub repository. Enable GitHub syncing for this project, then retry."
-                    ));
-                }
-            }
-        } else {
-            crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
-            if args.backend.is_none() {
-                args.backend = Some("local".to_string());
-            }
+        crate::local::apply_compute_default(&mut args.backend, &mut args.flavor);
+        if args.backend.is_none() {
+            args.backend = Some("local".to_string());
         }
-        if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
-            return Err(anyhow!("--manifest only applies with --backend k8s."));
-        }
-        if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
-            return Err(anyhow!("--host only applies with --backend ssh or slurm."));
-        }
-        if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
-            return Err(anyhow!("--org only applies with --backend openresearch."));
-        }
+        crate::compute::validate_run_args(&args)?;
         // Coarse backend label for analytics; the backend name is already an
         // enum, never user data. Recorded before the (borrowing) dispatch below.
         let backend_label = args.backend.clone();
-        let result = match args.backend.as_deref() {
-            Some("hf") => crate::local::hf::launch_local_hf(&args).await,
-            Some("modal") => crate::local::modal::launch_local_modal(&args).await,
-            Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
-            Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
-            Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
-            Some("ray") => crate::local::ray::launch_local_ray(&args).await,
-            Some("openresearch") => {
-                crate::local::openresearch::launch_local_openresearch(&args).await
+        let result = match crate::local::chat::trusted_up_port()? {
+            Some(port) => {
+                let summary = crate::commands::up::submit_run_via_up(port, &args).await?;
+                let backend = args.backend.as_deref().unwrap_or("local");
+                println!("\u{2713} {backend} run submitted by orx up.");
+                if let Some(job_id) = summary.job_id {
+                    let label = if backend == "local" { "dir" } else { "job" };
+                    println!("  {label}  {job_id}");
+                }
+                println!("  run  {}", summary.run_id);
+                println!(
+                    "{}",
+                    crate::invocation::follow_up(&summary.experiment_id, &summary.run_id)
+                );
+                Ok(())
             }
-            Some("local") => crate::local::localrun::launch_local_run(&args).await,
-            Some(other) => Err(anyhow!(
-                "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
-                 modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
-                 slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
-                 openresearch (an ephemeral OpenResearch box), local (this machine).",
-                other
-            )),
-            None => Err(anyhow!(
-                "No --backend given and no default compute target is set. \
-                 Configure a default compute target in OpenResearch, \
-                 or pass one per launch: \
-                 `--backend hf --flavor <flavor>` (e.g. --flavor a10g-small), \
-                 `--backend modal --flavor <flavor>` (e.g. --flavor a10g), \
-                 `--backend k8s` (runs the manifest committed on the branch — \
-                 default .orx/k8s.yaml, or --manifest <path>), \
-                 `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
-                 `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
-                 `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
-                 `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
-                 e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
-                 or `--backend local` (a detached process on this machine)."
-            )),
+            None => match args.backend.as_deref() {
+                Some("hf") => crate::local::hf::launch_local_hf(&args).await,
+                Some("modal") => crate::local::modal::launch_local_modal(&args).await,
+                Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
+                Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
+                Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
+                Some("ray") => crate::local::ray::launch_local_ray(&args).await,
+                Some("openresearch") => {
+                    crate::local::openresearch::launch_local_openresearch(&args).await
+                }
+                Some("tinker" | "local") => crate::local::localrun::launch_local_run(&args).await,
+                Some(other) => Err(anyhow!(
+                    "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
+                     modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
+                     slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                     openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
+                     local (this machine).",
+                    other
+                )),
+                None => Err(anyhow!(
+                    "No --backend given and no default compute target is set. \
+                     Configure a default compute target in OpenResearch, \
+                     or pass one per launch: \
+                     `--backend hf --flavor <flavor>` (e.g. --flavor a10g-small), \
+                     `--backend modal --flavor <flavor>` (e.g. --flavor a10g), \
+                     `--backend k8s` (runs the manifest committed on the branch — \
+                     default .orx/k8s.yaml, or --manifest <path>), \
+                     `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
+                     `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
+                     `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
+                     `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
+                     e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \
+                     `--backend tinker` (a local controller using remote Tinker model compute), \
+                     or `--backend local` (a detached process on this machine)."
+                )),
+            },
         };
         // Key event, fired only on a successful launch. Coarse backend only.
-        // `backend_label` is always `Some(<known backend>)` here — every arm that
-        // yields `Ok` matched a `Some("hf"|"modal"|...)`; `None`/unknown arms
-        // return `Err`. The `"unknown"` fallback is unreachable defense.
+        // Validation above guarantees a known backend before either dispatch path.
         if result.is_ok() {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", true, Some(target));
@@ -377,7 +319,7 @@ impl ControlPlane for LocalPlane {
         result
     }
 
-    async fn cancel(&self) -> Result<()> {
+    pub async fn cancel(&self) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
         let in_flight: Vec<_> = store
@@ -388,14 +330,18 @@ impl ControlPlane for LocalPlane {
         if in_flight.is_empty() {
             return Err(anyhow!("No run in flight for this experiment."));
         }
+        let trusted_port = crate::local::chat::trusted_up_port()?;
         for r in &in_flight {
-            crate::commands::exp::request_local_run_cancel(store, &r.id)?;
+            match trusted_port {
+                Some(port) => crate::commands::up::cancel_run_via_up(port, &r.id).await?,
+                None => crate::commands::exp::request_local_run_cancel(store, &r.id)?,
+            }
             println!("\u{2713} Cancel requested for run {}.", r.id);
         }
         Ok(())
     }
 
-    async fn wait_experiment(&self, interval: Duration, deadline: Instant) -> Result<()> {
+    pub async fn wait_experiment(&self, interval: Duration, deadline: Instant) -> Result<()> {
         let store = &self.store;
         let exp_id = &self.id;
         let mut last_status: Option<String> = None;
@@ -426,7 +372,7 @@ impl ControlPlane for LocalPlane {
         }
     }
 
-    async fn wait_project(&self, interval: Duration, deadline: Instant) -> Result<()> {
+    pub async fn wait_project(&self, interval: Duration, deadline: Instant) -> Result<()> {
         let store = &self.store;
         let project_id = &self.id;
         let snapshot: HashMap<String, String> = store
@@ -484,7 +430,7 @@ impl ControlPlane for LocalPlane {
 
     // --- create-experiment ------------------------------------------------
 
-    async fn create_experiment(&self, spec: CreateExperimentSpec) -> Result<()> {
+    pub async fn create_experiment(&self, spec: CreateExperimentSpec) -> Result<()> {
         let store = &self.store;
         let project = self.project()?;
         let CreateExperimentSpec {
@@ -500,8 +446,8 @@ impl ControlPlane for LocalPlane {
             Some(parent_id) => Some(store.get_local_experiment(parent_id)?.ok_or_else(|| {
                 anyhow!(
                     "Parent experiment {} not found in the local store. \
-                     Choose an existing parent experiment in OpenResearch, or omit --parent to branch off the project root.",
-                    parent_id
+                     Choose an existing local experiment from `orx project view {}`, or omit --parent to branch off the project root.",
+                    parent_id, project.id
                 )
             })?),
             None if baseline => None,
@@ -526,6 +472,19 @@ impl ControlPlane for LocalPlane {
             description,
             run_command,
         )?;
+
+        if project.github_enabled() {
+            if let Err(error) = crate::local::git::spawn_branch_publication(
+                std::path::Path::new(&project.repo_path),
+                &experiment.branch_name,
+                &project.github_owner,
+                &project.github_repo,
+            ) {
+                eprintln!(
+                    "  warning: experiment created locally, but GitHub sync could not start: {error}"
+                );
+            }
+        }
 
         println!("\u{2713} Created local {} experiment", kind);
         if defaulted_to_root {
@@ -555,63 +514,19 @@ impl ControlPlane for LocalPlane {
         println!("  cd {}", project.repo_path);
         println!("  git checkout {}", experiment.branch_name);
         println!("  # …edit, then…");
-        if project.github_enabled() {
-            println!("  git commit -am \"<msg>\" && git push");
-        } else {
-            println!("  git commit -am \"<msg>\"");
-        }
+        println!("  git commit -am \"<msg>\"");
         Ok(())
-    }
-
-    // --- reports (local has no report registry) ---------------------------
-
-    async fn report(&self, _cmd: ReportCommand) -> Result<()> {
-        // Local projects have no report registry or upload step — the artifacts dir
-        // on disk is the whole feature. Point there instead of pretending to
-        // upload.
-        let project = self.project()?;
-        let dir = crate::local::files::ensure_dir(project)?;
-        Err(anyhow!(
-            "`orx report` is cloud-only. Local projects have no upload step: write \
-             descriptively named outputs straight into the project's artifacts directory,\n  {}\n\
-             Everything in that directory is available as a project artifact; folders are optional.",
-            dir.display()
-        ))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A fresh, throwaway store rooted at a unique temp dir (never mutates the
-    /// process-global `$ORX_DATA_DIR`).
-    fn temp_store() -> Store {
-        let dir = std::env::temp_dir().join(format!("orx-plane-{}", uuid::Uuid::new_v4()));
-        Store::open_at(dir).expect("open temp store")
+async fn sleep_until_or_timeout(interval: Duration, deadline: Instant) -> Result<()> {
+    if Instant::now() >= deadline {
+        return Err(anyhow!("Timed out waiting for a run state change."));
     }
-
-    fn empty_local_plane() -> LocalPlane {
-        LocalPlane {
-            store: temp_store(),
-            project: None,
-            experiment: None,
-            id: "e1".to_string(),
-        }
+    let nap = interval.min(deadline.saturating_duration_since(Instant::now()));
+    tokio::time::sleep(nap).await;
+    if Instant::now() >= deadline {
+        return Err(anyhow!("Timed out waiting for a run state change."));
     }
-
-    #[tokio::test]
-    async fn set_experiment_command_is_unsupported_locally() {
-        // The server-only verb must reproduce `local::unsupported("exp cmd")`
-        // byte-for-byte (the old `exp cmd` local arm's error).
-        let plane = empty_local_plane();
-        let err = plane
-            .set_experiment_command(Some("echo hi".to_string()))
-            .await
-            .expect_err("exp cmd must be unsupported on a local experiment");
-        assert_eq!(
-            err.to_string(),
-            crate::local::unsupported("exp cmd").to_string()
-        );
-    }
+    Ok(())
 }

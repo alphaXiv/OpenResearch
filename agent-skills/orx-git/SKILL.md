@@ -1,105 +1,48 @@
 ---
 name: orx-git
-description: "Read, edit, and diff a node's code with plain git: sync, commit, and push before running. Use whenever you touch experiment code — before editing any branch, when a checkout or push fails, when comparing two nodes' code, or when a run seems to have picked up stale code."
+description: "Read, edit, commit, and diff experiment code; coordinate shared worktrees and preserve frozen branch history. Use before branch work, when starting work alongside other sessions, comparing nodes, preparing a run, repairing a provisional node, or diagnosing stale code."
 ---
 
-Every experiment node **is a git branch** (`orx/<slug>`) on the project's GitHub
-repo — `orx create-experiment` prints it. There is no dev box and no `orx` code
-command: the **local clone in the cache dir is the standard way to interface
-with code** — reading a node's files, diffing what a run changed, and editing —
-all with plain git and your own tools.
+Git records every experiment. GitHub publication may be enabled for collaborator
+visibility, but it is never part of compute transport. Follow the project
+playbook's publication status; do not push merely to launch compute and do not
+fetch from or publish back to the paper's upstream repository.
 
-(In a local `orx up` session you already sit in a private git worktree of the
-project repo, so you can edit the checked-out branch in place — `git fetch origin
-&& git checkout <branch>`, edit, commit, push. The cache-dir clone below is the
-flow for everything outside a live session, and for cloud/full-set contexts.)
+Other chat sessions may work in sibling worktrees of the same clone. Before
+starting, inspect `git branch -a`, `orx runs <projectId>`, and relevant `orx exp
+desc <expId>` notes so you do not duplicate their work. Branches and remotes are
+shared even though worktrees are separate. Keep experiment notes current as you
+learn so sibling sessions can orient from them.
 
-**Clone into the openresearch cache dir, not your cwd.** The canonical location,
-keyed by repo so the same clone is reused across all of a project's experiments:
+One branch has one worktree owner. If checkout says a branch is already checked
+out, keep working only when the named path is your worktree; otherwise leave that
+branch to its owning session. Session worktrees start detached on the baseline,
+so check out the experiment branch before editing.
 
-```
-~/.cache/openresearch/repos/<owner>/<repo>
-```
-
-`<owner>/<repo>` comes from `orx projects`. **Never** clone into your current
-directory or the user's project folders — clones accreting in `~/projects` is the
-failure mode this avoids.
-
-This is how you **realize a child's hypothesis**: after `create-experiment
---parent`, check out the child's branch and make the specific code/config edits
-its description calls for — then commit, push, and run. Edit only the files that
-idea touches, and **don't touch the run command** (it's inherited; see the
-`orx-experiment-tree` skill). A node a run has already answered is frozen —
-branch a child instead.
-
-The sync recipe is **idempotent** — run it verbatim whether or not the clone
-already exists from a previous session. Always fetch + fast-forward before
-editing, so a reused clone is never stale (and the experiment's branch, created
-server-side, is fetched even when it's brand-new and not in your local clone
-yet):
+Each experiment node has a local `orx/<slug>` branch. `orx
+create-experiment` creates it from its parent. Work in the session worktree,
+check out the printed branch, make only that experiment's change, and commit it:
 
 ```sh
-DIR=~/.cache/openresearch/repos/<owner>/<repo>
-
-# Clone once (skips if it already exists), then ALWAYS sync before touching a branch:
-[ -d "$DIR" ] || git clone https://github.com/<owner>/<repo> "$DIR"
-git -C "$DIR" fetch origin
-git -C "$DIR" checkout orx/<slug>                 # creates a tracking branch if it's remote-only
-git -C "$DIR" merge --ff-only origin/orx/<slug>   # fails loudly rather than discarding unpushed work
-
-#   …edit files under "$DIR" with your normal tools…
-git -C "$DIR" commit -am "tune lr"     # one or more commits — your call
-git -C "$DIR" push                     # push so runs and the tree see the change
+git checkout orx/<slug>
+git status --short
+git add <changed files>
+git commit -m "describe the experiment change"
 ```
 
-Rules and notes:
-- **Always sync first — but never blow away unpushed work.** `merge --ff-only`
-  fails loudly instead of silently discarding commits you never pushed — a real
-  hazard when a push has failed and you're returning to a branch to repair it.
-  Never use `checkout -B <branch> origin/<branch>`: it hard-resets to the GitHub
-  tip and throws that work away. The contract is still commit + push before
-  moving on.
-- **Auth is your own git.** Clone/push use whatever GitHub credentials your `git`
-  already has — the repo lives under your account or your org, so access is the
-  same as any of your repos. If a clone or push fails on auth, authenticate git
-  for github.com (e.g. `gh auth login` or an SSH key) and retry.
-- **Push before you run.** `orx exp run` launches from the branch's pushed tip on
-  GitHub — uncommitted or unpushed edits won't be in the run. Commit and push
-  first.
-- **Never merge or rebase a branch once its node is frozen** (cardinal rule):
-  its history is the code those results came from. Bring changes in on a
-  **child** instead. On a *provisional* node a plain `git merge
-  origin/<parent-branch>` is fine. Never rewrite history anywhere — no rebase,
-  amend, `reset --hard`, or force-push.
-- **Reading another node's code** without disturbing your checkout: that branch is
-  already in the clone after a fetch — `git -C "$DIR" show origin/orx/<slug>:<path>`.
+The runner builds an immutable source archive from the recorded commit, so
+committed work is sufficient on every backend. Uncommitted files are never
+included in a run. Before launching, confirm `git status --short` is empty and
+inspect the recorded commit with `git show --stat --oneline HEAD`.
 
-## Code diffs — local git
-
-What did a run change vs. its parent experiment? `orx exp status <expId>` prints
-the parent's branch, the latest run's full commit SHA, and this exact recipe —
-compute the diff locally in the same clone:
+To compare a child with its parent, use local refs only:
 
 ```sh
-DIR=~/.cache/openresearch/repos/<owner>/<repo>   # owner/repo from `orx projects`
-[ -d "$DIR" ] || git clone https://github.com/<owner>/<repo> "$DIR"   # cold cache → clone first
-git -C "$DIR" fetch origin                        # ALWAYS fetch first — the commit and parent tip live on GitHub
-git -C "$DIR" diff origin/<parent-branch>...<full-commit-sha>
+git diff <parent-branch>...orx/<child-slug>
+git log --oneline <parent-branch>..orx/<child-slug>
 ```
 
-- The **three-dot** form diffs from the merge-base — what the run's branch
-  changed, not what the parent gained since the fork. That's the cumulative
-  "what this experiment did to the code" view.
-- Fetch first is mandatory: the run's commit and the parent's tip exist on
-  GitHub and may not be in your clone yet.
-- Root experiments have no parent — there is no diff base, by definition.
-
-## Repairing a node in place (`orx up` worktrees)
-
-A node whose run answered nothing is provisional: fix it on **its own branch** and
-re-run the same `<expId>` — don't create a child (`orx-experiment-tree`). Sync
-as above, then commit, push, `orx exp run`.
-
-If the checkout fails with "already checked out at …", read the path: your own
-worktree means you already hold it. Another session's means that agent owns the
-node — leave it alone; never break the lock or branch a child to dodge it.
+Once a run answers an experiment, its branch and history are immutable. Never
+merge or rebase it. To incorporate other work, create a child and put the merge
+commit on the child's branch. Never rebase experiment history; it records the
+exact code that ran.

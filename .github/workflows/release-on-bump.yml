@@ -10,11 +10,28 @@
 # GITHUB_TOKEN don't trigger other workflows (GitHub's anti-recursion rule),
 # so a GITHUB_TOKEN-pushed tag would never start release.yml. workflow_dispatch
 # is the documented exception ("workflow_dispatch and repository_dispatch
-# events always create workflow runs"), so the default token is sufficient and
-# no PAT/secret is needed.
+# events always create workflow runs").
+#
+# Why a PAT (RELEASE_DISPATCH_TOKEN) and not the default GITHUB_TOKEN: the
+# Release run's *completion* must cascade to release-macos-app.yml via
+# workflow_run, and GitHub applies the same anti-recursion rule there — a run
+# authored by GITHUB_TOKEN does not fire workflow_run. Dispatching with a PAT
+# makes the Release run owned by a real token, so its completion triggers the
+# macOS attach. The PAT needs Actions: read and write (to dispatch release.yml).
+# If the secret is missing or invalid, releases still publish but the DMG must be
+# attached manually via release-macos-app.yml's workflow_dispatch. See DISTRIBUTION.md.
 #
 # This never increments a version: the version is always a human decision made
 # in a reviewed PR, and "merge a PR that bumps Cargo.toml" is the release act.
+#
+# The trigger is the version *changing* in a push, so exactly one run can
+# dispatch a given release and later pushes will not retry it. If that run fails
+# or never dispatches, re-run it (Actions -> this workflow -> the failed run ->
+# Re-run): a re-run replays the original event, `github.event.before` included,
+# so the guard below still sees the bump. Prefer that over dispatching
+# release.yml by hand, whose `tag` input defaults to `dry-run` (which publishes
+# nothing but reports success) and which builds from main's current tip rather
+# than the bump commit.
 
 name: Release on version bump
 
@@ -22,14 +39,18 @@ on:
   push:
     branches: [main]
 
-# Serialize runs so two quick merges can't double-dispatch.
-concurrency:
-  group: release-on-bump
-  cancel-in-progress: false
+# Deliberately no `concurrency` group. It served to stop two quick merges
+# double-dispatching, which the version guard below now does per-run and
+# correctly. Worse, it cost releases: queueing a run cancels the *pending* one
+# in its group (`cancel-in-progress: false` protects only the running one), so a
+# third push could cancel the bump's run outright — and since no later push
+# re-dispatches, the release would be lost with nothing red to show for it.
 
 permissions:
   contents: read
-  actions: write # to dispatch release.yml
+  actions: write # github.token fallback path dispatches release.yml
+  issues: write # to create/apply the version label on the bump's PR
+  pull-requests: read # to resolve the bump commit to its squash-merged PR
 
 jobs:
   dispatch:
@@ -37,10 +58,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The guard below reads Cargo.toml at the previous head. Full depth,
+          # not 2: a multi-commit push puts that commit out of range, and the
+          # guard would silently no-op back into duplicate dispatches.
+          fetch-depth: 0
 
       - name: Dispatch the release workflow
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Dispatching with the PAT makes the Release run cascade to the macOS
+          # attach (see header). GITHUB_TOKEN is the fallback so a missing OR
+          # invalid/expired PAT never blocks a release — it just ships without
+          # the auto-attach (recover via release-macos-app.yml's workflow_dispatch).
+          DISPATCH_PAT: ${{ secrets.RELEASE_DISPATCH_TOKEN }}
+          FALLBACK_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
@@ -49,13 +81,57 @@ jobs:
           version=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
           tag="v${version}"
 
+          # Did this push change the version? The tag check below can't stand
+          # alone: the tag is only created when the release publishes, minutes
+          # after dispatch, so every push during a build would dispatch a
+          # duplicate — from a different commit, making the released content a
+          # race. An unreadable previous head (force push, first commit) leaves
+          # `previous` empty and falls through to the tag check.
+          previous=""
+          if [ -n "${BEFORE}" ] && [ "${BEFORE}" != "0000000000000000000000000000000000000000" ] \
+            && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            previous=$(git show "${BEFORE}:Cargo.toml" 2>/dev/null \
+              | grep -m1 '^version = ' | sed -E 's/version = "(.*)"/\1/' || true)
+          fi
+          if [ -n "${previous}" ] && [ "${previous}" = "${version}" ]; then
+            echo "Version unchanged at ${version} in this push — nothing to release."
+            exit 0
+          fi
+
           if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
             echo "Tag ${tag} already exists — nothing to release."
             echo "(If you meant to cut a release, bump the version in Cargo.toml.)"
             exit 0
           fi
 
+          # Mark the bump's PR with a shared "version-bump" label so releases
+          # are visible from the PR list (one reused label, not one per
+          # version). Best-effort: a labeling hiccup must never block the
+          # release dispatch below.
+          if pr=$(GH_TOKEN="$FALLBACK_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq '.[0].number // empty' 2>/dev/null); then
+            if [ -n "${pr}" ]; then
+              # Create the label first (422 if it already exists — ignored) so
+              # the add below never depends on auto-creation behavior.
+              GH_TOKEN="$FALLBACK_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/labels" \
+                -f name="version-bump" -f color="0e8a16" \
+                -f description="Bumps the CLI version; merging cuts a release" >/dev/null 2>&1 || true
+              GH_TOKEN="$FALLBACK_TOKEN" gh api "repos/${GITHUB_REPOSITORY}/issues/${pr}/labels" \
+                -f "labels[]=version-bump" >/dev/null \
+                || echo "::warning::Failed to label PR #${pr} with version-bump"
+            else
+              echo "No PR associated with ${GITHUB_SHA} — skipping the version-bump label."
+            fi
+          else
+            echo "::warning::Could not look up the PR for ${GITHUB_SHA} — skipping the version-bump label."
+          fi
+
           echo "Dispatching release.yml with tag=${tag} (version is unreleased)."
-          gh workflow run release.yml --ref main -f tag="${tag}"
-          echo "Dispatched. The release will appear at:"
+          if [ -n "$DISPATCH_PAT" ] && GH_TOKEN="$DISPATCH_PAT" gh workflow run release.yml --ref main -f tag="${tag}"; then
+            echo "Dispatched with RELEASE_DISPATCH_TOKEN — the macOS DMG will attach automatically."
+          else
+            [ -n "$DISPATCH_PAT" ] && echo "::warning::RELEASE_DISPATCH_TOKEN failed; used GITHUB_TOKEN. Release ships but the DMG won't auto-attach — run release-macos-app.yml manually for ${tag}."
+            GH_TOKEN="$FALLBACK_TOKEN" gh workflow run release.yml --ref main -f tag="${tag}"
+          fi
+          echo "The release will appear at:"
           echo "  https://github.com/${GITHUB_REPOSITORY}/actions/workflows/release.yml"

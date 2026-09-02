@@ -1,3 +1,6 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { useLocale } from "../locale";
 import {
   Background,
   BackgroundVariant,
@@ -8,11 +11,12 @@ import {
   type Node,
   type NodeProps,
 } from "@xyflow/react";
-import { Ellipsis, FolderTree, GitBranch, Terminal } from "lucide-react";
+import { Ellipsis, FolderTree, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef } from "react";
 import {
   githubBranchUrl,
+  fmtNumber,
   runDisplayStatus,
   timeAgo,
   type Experiment,
@@ -22,14 +26,24 @@ import {
 import type { ExperimentView } from "./DetailDrawer";
 import type { CodeView } from "./CodeTab";
 import { ExpHoverCard, dismissTreeHoverCards, useHoverIntent } from "./ExpHoverCard";
-import { StatusBadge } from "./StatusBadge";
+import { statusLabel, StatusBadge } from "./StatusBadge";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+
+const EMPTY_STATE_CLASS_NAME = [
+  "empty-state absolute inset-0 flex flex-col items-center",
+  "justify-center p-6 text-center text-subtext [&_p]:max-w-[46ch]",
+  "[&_p]:m-0 [&_p]:text-sm [&_p]:leading-normal [&_p]:text-balance",
+  "[&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal",
+  "[&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg",
+  "[&_p.empty-state-hint]:text-subtext empty-state-cta gap-1.5",
+].join(" ");
 
 const NODE_W = 264;
 const NODE_H = 132;
 const GAP_X = 44;
 const GAP_Y = 72;
 const MAX_SQUARES = 8;
-// Keep in sync with `.elided-node` in styles.css.
+// Keep in sync with the inline `.elided-node` classes below.
 const ELIDED_W = 148;
 const ELIDED_H = 44;
 
@@ -41,8 +55,13 @@ type ExpNodeData = {
   parentSlug: string | null;
   githubOwner: string;
   githubRepo: string;
-  onOpenView: (id: string, view: ExperimentView) => void;
-  onOpenCode: (experimentId: string, branch: string, view: CodeView) => void;
+  onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
+  onOpenCode: (
+    experimentId: string,
+    branch: string,
+    view: CodeView,
+    intent: TabOpenIntent,
+  ) => void;
 };
 type ExpFlowNode = Node<ExpNodeData, "exp">;
 
@@ -163,10 +182,11 @@ function runSquareClass(status: string): string {
 }
 
 const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
+  useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
   const live = status === "running" || status === "starting" || status === "cancelling";
-  const kind = isBaseline ? "Baseline" : live ? "Running" : "Experiment";
+  const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
 
   // `data` is rebuilt on every experiments/runs change (a superset of the
@@ -179,7 +199,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   return (
     <div
       ref={rootRef}
-      className={`exp-node ${live ? "live" : ""}`}
+      className={`exp-node w-66 border border-border rounded-md bg-background py-2.5 px-3 shadow-tree text-sm transition-[box-shadow] duration-120 ease-standard [&:hover]:shadow-tree-hover [&.live]:border-accent-teal [&.live]:shadow-tree-live [&_.node-overview-link]:block [&_.node-overview-link]:w-full [&_.node-overview-link]:p-0 [&_.node-overview-link]:border-0 [&_.node-overview-link]:bg-transparent [&_.node-overview-link]:text-inherit [&_.node-overview-link]:[font:inherit] [&_.node-overview-link]:text-start [&_.node-overview-link]:cursor-pointer [&_.node-overview-link:hover_.node-slug]:underline [&_.node-overview-link:hover_.node-slug]:underline-offset-[3px] [&_.node-overview-link:focus-visible]:outline-2 [&_.node-overview-link:focus-visible]:outline-solid [&_.node-overview-link:focus-visible]:outline-accent [&_.node-overview-link:focus-visible]:outline-offset-4 [&_.node-overview-link:focus-visible]:rounded-xs [&_.node-eyebrow]:flex [&_.node-eyebrow]:items-center [&_.node-eyebrow]:justify-between [&_.node-eyebrow]:gap-2 [&_.node-eyebrow]:mb-1.5 [&_.node-eyebrow]:text-xs [&_.node-eyebrow]:font-medium [&_.node-eyebrow]:text-muted [&_.node-head]:flex [&_.node-head]:items-center [&_.node-head]:gap-[7px] [&_.node-head]:min-w-0 [&_.node-status]:w-2 [&_.node-status]:h-2 [&_.node-status]:rounded-full [&_.node-status]:shrink-0 [&_.node-slug]:text-sm [&_.node-slug]:font-semibold [&_.node-slug]:text-text [&_.node-slug]:flex-1 [&_.node-slug]:min-w-0 [&_.node-slug]:overflow-hidden [&_.node-slug]:text-ellipsis [&_.node-slug]:whitespace-nowrap [&_.node-title]:mt-1 [&_.node-title]:text-text [&_.node-title]:text-sm [&_.node-title]:line-clamp-2 [&_.node-meta]:mt-2 [&_.node-meta]:flex [&_.node-meta]:items-center [&_.node-meta]:gap-2 [&_.node-meta]:text-xs [&_.node-meta]:text-muted [&_.node-actions]:mt-2 [&_.node-actions]:pt-1.5 [&_.node-actions]:border-t [&_.node-actions]:border-t-border-variant [&_.node-actions]:flex [&_.node-actions]:items-center [&_.node-actions]:gap-[3px] [&_.node-action]:inline-flex [&_.node-action]:items-center [&_.node-action]:gap-[5px] [&_.node-action]:py-[3px] [&_.node-action]:px-1.5 [&_.node-action]:text-sm [&_.node-action]:font-medium [&_.node-action]:text-text [&_.node-action]:rounded-sm [&_.node-action]:no-underline [&_.node-action:hover]:text-text [&_.node-action:hover]:bg-surface [&_.node-action-ext]:ms-auto [&_.node-action-ext]:py-[3px] [&_.node-action-ext]:px-[5px] ${live ? "live" : ""}`}
       onMouseEnter={hover.onMouseEnter}
       onMouseLeave={hover.onMouseLeave}
     >
@@ -188,12 +208,9 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         role="button"
         tabIndex={0}
         className="node-overview-link nodrag"
-        onClick={() => onOpenView(exp.id, "overview")}
-        onKeyDown={(event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          onOpenView(exp.id, "overview");
-        }}
+        {...tabOpenGestureHandlers<HTMLDivElement>((intent) =>
+          onOpenView(exp.id, "overview", intent),
+        )}
       >
         <div className="node-eyebrow">
           <span>{kind}</span>
@@ -206,57 +223,53 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           <div className="node-title">{exp.title || exp.description}</div>
         )}
         <div className="node-meta">
-          <span>Runs</span>
+          <span>{m.tree_view_runs()}</span>
           {squares.length > 0 ? (
-            <span className="run-squares">
+            <span className="run-squares flex items-center gap-[3px]">
               {squares.map((run) => (
                 <span
                   key={run.id}
-                  className={`run-sq ${runSquareClass(runDisplayStatus(run))}`}
-                  title={runDisplayStatus(run)}
-                />
+                  className={`run-sq w-[9px] h-[9px] shrink-0 [&.pass]:bg-accent-green [&.fail]:border-[1.5px] [&.fail]:border-danger-outline [&.live]:bg-accent-teal [&.live]:animate-[or-pulse_1.2s_ease-in-out_infinite] [&.other]:border-[1.5px] [&.other]:border-border ${runSquareClass(runDisplayStatus(run))}`}
+                  title={statusLabel(runDisplayStatus(run))}
+               />
               ))}
             </span>
           ) : (
-            <span>no runs</span>
+            <span>{m.tree_view_no_runs()}</span>
           )}
-          <span style={{ flex: 1 }} />
+          <span className="flex-1" />
           {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
         </div>
       </div>
-      {/* Direct view shortcuts — changes and code always, logs once there's a run. */}
+      {/* Direct view shortcuts — code always, logs once there's a run. */}
       <div className="node-actions" onClick={(e) => e.stopPropagation()}>
-        <button
-          className="node-action"
-          title="Open changes"
-          onClick={() => onOpenCode(exp.id, exp.branchName, "changes")}
-        >
-          <GitBranch size={13} />
-          Changes
-        </button>
         {runs.length > 0 && (
           <button
             className="node-action"
-            title="Open logs"
-            onClick={() => onOpenView(exp.id, "terminal")}
+            title={m.tree_view_open_logs()}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenView(exp.id, "terminal", intent),
+            )}
           >
             <Terminal size={13} />
-            Logs
+            {m.tree_view_logs()}
           </button>
         )}
         <button
           className="node-action"
-          title={`Browse code on ${exp.branchName}`}
-          onClick={() => onOpenCode(exp.id, exp.branchName, "files")}
+          title={m.a11y_browse_code_on({ branch: ltr(exp.branchName) })}
+          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+            onOpenCode(exp.id, exp.branchName, "files", intent),
+          )}
         >
           <FolderTree size={13} />
-          Code
+          {m.tree_view_code()}
         </button>
         {/* Icon-only: labeled actions + the link overflow the card's fixed width. */}
         {githubOwner && githubRepo && <a
           className="node-action node-action-ext"
-          title={`Open ${exp.branchName} on GitHub`}
-          aria-label={`Open ${exp.branchName} on GitHub`}
+          title={m.a11y_open_on_github({ name: ltr(exp.branchName) })}
+          aria-label={m.a11y_open_on_github({ name: ltr(exp.branchName) })}
           href={githubBranchUrl(githubOwner, githubRepo, exp.branchName)}
           target="_blank"
           rel="noopener noreferrer"
@@ -275,18 +288,20 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
           latestRun={latestRun}
           parentSlug={parentSlug}
           anchor={hover.rect}
-          onOpenLogs={runs.length > 0 ? () => onOpenView(exp.id, "terminal") : undefined}
-          onOpenChanges={() => onOpenCode(exp.id, exp.branchName, "changes")}
-          onOpenCode={() => onOpenCode(exp.id, exp.branchName, "files")}
+          onOpenLogs={runs.length > 0
+            ? (intent) => onOpenView(exp.id, "terminal", intent)
+            : undefined}
+          onOpenCode={(intent) => onOpenCode(exp.id, exp.branchName, "files", intent)}
           onMouseEnter={hover.keepOpen}
           onMouseLeave={hover.onMouseLeave}
-        />
+       />
       )}
     </div>
   );
 });
 
 const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>) {
+  useLocale();
   const { count, onShowProjectScope } = data;
   // A div, not a <button>: ReactFlow's <Handle> renders divs, which are
   // invalid inside button elements. tabIndex opts the pill back into the tab
@@ -294,10 +309,10 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
   // body is a single action.
   return (
     <div
-      className="elided-node"
+      className="elided-node w-37 h-11 flex items-center gap-2 py-1.5 px-2.5 border border-dashed border-border rounded-md bg-hover-faint text-muted text-sm font-medium text-start transition-[border-color,color] duration-120 ease-standard [&:hover]:border-text [&:hover]:text-text [&_.elided-node-label]:flex [&_.elided-node-label]:flex-col [&_.elided-node-label]:leading-[1.3] [&_.elided-node-sub]:text-muted"
       role="button"
       tabIndex={0}
-      title="Switch to Entire project to see all experiments"
+      title={m.tree_view_switch_to_entire_project_to_see_all_experiments()}
       onClick={onShowProjectScope}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -309,8 +324,8 @@ const ElidedNode = memo(function ElidedNode({ data }: NodeProps<ElidedFlowNode>)
       <Handle type="target" position={Position.Top} />
       <Ellipsis size={14} />
       <span className="elided-node-label">
-        {count} {count === 1 ? "experiment" : "experiments"}
-        <span className="elided-node-sub">other tasks</span>
+        {count === 1 ? m.tree_one_experiment() : m.tree_experiment_count({ count: fmtNumber(count) })}
+        <span className="elided-node-sub">{m.tree_view_other_tasks()}</span>
       </span>
       <Handle type="source" position={Position.Bottom} />
     </div>
@@ -341,9 +356,14 @@ export function TreeView({
   /** Owning project — supplies owner/repo for the GitHub branch links. */
   project: Project;
   /** Open an experiment view as a right-pane tab (card shortcut buttons). */
-  onOpenView: (id: string, view: ExperimentView) => void;
+  onOpenView: (id: string, view: ExperimentView, intent: TabOpenIntent) => void;
   /** Browse an experiment branch's code in the project-level Code tab. */
-  onOpenCode: (experimentId: string, branch: string, view: CodeView) => void;
+  onOpenCode: (
+    experimentId: string,
+    branch: string,
+    view: CodeView,
+    intent: TabOpenIntent,
+  ) => void;
   /** Current task scope: show only this chat session's experiments, eliding the rest.
    * Null = Entire project scope (the whole forest). */
   agentSessionId: string | null;
@@ -439,9 +459,9 @@ export function TreeView({
 
   if (experiments.length === 0) {
     return (
-      <div className="empty-state empty-state-cta">
-        <p className="empty-state-title">No experiments yet</p>
-        <p className="empty-state-hint">Ask the agent in chat to create and run your first experiment.</p>
+      <div className={EMPTY_STATE_CLASS_NAME}>
+        <p className="empty-state-title">{m.tree_view_no_experiments_yet()}</p>
+        <p className="empty-state-hint">{m.tree_view_ask_the_agent_in_chat_to_create_and()}</p>
       </div>
     );
   }
@@ -449,10 +469,10 @@ export function TreeView({
   // Only Current task scope can filter a non-empty forest down to nothing.
   if (nodes.length === 0 && agentSessionId) {
     return (
-      <div className="empty-state empty-state-cta">
-        <p className="empty-state-title">No experiments from the current task yet</p>
+      <div className={EMPTY_STATE_CLASS_NAME}>
+        <p className="empty-state-title">{m.tree_view_no_experiments_from_the_current_task_yet()}</p>
         <p className="empty-state-hint">
-          Ask in this task to create one, or switch to Entire project to see all experiments.
+          {m.tree_view_ask_in_this_task_to_create_one_or()}
         </p>
       </div>
     );
@@ -460,6 +480,7 @@ export function TreeView({
 
   return (
     <ReactFlow
+      className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
       // fitView only runs on mount, so remount when the scope changes to re-fit.
       key={agentSessionId ?? "project"}
       nodes={nodes}

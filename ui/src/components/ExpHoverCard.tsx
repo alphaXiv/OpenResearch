@@ -1,3 +1,6 @@
+import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
+import { ltr } from "../i18n";
 // Floating detail card shown while hovering an experiment node in the tree.
 // Rendered through a portal at a fixed viewport position (never inside the
 // ReactFlow node: the canvas transform would scale it with zoom, and growing
@@ -13,6 +16,7 @@ import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
   fmtDuration,
+  fmtNumber,
   getRunDiff,
   runDisplayStatus,
   timeAgo,
@@ -23,6 +27,7 @@ import { BackendBadge } from "./BackendLogos";
 import { countChanges } from "./GitDiff";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const CARD_W = 380;
 const GAP = 12; // node ↔ card
@@ -109,7 +114,7 @@ function fmtCreated(ms: number): string {
     d.getFullYear() === new Date().getFullYear()
       ? { month: "short", day: "numeric" }
       : { month: "short", day: "numeric", year: "numeric" };
-  return d.toLocaleDateString(undefined, opts);
+  return d.toLocaleDateString(getLocale(), opts);
 }
 
 export function ExpHoverCard({
@@ -119,7 +124,6 @@ export function ExpHoverCard({
   parentSlug,
   anchor,
   onOpenLogs,
-  onOpenChanges,
   onOpenCode,
   onMouseEnter,
   onMouseLeave,
@@ -130,9 +134,8 @@ export function ExpHoverCard({
   parentSlug: string | null;
   /** Viewport rect of the hovered node (kept fresh by useHoverIntent). */
   anchor: DOMRect;
-  onOpenLogs?: () => void;
-  onOpenChanges: () => void;
-  onOpenCode: () => void;
+  onOpenLogs?: (intent: TabOpenIntent) => void;
+  onOpenCode: (intent: TabOpenIntent) => void;
   onMouseEnter: () => void;
   onMouseLeave: () => void;
 }) {
@@ -243,7 +246,7 @@ export function ExpHoverCard({
   return createPortal(
     <div
       ref={measure.ref}
-      className="exp-hover-card"
+      className="exp-hover-card fixed z-60 bg-background border border-border rounded-lg shadow-menu py-3.5 px-4 text-sm text-text [&_.hc-head]:flex [&_.hc-head]:items-baseline [&_.hc-head]:justify-between [&_.hc-head]:gap-2.5 [&_.hc-slug]:text-sm [&_.hc-slug]:font-semibold [&_.hc-slug]:min-w-0 [&_.hc-slug]:overflow-hidden [&_.hc-slug]:text-ellipsis [&_.hc-slug]:whitespace-nowrap [&_.hc-title]:mt-[3px] [&_.hc-title]:text-text [&_.hc-actions]:flex [&_.hc-actions]:items-center [&_.hc-actions]:gap-1.5 [&_.hc-actions]:mt-2.5 [&_.hc-actions_button]:inline-flex [&_.hc-actions_button]:items-center [&_.hc-actions_button]:justify-center [&_.hc-actions_button]:gap-[5px] [&_.hc-actions_button]:min-w-21 [&_.hc-actions_button]:py-1.5 [&_.hc-actions_button]:px-2.5 [&_.hc-actions_button]:border [&_.hc-actions_button]:border-border [&_.hc-actions_button]:rounded-md [&_.hc-actions_button]:bg-background [&_.hc-actions_button]:text-text [&_.hc-actions_button]:text-sm [&_.hc-actions_button]:font-medium [&_.hc-actions_button:hover]:border-border-hover-strong [&_.hc-actions_button:hover]:bg-canvas [&_.hc-body]:mt-2.5 [&_.hc-body]:border-t [&_.hc-body]:border-t-border-variant [&_.hc-body]:pt-2.5 [&_.hc-body]:leading-[1.6] [&_.hc-body]:whitespace-pre-line [&_.hc-body]:line-clamp-10 [&_.hc-body.expanded]:block [&_.hc-body.expanded]:line-clamp-none [&_.hc-body.expanded]:max-h-[45vh] [&_.hc-body.expanded]:overflow-y-auto [&_.hc-body.expanded]:overflow-x-hidden [&_.hc-body.expanded]:pb-1 [&_.hc-toggle]:mt-1 [&_.hc-toggle]:text-sm [&_.hc-toggle]:font-medium [&_.hc-toggle]:text-muted [&_.hc-toggle:hover]:text-text [&_.hc-failure]:mt-2 [&_.hc-failure]:text-accent-red [&_.hc-failure]:line-clamp-3 [&_.hc-stats]:mt-2.5 [&_.hc-stats]:border-t [&_.hc-stats]:border-t-border-variant [&_.hc-stats]:pt-2.5 [&_.hc-stats]:flex [&_.hc-stats]:items-center [&_.hc-stats]:gap-3 [&_.hc-stats]:flex-wrap [&_.hc-stats]:text-xs [&_.hc-stats]:text-text [&_.hc-git]:mt-2.5 [&_.hc-git]:pt-2 [&_.hc-git]:border-t [&_.hc-git]:border-t-border-variant [&_.hc-git]:text-xs [&_.hc-git]:text-text [&_.hc-git]:flex [&_.hc-git]:flex-col [&_.hc-git]:gap-1 [&_.hc-git-row]:flex [&_.hc-git-row]:items-center [&_.hc-git-row]:gap-2.5 [&_.hc-git-row]:flex-wrap [&_.hc-git-row]:min-w-0 [&_.hc-branch]:inline-flex [&_.hc-branch]:items-center [&_.hc-branch]:gap-1 [&_.hc-branch]:min-w-0 [&_.hc-branch]:overflow-hidden [&_.hc-branch]:text-ellipsis [&_.hc-branch]:whitespace-nowrap [&_.hc-foot]:mt-2 [&_.hc-foot]:flex [&_.hc-foot]:items-center [&_.hc-foot]:justify-between [&_.hc-foot]:gap-2.5 [&_.hc-foot]:text-xs [&_.hc-foot]:text-muted [&_.hc-foot_.hc-command]:min-w-0 [&_.hc-foot_.hc-command]:overflow-hidden [&_.hc-foot_.hc-command]:text-ellipsis [&_.hc-foot_.hc-command]:whitespace-nowrap"
       style={{
         width: CARD_W,
         left: x,
@@ -260,19 +263,21 @@ export function ExpHoverCard({
       </div>
       {exp.title && <div className="hc-title">{exp.title}</div>}
       <div className="hc-actions">
-        <button type="button" onClick={onOpenChanges}>
-          <GitBranch size={13} />
-          Changes
-        </button>
         {onOpenLogs && (
-          <button type="button" onClick={onOpenLogs}>
+          <button
+            type="button"
+            {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenLogs)}
+          >
             <Terminal size={13} />
-            Logs
+            {m.exp_hover_card_logs()}
           </button>
         )}
-        <button type="button" onClick={onOpenCode}>
+        <button
+          type="button"
+          {...tabOpenGestureHandlers<HTMLButtonElement>(onOpenCode)}
+        >
           <FolderTree size={13} />
-          Code
+          {m.exp_hover_card_code()}
         </button>
       </div>
       {body && (
@@ -282,17 +287,19 @@ export function ExpHoverCard({
       )}
       {body && (clamped || expanded) && (
         <button type="button" className="hc-toggle" onClick={() => setExpanded((v) => !v)}>
-          {expanded ? "Show less" : "Show more"}
+          {expanded ? m.common_show_less() : m.common_show_more()}
         </button>
       )}
       {failureNote && <div className="hc-failure">{failureNote}</div>}
       <div className="hc-stats">
         <span>
-          {runs.length === 1 ? "1 run" : `${runs.length} runs`}
-          {counts.done > 0 && ` · ${counts.done} done`}
-          {counts.failed > 0 && ` · ${counts.failed} failed`}
-          {counts.cancelled > 0 && ` · ${counts.cancelled} cancelled`}
-          {counts.live > 0 && ` · ${counts.live} live`}
+          {new Intl.ListFormat(getLocale(), { style: "short" }).format([
+            runs.length === 1 ? m.hover_one_run() : m.hover_run_count({ count: fmtNumber(runs.length) }),
+            ...(counts.done > 0 ? [m.hover_done_count({ count: fmtNumber(counts.done) })] : []),
+            ...(counts.failed > 0 ? [m.hover_failed_count({ count: fmtNumber(counts.failed) })] : []),
+            ...(counts.cancelled > 0 ? [m.hover_cancelled_count({ count: fmtNumber(counts.cancelled) })] : []),
+            ...(counts.live > 0 ? [m.hover_live_count({ count: fmtNumber(counts.live) })] : []),
+          ])}
         </span>
         {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
         {duration && <span>{duration}</span>}
@@ -306,30 +313,32 @@ export function ExpHoverCard({
           </span>
           {parentSlug && (
             <span>
-              from <span className="hc-mono">{parentSlug}</span>
+              {m.exp_hover_card_from()} <span>{parentSlug}</span>
             </span>
           )}
         </div>
         {diffStat && diffStat.fileCount > 0 && (
           <div
             className="hc-git-row"
-            title={`Committed changes vs ${parentSlug ?? "parent"}${diffStat.truncated ? " (diff truncated — counts are lower bounds)" : ""}`}
+            title={diffStat.truncated
+              ? m.a11y_committed_changes_truncated({ parent: ltr(parentSlug ?? "parent") })
+              : m.a11y_committed_changes({ parent: ltr(parentSlug ?? "parent") })}
           >
             <span>
               {diffStat.truncated && "≥ "}
-              <span className="diff-stat-add">+{diffStat.additions}</span>{" "}
-              <span className="diff-stat-del">−{diffStat.deletions}</span>
+              <span className="diff-stat-add text-accent-green">+{diffStat.additions}</span>{" "}
+              <span className="diff-stat-del text-accent-red">−{diffStat.deletions}</span>
               {" · "}
               {diffStat.fileCount === 1 && !diffStat.truncated
-                ? "1 file"
-                : `${diffStat.fileCount}${diffStat.truncated ? "+" : ""} files`}
+                ? m.hover_one_file()
+                : diffStat.truncated ? m.hover_files_at_least({ count: fmtNumber(diffStat.fileCount) }) : m.hover_file_count({ count: fmtNumber(diffStat.fileCount) })}
             </span>
           </div>
         )}
       </div>
       <div className="hc-foot">
-        <span className="hc-mono">$ {exp.runCommand}</span>
-        <span>created {fmtCreated(exp.createdAt)}</span>
+        <span className="hc-command font-mono">$ {exp.runCommand}</span>
+        <span>{m.exp_hover_card_created()} {fmtCreated(exp.createdAt)}</span>
       </div>
     </div>,
     document.body,

@@ -5,11 +5,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && tsc --noEmit && vite build",
+    "lint:i18n": "node scripts/check-i18n.mjs",
+    "lint:styles": "node scripts/check-styles.mjs",
+    "test": "node --test --experimental-strip-types tests/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@clo/react-markdown": "jsr:1.1.1",
+    "@inlang/paraglide-js": "^2.25.0",
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.6.0",
     "katex": "^0.16.22",
@@ -21,12 +27,19 @@
     "refractor": "^5.0.0",
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "remark-parse": "11.0.0",
+    "remark-rehype": "11.1.2",
+    "sonner": "^2.0.8",
+    "tailwind-merge": "^3.6.0",
+    "unified": "11.0.5"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "4.3.3",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
+    "tailwindcss": "4.3.3",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   }

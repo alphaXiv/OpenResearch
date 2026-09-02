@@ -10,13 +10,16 @@
 //! `main().catch(err => { console.error(err.message); process.exit(1) })`.
 
 mod browser;
+mod editors;
 // DTOs faithfully mirror every API wire field; not all are read by the CLI yet.
 #[allow(dead_code)]
 mod client;
 mod commands;
+mod compute;
 mod config;
 mod error;
 mod folder_picker;
+mod invocation;
 mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
@@ -61,20 +64,17 @@ enum Command {
     /// Remove the stored token.
     Logout,
 
-    /// List your projects, grouped by organization.
+    /// List projects registered in the local orx store.
     Projects(ProjectsArgs),
 
-    /// Browse the public project directory (no membership needed).
-    Explore(ExploreArgs),
+    /// List organizations available for OpenResearch compute.
+    Orgs(OrgsArgs),
 
-    /// Operate on one project (view it, or edit its name / description).
+    /// Operate on one local project.
     Project(ProjectArgs),
 
-    /// List a project's experiments as a tree.
-    Experiments(ExperimentsArgs),
-
-    /// List the names (not values) of a project's environment variables.
-    Env(EnvArgs),
+    /// Delegate a task to a second agent session.
+    Agent(AgentArgs),
 
     /// List a project's runs.
     Runs(RunsArgs),
@@ -82,30 +82,7 @@ enum Command {
     /// Read a run's terminal log (tail by default).
     Logs(LogsArgs),
 
-    /// Grep run logs for a literal pattern.
-    #[command(name = "search-logs")]
-    SearchLogs(SearchLogsArgs),
-
-    /// List the text artifacts a run produced (key + size).
-    Artifacts(ArtifactsArgs),
-
-    /// Read a run's text artifact (also caches it for SQL search).
-    Artifact(ArtifactArgs),
-
-    /// List the W&B runs linked to a run.
-    Wandb(WandbArgs),
-
-    /// Run read-only SQL against the project's evidence.
-    Query(QueryArgs),
-
-    /// Render a W&B metric across runs to a PNG.
-    Chart(ChartArgs),
-
-    /// Create a project (from a GitHub repo, or a fresh blank repo).
-    #[command(name = "create-project")]
-    CreateProject(CreateProjectArgs),
-
-    /// Add an experiment node (child of a parent, or a baseline root).
+    /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
 
@@ -119,11 +96,8 @@ enum Command {
     #[command(name = "ssh-key")]
     SshKey(SshKeyArgs),
 
-    /// Operate on one experiment node (status / run command / run / cancel).
+    /// Operate on one local experiment node.
     Exp(ExpArgs),
-
-    /// Upload, list, show, or download a project's research reports.
-    Report(ReportArgs),
 
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
@@ -132,9 +106,8 @@ enum Command {
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
-    /// Search literature by full-text query across alphaXiv, OpenAlex, or
-    /// bioRxiv (`--source`; no login required).
-    Lit(LitArgs),
+    /// Call one paper-retrieval primitive; the caller owns the search loop.
+    Discover(DiscoverArgs),
 
     /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv metadata.
     /// The source is auto-detected from the id (override with `--source`).
@@ -146,13 +119,18 @@ enum Command {
     /// Update orx to the latest release (installer-script installs only).
     Update(UpdateArgs),
 
+    /// Link the macOS app's `orx` onto your PATH (macOS app installs only).
+    InstallCli(InstallCliArgs),
+
+    /// Permanently delete the local database, CLI executable, or both.
+    Delete(DeleteArgs),
+
     /// Loopback HTTP/SSE daemon over the local run store (jobs sibling of
     /// `opencode serve`); the api tunnels to it on agent boxes.
     Serve(ServeArgs),
 
-    /// Supervise one external run: tail backend logs, mirror status to the
-    /// api, honor cancel intent. Spawned detached by `exp run --backend hf`;
-    /// safe to re-run after a crash or box replacement.
+    /// Supervise one local run: tail backend logs, persist status, and honor
+    /// local cancel intent. Spawned detached by `exp run`.
     Supervise(SuperviseArgs),
 
     /// Start the local autoresearch dashboard on 127.0.0.1: embedded UI,
@@ -174,6 +152,18 @@ enum Command {
     /// an approval card and blocks until answered. Not a user command.
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
+
+    /// Internal: detached worker for optional local-project publication.
+    #[command(name = "publish-branch", hide = true)]
+    PublishBranch(PublishBranchArgs),
+}
+
+#[derive(Args, Debug)]
+struct PublishBranchArgs {
+    repo_path: std::path::PathBuf,
+    branch: String,
+    owner: String,
+    repo: String,
 }
 
 #[derive(Args, Debug)]
@@ -185,18 +175,14 @@ pub struct LoginArgs {
 
 #[derive(Args, Debug)]
 pub struct ProjectsArgs {
-    /// Include archived projects.
-    #[arg(long)]
-    pub all: bool,
-    /// Emit raw JSON (id, name, paperId, repo, org) instead of the formatted
-    /// table — for scripts that need each project's `paperId`.
+    /// Emit local project records as JSON.
     #[arg(long)]
     pub json: bool,
 }
 
 #[derive(Args, Debug)]
-pub struct ExploreArgs {
-    /// Emit raw JSON instead of the formatted table.
+pub struct OrgsArgs {
+    /// Emit organization records as JSON.
     #[arg(long)]
     pub json: bool,
 }
@@ -209,43 +195,20 @@ pub struct ProjectArgs {
 
 #[derive(Subcommand, Debug)]
 pub enum ProjectCommand {
-    /// Show a project's overview: details, experiment tree, and reports.
+    /// Show a local project's details and experiment tree.
     View { project_id: String },
 
-    /// Edit a project's metadata. Pass at least one of `--name` / `--description`
-    /// / `--public` / `--private` / `--run-command`.
+    /// Edit a local project's name or run command.
     Edit {
         project_id: String,
         /// Rename the project.
         #[arg(long)]
         name: Option<String>,
-        /// Set the project's default run command (local projects only).
+        /// Set the project's default run command.
         /// New experiments inherit it; pass '' to clear.
         #[arg(long = "run-command")]
         run_command: Option<String>,
-        /// Overwrite the project's description with this value.
-        #[arg(long)]
-        description: Option<String>,
-        /// Overwrite the description with the whole of stdin (for long markdown).
-        #[arg(long)]
-        description_stdin: bool,
-        /// Make the project public (listed in the public directory).
-        #[arg(long)]
-        public: bool,
-        /// Make the project private. Mutually exclusive with `--public`.
-        #[arg(long, conflicts_with = "public")]
-        private: bool,
     },
-}
-
-#[derive(Args, Debug)]
-pub struct ExperimentsArgs {
-    pub project_id: String,
-}
-
-#[derive(Args, Debug)]
-pub struct EnvArgs {
-    pub project_id: String,
 }
 
 #[derive(Args, Debug)]
@@ -271,89 +234,8 @@ pub struct LogsArgs {
 }
 
 #[derive(Args, Debug)]
-pub struct SearchLogsArgs {
-    pub project_id: String,
-    pub pattern: String,
-    /// Scope to a single run.
-    #[arg(long)]
-    pub run: Option<String>,
-    /// Scope to a single experiment.
-    #[arg(long)]
-    pub experiment: Option<String>,
-    /// Cap matching lines.
-    #[arg(long)]
-    pub max: Option<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct ArtifactsArgs {
-    pub run_id: String,
-}
-
-#[derive(Args, Debug)]
-pub struct WandbArgs {
-    pub run_id: String,
-}
-
-#[derive(Args, Debug)]
-pub struct ArtifactArgs {
-    pub run_id: String,
-    pub key: String,
-    /// Read from the start instead of the tail.
-    #[arg(long)]
-    pub head: bool,
-    /// Max bytes to read.
-    #[arg(long)]
-    pub bytes: Option<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct QueryArgs {
-    pub project_id: String,
-    pub sql: String,
-}
-
-#[derive(Args, Debug)]
-pub struct ChartArgs {
-    /// Chart kind. Only `wandb` is supported today.
-    pub kind: String,
-    pub project_id: String,
-    /// W&B history key to plot.
-    #[arg(long)]
-    pub metric: Option<String>,
-    /// Run to overlay (`<id>[:label]`); repeat for multiple runs.
-    #[arg(long = "run")]
-    pub run: Vec<String>,
-    /// EMA smoothing 0–0.99.
-    #[arg(long)]
-    pub smoothing: Option<String>,
-    /// Directory to save the rendered PNG.
-    #[arg(long)]
-    pub out: Option<String>,
-}
-
-#[derive(Args, Debug)]
-pub struct CreateProjectArgs {
-    /// Organization id (from `orx projects`).
-    pub org_id: String,
-    /// Project name (required).
-    #[arg(long)]
-    pub name: Option<String>,
-    /// GitHub repo `owner/repo` (or github.com URL) to bind the project to.
-    /// Omit to start the project on a fresh blank repo.
-    #[arg(long)]
-    pub repo: Option<String>,
-    /// Branch of the repo the project binds to (with `--repo`; defaults to the
-    /// repo's default branch). The baseline experiment branches off it.
-    #[arg(long)]
-    pub branch: Option<String>,
-    /// Project description.
-    #[arg(long)]
-    pub description: Option<String>,
-}
-
-#[derive(Args, Debug)]
 pub struct CreateExperimentArgs {
+    /// Local project id from `orx projects`.
     pub project_id: String,
     /// Experiment title (required).
     #[arg(long)]
@@ -362,16 +244,14 @@ pub struct CreateExperimentArgs {
     #[arg(long)]
     pub description: Option<String>,
     /// Parent experiment id -> create a child. Omit on an empty project to
-    /// create the baseline (root); once a root exists, local projects attach
-    /// under the oldest root (server projects create another baseline).
+    /// create the baseline (root); once a root exists, attach under it.
     #[arg(long)]
     pub parent: Option<String>,
     /// Create a new baseline (root) even when the project already has one.
     /// Conflicts with --parent. Projects may hold multiple baselines.
     #[arg(long, conflicts_with = "parent")]
     pub baseline: bool,
-    /// Run command for the node (local projects and server baselines). Omit to
-    /// inherit from the parent / project default.
+    /// Run command for the node. Omit to inherit from the parent/project default.
     #[arg(long = "run-command")]
     pub run_command: Option<String>,
 }
@@ -435,7 +315,7 @@ pub enum InstanceCommand {
 
 #[derive(Args, Debug)]
 pub struct InstanceCreateArgs {
-    /// Organization id (from `orx projects`).
+    /// Organization id (from `orx orgs`).
     pub org_id: String,
     /// Provision a GPU instance with this GPU id, e.g. `H100_SXM` — the exact id
     /// from `orx compute`, not a family name like `H100`.
@@ -463,7 +343,7 @@ pub struct InstanceCreateArgs {
 
 #[derive(Args, Debug)]
 pub struct InstanceListArgs {
-    /// Organization id (from `orx projects`).
+    /// Organization id (from `orx orgs`).
     pub org_id: String,
 }
 
@@ -471,6 +351,37 @@ pub struct InstanceListArgs {
 pub struct InstanceDeleteArgs {
     /// The instance (sandbox) id to terminate.
     pub sandbox_id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// Hand a task to a helper agent running in its own top-level session.
+    Spawn {
+        /// What the helper agent should do. Write it as a self-contained brief:
+        /// the helper starts with an empty transcript and cannot see this chat.
+        task: Option<String>,
+        /// Read the task from stdin instead, for long multi-paragraph briefs.
+        #[arg(long)]
+        stdin: bool,
+        /// Name the session in the sidebar. Defaults to an auto-generated title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Harness for the helper (defaults to this session's).
+        #[arg(long)]
+        harness: Option<String>,
+        /// Model for the helper (defaults to this session's).
+        #[arg(long)]
+        model: Option<String>,
+        /// Do not resume this chat when the helper finishes.
+        #[arg(long)]
+        no_wake: bool,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -484,14 +395,6 @@ pub enum ExpCommand {
     /// Show the experiment's status, run command, and latest run.
     Status { exp_id: String },
 
-    /// View the run command, or set it with `--set`.
-    Cmd {
-        exp_id: String,
-        /// Set the run command to this value.
-        #[arg(long)]
-        set: Option<String>,
-    },
-
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
     Desc {
         exp_id: String,
@@ -503,11 +406,14 @@ pub enum ExpCommand {
         stdin: bool,
     },
 
-    /// Launch a run on new (`--gpu`) or existing (`--sandbox`) compute.
+    /// Launch a locally initialized experiment through an orx-supervised backend.
     Run(Box<ExpRunArgs>),
 
     /// Cancel the in-flight run.
     Cancel { exp_id: String },
+
+    /// Resume this agent after the experiment's latest run succeeds or fails.
+    Wake { exp_id: String },
 
     /// Wait for a run to finish: one experiment (`<expId>`) or the next completion in a project (`--project`).
     Wait {
@@ -531,85 +437,27 @@ pub enum ExpCommand {
 }
 
 #[derive(Args, Debug)]
-pub struct ReportArgs {
-    #[command(subcommand)]
-    pub command: ReportCommand,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum ReportCommand {
-    /// Upload a report folder (report.md + images/) to a project.
-    Upload {
-        project_id: String,
-        /// Path to the report folder on disk.
-        folder: String,
-        /// Report title (defaults to the folder name).
-        #[arg(long)]
-        title: Option<String>,
-    },
-
-    /// List a project's reports.
-    List { project_id: String },
-
-    /// Print a report's markdown body to stdout. Pass its id or slug.
-    Show {
-        project_id: String,
-        /// Report id (from `orx report list`) or its slug.
-        report: String,
-    },
-
-    /// Download a report folder (report.md + referenced images) to a local
-    /// directory — the inverse of `upload`. Pass the report's id or slug.
-    Download {
-        project_id: String,
-        /// Report id (from `orx report list`) or its slug.
-        report: String,
-        /// Destination directory (created if absent). `report.md` and an
-        /// `images/` subfolder are written under it.
-        dir: String,
-    },
-}
-
-#[derive(Args, Debug)]
 pub struct ExpRunArgs {
     pub exp_id: String,
-    /// Provision a new instance with this GPU id, e.g. `H100_SXM` — the exact
-    /// id from `orx compute`, not a family name like `H100`.
-    #[arg(long)]
-    pub gpu: Option<String>,
-    /// GPUs per instance (with `--gpu`; default 1).
-    #[arg(long)]
-    pub count: Option<i64>,
-    /// Disk in GB (with `--gpu` or a `--backend openresearch` GPU flavor;
-    /// default 100).
+    /// Disk in GB for a `--backend openresearch` instance (default 100).
     #[arg(long)]
     pub disk: Option<i64>,
-    /// Provider to provision from (with `--gpu` or a `--backend openresearch`
-    /// GPU flavor), e.g. runpod, vast, lambda. Defaults to runpod (`--gpu`) or
-    /// the cheapest offer (`openresearch`) when omitted; validated server-side.
+    /// Provider for a `--backend openresearch` GPU flavor. When omitted, the
+    /// cheapest qualified offer is selected.
     #[arg(long)]
     pub provider: Option<String>,
-    /// Provision a CPU-only instance with this flavor: cpu5c (compute), cpu5g
-    /// (general), or cpu5m (memory-optimized). Mutually exclusive with `--gpu`.
-    #[arg(long)]
-    pub cpu: Option<String>,
-    /// vCPUs for a CPU instance (with `--cpu`): 2, 8, or 32 (default 8).
-    #[arg(long)]
-    pub vcpus: Option<i64>,
-    /// Run on an existing sandbox instead of provisioning. Mutually exclusive with `--gpu`/`--cpu`.
-    #[arg(long)]
-    pub sandbox: Option<String>,
-    /// External executor instead of managed compute: `hf` (Hugging Face Jobs,
+    /// orx-supervised executor: `hf` (Hugging Face Jobs,
     /// billed to your HF account), `modal` (a Modal Sandbox on your own Modal
     /// account, billed per second), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
-    /// `orx login`), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, and local are local
+    /// `orx login`), `tinker` (a local controller using remote Tinker model
+    /// compute), or `local` (a detached process on this machine). k8s,
+    /// ssh, slurm, ray, openresearch, tinker, and local are local
     /// experiments only. orx submits the job and a detached supervisor
-    /// mirrors status/logs back. Omitted on a local experiment: launches on
+    /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
     #[arg(long)]
     pub backend: Option<String>,
@@ -655,10 +503,20 @@ pub struct ExpRunArgs {
     /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
     pub timeout: Option<String>,
-    /// Launch even if the experiment's branch has no changes over its parent
-    /// (bypasses the "did you forget to push?" guard, for a deliberate re-run).
+    /// Launch even when another run is already in flight for this experiment.
     #[arg(long)]
     pub force: bool,
+    /// Internal attribution forwarded through the local orx up API.
+    #[arg(skip)]
+    pub chat_session_id: Option<String>,
+}
+
+impl ExpRunArgs {
+    pub fn launching_chat_session(&self) -> Option<String> {
+        self.chat_session_id
+            .clone()
+            .or_else(crate::local::chat::launching_chat_session)
+    }
 }
 
 #[derive(Args, Debug)]
@@ -713,9 +571,8 @@ pub struct InstallSkillsArgs {
 
     /// Also install the full set of modular `orx` skills (~8 always-listed
     /// skills) into the agent's global skills dir, not just the thin shim.
-    /// Intended for dedicated/orx-only environments (e.g. the cloud box) — in a
-    /// general-purpose setup the always-on skills add noise, so the default is
-    /// the shim alone.
+    /// Intended for dedicated/orx-only environments. In a general-purpose setup
+    /// the always-on skills add noise, so the default is the shim alone.
     #[arg(long)]
     pub full: bool,
 }
@@ -734,19 +591,9 @@ pub enum TelemetryCommand {
     On,
     /// Disable anonymous usage analytics on this machine.
     Off,
-    /// Show or set this machine's context tag (e.g. "cloud-agent"), stamped on
-    /// every event as `install_kind` so automated installs are separable from
-    /// humans in analytics. Intended for fleet provisioning, not end users.
-    Context {
-        /// Context value to persist (omit to show the current value).
-        value: Option<String>,
-        /// Clear the persisted context (the machine counts as human again).
-        #[arg(long, conflicts_with = "value")]
-        clear: bool,
-    },
 }
 
-/// Which corpus `orx lit` searches / `orx paper` reads from.
+/// Which corpus a literature command searches or reads from.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
 pub enum LitSource {
@@ -756,7 +603,8 @@ pub enum LitSource {
     Openalex,
     /// bioRxiv biology preprints (searched via OpenAlex, fetched via bioRxiv).
     Biorxiv,
-    /// You.com web search for current research and broader context.
+    /// You.com web search for current research and broader context (opt-in;
+    /// enabled only when selected explicitly, no default fallback).
     Youcom,
 }
 
@@ -782,26 +630,67 @@ impl LitSource {
             LitSource::Youcom => "You.com",
         }
     }
-
-    /// All sources, in preference order (used to pick a default when `--source`
-    /// is omitted).
-    pub const ALL: [LitSource; 4] = [LitSource::Alphaxiv, LitSource::Openalex, LitSource::Biorxiv, LitSource::Youcom];
 }
 
 #[derive(Args, Debug)]
-pub struct LitArgs {
-    /// Full-text search query.
+pub struct DiscoverArgs {
+    #[command(subcommand)]
+    pub command: DiscoverCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DiscoverCommand {
+    /// alphaXiv full-text BM25 retrieval with match snippets.
+    Keyword(DiscoverySearchArgs),
+    /// alphaXiv semantic title/abstract retrieval with similarity/popularity reranking.
+    Embedding(DiscoverySearchArgs),
+    /// OpenAlex scholarly-graph search across disciplines.
+    Openalex(DiscoverySearchArgs),
+    /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
+    Biorxiv(DiscoverySearchArgs),
+    /// You.com web search for current research and broader context. Opt-in;
+    /// requires `YDC_API_KEY` for the authenticated endpoint, falls back to
+    /// the keyless agents endpoint otherwise.
+    Youcom(DiscoverySearchArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct DiscoverySearchArgs {
+    /// Exact keyword query or semantic description, depending on the strategy.
     pub query: String,
-    /// Max results (default 5).
-    #[arg(long)]
-    pub limit: Option<u32>,
-    /// Corpus to search. Omitted = the first source enabled in Settings
-    /// (alphaxiv unless it's disabled).
-    #[arg(long, value_enum)]
-    pub source: Option<LitSource>,
-    /// Emit raw JSON instead of the formatted list.
-    #[arg(long)]
-    pub json: bool,
+    /// Include papers first published on or after this date (YYYY-MM-DD).
+    #[arg(long = "published-after")]
+    pub published_after: Option<String>,
+    /// Include papers first published on or before this date (YYYY-MM-DD). Older
+    /// or narrow embedding windows can return a thin candidate set.
+    #[arg(long = "published-before")]
+    pub published_before: Option<String>,
+    /// Ranking policy after topical relevance is accounted for.
+    #[arg(long, value_enum, default_value = "default")]
+    pub prioritize: DiscoveryPriority,
+    /// Maximum results to emit (default 15). alphaXiv uses its fixed server-side candidate pool.
+    #[arg(long, default_value_t = 15, value_parser = clap::value_parser!(u32).range(1..=200))]
+    pub limit: u32,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+#[value(rename_all = "lower")]
+pub enum DiscoveryPriority {
+    Historical,
+    Default,
+    Recency,
+    Popular,
+}
+
+impl DiscoveryPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Historical => "historical",
+            Self::Default => "default",
+            Self::Recency => "recency",
+            Self::Popular => "popular",
+        }
+    }
 }
 
 #[derive(Args, Debug)]
@@ -826,6 +715,34 @@ pub struct UpdateArgs {
     /// (multiple copies, or a `cargo install` overwrote it).
     #[arg(long)]
     pub force: bool,
+    /// Internal: the detached auto-updater. Silent, and records its outcome so
+    /// repeated failures back off.
+    #[arg(long, hide = true)]
+    pub background: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct InstallCliArgs {
+    /// Replace an existing `orx` on your PATH.
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct DeleteArgs {
+    #[command(subcommand)]
+    pub command: DeleteCommand,
+}
+
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum DeleteCommand {
+    /// Delete only orx.db and its SQLite sidecars. Project folders are untouched.
+    #[command(alias = "db")]
+    Database,
+    /// Delete the running orx executable and its matching installer receipt.
+    Cli,
+    /// Delete both the database and CLI executable.
+    All,
 }
 
 #[derive(Args, Debug)]
@@ -842,8 +759,26 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
+// The default multi-thread runtime is load-bearing for macOS app mode: it blocks
+// the main thread in the AppKit run loop while the dashboard server runs on
+// worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
+    // server, browser) instead of parsing CLI args. Also require an empty argv so
+    // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
+    // the bundle itself launches it with no arguments. See commands::app.
+    #[cfg(target_os = "macos")]
+    if commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
+        commands::app::hydrate_shell_env().await;
+        telemetry::set_flag(false);
+        let _session = telemetry::TelemetrySession::start_app();
+        // AppKit owns process shutdown; the durable outbox covers termination before delivery.
+        commands::app::run().await;
+        return;
+    }
+
     let cli = Cli::parse();
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
@@ -881,9 +816,21 @@ async fn main() {
         }
         return;
     }
+    if let Command::PublishBranch(args) = &command {
+        if let Err(err) =
+            local::git::push_branch(&args.repo_path, &args.branch, &args.owner, &args.repo)
+        {
+            eprintln!("orx publish-branch: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
-    let warning = (!matches!(command, Command::Version(_) | Command::Update(_)))
-        .then(updates::UpdateWarning::start);
+    let warning = (!matches!(
+        command,
+        Command::Version(_) | Command::Update(_) | Command::Delete(_)
+    ))
+    .then(updates::UpdateWarning::start);
 
     // Anonymous usage analytics. Record the flag process-globally so command
     // modules can fire events without threading it through, then fire the
@@ -891,7 +838,9 @@ async fn main() {
     // (e.g. the "not logged in" path) are still counted. Opt out with
     // --no-telemetry or `orx telemetry off`.
     telemetry::set_flag(cli.no_telemetry);
-    let session = telemetry::TelemetrySession::start(command_name(&command));
+    let session = telemetry::TelemetrySession::start(
+        should_capture_command(&command).then(|| command_name(&command)),
+    );
 
     let result = dispatch(command).await;
     if let Some(warning) = warning {
@@ -906,6 +855,17 @@ async fn main() {
     }
 }
 
+fn should_capture_command(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Supervise(_)
+            | Command::Update(UpdateArgs {
+                background: true,
+                ..
+            })
+    )
+}
+
 /// A stable, PII-free event label for each command, decoupled from the enum
 /// variant name so renames don't silently break analytics continuity.
 fn command_name(command: &Command) -> &'static str {
@@ -913,58 +873,52 @@ fn command_name(command: &Command) -> &'static str {
         Command::Login(_) => "login",
         Command::Logout => "logout",
         Command::Projects(_) => "projects",
-        Command::Explore(_) => "explore",
+        Command::Orgs(_) => "orgs",
         Command::Project(_) => "project",
-        Command::Experiments(_) => "experiments",
-        Command::Env(_) => "env",
+        Command::Agent(_) => "agent",
         Command::Runs(_) => "runs",
         Command::Logs(_) => "logs",
-        Command::SearchLogs(_) => "search-logs",
-        Command::Artifacts(_) => "artifacts",
-        Command::Artifact(_) => "artifact",
-        Command::Wandb(_) => "wandb",
-        Command::Query(_) => "query",
-        Command::Chart(_) => "chart",
-        Command::CreateProject(_) => "create-project",
         Command::CreateExperiment(_) => "create-experiment",
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
-        Command::Report(_) => "report",
         Command::Skill(_) => "skill",
         Command::InstallSkills(_) => "install-skills",
-        Command::Lit(_) => "lit",
+        Command::Discover(_) => "discover",
         Command::Paper(_) => "paper",
         Command::Version(_) => "version",
         Command::Update(_) => "update",
+        Command::InstallCli(_) => "install-cli",
+        Command::Delete(_) => "delete",
         Command::Serve(_) => "serve",
         Command::Supervise(_) => "supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
+        Command::PublishBranch(_) => "publish-branch",
     }
 }
 
 async fn dispatch(command: Command) -> error::Result<()> {
+    let lifecycle_lock = command_uses_lifecycle_lock(&command)
+        .then(store::open_lifecycle_lock)
+        .transpose()?;
+    let _lifecycle_guard = lifecycle_lock
+        .as_ref()
+        .map(|lock| lock.read())
+        .transpose()?;
+
     match command {
         Command::Login(args) => commands::login::run(args).await,
         Command::Logout => commands::logout::run().await,
         Command::Projects(args) => commands::projects::run(args).await,
-        Command::Explore(args) => commands::explore::run(args).await,
+        Command::Orgs(args) => commands::orgs::run(args).await,
         Command::Project(args) => commands::project::run(args).await,
-        Command::Experiments(args) => commands::experiments::run(args).await,
-        Command::Env(args) => commands::env::run(args).await,
+        Command::Agent(args) => commands::agent::run(args).await,
         Command::Runs(args) => commands::runs::run(args).await,
         Command::Logs(args) => commands::logs::run(args).await,
-        Command::SearchLogs(args) => commands::search_logs::run(args).await,
-        Command::Artifacts(args) => commands::artifacts::run(args).await,
-        Command::Artifact(args) => commands::artifact::run(args).await,
-        Command::Wandb(args) => commands::wandb::run(args).await,
-        Command::Query(args) => commands::query::run(args).await,
-        Command::Chart(args) => commands::chart::run(args).await,
-        Command::CreateProject(args) => commands::create_project::run(args).await,
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
@@ -973,13 +927,14 @@ async fn dispatch(command: Command) -> error::Result<()> {
             SshKeyCommand::List => commands::ssh_key::list().await,
         },
         Command::Exp(args) => commands::exp::run(args).await,
-        Command::Report(args) => commands::report::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
-        Command::Lit(args) => commands::lit::run(args).await,
+        Command::Discover(args) => commands::discover::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,
         Command::Version(args) => commands::version::run(args).await,
         Command::Update(args) => commands::update::run(args).await,
+        Command::InstallCli(args) => commands::install_cli::run(args).await,
+        Command::Delete(args) => commands::delete::run(args).await,
         Command::Serve(args) => commands::serve::run(args).await,
         Command::Supervise(args) => commands::supervise::run(args).await,
         Command::Up(args) => match args.remote.clone() {
@@ -990,5 +945,165 @@ async fn dispatch(command: Command) -> error::Result<()> {
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
+        Command::PublishBranch(_) => unreachable!("handled before dispatch"),
+    }
+}
+
+fn command_uses_lifecycle_lock(command: &Command) -> bool {
+    !matches!(
+        command,
+        Command::Login(_)
+            | Command::Logout
+            | Command::InstallSkills(_)
+            | Command::Discover(_)
+            | Command::Paper(_)
+            | Command::Version(_)
+            | Command::Delete(_)
+            | Command::Telemetry(_)
+            | Command::PlanGate
+            | Command::McpGate
+            | Command::PublishBranch(_)
+    )
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn internal_commands_do_not_emit_command_telemetry() {
+        assert!(!should_capture_command(&Command::Supervise(
+            SuperviseArgs {
+                run_id: "run-1".into(),
+            }
+        )));
+        assert!(!should_capture_command(&Command::Update(UpdateArgs {
+            background: true,
+            dry_run: false,
+            force: false,
+        })));
+        assert!(should_capture_command(&Command::Update(UpdateArgs {
+            background: false,
+            dry_run: true,
+            force: false,
+        })));
+    }
+
+    #[test]
+    fn discover_parses_independent_retrieval_options() {
+        let cli = Cli::try_parse_from([
+            "orx",
+            "discover",
+            "embedding",
+            "test-time compute",
+            "--published-after",
+            "2024-01-01",
+            "--published-before",
+            "2025-12-31",
+            "--prioritize",
+            "historical",
+            "--limit",
+            "9",
+        ])
+        .expect("discover embedding should parse");
+
+        let Some(Command::Discover(DiscoverArgs {
+            command: DiscoverCommand::Embedding(args),
+        })) = cli.command
+        else {
+            panic!("expected discover embedding command");
+        };
+        assert_eq!(args.query, "test-time compute");
+        assert_eq!(args.published_after.as_deref(), Some("2024-01-01"));
+        assert_eq!(args.published_before.as_deref(), Some("2025-12-31"));
+        assert_eq!(args.prioritize, DiscoveryPriority::Historical);
+        assert_eq!(args.limit, 9);
+    }
+
+    #[test]
+    fn discover_parses_openalex_and_biorxiv_primitives() {
+        for (source, expected) in [
+            ("openalex", LitSource::Openalex),
+            ("biorxiv", LitSource::Biorxiv),
+        ] {
+            let cli = Cli::try_parse_from(["orx", "discover", source, "protein folding"])
+                .expect("source discovery should parse");
+            let Some(Command::Discover(DiscoverArgs { command })) = cli.command else {
+                panic!("expected discover command");
+            };
+            let actual = match command {
+                DiscoverCommand::Openalex(_) => LitSource::Openalex,
+                DiscoverCommand::Biorxiv(_) => LitSource::Biorxiv,
+                _ => panic!("expected non-alphaXiv discovery source"),
+            };
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn run_accepts_only_supervised_backend_flags() {
+        for flag in ["--gpu", "--cpu", "--sandbox"] {
+            let error = Cli::try_parse_from(["orx", "exp", "run", "exp-1", flag, "value"])
+                .expect_err("unsupported run flag should not parse");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn research_state_commands_are_local_only() {
+        for command in [
+            "explore",
+            "experiments",
+            "env",
+            "search-logs",
+            "artifacts",
+            "artifact",
+            "wandb",
+            "query",
+            "chart",
+            "report",
+        ] {
+            let error = Cli::try_parse_from(["orx", command])
+                .expect_err("removed research command should not parse");
+            assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        }
+
+        let error = Cli::try_parse_from(["orx", "exp", "cmd", "exp-1"])
+            .expect_err("per-experiment run command should not parse");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+
+        let error = Cli::try_parse_from(["orx", "projects", "--all"])
+            .expect_err("local projects have no archived state");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+
+        Cli::try_parse_from(["orx", "orgs", "--json"]).expect("orgs should parse");
+    }
+
+    #[test]
+    fn openresearch_backend_and_flavor_still_parse() {
+        let cli = Cli::try_parse_from([
+            "orx",
+            "exp",
+            "run",
+            "exp-1",
+            "--backend",
+            "openresearch",
+            "--flavor",
+            "h100_sxm",
+        ])
+        .expect("local OpenResearch launch should parse");
+
+        let Some(Command::Exp(ExpArgs {
+            command: ExpCommand::Run(args),
+        })) = cli.command
+        else {
+            panic!("expected exp run command");
+        };
+        assert_eq!(args.backend.as_deref(), Some("openresearch"));
+        assert_eq!(args.flavor.as_deref(), Some("h100_sxm"));
     }
 }

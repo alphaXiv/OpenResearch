@@ -1,3 +1,4 @@
+import { m } from "../paraglide/messages.js";
 import { ChevronDown, CircleStop } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -12,10 +13,12 @@ import { ExperimentOverview } from "./ExperimentOverview";
 import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
+import type { TabOpenIntent } from "../tabPreview";
+import { Button, MenuItem } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
 
-/** An experiment's detail view, rendered as right-pane tab content. Mount it
+/** An experiment's detail view, rendered as end-pane tab content. Mount it
  *  keyed by `${experiment.id}:${view}` so per-view state resets on switch. */
 export function DetailDrawer({
   experiment,
@@ -36,8 +39,8 @@ export function DetailDrawer({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
   parentExperiment: Experiment | null;
-  onOpenView: (view: ExperimentView, runId?: string) => void;
-  onOpenCode: (view: CodeView) => void;
+  onOpenView: (view: ExperimentView, runId: string | undefined, intent: TabOpenIntent) => void;
+  onOpenCode: (view: CodeView, intent: TabOpenIntent) => void;
 }) {
   const expRuns = runs
     .filter((r) => r.experimentId === experiment.id)
@@ -50,10 +53,9 @@ export function DetailDrawer({
         parentExperiment={parentExperiment}
         project={project}
         runs={expRuns}
-        onOpenLogs={(runId) => onOpenView("terminal", runId)}
-        onOpenChanges={() => onOpenCode("changes")}
-        onOpenCode={() => onOpenCode("files")}
-      />
+        onOpenLogs={(runId, intent) => onOpenView("terminal", runId, intent)}
+        onOpenCode={(intent) => onOpenCode("files", intent)}
+     />
     );
   }
 
@@ -63,7 +65,7 @@ export function DetailDrawer({
       expRuns={expRuns}
       selectedRunId={selectedRunId}
       onSelectRun={onSelectRun}
-    />
+   />
   );
 }
 
@@ -136,51 +138,52 @@ function TerminalView({
   }
 
   return (
-    <div className="term-view">
-      <div className="term-bar">
-        <div className="term-title" title={experiment.title || experiment.slug}>
+    <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+        <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
-        <span style={{ flex: 1 }} />
+        <span className="flex-1" />
         {error && (
           <span className="error" role="alert">
             {error}
           </span>
         )}
         {live && (
-          <button className="btn sm ghost" disabled={cancelling} onClick={() => void stop()}>
+          <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>
             <CircleStop size={13} />
-            {cancelling ? "Cancelling…" : "Stop"}
-          </button>
+            {cancelling ? m.common_cancelling() : m.common_stop()}
+          </Button>
         )}
         {expRuns.length > 0 && selectedRun && (
-          <div className="run-history" ref={historyRef}>
-            <button
-              className="run-picker"
-              title="Switch run"
+          <div className="run-history relative shrink-0" ref={historyRef}>
+            <Button
+              title={m.detail_drawer_switch_run()}
+              aria-expanded={historyOpen}
               onClick={() => setHistoryOpen((v) => !v)}
             >
-              <span className="run-label">Run {runNumber(selectedRun.id)}</span>
+              <span>{m.detail_drawer_run()} {runNumber(selectedRun.id)}</span>
               <StatusBadge
                 status={cancelling ? "cancelling" : runDisplayStatus(selectedRun)}
-              />
-              <ChevronDown size={14} className="run-picker-chev" />
-            </button>
+             />
+              <ChevronDown size={14} className="run-picker-chev text-muted shrink-0" />
+            </Button>
             {historyOpen && (
-              <div className="history-menu">
+              <div className="history-menu absolute top-[calc(100%_+_6px)] end-0 min-w-57.5 max-h-80 overflow-y-auto bg-background border border-border rounded-lg shadow-menu p-[5px] z-50">
                 {expRuns.map((r) => (
-                  <button
+                  <MenuItem
                     key={r.id}
-                    className={`history-item ${r.id === selectedRun?.id ? "active" : ""}`}
+                    className="justify-start"
+                    active={r.id === selectedRun?.id}
                     onClick={() => {
                       onSelectRun(r.id);
                       setHistoryOpen(false);
                     }}
                   >
-                    <span className="run-label">Run {runNumber(r.id)}</span>
+                    <span className="font-medium">{m.detail_drawer_run()} {runNumber(r.id)}</span>
                     <StatusBadge status={runDisplayStatus(r)} />
-                    <span className="when">{timeAgo(r.createdAt)}</span>
-                  </button>
+                    <span className="ms-auto text-xs text-muted">{timeAgo(r.createdAt)}</span>
+                  </MenuItem>
                 ))}
               </div>
             )}
@@ -188,13 +191,13 @@ function TerminalView({
         )}
       </div>
 
-      <div className="term-fill">
+      <div className="term-fill flex-1 min-h-0 bg-terminal pt-1 pe-0 pb-1 ps-1.5">
         {selectedRun ? (
           // Key by run id so switching runs in the history dropdown remounts
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />
         ) : (
-          <div className="term-empty">No runs yet — ask the agent to launch one.</div>
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
         )}
       </div>
     </div>

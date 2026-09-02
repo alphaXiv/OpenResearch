@@ -1,50 +1,65 @@
 //! Local launch — the on-this-machine twin of `local/ssh.rs`: run the
-//! experiment as a detached process on the machine running orx. Same clone
-//! contract as every backend — the run clones the branch's GitHub tip into
+//! experiment as a detached process on the machine running orx. Same snapshot
+//! contract as every backend — the run extracts the recorded revision into
 //! its own run dir, never the agent's worktree. The run row lives in the
 //! local store only; a detached `orx supervise` watches the process.
 
 use std::collections::HashMap;
 
-use crate::commands::exp::{local_clone_script, spawn_detached_supervise};
+use crate::commands::exp::spawn_detached_supervise;
+use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, Result};
 use crate::jobs::{localbox, BackendDescriptor};
-use crate::local::git;
 use crate::store::{now_ms, Store, StoredRun};
 
-/// CLI wrapper around `submit_local_run`: submit, then print the summary.
+/// Submit a local controller and print its run directory.
 pub async fn launch_local_run(args: &crate::ExpRunArgs) -> Result<()> {
-    let run = submit_local_run(args).await?;
+    let run = crate::compute::submit(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} Local run started.");
+    let label = if backend.kind == "tinker_job" {
+        "Tinker"
+    } else {
+        "Local"
+    };
+    println!("\u{2713} {label} run started.");
     println!("  dir  {}", backend.job_id.as_deref().unwrap_or(""));
     println!("  run  {}", run.id);
     println!(
-        "  Follow it with `orx exp wait {}` or `orx logs {}`.",
-        run.experiment_id, run.id
+        "{}",
+        crate::invocation::follow_up(&run.experiment_id, &run.id)
     );
     Ok(())
 }
 
-/// Submit the local experiment's run as a detached process on this machine
-/// and detach a supervisor. Requires `--backend local`; there is nothing else
-/// to pick — the hardware is whatever this machine has.
-pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    if args.sandbox.is_some() || args.gpu.is_some() || args.cpu.is_some() {
-        return Err(anyhow!(
-            "--backend local runs on this machine; drop --gpu/--cpu/--sandbox — \
-             there is nothing to provision."
-        ));
-    }
+pub async fn submit_local_run_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "local_job").await
+}
+
+pub async fn submit_tinker_run_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
+    submit_controller_run(args, source, run_id, "tinker_job").await
+}
+
+async fn submit_controller_run(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+    kind: &str,
+) -> Result<StoredRun> {
+    let backend = kind.trim_end_matches("_job");
     if args.flavor.is_some() {
-        return Err(anyhow!(
-            "--backend local has no flavors — the hardware is whatever this machine has."
-        ));
+        return Err(anyhow!("--backend {backend} does not take --flavor."));
     }
     if args.image.is_some() {
         return Err(anyhow!(
-            "--image doesn't apply to --backend local — the run uses this machine's \
-             own environment."
+            "--image doesn't apply to --backend {backend} — the controller uses this machine's own environment."
         ));
     }
 
@@ -61,60 +76,46 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let run_command = Some(exp.run_command.clone())
         .filter(|c| !c.trim().is_empty())
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
-        .ok_or_else(|| {
-            anyhow!(
-                "No run command set for this experiment or its project. Set the project \
-                 default with `orx project edit {} --run-command '<cmd>'`, or pass \
-                 `--run-command '<cmd>'` to `orx create-experiment` — then relaunch.",
-                project.id
-            )
-        })?;
+        .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    // One run in flight per experiment unless deliberately forced.
-    if !args.force {
-        if let Some(r) = store
-            .list_runs_by_experiment(&exp.id)?
-            .into_iter()
-            .find(|r| !crate::local::is_terminal(&r.status))
-        {
-            return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). \
-                 Cancel it with `orx exp cancel {}` or pass --force to launch anyway.",
-                r.id,
-                r.status,
-                exp.id
-            ));
-        }
-    }
-
-    let commit_sha = {
-        let repo_path = project.repo_path.clone();
-        let branch = exp.branch_name.clone();
-        tokio::task::spawn_blocking(move || -> Result<String> {
-            git::local_head_sha(std::path::Path::new(&repo_path), &branch)
-        })
-        .await
-        .map_err(|e| anyhow!("git task failed: {e}"))??
-    };
-
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let script = local_clone_script(&project.repo_path, &commit_sha, &run_command);
+    let script = crate::compute::snapshot_script(&source.path.to_string_lossy(), &run_command);
 
     // The run's env: everything the user synced (API keys), plus the tokens
-    // the clone script expects. Exported inside run.sh (written owner-only).
+    // the run script expects. Exported inside run.sh (written owner-only).
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
+    }
+    // run.sh executes the user's own script, so it needs the shell's PATH — a
+    // run launched from the macOS app would otherwise have no python/uv/conda.
+    if let Some(path) = crate::local::shell_env::search_path() {
+        env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
+    }
+    crate::local::shell_env::export_to(|key, value| {
+        env.insert(key.to_string(), value.to_string_lossy().into_owned());
+    });
+    let mut secret_env = HashMap::new();
+    // Every local controller inherits this key without persisting it in run.sh.
+    let tinker_key = if kind == "tinker_job" {
+        env.insert("ORX_RUN_ID".to_string(), run_id.clone());
+        Some(crate::jobs::tinker::resolve_api_key()?)
+    } else {
+        env.get(crate::jobs::tinker::API_KEY_ENV).cloned()
+    };
+    env.remove(crate::jobs::tinker::API_KEY_ENV);
+    if let Some(key) = tinker_key {
+        secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
     }
 
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
         script,
         env,
+        secret_env,
     })?;
 
-    let descriptor = BackendDescriptor {
-        kind: "local_job".to_string(),
+    let mut descriptor = BackendDescriptor {
+        kind: kind.to_string(),
         namespace: None,
         job_id: Some(dir.to_string_lossy().into_owned()),
         flavor: None,
@@ -127,7 +128,15 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         ssh_port: None,
         ssh_user: None,
         timeout_secs: None,
+        source_digest: None,
+        source_path: None,
+        source_size: None,
     };
+    source.apply_to_descriptor(&mut descriptor);
+    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
+        let _ = localbox::cancel_job(&dir);
+        return Err(error);
+    }
     let run = StoredRun {
         id: run_id.clone(),
         experiment_id: exp.id.clone(),
@@ -139,10 +148,12 @@ pub async fn submit_local_run(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         updated_at: now_ms(),
         ended_at: None,
         exit_code: None,
-        commit_sha: Some(commit_sha),
+        commit_sha: Some(source.revision),
         result_markdown: None,
-        cancel_requested: false,
-        chat_session_id: crate::local::chat::launching_chat_session(),
+        cancel_requested: store
+            .get_run(&run_id)?
+            .is_some_and(|run| run.cancel_requested),
+        chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;
 

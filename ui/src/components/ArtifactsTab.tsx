@@ -1,3 +1,6 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { getLocale } from "../paraglide/runtime.js";
 import {
   Check,
   ChevronRight,
@@ -5,8 +8,8 @@ import {
   ExternalLink,
   Code,
   FileText,
-  FolderOpen,
   MousePointerClick,
+  Package,
   Settings2,
   Trash2,
 } from "lucide-react";
@@ -18,13 +21,22 @@ import remarkMath from "remark-math";
 import {
   artifactUrl,
   deleteArtifact,
+  FILE_PREVIEW_BYTES,
   fmtBytes,
+  getArtifactFileText,
   type ArtifactEntry,
   type Project,
   type ProjectArtifacts,
 } from "../api";
 import { CodeView } from "./CodeView";
-import { mdCodeComponents, normalizeMathDelimiters, remarkMathOptions } from "./Md";
+import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
+import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
+import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { mdCodeComponents, remarkMathOptions } from "./Md";
+import { IconButton, IconButtonLink, LoadingRow, Spinner } from "./ui";
+
+const TOOLTIP_ICON_BUTTON_CLASS_NAME =
+  "tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]";
 
 /** Any href with a URI scheme (https:, mailto:, data:, …) or a
  * protocol-relative // — i.e. not an artifact-relative path to resolve. */
@@ -70,16 +82,12 @@ function stripFrontmatter(md: string): string {
   return end === -1 ? md : md.slice(end + 4).replace(/^\r?\n/, "");
 }
 
-const IMAGE_RE = /\.(png|jpe?g|gif|webp|svg)$/i;
-const MD_RE = /\.(md|mdx|markdown)$/i;
-/** Raw text preview cap — matches the repo file viewer's truncation cap. */
-const MAX_TEXT_PREVIEW = 512 * 1024;
-
 /** Tree pane width: draggable divider, persisted across reloads. */
 const TREE_WIDTH_KEY = "orx:files-tree-width";
 const COLLAPSED_DIRS_KEY_PREFIX = "orx:artifacts-collapsed:";
 const TREE_MIN_WIDTH = 180;
 const TREE_MAX_WIDTH = 560;
+const TREE_MAX_INDENT_DEPTH = 8;
 const TREE_DEFAULT_WIDTH = 280;
 
 function initialTreeWidth(): number {
@@ -132,7 +140,7 @@ export function ArtifactMarkdown({
     return artifactTargetUrl(projectId, folder, src);
   };
   return (
-    <div className="md artifact-md">
+    <div className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:font-semibold [&_h2]:text-text [&_h2]:font-semibold [&_h3]:text-text [&_h3]:font-semibold [&_h4]:text-text [&_h4]:font-semibold [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text artifact-md text-lg [&_h1]:text-4xl [&_h1]:leading-[1.18] [&_h1]:mt-7 [&_h1]:mx-0 [&_h1]:mb-3.5 [&_h2]:text-3xl [&_h2]:leading-tight [&_h2]:mt-7 [&_h2]:mx-0 [&_h2]:mb-2.5 [&_h3]:text-xl [&_h3]:leading-[1.35] [&_h3]:mt-5.5 [&_h3]:mx-0 [&_h3]:mb-2 [&_h4]:text-lg [&_h4]:leading-[1.4] [&_h4]:mt-4.5 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:overflow-x-auto [&_.artifact-img]:block [&_.artifact-img]:my-3 [&_.artifact-img]:mx-0 [&_.artifact-img_img]:max-w-full [&_.artifact-img_img]:h-auto [&_.artifact-img_img]:border [&_.artifact-img_img]:border-border [&_.artifact-img_img]:rounded-sm [&_.artifact-img-caption]:block [&_.artifact-img-caption]:mt-1 [&_.artifact-img-caption]:text-center [&_.artifact-img-caption]:text-sm [&_.artifact-img-caption]:text-subtext">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, [remarkMath, remarkMathOptions]]}
         rehypePlugins={[rehypeKatex]}
@@ -167,58 +175,65 @@ export function ArtifactMarkdown({
           ...mdCodeComponents,
         }}
       >
-        {normalizeMathDelimiters(stripFrontmatter(markdown))}
+        {normalizeMarkdownForRendering(stripFrontmatter(markdown))}
       </ReactMarkdown>
     </div>
   );
 }
 
-type PreviewKind = "markdown" | "image" | "pdf" | "text";
+type PreviewKind = "markdown" | MediaPreviewKind | "text" | "download";
 
 function previewKind(entry: ArtifactEntry): PreviewKind {
-  if (MD_RE.test(entry.name)) return "markdown";
-  if (IMAGE_RE.test(entry.name)) return "image";
-  if (/\.pdf$/i.test(entry.name)) return "pdf";
-  return "text";
+  if (entry.presentation === "text" && isMarkdownFile(entry.name)) return "markdown";
+  return mediaPreviewKind(entry.presentation) ??
+    (entry.presentation === "text" || entry.presentation === "unknown" ? "text" : "download");
 }
 
-/** Fetched body for kinds that need text: markdown or raw text.
- * `binary` flags NUL bytes so we don't dump garbage into a <pre>. */
+/** Fetched body for kinds that need text: markdown or raw text. */
 function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind) {
   const [text, setText] = useState<string | null>(null);
   const [binary, setBinary] = useState(false);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestSequence = useRef(0);
+  const hasText = useRef(false);
 
-  const wantsText = kind === "markdown" || (kind === "text" && entry.size <= MAX_TEXT_PREVIEW);
+  const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
 
   useEffect(() => {
-    // Reset before the wantsText guard: a refire on the same mounted entry
-    // (modifiedAt changed — file rewritten on disk) must not leave the
-    // previous body or binary/error flags behind.
-    setText(null);
+    // Keep the previous body visible while a same-path rewrite is refetched.
+    // The preview component remounts when the selected path changes.
     setBinary(false);
+    setTruncated(false);
     setError(null);
     if (!wantsText) return;
     let cancelled = false;
-    const load = fetch(artifactUrl(projectId, entry.path)).then((r) => {
-      if (!r.ok) throw new Error(`Failed to load artifact (${r.status})`);
-      return r.text();
+    const request = ++requestSequence.current;
+    const load = getArtifactFileText(projectId, entry.path).then((body) => {
+      if (!body) throw new Error(m.artifacts_not_found());
+      return body;
     });
     load
       .then((body) => {
-        if (cancelled) return;
-        if (body.includes("\u0000")) setBinary(true);
-        else setText(body);
+        if (cancelled || request !== requestSequence.current) return;
+        if (body.binary) setBinary(true);
+        else {
+          hasText.current = true;
+          setText(body.content);
+        }
+        setTruncated(body.truncated);
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled && request === requestSequence.current && !hasText.current) {
+          setError(e instanceof Error ? e.message : String(e));
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [projectId, entry.path, entry.modifiedAt, kind, wantsText]);
 
-  return { text, binary, error, wantsText };
+  return { text, binary, truncated, error, wantsText };
 }
 
 /** Right pane: the selected artifact rendered inline — markdown as a document,
@@ -233,37 +248,38 @@ function PreviewPane({
   onDelete: (path: string) => void;
 }) {
   const kind = previewKind(entry);
-  const { text, binary, error, wantsText } = useTextBody(projectId, entry, kind);
+  const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind);
   const [showSource, setShowSource] = useState(false);
   const isDoc = kind === "markdown";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
-  const rawUrl = artifactUrl(projectId, entry.path);
+  const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${entry.modifiedAt}`;
 
   let body: ReactNode;
-  if (kind === "image") {
+  if (kind === "image" || kind === "audio" || kind === "video" || kind === "pdf") {
+    body = <MediaPreview kind={kind} url={rawUrl} name={entry.name} />;
+  } else if (kind === "download" || !wantsText || binary) {
     body = (
-      <a className="fpreview-image" href={rawUrl} target="_blank" rel="noopener noreferrer">
-        <img src={rawUrl} alt={entry.name} />
-      </a>
-    );
-  } else if (kind === "pdf") {
-    body = <iframe className="fpreview-pdf" title={entry.name} src={rawUrl} />;
-  } else if (!wantsText || binary) {
-    body = (
-      <div className="file-view-note">
-        {binary ? "Binary file — no inline preview." : "File too large to preview inline."}{" "}
-        <a href={rawUrl} target="_blank" rel="noopener noreferrer">
-          Open raw
+      <div className="file-view-note py-2.5 px-4 text-sm text-muted">
+        {kind === "download" || binary
+          ? m.artifacts_binary_no_preview()
+          : m.artifacts_too_large_to_preview()}{" "}
+        <a
+          href={rawUrl}
+          {...(kind === "download" || binary
+            ? { download: entry.name }
+            : { target: "_blank", rel: "noopener noreferrer" })}
+        >
+          {kind === "download" || binary ? m.file_viewer_download() : m.artifacts_open_raw()}
         </a>
       </div>
     );
   } else if (error) {
-    body = <div className="file-view-note">Failed to load: {error}</div>;
+    body = <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.artifacts_tab_failed_to_load()} {ltr(error)}</div>;
   } else if (text === null) {
     body = (
-      <div className="settings-loading">
-        <span className="spinner" /> Loading…
-      </div>
+      <LoadingRow>
+        <Spinner /> {m.artifacts_tab_loading()}
+      </LoadingRow>
     );
   } else if (isDoc && !showSource) {
     body = <ArtifactMarkdown projectId={projectId} folder={mdFolder} markdown={text} />;
@@ -273,148 +289,174 @@ function PreviewPane({
 
   return (
     // `file-view` scopes the shared syntax-token colors onto the code view.
-    <div className="fpreview file-view">
-      <div className="fpreview-head">
-        <FileText size={13} style={{ flexShrink: 0 }} />
-        <code className="fpreview-path" title={entry.path}>
+    <div className="fpreview flex-1 min-w-0 bg-background file-view flex flex-col h-full min-h-0">
+      <div className="fpreview-head h-10 flex items-center gap-2 py-0 px-3.5 border-b border-b-border-variant text-subtext shrink-0">
+        <FileText size={13} className="shrink-0" />
+        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={ltr(entry.path)}>
           {entry.path}
         </code>
-        <span className="fpreview-date">
-          Modified{" "}
-          {new Date(entry.modifiedAt).toLocaleString(undefined, {
+        <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
+          {m.artifacts_tab_modified()}{" "}
+          {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
             dateStyle: "medium",
             timeStyle: "short",
           })}
         </span>
-        {kind === "text" && (
-          <span className="fpreview-size">{fmtBytes(entry.size)}</span>
+        {(kind === "text" || kind === "download") && (
+          <span className="fpreview-size text-xs text-muted whitespace-nowrap shrink-0">{fmtBytes(entry.size)}</span>
         )}
         {isDoc && (
-          <button
-            className={`icon-btn ${showSource ? "active" : ""}`}
-            data-tip={showSource ? "Rendered view" : "View source"}
+          <IconButton
+            active={showSource}
+            data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
-            aria-label={showSource ? "Rendered view" : "View source"}
+            aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
             onClick={() => setShowSource((s) => !s)}
           >
             <Code size={13} />
-          </button>
+          </IconButton>
         )}
-        <a
-          className="icon-btn"
+        <IconButtonLink
           href={rawUrl}
           target="_blank"
           rel="noopener noreferrer"
-          data-tip="Open raw in new tab"
+          data-tip={m.artifacts_tab_open_raw_in_new_tab()}
           data-tip-align="end"
-          aria-label="Open raw in new tab"
+          aria-label={m.artifacts_tab_open_raw_in_new_tab()}
         >
           <ExternalLink size={13} />
-        </a>
-        <button
-          className="icon-btn"
-          data-tip="Delete artifact"
+        </IconButtonLink>
+        <IconButton
+          data-tip={m.artifacts_tab_delete_artifact()}
           data-tip-align="end"
-          aria-label="Delete artifact"
+          aria-label={m.artifacts_tab_delete_artifact()}
           onClick={() => {
-            if (window.confirm(`Delete "${entry.path}" from the artifacts directory?`))
+            if (window.confirm(m.artifact_delete_confirm({ path: ltr(entry.path) })))
               onDelete(entry.path);
           }}
         >
           <Trash2 size={13} />
-        </button>
+        </IconButton>
       </div>
-      <div className={`fpreview-body ${isDoc && !showSource ? "doc" : ""}`}>{body}</div>
+      <div className={`fpreview-body flex-1 min-h-0 overflow-auto [&.doc]:pt-4.5 [&.doc]:px-7 [&.doc]:pb-12 [&.doc_.artifact-md]:max-w-readable [&.doc_.artifact-md]:my-0 [&.doc_.artifact-md]:mx-auto ${isDoc && !showSource ? "doc" : ""}`}>
+        {body}
+        {truncated && (
+          <div className="file-view-note py-2.5 px-4 text-sm text-muted">
+            {m.artifacts_tab_file_truncated_showing_the_first_512_kb()}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
 function TreeRows({
-  projectId,
   entries,
   depth,
   collapsed,
   selected,
   onToggle,
   onSelect,
+  onOpenFile,
   onDelete,
 }: {
-  projectId: string;
   entries: ArtifactEntry[];
   depth: number;
   collapsed: Set<string>;
   selected: string | null;
   onToggle: (path: string) => void;
   onSelect: (path: string) => void;
+  onOpenFile: (path: string) => void;
   onDelete: (path: string) => void;
 }) {
   return (
-    <>
+    <div className="flex w-full max-w-full min-w-0 flex-col items-stretch">
       {entries.map((e) => {
-        const indent = { paddingLeft: 8 + depth * 14 };
+        const indent = { paddingInlineStart: 8 + Math.min(depth, TREE_MAX_INDENT_DEPTH) * 14 };
         if (e.isDir) {
           const open = !collapsed.has(e.path);
           return (
-            <div key={e.path}>
-              <div className="ft-row" style={indent} onClick={() => onToggle(e.path)}>
+            <div key={e.path} className="min-w-0 max-w-full">
+              <div className="file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100" style={indent} onClick={() => onToggle(e.path)}>
                 <button
-                  className={`ft-chevron ${open ? "open" : ""}`}
-                  aria-label={open ? `Collapse ${e.name}` : `Expand ${e.name}`}
+                  className="file-tree-chevron text-muted shrink-0 [button&]:inline-flex [button&]:items-center [button&]:justify-center [button&]:w-[13px] [button&]:h-[13px] [button&]:p-0 [button&]:border-0 [button&]:bg-transparent [button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90"
+                  aria-label={open ? m.artifact_collapse_folder({ name: ltr(e.name) }) : m.artifact_expand_folder({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
                     onToggle(e.path);
                   }}
                 >
-                  <ChevronRight size={12} />
+                  <ChevronRight size={13} className={open ? "open" : ""} />
                 </button>
-                <span className="ft-dirname">{e.name}/</span>
-                <button
-                  className="icon-btn ft-row-delete"
-                  data-tip="Delete folder"
+                <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{e.name}</span>
+                <IconButton size="small"
+                  className="ft-row-delete opacity-35 focus-visible:opacity-100"
+                  data-tip={m.artifacts_tab_delete_folder()}
                   data-tip-align="end"
-                  aria-label={`Delete folder ${e.name}`}
+                  aria-label={m.artifact_delete_folder_label({ name: ltr(e.name) })}
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    if (window.confirm(`Delete "${e.path}" from the artifacts directory?`))
+                    if (window.confirm(m.artifact_delete_confirm({ path: ltr(e.path) })))
                       onDelete(e.path);
                   }}
                 >
                   <Trash2 size={12} />
-                </button>
+                </IconButton>
               </div>
               {open && (e.children?.length ?? 0) > 0 && (
                 <TreeRows
-                  projectId={projectId}
                   entries={e.children ?? []}
                   depth={depth + 1}
                   collapsed={collapsed}
                   selected={selected}
                   onToggle={onToggle}
                   onSelect={onSelect}
+                  onOpenFile={onOpenFile}
                   onDelete={onDelete}
-                />
+               />
               )}
             </div>
           );
         }
 
+        // Artifacts keeps preview in this split view; explicit opens use file tabs.
         return (
-          <div
+          <button
             key={e.path}
-            className={`ft-row file ${selected === e.path ? "selected" : ""}`}
+            type="button"
+            className={`file-tree-row flex w-full min-w-0 items-center gap-1.5 py-[3px] px-2.5 border-0 bg-transparent text-text text-start cursor-pointer font-[inherit] [&:hover]:bg-panel [&_>_svg]:shrink-0 [&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted artifact-tree-row [&.selected]:bg-panel [&.selected:hover]:bg-panel [&:hover_.ft-row-delete]:opacity-100 ${selected === e.path ? "selected" : ""}`}
             style={indent}
-            title={e.path}
+            title={m.a11y_artifact_preview({ path: ltr(e.path) })}
+            aria-keyshortcuts="Space Enter"
+            aria-pressed={selected === e.path}
             onClick={() => onSelect(e.path)}
+            onDoubleClick={() => onOpenFile(e.path)}
+            onAuxClick={(event) => {
+              if (event.button !== 1) return;
+              event.preventDefault();
+              onSelect(e.path);
+              onOpenFile(e.path);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === " ") {
+                event.preventDefault();
+                event.stopPropagation();
+                onSelect(e.path);
+                return;
+              }
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              event.stopPropagation();
+              onSelect(e.path);
+              onOpenFile(e.path);
+            }}
           >
-            <span className="ft-chevron spacer" />
-            {IMAGE_RE.test(e.name) && (
-              <img className="ft-thumb" src={artifactUrl(projectId, e.path)} alt="" loading="lazy" />
-            )}
-            <span className="ft-name">{e.name}</span>
-          </div>
+            <FileTypeIcon name={e.name} />
+            <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{e.name}</span>
+          </button>
         );
       })}
-    </>
+    </div>
   );
 }
 
@@ -422,12 +464,12 @@ function TreeRows({
 function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
-    <div className="ftree-footer" title={dir}>
-      <code>{dir}</code>
-      <button
-        className="icon-btn tip-up"
-        data-tip={copied ? "Copied!" : "Copy path"}
-        aria-label="Copy artifacts directory path"
+    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={ltr(dir)}>
+      <code className="path-front-ellipsis">{dir}</code>
+      <IconButton size="small"
+        className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
+        data-tip={copied ? m.common_copied() : m.artifacts_copy_path()}
+        aria-label={m.artifacts_tab_copy_artifacts_directory_path()}
         onClick={() => {
           void navigator.clipboard?.writeText(dir);
           setCopied(true);
@@ -435,16 +477,16 @@ function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => v
         }}
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
-      </button>
-      <button
-        className="icon-btn tip-up"
-        data-tip="Storage settings"
+      </IconButton>
+      <IconButton size="small"
+        className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
+        data-tip={m.artifacts_tab_storage_settings()}
         data-tip-align="end"
-        aria-label="Storage settings"
+        aria-label={m.artifacts_tab_storage_settings()}
         onClick={onOpenStorage}
       >
         <Settings2 size={12} />
-      </button>
+      </IconButton>
     </div>
   );
 }
@@ -456,11 +498,13 @@ export function ArtifactsTab({
   project,
   artifacts,
   onChanged,
+  onOpenFile,
   onOpenStorage,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onChanged: () => void;
+  onOpenFile: (path: string) => void;
   /** Navigate to Settings → Storage (where the data dir can be changed). */
   onOpenStorage: () => void;
 }) {
@@ -470,7 +514,6 @@ export function ArtifactsTab({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => initialCollapsed(project.id));
   const [treeWidth, setTreeWidth] = useState(initialTreeWidth);
   const treeRef = useRef<HTMLDivElement>(null);
-
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -483,16 +526,16 @@ export function ArtifactsTab({
   }, [project.id, collapsed]);
 
   // Drag the divider to resize the tree pane; width persists across reloads.
-  // Mirrors App's right-panel resizer: capture the pointer so views under the
+  // Mirrors App's end-panel resizer: capture the pointer so views under the
   // cursor don't steal the drag, and suppress text selection while dragging.
   const resizeTree = (e: React.PointerEvent) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    const left = treeRef.current?.getBoundingClientRect().left ?? 0;
+    const rect = treeRef.current?.getBoundingClientRect();
     const prevUserSelect = document.body.style.userSelect;
     document.body.style.userSelect = "none";
     const onMove = (ev: PointerEvent) => {
-      const w = Math.round(ev.clientX - left);
+      const w = Math.round(ev.clientX - (rect?.left ?? 0));
       const clamped = Math.min(Math.max(w, TREE_MIN_WIDTH), TREE_MAX_WIDTH);
       setTreeWidth(clamped);
       try {
@@ -536,37 +579,36 @@ export function ArtifactsTab({
 
   if (!artifacts) {
     return (
-      <div className="files-tab">
-        <div className="settings-loading" style={{ padding: 20 }}>
-          <span className="spinner" /> Loading artifacts…
-        </div>
+      <div className="files-tab h-full min-h-0 flex bg-background">
+        <LoadingRow className="p-5">
+          <Spinner /> {m.artifacts_tab_loading_artifacts()}
+        </LoadingRow>
       </div>
     );
   }
 
   const tree = (entries: ArtifactEntry[]) => (
     <TreeRows
-      projectId={project.id}
       entries={entries}
       depth={0}
       collapsed={collapsed}
       selected={selected}
       onToggle={toggle}
       onSelect={setSelected}
+      onOpenFile={onOpenFile}
       onDelete={remove}
-    />
+   />
   );
   const selectedEntry = selected ? findEntry(artifacts.entries, selected) : null;
 
   if (artifacts.entries.length === 0) {
     return (
-      <div className="files-tab">
-        <div className="files-empty-state">
-          <FolderOpen size={28} strokeWidth={1.5} />
-          <h3>No artifacts yet</h3>
+      <div className="files-tab h-full min-h-0 flex bg-background">
+        <div className="files-empty-state flex-1 flex flex-col items-center justify-center gap-1.5 p-6 text-center text-muted [&_h3]:mt-1.5 [&_h3]:mx-0 [&_h3]:mb-0 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text [&_p]:m-0 [&_p]:max-w-105 [&_p]:text-sm [&_p]:leading-[1.55] [&_p]:text-subtext [&_.ftree-footer]:mt-2.5 [&_.ftree-footer]:max-w-full [&_.ftree-footer]:border [&_.ftree-footer]:border-border [&_.ftree-footer]:rounded-md [&_.ftree-footer]:py-1.5 [&_.ftree-footer]:px-2.5 [&_.ftree-footer]:bg-background [&_.ftree-footer_code]:max-w-95">
+          <Package size={28} strokeWidth={1.5} />
+          <h3>{m.artifacts_tab_no_artifacts_yet()}</h3>
           <p>
-            This is the project's durable output space for reports, figures, images, CSVs, PDFs,
-            and other research artifacts. Ask the agent for a write-up or add your own files:
+            {m.artifacts_tab_this_is_the_project_s_durable_output_space()}
           </p>
           <DirFooter dir={artifacts.dir} onOpenStorage={onOpenStorage} />
         </div>
@@ -575,13 +617,13 @@ export function ArtifactsTab({
   }
 
   return (
-    <div className="files-tab">
-      <div className="ftree-pane" ref={treeRef} style={{ width: treeWidth }}>
-        <div className="ftree-resizer" onPointerDown={resizeTree} />
-        <div className="ftree-scroll">
+    <div className="files-tab h-full min-h-0 flex bg-background">
+      <div className="ftree-pane relative shrink-0 flex flex-col min-h-0 border-s border-s-border-variant border-e border-e-border-variant bg-background" ref={treeRef} style={{ width: treeWidth }}>
+        <div className="ftree-resizer absolute -end-[3px] top-0 bottom-0 w-1.5 cursor-col-resize z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover" onPointerDown={resizeTree} />
+        <div className="ftree-scroll flex-1 min-h-0 overflow-y-auto file-tree py-1.5 px-0 text-sm">
           {tree(artifacts.entries)}
           {artifacts.truncated && (
-            <p className="files-truncated">Listing truncated — the folder has more artifacts.</p>
+            <p className="files-truncated m-0 py-2 px-3.5 text-sm text-muted">{m.artifacts_tab_listing_truncated_the_folder_has_more_artifacts()}</p>
           )}
         </div>
         <DirFooter dir={artifacts.dir} onOpenStorage={onOpenStorage} />
@@ -594,11 +636,11 @@ export function ArtifactsTab({
           projectId={project.id}
           entry={selectedEntry}
           onDelete={remove}
-        />
+       />
       ) : (
-        <div className="fpreview fpreview-none">
+        <div className="fpreview flex-1 min-w-0 flex flex-col min-h-0 bg-background fpreview-none items-center justify-center gap-2 text-sm text-muted">
           <MousePointerClick size={22} strokeWidth={1.5} />
-          <span>Click an artifact to view it</span>
+          <span>{m.artifacts_tab_click_an_artifact_to_view_it()}</span>
         </div>
       )}
     </div>

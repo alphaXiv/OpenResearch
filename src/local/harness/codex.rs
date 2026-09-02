@@ -7,13 +7,13 @@
 //! streamed as JSON-RPC notifications. The playbook rides
 //! `developerInstructions` (a real instruction channel — no more first-turn
 //! `<system-context>` text wrapping), and the sandbox policy travels per turn
-//! (`sandboxPolicy` with writable roots + network). Auto runs
-//! `approvalPolicy: on-request`: a command that needs to escalate past the
-//! sandbox arrives as a server→client approval request, surfaced as a
-//! permission card and answered inline over the same connection
+//! (`sandboxPolicy` with writable roots + network). Auto uses Codex's built-in
+//! approval reviewer for first-party providers; requests left to the client are
+//! surfaced as permission cards and answered inline over the same connection
 //! (`resume_from_prompt` → `{"decision": accept|decline}`). Verified against
-//! codex-cli 0.144.0 via `codex app-server generate-json-schema` plus a live
-//! spike; the fixture transcript in the tests pins the wire shapes.
+//! codex-cli 0.144.0 via
+//! `codex app-server generate-json-schema` plus a live spike; the fixture
+//! transcript in the tests pins the wire shapes.
 //!
 //! Older codex (< 0.144) falls back to the legacy exec path for one release:
 //! one `codex exec --json` process per turn, JSONL events on stdout,
@@ -28,6 +28,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -37,18 +38,28 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, find_on_path, jwt_payload, nonempty_str, parse_version, read_json,
-    resolve_symlinks, title_case, HarnessInfo, ModelInfo,
+    bin_version, jwt_payload, nonempty_str, parse_version, probe_bin, read_json, resolve_symlinks,
+    title_case, HarnessInfo, ModelInfo,
 };
-use super::options::{resolve_reasoning, HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
-use super::{should_synthesize_plan, synthesize_resume, Harness, ResumeAction, TURN_WATCHDOG};
+use super::options::{
+    resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
+    REASONING_DEFAULT_ID,
+};
+use super::{
+    should_synthesize_plan, synthesize_resume, Harness, ResumeAction, TurnFailure, TurnOutcome,
+    TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
-    PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption, WireToolState,
+    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage, WirePart,
+    WirePrompt, WireQuestionOption, WireToolState,
 };
-use crate::local::codex::{CodexClient, ServerReqKind, TurnEvent};
+use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
+use crate::local::shell_env::find_on_path;
+use crate::store::{Store, StoredChatMessage};
 
 // FALLBACK model table, used only when the app-server catalog is unreachable
 // (codex < 0.144's legacy exec path, or a failed/timed-out `model/list`). The
@@ -107,6 +118,10 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
 /// this build doesn't know).
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
+/// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
+/// naming one installer would send a brew or standalone install to npm.
+const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
+
 /// The effort ids a given codex model accepts per the FALLBACK table, or the
 /// conservative intersection. Send-time validation only — detection prefers
 /// the live catalog (`codex_model_list`).
@@ -119,10 +134,11 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source (the static table is only the
-/// fallback), for the same reason opencode parses `models --verbose`: the
-/// installed CLI knows its catalog and we don't — a curated table here shipped
-/// missing three models and a wrong Luna tier before this existed.
+/// default. This is the primary model source for first-party accounts and for
+/// custom providers that declare an explicit model catalog (the static table is
+/// only the fallback), for the same reason opencode parses `models --verbose`:
+/// the installed CLI knows its catalog and we don't — a curated table here
+/// shipped missing three models and a wrong Luna tier before this existed.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
@@ -132,14 +148,14 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 /// (the server already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
     let fut = async {
-        let mut child = Command::new(bin)
-            .arg("app-server")
+        let mut cmd = Command::new(bin);
+        cmd.arg("app-server")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
+            .kill_on_drop(true);
+        prepare_env(&mut cmd);
+        let mut child = cmd.spawn().ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -236,6 +252,24 @@ fn parse_model_list(result: &Value, configured_effort: Option<&str>) -> Vec<Mode
                 m.get("displayName").and_then(Value::as_str),
                 m.get("description").and_then(Value::as_str),
             );
+            let info = info.with_service_tiers(
+                m.get("serviceTiers")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|tier| tier.get("id").and_then(Value::as_str) == Some("priority"))
+                    .filter_map(|tier| {
+                        Some(OptionChoice {
+                            id: tier.get("id")?.as_str()?.to_string(),
+                            label: tier.get("name")?.as_str()?.to_string(),
+                            description: tier
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                        })
+                    })
+                    .collect(),
+            );
             Some(match default {
                 Some(default) => info.with_reasoning_default(&efforts, default),
                 // No reported default (an older catalog shape) → keep the
@@ -257,6 +291,12 @@ struct CodexConfig {
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
     /// preselected tier must too.
     model_reasoning_effort: Option<String>,
+    /// An explicit provider model catalog (`model_catalog_json`). When a custom
+    /// provider declares one, the app-server's `model/list` reflects it and the
+    /// picker can offer every model the provider exposes; without one the CLI
+    /// falls back to its bundled first-party catalog, which says nothing about
+    /// a custom endpoint.
+    model_catalog_json: Option<String>,
     #[serde(default)]
     model_providers: HashMap<String, CodexProvider>,
 }
@@ -266,6 +306,32 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
     toml::from_str::<CodexConfig>(raw)
         .ok()?
         .model_reasoning_effort
+}
+
+/// Keep the configured model first without discarding catalog metadata.
+/// With either input absent, preserve the other as-is.
+fn custom_provider_models(
+    configured_model: Option<&str>,
+    catalog: Option<Vec<ModelInfo>>,
+) -> Vec<ModelInfo> {
+    let Some(configured_model) = configured_model else {
+        return catalog.unwrap_or_default();
+    };
+    let Some(mut models) = catalog else {
+        return vec![ModelInfo::new(configured_model)];
+    };
+    match models.iter().position(|model| model.id == configured_model) {
+        Some(0) => {}
+        Some(index) => {
+            let configured = models.remove(index);
+            models.insert(0, configured);
+        }
+        None => {
+            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
+            models.insert(0, ModelInfo::new(configured_model));
+        }
+    }
+    models
 }
 
 #[derive(Deserialize)]
@@ -278,6 +344,7 @@ struct CodexProvider {
 struct CustomProvider {
     model: Option<String>,
     env_key: Option<String>,
+    has_model_catalog: bool,
 }
 
 impl CustomProvider {
@@ -303,15 +370,10 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     Some(CustomProvider {
         model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
+        has_model_catalog: cfg
+            .model_catalog_json
+            .is_some_and(|path| !path.trim().is_empty()),
     })
-}
-
-/// `$CODEX_HOME` when set (the same two env sources the harness child sees),
-/// else `~/.codex`.
-fn codex_home() -> Option<PathBuf> {
-    super::detect::api_key("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|home| home.join(".codex")))
 }
 
 /// `codex` on PATH, symlinks resolved (see `resolve_symlinks` — codex needs to
@@ -335,15 +397,14 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
 ///
 /// No `-m`: the user's default model at `low` effort is the cheap pin, and the
 /// session's own (possibly expensive) model selection is irrelevant to naming a
-/// chat. Like Codex desktop's own hidden titling thread, this leaves a throwaway
-/// rollout behind in `~/.codex/sessions`.
+/// chat. `--ephemeral` keeps the throwaway thread out of every session store.
 ///
 /// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
 /// and the caller keeps the placeholder title.
 async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String> {
     let fut = async {
         let mut cmd = Command::new(bin);
-        cmd.args(["exec", "--json", "--skip-git-repo-check"])
+        cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
             .args(["-c", "model_reasoning_effort=\"low\""])
@@ -362,6 +423,10 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             // server cwd's AGENTS.md into a request that only needs a title.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
+        cmd.env(
+            "CODEX_HOME",
+            native_store::prepare_codex(NativeStore::Isolated).ok()?,
+        );
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
         // would otherwise write escape codes straight into the title column.
         cmd.env("NO_COLOR", "1");
@@ -422,17 +487,19 @@ impl Harness for Codex {
         true
     }
 
+    /// The app-server takes `turn/steer` against the active turn; `detect`
+    /// withholds it from installations that fall back to the exec path.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_codex() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
         }
-        let home = codex_home();
-        let config_raw = home
-            .as_ref()
-            .and_then(|home| std::fs::read_to_string(home.join("config.toml")).ok());
+        let home = native_store::codex_home(NativeStore::Legacy);
+        let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
         let configured_effort = config_raw.as_deref().and_then(parse_configured_effort);
 
@@ -447,7 +514,7 @@ impl Harness for Codex {
                     "Set `{key}` for the configured Codex model provider."
                 ));
             }
-        } else if let Some(auth) = home.and_then(|home| read_json(home.join("auth.json"))) {
+        } else if let Some(auth) = read_json(home.join("auth.json")) {
             if nonempty_str(&auth, "OPENAI_API_KEY").is_some() {
                 info.authenticated = true;
                 info.auth_method = Some("apiKey");
@@ -467,24 +534,27 @@ impl Harness for Codex {
             }
         }
 
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
-            // The first-party catalog is meaningless for a custom provider, so
-            // offer only the model that provider is configured with (the
-            // picker's "Default model" entry covers the unset case).
-            //
-            // A custom provider's model gets no reasoning list of its own: the
-            // curated tiers below describe OpenAI's models, and we know nothing
-            // about what an arbitrary provider accepts. `ModelInfo::new` leaves
-            // `reasoning_levels` absent, so the composer falls back to the
-            // conservative harness-wide list rather than offering `ultra` to a
-            // provider that would reject it.
+            // A custom provider's bundled first-party catalog is meaningless,
+            // so probe only when its config declares an explicit catalog.
+            let custom_catalog = match (
+                custom_provider.as_ref(),
+                info.bin_path.as_deref().map(Path::new),
+            ) {
+                (Some(provider), Some(bin)) if provider.has_model_catalog => {
+                    codex_model_list(bin, configured_effort.as_deref()).await
+                }
+                _ => None,
+            };
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
-                Some(Some(model)) => info = info.with_models(vec![ModelInfo::new(model)]),
-                Some(None) => info = info.with_models(Vec::new()),
+                Some(configured_model) => {
+                    info =
+                        info.with_models(custom_provider_models(configured_model, custom_catalog))
+                }
                 None => {
                     // First-party account: ask the installed CLI for its own
                     // catalog (models + per-model efforts, the data codex's TUI
@@ -506,6 +576,9 @@ impl Harness for Codex {
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
             // thread resume).
+            // `turn/steer` is an app-server method, so this must follow the
+            // dispatch predicate rather than the version alone.
+            info.supports_steering = runs_app_server().await;
             let too_old = info
                 .version
                 .as_deref()
@@ -516,6 +589,10 @@ impl Harness for Codex {
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
                 );
             }
+        } else if info.install_broken {
+            // Outranks both notes below: neither signing in nor a provider key
+            // helps a codex that can't start.
+            info.agent_note = Some(info.broken_note(CODEX_REINSTALL));
         } else if info.agent_note.is_some() {
             // A configured custom provider already said which env var to set;
             // `codex login` is the wrong instruction for it.
@@ -530,15 +607,23 @@ impl Harness for Codex {
         Some(info)
     }
 
-    async fn run_turn(&self, ctx: &mut TurnCtx) -> Result<()> {
-        // app-server for codex ≥ 0.144 (the validated protocol version);
-        // legacy exec for older CLIs, for one release. ORX_CODEX_EXEC=1 is the
-        // escape hatch if app-server misbehaves ("0"/empty don't count).
-        let force_exec = std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0");
-        if force_exec || !app_server_supported().await {
-            return run_turn_exec(ctx).await;
+    async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
+        if !runs_app_server().await {
+            let result = run_turn_exec(ctx).await;
+            // Still `Unknown` after a failure means codex died before its first
+            // event — nothing was delivered, so the card must offer Retry, not a
+            // Continue that re-runs the same doomed spawn.
+            if result.is_err() && ctx.delivery_state() == DeliveryState::Unknown {
+                ctx.mark_delivery(DeliveryState::NotSent);
+            }
+            return result
+                .map(|()| TurnOutcome::Completed)
+                .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()));
         }
-        run_turn_app_server(ctx).await
+        run_turn_app_server(ctx)
+            .await
+            .map(|()| TurnOutcome::Completed)
+            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
     async fn generate_title(&self, first_message: &str) -> Option<String> {
@@ -546,32 +631,29 @@ impl Harness for Codex {
     }
 
     fn options(&self) -> HarnessOptions {
-        // Plan + Auto + Bypass over the app-server (codex ≥ 0.144). Plan is a
-        // native *collaboration mode*: `turn/start.collaborationMode` injects
-        // codex's own plan.md template, enables the `request_user_input` tool,
-        // and streams the finished plan as a dedicated `plan` item — the same
-        // scheme the codex TUI's `/plan` uses (see `run_turn_app_server`). The
-        // legacy exec fallback (< 0.144) has no collaboration mode, so Plan
-        // there degrades to a read-only sandbox with no cards (see
-        // `codex_sandbox`) — harmless, and noted in the detect-time agent note.
-        //   * Plan  — read-mostly planning turn: same sandbox as Auto
-        //     (workspace-write + on-request), restricted only by the prompt-level
-        //     plan template (see `codex_policies` for the parity gap vs Claude's
-        //     hook-gated plan mode).
-        //   * Auto  — workspace-write + `on-request` approvals: the writable
-        //     roots (orx data dir, hub `.git` — see `sandbox_policy_json`)
-        //     plus network keep routine work prompt-free, and anything past
-        //     the sandbox surfaces as a permission card. On the exec fallback
-        //     approvals stay off (denials fail to the model).
-        //   * Bypass— full access, approvals off.
+        // Codex keeps planning on its independent collaboration-mode axis; the
+        // dropdown mirrors the desktop app's three permission choices.
         HarnessOptions::none()
-            .with_permission_modes(
-                &[
-                    PermissionMode::Plan,
-                    PermissionMode::Auto,
-                    PermissionMode::Bypass,
+            .with_permission_choices(
+                vec![
+                    OptionChoice::described(
+                        "ask",
+                        "Ask for approval",
+                        "Ask before commands that need elevated access",
+                    ),
+                    OptionChoice::described(
+                        "approve-for-me",
+                        "Approve for me",
+                        "Codex reviews approval requests automatically",
+                    ),
+                    OptionChoice::described(
+                        "full-access",
+                        "Full access",
+                        "Run without sandbox or approval prompts",
+                    ),
                 ],
-                PermissionMode::Auto,
+                "approve-for-me",
+                PlanActivation::Command,
             )
             // Harness-wide fallback only — the real per-model lists ride on each
             // `ModelInfo` (see `CODEX_MODELS`). The default is
@@ -591,8 +673,8 @@ impl Harness for Codex {
     ///   delivered inline the same way (`user_input_reply`).
     /// * `plan` (end-turn card, no `native_id`): resumes by a NEW user message
     ///   ([`ResumeAction::SendMessage`]) — approve sends the implementation
-    ///   prompt under the chosen (default Auto) mode; whose maskless→`default`
-    ///   collaborationMode is what actually exits plan mode. Revise stays in
+    ///   prompt with Plan cleared while preserving the selected permission;
+    ///   the `default` collaborationMode mask exits native Plan. Revise stays in
     ///   Plan (shared `synthesize_resume`); a note-less reject just closes the
     ///   card ([`ResumeAction::Nothing`]).
     async fn resume_from_prompt(
@@ -615,26 +697,26 @@ impl Harness for Codex {
                     return Ok(ResumeAction::Nothing);
                 }
                 let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
-                let chosen = answer
-                    .resume_mode
-                    .as_deref()
-                    .and_then(PermissionMode::from_id);
-                let (text, mode) = if answer.approve {
+                let (text, plan_mode) = if answer.approve {
                     // Codex's plan template primes the model for "Implement the
                     // plan." — its own proven approval phrasing (the TUI uses
-                    // it). Approving leaves plan mode; default to Auto, whose
-                    // fresh turn attaches the `default` mask that un-sticks.
+                    // it). Approving leaves Plan without changing permissions;
+                    // the fresh turn attaches the `default` mask that un-sticks.
                     let mut text = "Implement the plan.".to_string();
                     if let Some(note) = note {
                         text.push_str(&format!("\n\nAdditional guidance: {note}"));
                     }
-                    (text, chosen.or(Some(PermissionMode::Auto)))
+                    (text, false)
                 } else {
                     // Revise (a note-carrying reject): stay in Plan. Reuse the
                     // shared plan-deny wording so the phrasing matches Claude.
-                    synthesize_resume("plan", answer)
+                    (synthesize_resume("plan", answer).0, true)
                 };
-                Ok(ResumeAction::SendMessage { text, mode })
+                Ok(ResumeAction::SendMessage {
+                    text,
+                    mode: None,
+                    plan_mode: Some(plan_mode),
+                })
             }
             // Native held cards (permission / question): reply inline over the
             // live child. A reply only lands if the turn is still paused on it —
@@ -674,14 +756,14 @@ impl Harness for Codex {
                         anyhow!("codex app-server is not running — cannot deliver the reply")
                     })?;
                 client.respond(&rpc_id, reply).await?;
-                Ok(ResumeAction::Handled)
+                Ok(ResumeAction::Handled { plan_mode: None })
             }
             other => Err(anyhow!("codex cannot reply to a `{other}` prompt")),
         }
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        codex_home()
+        Some(native_store::codex_home(NativeStore::Legacy))
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -706,10 +788,12 @@ impl Harness for Codex {
     fn extra_skill_targets(&self) -> Vec<(PathBuf, &'static str)> {
         // Keep the legacy `/orx` prompt for codex versions that don't yet read
         // `~/.agents/skills/`.
-        match codex_home() {
-            Some(home) => vec![(home.join("prompts").join("orx.md"), super::CODEX_PROMPT)],
-            None => Vec::new(),
-        }
+        vec![(
+            native_store::codex_home(NativeStore::Legacy)
+                .join("prompts")
+                .join("orx.md"),
+            super::CODEX_PROMPT,
+        )]
     }
 
     fn session_skills_dir(&self) -> Option<&'static str> {
@@ -722,6 +806,15 @@ impl Harness for Codex {
 /// First protocol version the harness was validated against (schema dump +
 /// live spike). Older CLIs take the exec fallback below.
 const MIN_APP_SERVER_VERSION: (u64, u64, u64) = (0, 144, 0);
+
+/// Whether a turn will run over the app-server: a supported codex, unless
+/// ORX_CODEX_EXEC forces the legacy exec path ("0"/empty don't count).
+/// Capability reporting reads the same answer, so the composer can't offer
+/// app-server-only features the exec path lacks.
+async fn runs_app_server() -> bool {
+    let force_exec = std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0");
+    !force_exec && app_server_supported().await
+}
 
 /// Whether the installed codex speaks the validated app-server protocol.
 /// Probed once per process (a codex upgrade mid-run takes an `orx up` restart
@@ -742,43 +835,79 @@ async fn app_server_supported() -> bool {
         .await
 }
 
-/// Session mode → (thread `sandbox` mode, `approvalPolicy`). Auto runs
-/// `on-request`: the sandbox is still the boundary for routine work (the
-/// writable roots keep orx traffic prompt-free), and anything that needs to
-/// escalate past it arrives as an approval request we surface as a permission
-/// card (verified live: 0.144 asks *before* running an out-of-sandbox
-/// command). Bypass drops the sandbox, so there is nothing to escalate —
-/// approvals stay off.
-fn codex_policies(mode: Option<PermissionMode>) -> (&'static str, &'static str) {
+/// Session mode → thread sandbox, approval policy, and approval reviewer.
+/// Custom providers stay human-reviewed because Codex's hidden auto-review
+/// model is not generally available through third-party model endpoints.
+fn codex_policies(
+    mode: Option<PermissionMode>,
+    auto_review_supported: bool,
+) -> (&'static str, &'static str, &'static str) {
     match mode.unwrap_or(PermissionMode::Auto) {
-        PermissionMode::Bypass => ("danger-full-access", "never"),
+        PermissionMode::Bypass => ("danger-full-access", "never", "user"),
         // Plan runs the SAME sandbox as Auto (workspace-write + on-request).
         // Native plan mode restricts *at the prompt level* — codex's built-in
         // plan.md template tells the model to propose without editing — not at
         // the sandbox level, so this is the parity gap vs Claude's hook-gated
         // plan mode: an off-script write inside the workspace would not prompt
         // (user-accepted). This arm is the variation point if we ever want a
-        // harder read-only floor: swap to `("read-only", "on-request")` here
-        // and nowhere else. AcceptEdits/Ask still collapse to the balanced
+        // harder read-only floor: change this arm's sandbox to `read-only`.
+        // AcceptEdits/Ask still collapse to the balanced
         // default (mirrors `codex_sandbox` on the exec path).
-        PermissionMode::Plan => ("workspace-write", "on-request"),
-        _ => ("workspace-write", "on-request"),
+        PermissionMode::Plan => ("workspace-write", "on-request", "user"),
+        PermissionMode::Auto if auto_review_supported => {
+            ("workspace-write", "on-request", "auto_review")
+        }
+        _ => ("workspace-write", "on-request", "user"),
     }
 }
 
+fn config_supports_auto_review(response: &Value) -> bool {
+    let Some(config) = response.get("config").and_then(Value::as_object) else {
+        return false;
+    };
+    let first_party_provider = match config.get("model_provider") {
+        Some(Value::Null) => true,
+        Some(Value::String(provider)) => provider == "openai",
+        _ => false,
+    };
+    let first_party_url = match config.get("openai_base_url") {
+        Some(Value::Null) => true,
+        Some(Value::String(url)) => url.trim().is_empty(),
+        _ => false,
+    };
+    first_party_provider && first_party_url
+}
+
+async fn codex_auto_review_supported(client: &CodexClient, workspace: &Path) -> bool {
+    let Ok(Ok(response)) = client
+        .try_request(
+            "config/read",
+            serde_json::json!({
+                "cwd": workspace.to_string_lossy(),
+                "includeLayers": false,
+            }),
+        )
+        .await
+    else {
+        return false;
+    };
+    config_supports_auto_review(&response) && super::detect::api_key("OPENAI_BASE_URL").is_none()
+}
+
 /// The per-turn `sandboxPolicy` object. workspace-write carries the same
-/// grants the exec path passed via `-c`: the orx data dir + the hub clone's
-/// `.git` as writable roots (see `ensure_orx_data_dir` / `shared_git_dir`),
-/// and network on (the agent's job is driving the orx API and git). Like the
-/// exec `-c` override, this is a full policy replacement for the turn — a
-/// user's own config.toml `sandbox_workspace_write.writable_roots` don't
-/// survive it (no append form exists on either transport).
+/// grants the exec path passed via `-c`: the orx data dir, its lifecycle lock,
+/// and the hub clone's `.git` as writable roots (see the helpers below), plus
+/// network (the agent's job is driving the orx API and git). Like the exec `-c`
+/// override, this is a full policy replacement for the turn — a user's own
+/// config.toml `sandbox_workspace_write.writable_roots` don't survive it (no
+/// append form exists on either transport).
 async fn sandbox_policy_json(mode: Option<PermissionMode>, workspace: &Path) -> Value {
     match mode.unwrap_or(PermissionMode::Auto) {
         PermissionMode::Bypass => serde_json::json!({ "type": "dangerFullAccess" }),
         _ => {
             let mut roots: Vec<String> = Vec::new();
             roots.extend(ensure_orx_data_dir().map(|p| p.to_string_lossy().into_owned()));
+            roots.extend(ensure_orx_lifecycle_lock().map(|p| p.to_string_lossy().into_owned()));
             roots.extend(
                 shared_git_dir(workspace)
                     .await
@@ -819,6 +948,20 @@ fn collaboration_mode_json(mode: &str, model: &str, effort: Option<&str>) -> Val
     serde_json::json!({ "mode": mode, "settings": Value::Object(settings) })
 }
 
+fn collaboration_mask_mode(
+    plan_mode: bool,
+    reset_pending: bool,
+    last_mode: Option<&str>,
+) -> Option<&'static str> {
+    if plan_mode {
+        Some("plan")
+    } else if reset_pending || last_mode == Some("plan") {
+        Some("default")
+    } else {
+        None
+    }
+}
+
 /// How a turn ended, from `turn/completed`.
 enum TurnEnd {
     /// Completed or interrupted. `interrupted` drives whether an end-turn plan
@@ -833,6 +976,9 @@ enum TurnEnd {
 /// touches only `ctx.assistant.parts` via the TurnCtx helpers. Returns the
 /// turn's terminal state when this event ends it.
 fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option<TurnEnd> {
+    if method != "error" {
+        ctx.clear_retry_status();
+    }
     match method {
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
@@ -896,8 +1042,28 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                 .get("willRetry")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            if !will_retry {
-                ctx.push_error(error_message(params.get("error")));
+            if will_retry {
+                ctx.show_retry_status("native", "Codex CLI is retrying", 1, None, None);
+            } else {
+                ctx.mark_native_retry_exhausted();
+                ctx.clear_retry_status();
+                let mut message = error_message(params.get("error"));
+                if let Some(info) = params.get("codexErrorInfo").or_else(|| {
+                    params
+                        .get("error")
+                        .and_then(|error| error.get("codexErrorInfo"))
+                }) {
+                    message.push_str(&format!("\n\ncodexErrorInfo: {info}"));
+                }
+                ctx.mark_terminal_failure("codex_terminal", message.clone());
+                ctx.push_error(message);
+            }
+        }
+        // Codex 0.144 emits this before the typed review event; ignoring it avoids duplicate rows.
+        "guardianWarning" => {}
+        "item/autoApprovalReview/started" | "item/autoApprovalReview/completed" => {
+            if let Some(message) = guardian_review_failure(params) {
+                ctx.push_error(message);
             }
         }
         "turn/completed" => {
@@ -920,7 +1086,16 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
             }
             let status = turn.get("status").and_then(Value::as_str).unwrap_or("");
             if status == "failed" {
-                return Some(TurnEnd::Failed(error_message(turn.get("error"))));
+                ctx.mark_native_retry_exhausted();
+                let mut message = error_message(turn.get("error"));
+                if let Some(info) = turn.get("codexErrorInfo").or_else(|| {
+                    turn.get("error")
+                        .and_then(|error| error.get("codexErrorInfo"))
+                }) {
+                    message.push_str(&format!("\n\ncodexErrorInfo: {info}"));
+                }
+                ctx.mark_terminal_failure("codex_terminal", message.clone());
+                return Some(TurnEnd::Failed(message));
             }
             // Defensive: the pins say turn/completed carries a final status,
             // but a non-final one must not truncate the turn if codex ever
@@ -1016,6 +1191,102 @@ fn apply_item(ctx: &mut TurnCtx, item: &Value, completed: bool) {
     upsert_preserving_children(&mut ctx.assistant.parts, part);
 }
 
+async fn reconcile_turn_items(
+    ctx: &mut TurnCtx,
+    client: &CodexClient,
+    thread_id: &str,
+    turn_id: Option<&str>,
+) {
+    let Some(turn_id) = turn_id else { return };
+    let Some(items) = client.read_turn_items(thread_id, turn_id).await else {
+        return;
+    };
+    reconcile_items(&mut ctx.assistant.parts, &items);
+}
+
+pub(crate) fn reconcile_interrupted_items(
+    session_id: &str,
+    message_id: &str,
+    items: &[Value],
+) -> Option<WireMessage> {
+    let store = Store::open().ok()?;
+    let stored = store
+        .list_chat_messages(session_id)
+        .ok()?
+        .into_iter()
+        .find(|message| message.id == message_id)?;
+    let mut message = crate::local::chat::stored_to_wire(&stored);
+    reconcile_items(&mut message.parts, items);
+    settle_interrupted_parts(&mut message.parts);
+    store
+        .upsert_chat_message(&StoredChatMessage {
+            parts_json: serde_json::to_string(&message.parts).ok()?,
+            ..stored.clone()
+        })
+        .ok()?;
+    Some(message)
+}
+
+fn reconcile_items(parts: &mut Vec<WirePart>, items: &[Value]) {
+    // History can repeat identical text; consume-once pairing keeps the Nth
+    // repeat restorable instead of collapsing every copy onto one part.
+    let mut claimed: Vec<String> = Vec::new();
+    for item in items {
+        let completed = item.get("status").and_then(Value::as_str) != Some("inProgress");
+        let Some(part) = item_to_part(item, completed, parts) else {
+            continue;
+        };
+        let id_exists = parts.iter().any(|prior| prior.id == part.id);
+        if completed && streamed_text_kind(item) && part_text_is_empty(&part) && id_exists {
+            continue;
+        }
+        // `thread/read` re-mints ids (`item-N`) for content the live stream
+        // keyed by its Responses id (`msg_…`/`rs_…`), so an unknown id whose
+        // text continues a non-empty same-kind part is that part's item
+        // renamed, not new content (OR-181) — adopt the authoritative text in
+        // place. An empty part carries no evidence of which item it is.
+        if !id_exists && renamable_text_kind(item) {
+            let incoming = part.text.as_deref().unwrap_or("");
+            let renamed = parts.iter().position(|prior| {
+                let prior_text = prior.text.as_deref().unwrap_or("");
+                !claimed.contains(&prior.id)
+                    && !prior.id.starts_with("plan-item-")
+                    && prior.kind == part.kind
+                    && !prior_text.is_empty()
+                    && incoming.starts_with(prior_text)
+            });
+            if let Some(i) = renamed {
+                claimed.push(parts[i].id.clone());
+                parts[i].text = part.text;
+                continue;
+            }
+        }
+        upsert_preserving_children(parts, part);
+    }
+}
+
+/// Item types whose ids `thread/read` re-mints (see `reconcile_items`). Plan
+/// streams text too, but its part id is derived (`plan_part_id`), so history
+/// never renames it — and the `plan-item-` prior check is the other half of
+/// that exemption.
+fn renamable_text_kind(item: &Value) -> bool {
+    matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("agentMessage") | Some("reasoning")
+    )
+}
+
+fn settle_interrupted_parts(parts: &mut [WirePart]) {
+    for part in parts {
+        settle_interrupted_parts(&mut part.children);
+        if let Some(state) = part.state.as_mut() {
+            if state.status == "running" {
+                state.status = "interrupted".into();
+            }
+        }
+    }
+}
+
 /// The three item types whose text streams token-by-token via `item/*/delta`
 /// before the completed item arrives (agentMessage, reasoning, plan). For these,
 /// a completed item carrying empty text must not clobber the streamed part.
@@ -1073,9 +1344,33 @@ fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<Wir
                         .and_then(|p| p.state.as_ref())
                         .and_then(|s| s.output.clone())
                 });
-            let input = serde_json::json!({
+            let mut input = serde_json::json!({
                 "command": item.get("command").map(command_string).unwrap_or_default(),
             });
+            if let Some(argv) = item.get("command").and_then(command_argv) {
+                input["commandArgv"] = serde_json::json!(argv);
+            }
+            if let Some(cwd) = item.get("cwd").and_then(Value::as_str) {
+                input["cwd"] = Value::String(cwd.to_string());
+            }
+            if let Some(prior_input) = prior
+                .iter()
+                .find(|part| part.id == id)
+                .and_then(|part| part.state.as_ref())
+                .and_then(|state| state.input.as_ref())
+            {
+                for key in [
+                    "runTargetIds",
+                    "runTargetIdsAuthoritative",
+                    "experimentTargetIds",
+                    "experimentTargetIdsAuthoritative",
+                    "targetIds",
+                ] {
+                    if let Some(value) = prior_input.get(key) {
+                        input[key] = value.clone();
+                    }
+                }
+            }
             Some(tool_part(
                 id,
                 "bash",
@@ -1261,13 +1556,36 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
         "completed"
     };
     // Surface only what the UI labels the row from (`toolLine`'s subagent arm
-    // reads `tool` / `prompt` / `kind`) — the transcript is located via the
-    // spawn part id + `children`, not via any thread id in the payload.
+    // reads `tool` / `prompt` / `kind` / `nickname`) — the transcript is
+    // located via the spawn part id + `children`, not via any thread id in the
+    // payload.
     let mut input = serde_json::Map::new();
     for key in ["tool", "prompt", "kind"] {
         if let Some(v) = item.get(key) {
             input.insert(key.into(), v.clone());
         }
+    }
+    // The model-assigned agent identity — the row's best label. Collab items
+    // carry it on the first receiver agent; activity items on the agent path,
+    // whose last segment is the agent name.
+    let nickname = item
+        .get("receiverAgents")
+        .and_then(Value::as_array)
+        .and_then(|agents| agents.first())
+        .and_then(|agent| {
+            agent
+                .get("agentNickname")
+                .or_else(|| agent.get("agentRole"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            item.get("agentPath")
+                .and_then(Value::as_str)
+                .and_then(|path| path.rsplit('/').next())
+                .filter(|name| !name.is_empty() && *name != "root")
+        });
+    if let Some(nickname) = nickname {
+        input.insert("nickname".into(), nickname.into());
     }
     tool_part(
         id.to_string(),
@@ -1291,11 +1609,58 @@ fn subagent_spawn_part(id: &str, item: &Value, completed: bool) -> WirePart {
 // thread we know is a sub-agent spawned this turn, route its items/deltas into
 // the spawning part's `children` instead.
 
+/// Shared tail of every successfully-completed turn: sweep still-open request
+/// cards, reconcile final item states, settle orphaned spawn rows, synthesize
+/// the plan card when applicable, and flush. Kept in one place so the three
+/// exit paths (plain completion, drain completion, drain quiet-settle) can't
+/// drift.
+async fn finish_completed_turn(
+    ctx: &mut TurnCtx,
+    client: &CodexClient,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    plan_card_wanted: bool,
+    open_requests: &mut HashMap<String, (Value, ServerReqKind)>,
+) {
+    sweep_open_requests(ctx, client, open_requests).await;
+    reconcile_turn_items(ctx, client, thread_id, turn_id).await;
+    // A sub-agent whose `turn/completed` never arrived before the turn ended
+    // would otherwise spin forever.
+    settle_running_subagents(&mut ctx.assistant.parts);
+    if plan_card_wanted {
+        if let Some(part) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
+            ctx.upsert_part(part);
+        }
+    }
+    let _ = ctx.flush();
+}
+
+/// How long a quiet post-parent drain waits before settling the turn. The
+/// parent's turn is already complete, so only actively-streaming agents
+/// justify waiting; settling early degrades gracefully because codex delivers
+/// a finished agent's report on the next turn either way.
+const DRAIN_QUIET_SETTLE: Duration = Duration::from_secs(180);
+
+/// How long a turn may stay quiet before the loop acts on it. Held absolute by
+/// the caller so steering can't push either bound back.
+fn turn_phase_quiet(parent_done: bool) -> Duration {
+    if parent_done {
+        DRAIN_QUIET_SETTLE
+    } else {
+        TURN_WATCHDOG
+    }
+}
+
 /// A sub-agent thread discovered this parent turn, keyed by its threadId.
 struct SubThread {
     /// The `subagent` spawn part (anywhere in the tree) that owns this thread's
     /// transcript. Its `children` is the bucket the thread's parts stream into.
     spawn_part_id: String,
+    /// Still running: no terminal `turn/completed` seen for this thread yet.
+    /// Spawned agents outlive the parent turn (codex delivers their reports on
+    /// the NEXT turn), so the parent's `turn/completed` doesn't end our turn
+    /// while any of these are live — see the drain in `run_turn_app_server`.
+    live: bool,
 }
 
 /// Where an incoming notification/request should be routed.
@@ -1337,18 +1702,25 @@ fn apply_sub_notification(
     tid: &str,
     method: &str,
     params: &Value,
-) -> Vec<(String, String)> {
+) -> Vec<DiscoveredSubThread> {
     let mut discovered = Vec::new();
     match method {
         "item/started" | "item/completed" => {
             if let Some(item) = params.get("item") {
                 let completed = method == "item/completed";
-                if let Some(mut part) = item_to_part(item, completed, bucket) {
-                    part.id = namespaced_part_id(tid, &part.id);
+                let mut scoped_item = item.clone();
+                if let Some(id) = item.get("id").and_then(Value::as_str) {
+                    scoped_item["id"] = Value::String(namespaced_part_id(tid, id));
+                }
+                if let Some(part) = item_to_part(&scoped_item, completed, bucket) {
                     // A grandchild spawn: register its threads under this part.
                     if part.tool.as_deref() == Some("subagent") {
                         for gtid in subagent_thread_ids(item) {
-                            discovered.push((gtid, part.id.clone()));
+                            discovered.push(DiscoveredSubThread {
+                                thread_id: gtid,
+                                spawn_part_id: part.id.clone(),
+                                arms: item_arms_thread(item),
+                            });
                         }
                     }
                     let completed_streamed =
@@ -1390,8 +1762,9 @@ fn apply_sub_notification(
             }
         }
         // A sub-agent's own turn/completed / error / other notifications don't
-        // add transcript parts here (the spawn part's status is driven from the
-        // parent's collab item), and crucially never end the parent turn.
+        // add transcript parts here (`route_sub_event` handles the thread's
+        // terminal turn notifications and mirrors liveness onto the spawn
+        // part), and crucially never end the parent turn.
         _ => {}
     }
     discovered
@@ -1409,6 +1782,7 @@ fn namespaced_part_id(thread_id: &str, item_id: &str) -> String {
 /// `spawn_part_id` is namespaced when the collab item itself belongs to a
 /// sub-agent (a grandchild spawn), plain for a top-level parent spawn.
 fn register_sub_threads_from(
+    parent_thread: &str,
     method: &str,
     params: &Value,
     sub_threads: &mut HashMap<String, SubThread>,
@@ -1434,12 +1808,64 @@ fn register_sub_threads_from(
     // rather than the original (already-completed) spawn row. Re-firing the same
     // spawn item (started→completed) re-points to the same id: a harmless no-op.
     for tid in subagent_thread_ids(item) {
-        sub_threads.insert(
+        // NEVER the parent's own thread: a handoff/interaction item can
+        // reference it, and registering it would add a "sub-agent" that can
+        // never retire — the post-parent drain would wait on it forever.
+        if tid == parent_thread {
+            continue;
+        }
+        register_sub_thread(
+            sub_threads,
             tid,
-            SubThread {
-                spawn_part_id: spawn_id.to_string(),
-            },
+            spawn_id.to_string(),
+            item_arms_thread(item),
         );
+    }
+}
+
+/// A sub-agent thread referenced by a collab item, with whether that item
+/// drives it (see `item_arms_thread`).
+struct DiscoveredSubThread {
+    thread_id: String,
+    spawn_part_id: String,
+    arms: bool,
+}
+
+/// Insert/re-point one sub-agent thread. Ownership (which spawn row the
+/// transcript streams into) always re-points to the newest item; liveness is
+/// a separate axis: a driving item (spawn / sendInput / resume / a `started`
+/// activity) ARMS it — even for a thread that already retired, so a resumed
+/// agent's continuation is drained — while a passive item (wait, close, an
+/// interaction/interruption marker) neither invents liveness for an unknown
+/// thread (a next-turn report marker must not stall the drain) nor retires a
+/// thread that is still live (a `wait` over running agents must not clear
+/// them). Only the thread's own `turn/completed` retires it.
+fn register_sub_thread(
+    sub_threads: &mut HashMap<String, SubThread>,
+    thread_id: String,
+    spawn_part_id: String,
+    arms: bool,
+) {
+    let live = arms || sub_threads.get(&thread_id).is_some_and(|s| s.live);
+    sub_threads.insert(
+        thread_id,
+        SubThread {
+            spawn_part_id,
+            live,
+        },
+    );
+}
+
+/// Whether a collab item DRIVES its referenced threads (starts or re-drives an
+/// agent), as opposed to passively referencing them.
+fn item_arms_thread(item: &Value) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("collabAgentToolCall") => matches!(
+            item.get("tool").and_then(Value::as_str),
+            Some("spawnAgent") | Some("sendInput") | Some("resumeAgent")
+        ),
+        Some("subAgentActivity") => item.get("kind").and_then(Value::as_str) == Some("started"),
+        _ => false,
     }
 }
 
@@ -1450,6 +1876,7 @@ fn register_sub_threads_from(
 fn route_sub_event(
     ctx: &mut TurnCtx,
     sub_threads: &mut HashMap<String, SubThread>,
+    parent_thread: &str,
     tid: &str,
     method: &str,
     params: &Value,
@@ -1457,9 +1884,19 @@ fn route_sub_event(
     let Some(spawn_part_id) = sub_threads.get(tid).map(|s| s.spawn_part_id.clone()) else {
         return;
     };
+    // Track liveness for the post-parent drain: a new turn on this thread (a
+    // resumed / re-driven agent) re-arms it, its `turn/completed` retires it.
+    if method == "turn/started" {
+        if let Some(sub) = sub_threads.get_mut(tid) {
+            sub.live = true;
+        }
+    }
     // A sub-agent's turn/completed → mark the spawn part terminal (don't add a
     // transcript part for it, and never end the parent turn).
     if method == "turn/completed" {
+        if let Some(sub) = sub_threads.get_mut(tid) {
+            sub.live = false;
+        }
         if let Some(part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) {
             let interrupted = params
                 .get("turn")
@@ -1474,19 +1911,34 @@ fn route_sub_event(
         }
         return;
     }
+    let live = sub_threads.get(tid).is_some_and(|s| s.live);
     let Some(spawn_part) = find_part_mut(&mut ctx.assistant.parts, &spawn_part_id) else {
         return;
     };
+    // Mirror thread liveness onto the spawn part: an async spawn's collab item
+    // completes at launch, which would otherwise leave the row (and every
+    // running indicator keyed off it) unspinning while the agent still works.
+    // The thread's `turn/completed` above stamps it terminal again.
+    if live {
+        if let Some(state) = spawn_part.state.as_mut() {
+            if state.status == "completed" {
+                state.status = "running".into();
+            }
+        }
+    }
     let discovered = apply_sub_notification(&mut spawn_part.children, tid, method, params);
-    for (gtid, spawn_id) in discovered {
-        // Re-point, same as `register_sub_threads_from` for top-level threads: a
-        // later collab item on this grandchild thread (sendInput/resumeAgent)
-        // owns its continued transcript.
-        sub_threads.insert(
-            gtid,
-            SubThread {
-                spawn_part_id: spawn_id,
-            },
+    for found in discovered {
+        // Same parent-thread guard as `register_sub_threads_from`: a child's
+        // handoff item can reference the parent, which must never become a
+        // waitable "sub-agent".
+        if found.thread_id == parent_thread {
+            continue;
+        }
+        register_sub_thread(
+            sub_threads,
+            found.thread_id,
+            found.spawn_part_id,
+            found.arms,
         );
     }
 }
@@ -1580,6 +2032,59 @@ fn error_message(error: Option<&Value>) -> String {
         .unwrap_or_else(|| "codex reported an error".to_string())
 }
 
+fn append_native_recovery_context(ctx: &TurnCtx, setup: &mut Value) {
+    let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") else {
+        return;
+    };
+    let instructions = setup
+        .get("developerInstructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    setup["developerInstructions"] = Value::String(format!("{instructions}\n\n{recovery}"));
+}
+
+async fn ensure_codex_pre_accept(
+    ctx: &mut TurnCtx,
+    native_store: NativeStore,
+) -> Result<Arc<CodexClient>> {
+    loop {
+        let ensure = ctx.host.codex.ensure(&ctx.session_id, native_store);
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, ensure)
+                .await
+                .map_err(|_| anyhow!("Codex setup exceeded the ORX retry budget"))?,
+            None => ensure.await,
+        };
+        match result {
+            Ok(client) => {
+                ctx.clear_retry_status();
+                return Ok(client);
+            }
+            Err(error) => {
+                ctx.host.codex.kill_session(&ctx.session_id).await;
+                let detail = error.to_string();
+                let retryable = !["JSON-RPC -32600", "JSON-RPC -32601", "JSON-RPC -32602"]
+                    .iter()
+                    .any(|code| detail.contains(code));
+                let retry = retryable.then(|| ctx.schedule_orx_retry(None)).flatten();
+                let Some((retry_number, delay)) = retry else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("codex_setup", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Restarting Codex app-server",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
 async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // Entry sweep: any HELD (native_id) card still unresolved from an earlier
     // turn is a zombie — its JSON-RPC request died with its turn (or child), and
@@ -1604,8 +2109,23 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
     let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
 
-    let client = ctx.host.codex.ensure(&ctx.session_id).await?;
-    let (sandbox_mode, approval_policy) = codex_policies(ctx.permission_mode);
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
+    };
+    let preferred_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let mut client = ensure_codex_pre_accept(ctx, preferred_store).await?;
+    let auto_review_supported =
+        if ctx.permission_mode.unwrap_or(PermissionMode::Auto) == PermissionMode::Auto {
+            codex_auto_review_supported(&client, &repo).await
+        } else {
+            false
+        };
+    let (sandbox_mode, approval_policy, approvals_reviewer) =
+        codex_policies(ctx.permission_mode, auto_review_supported);
 
     // Thread bring-up: reuse the thread this child already carries, resume a
     // persisted one on a fresh child (after an orx up restart or child crash),
@@ -1617,17 +2137,28 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         "cwd": repo.to_string_lossy(),
         "sandbox": sandbox_mode,
         "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
         "developerInstructions": playbook_md,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        thread_setup["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
-    let thread_id = match ctx.native_session_id.clone() {
-        Some(id) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
-        Some(id) => {
+    let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
+        (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
+        (Some(_), None) => {
+            append_native_recovery_context(ctx, &mut thread_setup);
+            start_thread(ctx, &client, thread_setup).await?
+        }
+        (Some(id), Some(session)) => {
             let mut params = thread_setup.clone();
             params["threadId"] = Value::String(id.clone());
-            match client.try_request("thread/resume", params).await? {
+            params["path"] = Value::String(session.path.to_string_lossy().into_owned());
+            let (resume_client, resumed) = codex_resume_thread(ctx, client.clone(), params).await?;
+            client = resume_client;
+            match resumed {
                 Ok(resumed) => {
                     // Capture the effective model codex reports (top-level
                     // `model`) — the required `settings.model` for a
@@ -1637,20 +2168,23 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                     client.set_resumed_thread(&id);
                     id
                 }
-                // Codex *rejected* the id (e.g. minted by the old exec path,
-                // or the rollout is gone): start a fresh thread; prior context
-                // is lost either way. A transport failure, by contrast,
-                // propagates as the turn's error (the `?` above) — a resumable
-                // thread must never be discarded over a timeout/hiccup.
                 Err(err) => {
-                    eprintln!(
-                        "orx up: codex thread/resume rejected ({err}); starting a fresh thread"
-                    );
+                    // Transport failures never reach this arm. Recover only if
+                    // the exact rollout disappeared after the initial lookup.
+                    if codex_native_session(&id).await?.is_some() {
+                        ctx.mark_terminal_failure("json_rpc", err.to_string());
+                        return Err(anyhow!("codex thread/resume failed: {err}"));
+                    }
+                    if client.native_store() != NativeStore::Isolated {
+                        ctx.host.codex.kill_session(&ctx.session_id).await;
+                        client = ensure_codex_pre_accept(ctx, NativeStore::Isolated).await?;
+                    }
+                    append_native_recovery_context(ctx, &mut thread_setup);
                     start_thread(ctx, &client, thread_setup).await?
                 }
             }
         }
-        None => start_thread(ctx, &client, thread_setup).await?,
+        (None, _) => start_thread(ctx, &client, thread_setup).await?,
     };
 
     // Route events to this turn before starting it — nothing is missed.
@@ -1663,8 +2197,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         // Explicit per turn — the composer can change mode/model mid-session,
         // and `sandboxPolicy` is the only carrier of writable roots.
         "approvalPolicy": approval_policy,
+        "approvalsReviewer": approvals_reviewer,
         "sandboxPolicy": sandbox_policy_json(ctx.permission_mode, &repo).await,
     });
+    if let Some(service_tier) = &ctx.service_tier {
+        turn_params["serviceTier"] = Value::String(service_tier.clone());
+    }
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
@@ -1680,29 +2218,24 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     //   * Non-plan turn whose thread MAY be sticky-planned → the `default` mask,
     //     once, to un-stick (a `plan` turn leaves the thread planning until a
     //     turn carries `default`; there is no way back to "no template"). "May
-    //     be sticky-planned" fires on either signal: the DB `prev_permission_mode`
+    //     be sticky-planned" fires on either signal: the durable reset marker
     //     (survives restarts) or this child's in-memory `last_collab_mode` (a
     //     `plan` mask we sent and haven't cleared).
     //   * Otherwise → attach nothing (preserves today's template-free context).
     // The mask's required `settings.model` is the session model, falling back to
     // codex's reported thread model; keep the top-level `model`/`effort` above
     // so the None-model escape path still works (mask omitted, plain turn).
-    let plan_turn = ctx.permission_mode == Some(PermissionMode::Plan);
-    let may_be_sticky = ctx.prev_permission_mode == Some(PermissionMode::Plan)
-        || client.last_collab_mode() == Some("plan");
-    let mask_mode = if plan_turn {
-        Some("plan")
-    } else if may_be_sticky {
-        Some("default")
-    } else {
-        None
-    };
+    let plan_turn = ctx.plan_mode;
+    let mask_mode =
+        collaboration_mask_mode(plan_turn, ctx.plan_reset_pending, client.last_collab_mode());
+    let mut applied_mask_mode = None;
     if let Some(mode) = mask_mode {
         let collab_model = ctx.model.clone().or_else(|| client.thread_model());
         match collab_model {
             Some(model) => {
                 turn_params["collaborationMode"] = collaboration_mode_json(mode, &model, effort);
                 client.set_last_collab_mode(mode);
+                applied_mask_mode = Some(mode);
             }
             None if plan_turn => {
                 // Plan mode with no known model can't build the mask (settings
@@ -1722,7 +2255,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         }
     }
 
-    let started = client.request("turn/start", turn_params).await?;
+    let started = codex_pre_accept_request(ctx, &client, "turn/start", turn_params, true).await?;
+    if applied_mask_mode == Some("default") && ctx.plan_reset_pending {
+        Store::open()?.clear_chat_session_plan_reset(&ctx.session_id)?;
+        ctx.plan_reset_pending = false;
+    }
     // Everything below is filtered to this turn: an earlier turn of the same
     // session that was orx-side aborted (its native interrupt raced or never
     // fired) can still be streaming into the shared channel, and its tail —
@@ -1732,6 +2269,12 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
         .and_then(|t| t.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    if turn_id.is_some() {
+        ctx.mark_delivery(DeliveryState::Accepted);
+    } else {
+        ctx.mark_delivery(DeliveryState::Unknown);
+        return Err(anyhow!("codex turn/start returned no turn id"));
+    }
     // Arm the native interrupt now rather than on `turn/started` — an
     // interrupt landing before that notification would otherwise no-op.
     if let Some(turn_id) = turn_id.as_deref() {
@@ -1747,33 +2290,88 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // requests natively first, and the next turn's entry sweep in this function
     // resolves whatever survived.)
     let mut open_requests: HashMap<String, (Value, ServerReqKind)> = HashMap::new();
+    // Absolute, so steering can't push the watchdog back on a wedged turn.
+    let mut deadline = tokio::time::Instant::now() + TURN_WATCHDOG;
 
     // Sub-agent threads spawned this turn (Codex collaboration). Their events
     // stream on this same connection with a foreign turnId; we route them into
     // the spawning part's `children` instead of dropping them.
     let mut sub_threads: HashMap<String, SubThread> = HashMap::new();
+    // The parent turn's `turn/completed` arrived while sub-agent threads were
+    // still live — we're draining their tails before ending the turn (bounded
+    // by DRAIN_QUIET_SETTLE, see the deadline below).
+    let mut parent_done = false;
 
     loop {
         // Watchdog (see TURN_WATCHDOG for the false-positive trade-off).
         // Suspended while a card is pending — user think-time is unbounded by
         // design (question think-time too); codex's own ~5-minute approval
         // deadline still applies server-side.
-        let event = if open_requests.is_empty() {
-            match tokio::time::timeout(TURN_WATCHDOG, rx.recv()).await {
-                Ok(event) => event,
-                Err(_) => {
-                    client.interrupt_active_turn().await;
-                    ctx.push_error(format!(
-                        "codex produced no output for {} minutes — turn interrupted",
-                        TURN_WATCHDOG.as_secs() / 60
-                    ));
-                    settle_running_subagents(&mut ctx.assistant.parts);
-                    let _ = ctx.flush();
-                    return Ok(());
+        // The post-parent drain gets a much shorter deadline: the parent turn
+        // is already over, so the only legitimate wait is agents actively
+        // streaming — a long-quiet drain means a terminal event was missed (or
+        // codex never sent one). Settling then is graceful, not lossy: codex
+        // holds a finished agent's report for the next turn regardless.
+        //
+        // `steering` is borrowed out of `ctx` so the borrow ends with the
+        // select — the steer arm's handler needs `&mut ctx`.
+        let waited = {
+            let steering = &mut ctx.steering;
+            let event = async {
+                if open_requests.is_empty() {
+                    tokio::time::timeout_at(deadline, rx.recv()).await
+                } else {
+                    Ok(rx.recv().await)
                 }
+            };
+            tokio::select! {
+                event = event => Waited::Event(event),
+                steer = super::next_steer(steering) => Waited::Steer(steer),
             }
-        } else {
-            rx.recv().await
+        };
+        let event = match waited {
+            Waited::Steer(steer) => {
+                steer_turn(ctx, &client, &thread_id, turn_id.as_deref(), steer).await;
+                continue;
+            }
+            Waited::Event(Ok(event)) => {
+                deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
+                event
+            }
+            Waited::Event(Err(_)) if parent_done => {
+                let stuck: Vec<&str> = sub_threads
+                    .iter()
+                    .filter(|(_, s)| s.live)
+                    .map(|(tid, _)| tid.as_str())
+                    .collect();
+                eprintln!(
+                    "orx up: codex sub-agent drain settled after {}s of silence \
+                     (threads without a terminal event: {stuck:?})",
+                    DRAIN_QUIET_SETTLE.as_secs()
+                );
+                finish_completed_turn(
+                    ctx,
+                    &client,
+                    &thread_id,
+                    turn_id.as_deref(),
+                    plan_turn,
+                    &mut open_requests,
+                )
+                .await;
+                return Ok(());
+            }
+            Waited::Event(Err(_)) => {
+                client.interrupt_active_turn().await;
+                let message = format!(
+                    "codex produced no output for {} minutes — turn interrupted",
+                    TURN_WATCHDOG.as_secs() / 60
+                );
+                ctx.mark_terminal_failure("codex_watchdog", message.clone());
+                ctx.push_error(message);
+                settle_running_subagents(&mut ctx.assistant.parts);
+                let _ = ctx.flush();
+                return Ok(());
+            }
         };
         let Some(event) = event else {
             settle_running_subagents(&mut ctx.assistant.parts);
@@ -1785,8 +2383,22 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 match classify_event_thread(turn_id.as_deref(), &sub_threads, &params) {
                     EventScope::Stale => continue,
                     EventScope::SubAgent(tid) => {
-                        route_sub_event(ctx, &mut sub_threads, &tid, &method, &params);
+                        route_sub_event(ctx, &mut sub_threads, &thread_id, &tid, &method, &params);
                         ctx.maybe_flush();
+                        // Draining after the parent's turn/completed: the last
+                        // live thread retiring ends the turn for real.
+                        if parent_done && !sub_threads.values().any(|s| s.live) {
+                            finish_completed_turn(
+                                ctx,
+                                &client,
+                                &thread_id,
+                                turn_id.as_deref(),
+                                plan_turn,
+                                &mut open_requests,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                         continue;
                     }
                     EventScope::Parent => {}
@@ -1807,22 +2419,33 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
                 // A parent collab item spawns/drives sub-agents — register the
                 // thread ids it references so their (foreign-turn) events route
                 // into this spawn part's `children` from here on.
-                register_sub_threads_from(&method, &params, &mut sub_threads);
+                register_sub_threads_from(&thread_id, &method, &params, &mut sub_threads);
                 match apply_notification(ctx, &method, &params) {
                     Some(TurnEnd::Done { interrupted }) => {
-                        sweep_open_requests(ctx, &client, &mut open_requests).await;
-                        // A sub-agent whose `turn/completed` never arrived before
-                        // the parent turn ended would otherwise spin forever.
-                        settle_running_subagents(&mut ctx.assistant.parts);
-                        // Synthesize the end-turn plan card (Plan mode, not
-                        // interrupted). Attach before the final flush so the
-                        // PlanStrip appears atomically with the finished turn.
-                        if plan_turn && !interrupted {
-                            if let Some(part) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
-                                ctx.upsert_part(part);
-                            }
+                        // Spawned sub-agents outlive the parent turn — codex
+                        // holds their reports for the NEXT turn and their
+                        // threads keep streaming on this connection. Ending now
+                        // would freeze those transcripts mid-run, so drain
+                        // until every live thread retires (its own
+                        // turn/completed); the watchdog still backstops a
+                        // thread that never does. An interrupt ends everything.
+                        if !interrupted && sub_threads.values().any(|s| s.live) {
+                            parent_done = true;
+                            deadline = tokio::time::Instant::now() + turn_phase_quiet(parent_done);
+                            let _ = ctx.flush();
+                            continue;
                         }
-                        let _ = ctx.flush();
+                        // Plan card only for a non-interrupted Plan turn — an
+                        // interrupted plan turn has no finished plan.
+                        finish_completed_turn(
+                            ctx,
+                            &client,
+                            &thread_id,
+                            turn_id.as_deref(),
+                            plan_turn && !interrupted,
+                            &mut open_requests,
+                        )
+                        .await;
                         return Ok(());
                     }
                     Some(TurnEnd::Failed(message)) => {
@@ -2096,20 +2719,23 @@ fn user_input_card(turn: Option<&str>, id: &Value, params: &Value) -> Option<(St
 }
 
 /// The `item/tool/requestUserInput` reply for an answered question card: the
-/// surfaced question id gets the selected labels (or the freeform note when
-/// there's no selection), every other stashed id gets an empty `{"answers": []}`
-/// (codex tolerates a partial map and proceeds). `Err` when neither a selection
-/// nor a note was provided — leaves the card actionable rather than sending an
-/// empty answer the user didn't intend.
+/// surfaced question id gets the selected labels, freeform note, or one
+/// contextualized annotation answer; every other stashed id gets an empty
+/// `{"answers": []}`. `Err` when none were provided leaves the card actionable.
 fn user_input_reply(prompt: &WirePrompt, answer: &PromptAnswer) -> Result<Value> {
     let note = answer.note.as_deref().filter(|s| !s.trim().is_empty());
-    let selected: Vec<String> = if !answer.answers.is_empty() {
+    let mut selected: Vec<String> = if !answer.answers.is_empty() {
         answer.answers.clone()
     } else if let Some(note) = note {
         vec![note.to_string()]
+    } else if !answer.annotations.is_empty() {
+        Vec::new()
     } else {
         return Err(anyhow!("select an option (or type an answer) to reply"));
     };
+    if !answer.annotations.is_empty() {
+        selected = vec![answer.contextualized_answer(answer.plain_answer_text())];
+    }
     let tool_input = prompt.tool_input.as_ref();
     let answered_id = tool_input
         .and_then(|t| t.get("answeredId"))
@@ -2217,9 +2843,192 @@ fn has_error_part(ctx: &TurnCtx, message: &str) -> bool {
     })
 }
 
+fn retry_after(error: &JsonRpcError) -> Option<Duration> {
+    let data = error.data.as_ref()?;
+    data.get("retryAfterMs")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .or_else(|| {
+            data.get("retryAfter")
+                .and_then(Value::as_u64)
+                .map(Duration::from_secs)
+        })
+}
+
+async fn codex_pre_accept_request(
+    ctx: &mut TurnCtx,
+    client: &CodexClient,
+    method: &str,
+    params: Value,
+    ambiguous_transport: bool,
+) -> Result<Value> {
+    loop {
+        if ambiguous_transport {
+            ctx.persist_delivery(DeliveryState::Unknown)?;
+        }
+        let request = client.try_request(method, params.clone());
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, request)
+                .await
+                .map_err(|_| anyhow!("codex {method} exceeded the ORX retry budget"))?,
+            None => request.await,
+        };
+        match result {
+            Ok(Ok(value)) => {
+                ctx.clear_retry_status();
+                return Ok(value);
+            }
+            Ok(Err(error)) if error.code == -32001 => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(retry_after(&error))
+                else {
+                    ctx.mark_terminal_failure("server_overloaded", error.to_string());
+                    return Err(anyhow!("codex {method} failed: {error}"));
+                };
+                let next_retry_at = crate::store::now_ms() + delay.as_millis() as i64;
+                ctx.show_retry_status(
+                    "orx",
+                    "Codex app-server is overloaded",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(next_retry_at),
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(error)) => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                ctx.mark_terminal_failure("json_rpc", error.to_string());
+                return Err(anyhow!("codex {method} failed: {error}"));
+            }
+            Err(error) => {
+                ctx.mark_delivery(if ambiguous_transport {
+                    DeliveryState::Unknown
+                } else {
+                    DeliveryState::NotSent
+                });
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn codex_resume_thread(
+    ctx: &mut TurnCtx,
+    mut client: Arc<CodexClient>,
+    params: Value,
+) -> Result<(Arc<CodexClient>, std::result::Result<Value, JsonRpcError>)> {
+    loop {
+        let request = client.try_request("thread/resume", params.clone());
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, request)
+                .await
+                .map_err(|_| anyhow!("codex thread/resume exceeded the ORX retry budget"))?,
+            None => request.await,
+        };
+        match result {
+            Ok(Ok(value)) => {
+                ctx.clear_retry_status();
+                return Ok((client, Ok(value)));
+            }
+            Ok(Err(error)) if error.code == -32001 => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(retry_after(&error))
+                else {
+                    ctx.mark_terminal_failure("server_overloaded", error.to_string());
+                    return Err(anyhow!("codex thread/resume failed: {error}"));
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Codex app-server is overloaded",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+            Ok(Err(error)) => {
+                ctx.mark_delivery(DeliveryState::Rejected);
+                return Ok((client, Err(error)));
+            }
+            Err(error) => {
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("codex_resume", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Reconnecting to Codex",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                ctx.host.codex.kill_session(&ctx.session_id).await;
+                tokio::time::sleep(delay).await;
+                let native_store = client.native_store();
+                client = ensure_codex_pre_accept(ctx, native_store).await?;
+            }
+        }
+    }
+}
+
+/// Bounded well under the shared request timeout: a steer is awaited *in* the
+/// event loop, so a slow app-server would otherwise freeze the transcript and
+/// hide any card it raises.
+const STEER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Hand one steer to the turn already running.
+///
+/// codex rejects `turn/steer` on review and compaction turns, and older
+/// app-servers lack the method — those answer definitively, so the message
+/// parks for the next turn. A transport failure or timeout answers nothing:
+/// codex may already have applied the text, so re-running it as a fresh turn
+/// could execute the instruction twice. Say so instead.
+async fn steer_turn(
+    ctx: &mut TurnCtx,
+    client: &CodexClient,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    steer: SteerMessage,
+) {
+    let Some(turn_id) = turn_id else {
+        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
+            ctx.push_error(format!("Could not preserve steering message: {error}"));
+        }
+        return;
+    };
+    let answered = client
+        .try_request_with_timeout(
+            "turn/steer",
+            serde_json::json!({
+                "threadId": thread_id,
+                "input": [{ "type": "text", "text": steer.text }],
+                "expectedTurnId": turn_id,
+            }),
+            STEER_TIMEOUT,
+        )
+        .await;
+    match answered {
+        Ok(Ok(_)) => ctx.record_steer(&steer.display),
+        Ok(Err(_)) => {
+            if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
+                ctx.push_error(format!("Could not preserve steering message: {error}"));
+            }
+        }
+        Err(e) => {
+            // Record it anyway: the composer is already cleared, so this is
+            // the only copy of what the user typed.
+            ctx.record_steer(&steer.display);
+            ctx.push_error(format!(
+                "codex did not confirm the steering message ({e}) — send it again if the turn ignores it"
+            ));
+        }
+    }
+}
+
 /// `thread/start` and record the new thread id as the session's native id.
 async fn start_thread(ctx: &mut TurnCtx, client: &CodexClient, params: Value) -> Result<String> {
-    let result = client.request("thread/start", params).await?;
+    let result = codex_pre_accept_request(ctx, client, "thread/start", params, false).await?;
     let thread_id = result
         .get("thread")
         .and_then(|t| t.get("id"))
@@ -2290,6 +3099,14 @@ pub(crate) fn ensure_orx_data_dir() -> Option<PathBuf> {
     dir.canonicalize().ok()
 }
 
+/// The exact lifecycle lock file required by every stateful `orx` command.
+/// Granting only this file avoids exposing the neighboring credentials file.
+fn ensure_orx_lifecycle_lock() -> Option<PathBuf> {
+    let lock = crate::store::open_lifecycle_lock().ok()?;
+    drop(lock);
+    crate::store::lifecycle_lock_path().canonicalize().ok()
+}
+
 /// Session reasoning id → Codex `model_reasoning_effort` value. See
 /// [`resolve_reasoning`] for what a `None` result means.
 ///
@@ -2327,6 +3144,46 @@ fn command_string(v: &Value) -> String {
     }
 }
 
+fn command_argv(v: &Value) -> Option<Vec<String>> {
+    let Value::Array(parts) = v else {
+        return None;
+    };
+    if parts.is_empty() {
+        return None;
+    }
+    parts
+        .iter()
+        .map(|part| part.as_str().map(str::to_string))
+        .collect()
+}
+
+fn guardian_review_failure(params: &Value) -> Option<String> {
+    let review = params.get("review");
+    let status = review
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str);
+    if matches!(status, Some("inProgress") | Some("approved")) {
+        return None;
+    }
+    if let Some(rationale) = review
+        .and_then(|value| value.get("rationale"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(rationale.to_string());
+    }
+    Some(
+        match status {
+            Some("denied") => "Automatic approval review denied.",
+            Some("timedOut") => "Automatic approval review timed out.",
+            Some("aborted") => "Automatic approval review aborted.",
+            _ => "Automatic approval review failed.",
+        }
+        .to_string(),
+    )
+}
+
 // --- legacy exec path (codex < 0.144, and ORX_CODEX_EXEC=1) -------------------
 
 /// Session mode → Codex `exec` sandbox policy. `codex exec` can't prompt for
@@ -2354,21 +3211,11 @@ fn writable_roots_override(roots: &[PathBuf]) -> Option<String> {
     if roots.is_empty() {
         return None;
     }
-    let list: Vec<String> = roots.iter().map(|p| toml_string(p)).collect();
+    let list: Vec<String> = roots.iter().map(|p| native_store::toml_string(p)).collect();
     Some(format!(
         "sandbox_workspace_write.writable_roots=[{}]",
         list.join(", ")
     ))
-}
-
-/// A path as a TOML basic-string literal, for `-c key="value"` overrides.
-/// serde_json's escaping emits only sequences TOML also accepts (`\"`, `\\`,
-/// control chars as `\uXXXX`) and leaves `/` literal — except DEL (0x7F),
-/// which serde_json passes through and TOML forbids unescaped.
-fn toml_string(path: &Path) -> String {
-    serde_json::to_string(&path.to_string_lossy())
-        .unwrap_or_else(|_| String::from("\"\""))
-        .replace('\u{7f}', "\\u007F")
 }
 
 async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
@@ -2383,12 +3230,23 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             .await
             .map_err(|e| anyhow!("playbook task failed: {e}"))??;
 
+    let native_session = match ctx.native_session_id.as_deref() {
+        Some(id) => codex_native_session(id).await?,
+        None => None,
+    };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let codex_home = tokio::task::spawn_blocking(move || native_store::prepare_codex(native_store))
+        .await
+        .map_err(|error| anyhow!("Codex config preparation failed: {error}"))??;
     let mut cmd = Command::new(&bin);
-    match &ctx.native_session_id {
-        Some(native_id) => {
+    match (&ctx.native_session_id, &native_session) {
+        (Some(native_id), Some(_)) => {
             cmd.args(["exec", "resume", native_id]);
         }
-        None => {
+        _ => {
             cmd.arg("exec");
         }
     }
@@ -2409,7 +3267,11 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     //
     // Yields the data dir granted as a writable root (if any), so the child's
     // store can be pinned to it below, after `prepare_env`.
-    let data_dir_pin = match codex_sandbox(ctx.permission_mode) {
+    let data_dir_pin = match if ctx.plan_mode {
+        Some("read-only")
+    } else {
+        codex_sandbox(ctx.permission_mode)
+    } {
         Some(policy) => {
             cmd.args([
                 "-c",
@@ -2418,7 +3280,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                 "approval_policy=\"never\"",
             ]);
             // workspace-write out of the box is too tight for the orx
-            // workflow in three ways (all verified via `codex sandbox` against
+            // workflow in four ways (all verified via `codex sandbox` against
             // codex-cli 0.144; in the TUI these denials escalate to approval
             // prompts, which `codex exec` doesn't have):
             //   * Network is blocked by default — DNS doesn't even resolve, so
@@ -2430,6 +3292,10 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             //     every `orx` command that touches it fails with "unable to
             //     open database file"; grant the data dir (see
             //     `ensure_orx_data_dir`).
+            //   * Every stateful `orx` command takes a lifecycle lock in the
+            //     config dir before opening the store. Grant only that lock
+            //     file, not the neighboring credentials (see
+            //     `ensure_orx_lifecycle_lock`).
             //   * Git metadata isn't writable — codex protects `.git` inside
             //     the workspace, and a worktree's real metadata (the hub
             //     clone's `.git`) sits outside it — so `git fetch`/`commit`
@@ -2440,10 +3306,14 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             if policy == "workspace-write" {
                 cmd.args(["-c", "sandbox_workspace_write.network_access=true"]);
                 let data_dir = ensure_orx_data_dir();
-                let roots: Vec<PathBuf> = [data_dir.clone(), shared_git_dir(&repo).await]
-                    .into_iter()
-                    .flatten()
-                    .collect();
+                let roots: Vec<PathBuf> = [
+                    data_dir.clone(),
+                    ensure_orx_lifecycle_lock(),
+                    shared_git_dir(&repo).await,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 if let Some(override_arg) = writable_roots_override(&roots) {
                     cmd.args(["-c", &override_arg]);
                 }
@@ -2461,24 +3331,40 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
+    if let Some(service_tier) = &ctx.service_tier {
+        cmd.args(["-c", &format!("service_tier=\"{service_tier}\"")]);
+    }
     if let Some(model) = &ctx.model {
         cmd.args(["-m", model]);
     }
-    let prompt = if ctx.native_session_id.is_none() {
+    if let Some(override_arg) = native_store::codex_sqlite_override(native_store, &codex_home) {
+        cmd.args(["-c", &override_arg]);
+    }
+    let mut turn_text = legacy_exec_text(&ctx.text, ctx.plan_mode);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Codex thread") {
+            turn_text = format!("{recovery}\n\n{turn_text}");
+        }
+    }
+    let prompt = if native_session.is_none() {
         let playbook_md = std::fs::read_to_string(&playbook).unwrap_or_default();
         format!(
             "<system-context>\n{playbook_md}\n</system-context>\n\n{}",
-            ctx.text
+            turn_text
         )
     } else {
-        ctx.text.clone()
+        turn_text
     };
     cmd.arg(prompt);
     prepare_env(&mut cmd);
+    cmd.env("CODEX_HOME", codex_home);
+    // Plain text only: a synced FORCE_COLOR would put escape codes in the
+    // `--json` event stream, and every unparseable line reads as "not delivered".
+    cmd.env("NO_COLOR", "1");
     // Tag the run this sandboxed turn may launch (`orx exp run`) with the
-    // session, so the run watcher notifies this chat. After prepare_env so it
+    // session so it can be explicitly subscribed to. After prepare_env so it
     // isn't shadowed by a synced value.
-    set_chat_session_env(&mut cmd, &ctx.session_id);
+    set_chat_session_env(&mut cmd, &ctx.session_id, "codex", ctx.host.up_port());
     // Pin the sandboxed turn's store to the exact path granted above. The
     // grant was resolved from the host's env, but the child could resolve a
     // different data dir — `prepare_env` injects dashboard-synced vars (a
@@ -2491,17 +3377,14 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(dir) = &data_dir_pin {
         cmd.env("ORX_DATA_DIR", dir);
     }
-    // The sandbox blocks the keyring `gh` keeps its token in ("stored token is
-    // invalid" from inside the workspace), so resolve it out here and pass it
-    // down; both `gh` and its git credential helper prefer these env vars.
-    if let Some(token) = crate::local::git::resolve_github_token() {
-        cmd.env("GH_TOKEN", &token);
-        cmd.env("GITHUB_TOKEN", token);
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {}: {}", bin.display(), e))?;
+    ctx.persist_delivery(DeliveryState::Unknown)?;
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            ctx.mark_delivery(DeliveryState::NotSent);
+            return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
+        }
+    };
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut counter = 0usize;
@@ -2517,6 +3400,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         let Ok(event) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
+        ctx.mark_delivery(DeliveryState::Accepted);
         // Legacy events nest under "msg"; item-style events are flat.
         let msg = event.get("msg").unwrap_or(&event);
         let kind = msg.get("type").and_then(Value::as_str).unwrap_or("");
@@ -2639,7 +3523,33 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
             crate::store::data_dir().join("agent-codex.log").display()
         ));
     }
+    if ctx.plan_mode {
+        if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
+            ctx.upsert_part(card);
+        }
+        let _ = ctx.flush();
+    }
     Ok(())
+}
+
+async fn codex_native_session(
+    native_id: &str,
+) -> Result<Option<native_store::NativeSessionLocation>> {
+    let native_id = native_id.to_string();
+    tokio::task::spawn_blocking(move || native_store::codex_session(&native_id))
+        .await
+        .map_err(|error| anyhow!("codex rollout lookup failed: {error}"))?
+}
+
+fn legacy_exec_text(text: &str, plan_mode: bool) -> String {
+    if !plan_mode {
+        return text.to_string();
+    }
+    format!(
+        "<plan-mode>\nInvestigate and produce a complete implementation plan only. Do not modify \
+         files or run mutating commands. Ask clarifying questions when needed, then present the \
+         plan for approval.\n</plan-mode>\n\n{text}"
+    )
 }
 
 fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -> String) {
@@ -2672,6 +3582,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                     status: if failed { "error" } else { "completed" }.into(),
                     input: Some(serde_json::json!({
                         "command": item.get("command").map(command_string).unwrap_or_default(),
+                        "cwd": item.get("cwd").and_then(Value::as_str),
                     })),
                     output: item
                         .get("aggregated_output")
@@ -2693,6 +3604,10 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
+        models.iter().map(|model| model.id.as_str()).collect()
+    }
 
     #[test]
     fn custom_provider_uses_its_env_key_and_configured_model() {
@@ -2767,6 +3682,98 @@ requires_openai_auth = false
     }
 
     #[test]
+    fn custom_provider_records_whether_a_model_catalog_is_declared() {
+        // A declared catalog (the DeepSeek-style setup) means the app-server
+        // `model/list` reflects the provider's own models, so orx should probe
+        // it and offer every listed model.
+        assert!(
+            parse_custom_provider(
+                r#"
+model = "deepseek-v4-flash"
+model_provider = "deepseek"
+model_catalog_json = "~/.codex/models.json"
+
+[model_providers.deepseek]
+base_url = "https://api.deepseek.com/"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+
+        // A bare gateway provider has no explicit catalog; the CLI would fall
+        // back to its bundled first-party list, so orx keeps offering only the
+        // configured model instead of a catalog that says nothing about the
+        // endpoint.
+        assert!(
+            !parse_custom_provider(
+                r#"
+model = "gateway-model"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://gateway.example/v1"
+wire_api = "responses"
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(
+            !parse_custom_provider(
+                r#"
+model_provider = "custom"
+model_catalog_json = "  "
+[model_providers.custom]
+requires_openai_auth = false
+"#,
+            )
+            .unwrap()
+            .has_model_catalog
+        );
+        assert!(parse_custom_provider("not toml ===").is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_keep_the_configured_model_first() {
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![
+                ModelInfo::new("first"),
+                ModelInfo::new("configured").with_label(Some("Configured model"), None),
+                ModelInfo::new("last"),
+            ]),
+        );
+
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
+
+        let models = custom_provider_models(
+            Some("configured"),
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
+        assert!(models[0].reasoning_levels.is_none());
+        assert!(models[0].default_reasoning_level.is_none());
+    }
+
+    #[test]
+    fn custom_provider_models_preserve_catalog_fallbacks() {
+        let models = custom_provider_models(Some("configured"), None);
+        assert_eq!(model_ids(&models), ["configured"]);
+
+        let models = custom_provider_models(
+            None,
+            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
+        );
+        assert_eq!(model_ids(&models), ["first", "last"]);
+        assert!(custom_provider_models(None, None).is_empty());
+    }
+
+    #[test]
     fn version_parses_cli_output_and_gates() {
         assert_eq!(parse_version("codex-cli 0.144.0"), Some((0, 144, 0)));
         assert_eq!(parse_version("0.150.2"), Some((0, 150, 2)));
@@ -2781,23 +3788,50 @@ requires_openai_auth = false
     #[test]
     fn policies_map_modes_to_thread_params() {
         // Every non-bypass mode is the balanced sandbox with on-request
-        // approvals (escalations become permission cards); Bypass drops the
-        // sandbox, so approvals stay off — nothing to escalate.
-        assert_eq!(codex_policies(None), ("workspace-write", "on-request"));
+        // approvals; Bypass drops the sandbox, so approvals stay off.
         assert_eq!(
-            codex_policies(Some(PermissionMode::Auto)),
-            ("workspace-write", "on-request")
+            codex_policies(None, true),
+            ("workspace-write", "on-request", "auto_review")
+        );
+        assert_eq!(
+            codex_policies(Some(PermissionMode::Auto), true),
+            ("workspace-write", "on-request", "auto_review")
+        );
+        assert_eq!(
+            codex_policies(Some(PermissionMode::Auto), false),
+            ("workspace-write", "on-request", "user")
+        );
+        assert_eq!(
+            codex_policies(Some(PermissionMode::Ask), true),
+            ("workspace-write", "on-request", "user")
         );
         // Plan runs the SAME sandbox as Auto — native plan mode restricts at the
         // prompt level (the plan.md template), not the sandbox level.
         assert_eq!(
-            codex_policies(Some(PermissionMode::Plan)),
-            ("workspace-write", "on-request")
+            codex_policies(Some(PermissionMode::Plan), true),
+            ("workspace-write", "on-request", "user")
         );
         assert_eq!(
-            codex_policies(Some(PermissionMode::Bypass)),
-            ("danger-full-access", "never")
+            codex_policies(Some(PermissionMode::Bypass), true),
+            ("danger-full-access", "never", "user")
         );
+
+        assert!(config_supports_auto_review(&serde_json::json!({
+            "config": {"model_provider": null, "openai_base_url": null}
+        })));
+        assert!(!config_supports_auto_review(&serde_json::json!({
+            "config": {"model_provider": "custom", "openai_base_url": null}
+        })));
+        assert!(!config_supports_auto_review(&serde_json::json!({
+            "config": {"model_provider": "openai", "openai_base_url": "https://gateway.test/v1"}
+        })));
+        assert!(!config_supports_auto_review(&serde_json::json!({})));
+        assert!(!config_supports_auto_review(&serde_json::json!({
+            "config": {"model_provider": null}
+        })));
+        assert!(!config_supports_auto_review(&serde_json::json!({
+            "config": {"model_provider": 42, "openai_base_url": null}
+        })));
     }
 
     /// Fold a trimmed live transcript (captured from the 0.144 spike, ids
@@ -2855,12 +3889,180 @@ requires_openai_auth = false
             state.input.as_ref().unwrap()["command"],
             "/bin/zsh -lc 'touch /outside/probe.txt'"
         );
+        assert_eq!(state.input.as_ref().unwrap()["cwd"], "/ws");
         // Agent message: the completed item's full text wins over the deltas.
         assert_eq!(parts[2].kind, "text");
         assert_eq!(
             parts[2].text.as_deref(),
             Some("Command was not run because the required escalation was rejected.")
         );
+    }
+
+    #[test]
+    fn native_history_restores_a_missed_failed_command() {
+        let mut parts = vec![tool_part(
+            "ok".into(),
+            "bash",
+            "completed",
+            Some(serde_json::json!({ "command": "printf ok" })),
+            Some("ok".into()),
+        )];
+        let items = serde_json::json!([
+            {
+                "type": "commandExecution",
+                "id": "failed",
+                "command": "orx projects",
+                "cwd": "/worktree",
+                "status": "failed",
+                "aggregatedOutput": "Operation not permitted (os error 1)\n",
+                "exitCode": 1
+            },
+            {
+                "type": "commandExecution",
+                "id": "ok",
+                "command": "printf ok",
+                "cwd": "/worktree",
+                "status": "completed",
+                "aggregatedOutput": "ok",
+                "exitCode": 0
+            }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        assert_eq!(parts.len(), 2);
+        let failed = parts.iter().find(|part| part.id == "failed").unwrap();
+        assert_eq!(failed.state.as_ref().unwrap().status, "error");
+        assert_eq!(
+            failed.state.as_ref().unwrap().output.as_deref(),
+            Some("Operation not permitted (os error 1)\n")
+        );
+    }
+
+    /// OR-181: `thread/read` re-mints item ids (`item-N`) for content the
+    /// live stream keyed by its Responses id, so reconcile must treat the
+    /// renamed item as the streamed part — not append a second copy.
+    #[test]
+    fn native_history_renamed_text_item_does_not_duplicate() {
+        let mut parts = vec![
+            WirePart::reasoning("rs_0ea484ab".to_string(), ""),
+            WirePart::text("msg_0ea484ab".to_string(), "**Decision:** no JSD."),
+        ];
+        let items = serde_json::json!([
+            { "type": "userMessage", "id": "item-11", "content": "which loss?" },
+            { "type": "agentMessage", "id": "item-12", "text": "**Decision:** no JSD." },
+            { "type": "agentMessage", "id": "item-13", "text": "A message the stream missed." }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        let ids: Vec<&str> = parts.iter().map(|part| part.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["rs_0ea484ab", "msg_0ea484ab", "item-13"],
+            "the streamed part survives under its own id; only the genuinely \
+             missing message is appended"
+        );
+        assert_eq!(parts[1].text.as_deref(), Some("**Decision:** no JSD."));
+        assert_eq!(
+            parts[2].text.as_deref(),
+            Some("A message the stream missed.")
+        );
+    }
+
+    /// A renamed item whose live part streamed only partial text completes
+    /// the streamed part in place instead of appending a sibling.
+    #[test]
+    fn native_history_renamed_item_completes_partial_streamed_text() {
+        let mut parts = vec![
+            WirePart::reasoning("rs_aa".to_string(), "Weighing"),
+            WirePart::text("msg_bb".to_string(), "**Decision:** no J"),
+        ];
+        let items = serde_json::json!([
+            { "type": "reasoning", "id": "item-1", "summary": ["Weighing the losses."] },
+            { "type": "agentMessage", "id": "item-2", "text": "**Decision:** no JSD." }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        assert_eq!(parts.len(), 2, "renamed items must not add parts");
+        assert_eq!(parts[0].id, "rs_aa");
+        assert_eq!(parts[0].text.as_deref(), Some("Weighing the losses."));
+        assert_eq!(parts[1].id, "msg_bb");
+        assert_eq!(parts[1].text.as_deref(), Some("**Decision:** no JSD."));
+    }
+
+    /// Consume-once matching: two identical history messages pair with at
+    /// most one streamed part each, so a genuine repeat is still restored.
+    #[test]
+    fn native_history_identical_repeat_is_still_restored() {
+        let mut parts = vec![WirePart::text("msg_aa".to_string(), "Done.")];
+        let items = serde_json::json!([
+            { "type": "agentMessage", "id": "item-1", "text": "Done." },
+            { "type": "agentMessage", "id": "item-2", "text": "Done." }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        let ids: Vec<&str> = parts.iter().map(|part| part.id.as_str()).collect();
+        assert_eq!(ids, ["msg_aa", "item-2"], "the second repeat is appended");
+    }
+
+    /// A plan part sharing its text with the final message must not swallow a
+    /// missing message (plan ids are derived, never re-minted by history).
+    #[test]
+    fn native_history_message_matching_plan_text_is_restored() {
+        let mut parts = vec![WirePart::text("plan-item-plan_1".to_string(), "the plan")];
+        let items = serde_json::json!([
+            { "type": "agentMessage", "id": "item-2", "text": "the plan" }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        let ids: Vec<&str> = parts.iter().map(|part| part.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["plan-item-plan_1", "item-2"],
+            "a plan part must not absorb a real message"
+        );
+    }
+
+    /// An empty streamed part carries no evidence of which item it is —
+    /// `starts_with("")` matches anything — so it never adopts history text.
+    #[test]
+    fn native_history_empty_part_is_not_a_wildcard_match() {
+        let mut parts = vec![WirePart::reasoning("rs_empty".to_string(), "")];
+        let items = serde_json::json!([
+            { "type": "reasoning", "id": "item-1", "summary": ["First thought."] }
+        ]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+
+        let ids: Vec<&str> = parts.iter().map(|part| part.id.as_str()).collect();
+        assert_eq!(ids, ["rs_empty", "item-1"], "the item appends, not adopts");
+        assert_eq!(
+            parts[0].text.as_deref(),
+            Some(""),
+            "the empty part stays untouched"
+        );
+        assert_eq!(parts[1].text.as_deref(), Some("First thought."));
+    }
+
+    #[test]
+    fn interrupted_history_settles_in_progress_tools_as_interrupted() {
+        let mut parts = Vec::new();
+        let items = serde_json::json!([{
+            "type": "commandExecution",
+            "id": "command",
+            "command": "sleep 30",
+            "cwd": "/worktree",
+            "status": "inProgress"
+        }]);
+
+        reconcile_items(&mut parts, items.as_array().unwrap());
+        settle_interrupted_parts(&mut parts);
+
+        assert_eq!(parts[0].state.as_ref().unwrap().status, "interrupted");
     }
 
     /// Every tool-flavored ThreadItem — web search, MCP, dynamic tool call —
@@ -2996,6 +4198,7 @@ requires_openai_auth = false
             "sub".into(),
             SubThread {
                 spawn_part_id: "spawn1".into(),
+                live: true,
             },
         );
         // Same turn as parent → Parent.
@@ -3033,7 +4236,7 @@ requires_openai_auth = false
         let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
             "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["sub"],
             "prompt":"go"},"threadId":"parent","turnId":"turn1"});
-        register_sub_threads_from("item/started", &spawn, &mut subs);
+        register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
         apply_notification(&mut ctx, "item/started", &spawn);
         assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn1");
         assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("subagent"));
@@ -3046,6 +4249,7 @@ requires_openai_auth = false
         route_sub_event(
             &mut ctx,
             &mut subs,
+            "parent-thread",
             "sub",
             "item/completed",
             &json!({"item":{"type":"commandExecution","id":"c1","command":"ls",
@@ -3064,6 +4268,7 @@ requires_openai_auth = false
         route_sub_event(
             &mut ctx,
             &mut subs,
+            "parent-thread",
             "sub",
             "turn/completed",
             &json!({"turn":{"id":"subturn","status":"completed"},"threadId":"sub"}),
@@ -3071,6 +4276,41 @@ requires_openai_auth = false
         assert_eq!(
             ctx.assistant.parts[0].state.as_ref().unwrap().status,
             "completed"
+        );
+    }
+
+    #[test]
+    fn subagent_command_completion_preserves_streamed_state() {
+        let mut bucket = Vec::new();
+        apply_sub_notification(
+            &mut bucket,
+            "sub",
+            "item/started",
+            &json!({"item":{"type":"commandExecution","id":"c1","command":"orx logs $id","status":"inProgress"}}),
+        );
+        apply_sub_notification(
+            &mut bucket,
+            "sub",
+            "item/commandExecution/outputDelta",
+            &json!({"itemId":"c1","delta":"streamed\n"}),
+        );
+        let input = bucket[0].state.as_mut().unwrap().input.as_mut().unwrap();
+        input["runTargetIds"] = json!(["11111111-1111-1111-1111-111111111111"]);
+        input["runTargetIdsAuthoritative"] = json!(true);
+
+        apply_sub_notification(
+            &mut bucket,
+            "sub",
+            "item/completed",
+            &json!({"item":{"type":"commandExecution","id":"c1","command":"orx logs $id","status":"completed","exitCode":0}}),
+        );
+
+        let state = bucket[0].state.as_ref().unwrap();
+        assert_eq!(bucket[0].id, "sub:c1");
+        assert_eq!(state.output.as_deref(), Some("streamed\n"));
+        assert_eq!(
+            state.input.as_ref().unwrap()["runTargetIds"],
+            json!(["11111111-1111-1111-1111-111111111111"])
         );
     }
 
@@ -3084,13 +4324,14 @@ requires_openai_auth = false
         let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
             "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"]},
             "threadId":"parent","turnId":"turn1"});
-        register_sub_threads_from("item/started", &spawn, &mut subs);
+        register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
         apply_notification(&mut ctx, "item/started", &spawn);
 
         // Child spawns a grandchild — a collab item on the CHILD thread.
         route_sub_event(
             &mut ctx,
             &mut subs,
+            "parent-thread",
             "child",
             "item/started",
             &json!({"item":{"type":"collabAgentToolCall","id":"spawn2",
@@ -3104,6 +4345,7 @@ requires_openai_auth = false
         route_sub_event(
             &mut ctx,
             &mut subs,
+            "parent-thread",
             "grand",
             "item/completed",
             &json!({"item":{"type":"agentMessage","id":"m1","text":"hi"},
@@ -3139,7 +4381,7 @@ requires_openai_auth = false
         let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
             "tool":"spawnAgent","status":"completed","receiverThreadIds":["sub"]},
             "threadId":"parent","turnId":"turn1"});
-        register_sub_threads_from("item/completed", &spawn, &mut subs);
+        register_sub_threads_from("parent-thread", "item/completed", &spawn, &mut subs);
         apply_notification(&mut ctx, "item/completed", &spawn);
         assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn1");
 
@@ -3147,7 +4389,7 @@ requires_openai_auth = false
         let send = json!({"item":{"type":"collabAgentToolCall","id":"spawn2",
             "tool":"sendInput","status":"inProgress","receiverThreadIds":["sub"]},
             "threadId":"parent","turnId":"turn1"});
-        register_sub_threads_from("item/started", &send, &mut subs);
+        register_sub_threads_from("parent-thread", "item/started", &send, &mut subs);
         apply_notification(&mut ctx, "item/started", &send);
         // Thread now owned by the new row.
         assert_eq!(subs.get("sub").unwrap().spawn_part_id, "spawn2");
@@ -3156,6 +4398,7 @@ requires_openai_auth = false
         route_sub_event(
             &mut ctx,
             &mut subs,
+            "parent-thread",
             "sub",
             "item/completed",
             &json!({"item":{"type":"agentMessage","id":"m2","text":"more"},
@@ -3180,6 +4423,40 @@ requires_openai_auth = false
         assert_eq!(spawn2.children[0].id, "sub:m2");
     }
 
+    /// The parent's own thread must never be registered as a waitable
+    /// sub-agent: a child's handoff/interaction item can reference it, and a
+    /// registered parent thread never emits another `turn/completed` — the
+    /// post-parent drain would wait on it forever (the OR-178 hang).
+    #[test]
+    fn parent_thread_is_never_registered_as_a_sub_agent() {
+        let mut subs: HashMap<String, SubThread> = HashMap::new();
+        let activity = json!({"item":{"type":"subAgentActivity","id":"act1",
+            "kind":"interacted","agentThreadId":"parent-thread"},
+            "threadId":"child","turnId":"childturn"});
+        register_sub_threads_from("parent-thread", "item/completed", &activity, &mut subs);
+        assert!(subs.is_empty(), "parent thread must not be registered");
+
+        // Same guard on the grandchild-discovery path inside route_sub_event.
+        let mut ctx = TurnCtx::test_stub();
+        let spawn = json!({"item":{"type":"collabAgentToolCall","id":"spawn1",
+            "tool":"spawnAgent","status":"inProgress","receiverThreadIds":["child"]},
+            "threadId":"parent-thread","turnId":"turn1"});
+        register_sub_threads_from("parent-thread", "item/started", &spawn, &mut subs);
+        apply_notification(&mut ctx, "item/started", &spawn);
+        route_sub_event(
+            &mut ctx,
+            &mut subs,
+            "parent-thread",
+            "child",
+            "item/completed",
+            &activity,
+        );
+        assert!(
+            !subs.contains_key("parent-thread"),
+            "handoff item must not re-register the parent"
+        );
+    }
+
     #[test]
     fn command_output_deltas_accumulate_and_final_output_wins() {
         let mut ctx = TurnCtx::test_stub();
@@ -3195,6 +4472,17 @@ requires_openai_auth = false
                 &serde_json::json!({"itemId":"c1","delta":delta}),
             );
         }
+        {
+            let input = ctx.assistant.parts[0]
+                .state
+                .as_mut()
+                .unwrap()
+                .input
+                .as_mut()
+                .unwrap();
+            input["runTargetIds"] = serde_json::json!(["11111111-1111-1111-1111-111111111111"]);
+            input["runTargetIdsAuthoritative"] = serde_json::json!(true);
+        }
         // No aggregatedOutput on the completed item → streamed output survives.
         apply_notification(
             &mut ctx,
@@ -3204,6 +4492,14 @@ requires_openai_auth = false
         let state = ctx.assistant.parts[0].state.as_ref().unwrap();
         assert_eq!(state.status, "completed");
         assert_eq!(state.output.as_deref(), Some("a\nb\n"));
+        assert_eq!(
+            state.input.as_ref().unwrap()["runTargetIds"],
+            serde_json::json!(["11111111-1111-1111-1111-111111111111"])
+        );
+        assert_eq!(
+            state.input.as_ref().unwrap()["runTargetIdsAuthoritative"],
+            true
+        );
 
         // With aggregatedOutput present, it is authoritative.
         apply_notification(
@@ -3213,6 +4509,76 @@ requires_openai_auth = false
         );
         let state = ctx.assistant.parts[0].state.as_ref().unwrap();
         assert_eq!(state.output.as_deref(), Some("final"));
+    }
+
+    #[test]
+    fn command_execution_preserves_structured_argv() {
+        let array_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c1",
+                "command": ["/bin/zsh", "-lc", "orx discover keyword \"multi word query\""]
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let array_input = array_part.state.unwrap().input.unwrap();
+        assert_eq!(
+            array_input["command"],
+            "/bin/zsh -lc orx discover keyword \"multi word query\""
+        );
+        assert_eq!(
+            array_input["commandArgv"],
+            serde_json::json!([
+                "/bin/zsh",
+                "-lc",
+                "orx discover keyword \"multi word query\""
+            ])
+        );
+
+        let string_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c2",
+                "command": "orx projects"
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        assert!(
+            string_part.state.unwrap().input.unwrap()["commandArgv"].is_null(),
+            "string commands keep the legacy wire shape"
+        );
+
+        let malformed_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c3",
+                "command": ["orx", 7, "projects"]
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let malformed_input = malformed_part.state.unwrap().input.unwrap();
+        assert_eq!(malformed_input["command"], "orx projects");
+        assert!(malformed_input["commandArgv"].is_null());
+
+        let empty_part = item_to_part(
+            &serde_json::json!({
+                "type": "commandExecution",
+                "id": "c4",
+                "command": []
+            }),
+            false,
+            &[],
+        )
+        .unwrap();
+        let empty_input = empty_part.state.unwrap().input.unwrap();
+        assert_eq!(empty_input["command"], "");
+        assert!(empty_input["commandArgv"].is_null());
     }
 
     /// The live spike's approval request (trimmed) → a permission card whose
@@ -3341,7 +4707,10 @@ requires_openai_auth = false
             "error",
             &serde_json::json!({"error":{"message":"transient"},"willRetry":true}),
         );
-        assert!(ctx.assistant.parts.is_empty(), "retried errors stay silent");
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        let retry = ctx.assistant.parts[0].state.as_ref().unwrap();
+        assert_eq!(retry.status, "running");
+        assert_eq!(retry.input.as_ref().unwrap()["retryOwner"], "native");
         apply_notification(
             &mut ctx,
             "error",
@@ -3350,6 +4719,91 @@ requires_openai_auth = false
         assert_eq!(ctx.assistant.parts.len(), 1);
         let state = ctx.assistant.parts[0].state.as_ref().unwrap();
         assert_eq!(state.status, "error");
+    }
+
+    #[test]
+    fn guardian_approval_reviews_use_typed_statuses() {
+        let mut ctx = TurnCtx::test_stub();
+        apply_notification(
+            &mut ctx,
+            "guardianWarning",
+            &serde_json::json!({"message":"Automatic review stopped this turn."}),
+        );
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/started",
+            &serde_json::json!({"review":{"status":"inProgress","rationale":null}}),
+        );
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{"status":"approved","rationale":"Safe."}}),
+        );
+        assert!(ctx.assistant.parts.is_empty());
+
+        apply_notification(
+            &mut ctx,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{"status":"denied","rationale":"Blocked by policy."}}),
+        );
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(
+            ctx.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("Blocked by policy.")
+        );
+    }
+
+    #[test]
+    fn guardian_terminal_reviews_have_deterministic_fallbacks() {
+        for (status, expected) in [
+            ("denied", "Automatic approval review denied."),
+            ("timedOut", "Automatic approval review timed out."),
+            ("aborted", "Automatic approval review aborted."),
+            ("futureStatus", "Automatic approval review failed."),
+        ] {
+            let mut ctx = TurnCtx::test_stub();
+            apply_notification(
+                &mut ctx,
+                "guardianWarning",
+                &serde_json::json!({"message":"duplicate untyped notice"}),
+            );
+            apply_notification(
+                &mut ctx,
+                "item/autoApprovalReview/completed",
+                &serde_json::json!({"review":{"status":status,"rationale":"  "}}),
+            );
+            assert_eq!(ctx.assistant.parts.len(), 1);
+            assert_eq!(
+                ctx.assistant.parts[0]
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .error
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+
+        let mut missing = TurnCtx::test_stub();
+        apply_notification(
+            &mut missing,
+            "item/autoApprovalReview/completed",
+            &serde_json::json!({"review":{}}),
+        );
+        assert_eq!(
+            missing.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("Automatic approval review failed.")
+        );
     }
 
     #[test]
@@ -3461,12 +4915,18 @@ requires_openai_auth = false
     #[test]
     fn toml_string_quotes_and_escapes_paths() {
         assert_eq!(
-            toml_string(Path::new("/a/with space")),
+            native_store::toml_string(Path::new("/a/with space")),
             r#""/a/with space""#
         );
-        assert_eq!(toml_string(Path::new(r#"/a/"q""#)), r#""/a/\"q\"""#);
+        assert_eq!(
+            native_store::toml_string(Path::new(r#"/a/"q""#)),
+            r#""/a/\"q\"""#
+        );
         // DEL is the one char serde_json leaves raw that TOML rejects.
-        assert_eq!(toml_string(Path::new("/a/\u{7f}b")), r#""/a/\u007Fb""#);
+        assert_eq!(
+            native_store::toml_string(Path::new("/a/\u{7f}b")),
+            r#""/a/\u007Fb""#
+        );
     }
 
     #[test]
@@ -3548,6 +5008,10 @@ requires_openai_auth = false
                         { "reasoningEffort": "max", "description": "" },
                         { "reasoningEffort": "ultra", "description": "" },
                     ],
+                    "serviceTiers": [
+                        { "id": "priority", "name": "Fast", "description": "1.5x speed, increased usage" },
+                        { "id": "ultrafast", "name": "Ultrafast", "description": "Access controlled" }
+                    ],
                 },
                 {
                     "id": "gpt-5.4-mini", "model": "gpt-5.4-mini",
@@ -3589,6 +5053,10 @@ requires_openai_auth = false
         assert_eq!(models[1].default_reasoning_level.as_deref(), Some("medium"));
         // The catalog's display name rides along for the picker.
         assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6 Sol"));
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].id, "priority");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap()[0].label, "Fast");
+        assert_eq!(models[0].service_tiers.as_ref().unwrap().len(), 1);
+        assert!(models[1].service_tiers.as_ref().unwrap().is_empty());
 
         // A config.toml `model_reasoning_effort` outranks the catalog default —
         // codex resolves it that way, so the preselect must too. A configured
@@ -3661,6 +5129,7 @@ requires_openai_auth = false
             resume_mode: resume_mode.map(str::to_string),
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
+            annotations: Vec::new(),
         }
     }
 
@@ -3680,6 +5149,17 @@ requires_openai_auth = false
         assert_eq!(default["settings"]["model"], "gpt-5.6-sol");
         assert!(default["settings"].get("reasoning_effort").is_none());
         assert!(default["settings"]["developer_instructions"].is_null());
+    }
+
+    #[test]
+    fn collaboration_mode_is_independent_from_permissions_and_resets_once() {
+        assert_eq!(collaboration_mask_mode(true, false, None), Some("plan"));
+        assert_eq!(collaboration_mask_mode(false, true, None), Some("default"));
+        assert_eq!(
+            collaboration_mask_mode(false, false, Some("plan")),
+            Some("default")
+        );
+        assert_eq!(collaboration_mask_mode(false, false, None), None);
     }
 
     /// A plan turn: streamed deltas accumulate, the completed `plan` item is
@@ -3863,6 +5343,19 @@ requires_openai_auth = false
             serde_json::json!(["teal"])
         );
 
+        let mut annotated = answer(true, None, &[], Some("explain"));
+        annotated.annotations = vec![crate::local::chat::TextAnnotation {
+            text: "quoted excerpt".into(),
+        }];
+        let reply = user_input_reply(&prompt, &annotated).unwrap();
+        let contextualized = reply["answers"]["q1"]["answers"][0].as_str().unwrap();
+        let payload: Value = serde_json::from_str(contextualized.lines().last().unwrap()).unwrap();
+        assert_eq!(payload["currentUserMessage"], "explain");
+        assert_eq!(
+            payload["selectedChatExcerpts"],
+            serde_json::json!(["quoted excerpt"])
+        );
+
         // Neither selection nor note → Err (card stays actionable).
         assert!(user_input_reply(&prompt, &answer(true, None, &[], None)).is_err());
     }
@@ -3906,41 +5399,51 @@ requires_openai_auth = false
         }
     }
 
-    /// The codex plan card resume arms: approve → "Implement the plan." under
-    /// Auto (override honored); revise → shared plan-deny wording in Plan mode
-    /// (matching Claude); note-less reject → Nothing.
+    /// The codex plan card resume arms: approve → "Implement the plan." with
+    /// permission unchanged; revise → shared plan-deny wording in Plan mode;
+    /// note-less reject → Nothing.
     #[tokio::test]
     async fn plan_resume_arms() {
         let ctx = test_resume_ctx();
         let card = plan_prompt_card();
 
-        // Approve, no note → codex's own phrasing, default Auto.
+        // Approve leaves Plan without changing the selected permission mode.
         let action = Codex
             .resume_from_prompt(&ctx, &card, &answer(true, None, &[], None))
             .await
             .unwrap();
         match action {
-            ResumeAction::SendMessage { text, mode } => {
+            ResumeAction::SendMessage {
+                text,
+                mode,
+                plan_mode,
+            } => {
                 assert_eq!(text, "Implement the plan.");
-                assert_eq!(mode, Some(PermissionMode::Auto));
+                assert_eq!(mode, None);
+                assert_eq!(plan_mode, Some(false));
             }
             _ => panic!("approve should send a message"),
         }
 
-        // Approve with a note + a resume_mode override.
+        // A stale resumeMode cannot overwrite Codex's permission choice.
         let action = Codex
             .resume_from_prompt(
                 &ctx,
                 &card,
-                &answer(true, Some("bypass"), &[], Some("skip tests")),
+                &answer(true, Some("bypassPermissions"), &[], Some("skip tests")),
             )
             .await
             .unwrap();
         match action {
-            ResumeAction::SendMessage { text, mode } => {
+            ResumeAction::SendMessage {
+                text,
+                mode,
+                plan_mode,
+            } => {
                 assert!(text.contains("Implement the plan."));
                 assert!(text.contains("skip tests"));
-                assert_eq!(mode, Some(PermissionMode::Bypass));
+                assert_eq!(mode, None);
+                assert_eq!(plan_mode, Some(false));
             }
             _ => panic!("approve should send a message"),
         }
@@ -3950,13 +5453,17 @@ requires_openai_auth = false
             .resume_from_prompt(&ctx, &card, &answer(false, None, &[], Some("tweak X")))
             .await
             .unwrap();
-        let (shared_text, shared_mode) =
+        let (shared_text, _) =
             synthesize_resume("plan", &answer(false, None, &[], Some("tweak X")));
         match action {
-            ResumeAction::SendMessage { text, mode } => {
+            ResumeAction::SendMessage {
+                text,
+                mode,
+                plan_mode,
+            } => {
                 assert_eq!(text, shared_text, "revise reuses Claude's wording");
-                assert_eq!(mode, shared_mode);
-                assert_eq!(mode, Some(PermissionMode::Plan));
+                assert_eq!(mode, None);
+                assert_eq!(plan_mode, Some(true));
             }
             _ => panic!("revise should send a message"),
         }
@@ -3967,6 +5474,15 @@ requires_openai_auth = false
             .await
             .unwrap();
         assert!(matches!(action, ResumeAction::Nothing));
+    }
+
+    #[test]
+    fn legacy_exec_plan_mode_injects_an_explicit_planning_contract() {
+        let planned = legacy_exec_text("investigate this", true);
+        assert!(planned.contains("<plan-mode>"));
+        assert!(planned.contains("Do not modify files"));
+        assert!(planned.ends_with("investigate this"));
+        assert_eq!(legacy_exec_text("implement this", false), "implement this");
     }
 
     /// server_req_kind classifies the three reply schemas the settle paths key

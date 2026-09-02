@@ -1,4 +1,6 @@
-import { ArrowLeft, ArrowRight, Check, RefreshCw, X } from "lucide-react";
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
+import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -8,7 +10,9 @@ import {
   harnessModelLabel,
   completeOnboarding,
   reasoningFor,
+  resolvePaper,
   searchPapers,
+  type AgentSelection,
   type Harness,
   type HarnessId,
   type LinkedPaper,
@@ -16,20 +20,59 @@ import {
   type Project,
 } from "../api";
 import { renderNote } from "./agentNote";
+import { HarnessLogo } from "./HarnessLogo";
 import { onHarnessAuth } from "../events";
-import { saveAgentSelection, type AgentSelection } from "../agentSelection";
+import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
+import { PaperTitle } from "./PaperTitle";
 
-const RETRY_COPY = "Couldn't reach orx. Check it's still running, then re-check.";
-const RESEARCH_AREAS = ["AI/ML", "Biology", "Physics", "Other"];
+const ONB_GATE_HINT_CLASS_NAME = [
+  "onb-gate-hint text-base font-medium leading-normal text-text",
+  "onb-agent-hint mt-0 mx-0 mb-2.5",
+].join(" ");
+
+const ONB_CARD_META_CLASS_NAME = [
+  "onb-card-meta text-sm text-subtext [&_code]:font-mono",
+  "[&_code]:text-xs [&_code]:bg-panel",
+  "[&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs",
+  "[&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap",
+].join(" ");
+
+const GIT_RETRY_HINT_CLASS_NAME = [
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-medium leading-normal",
+  "text-text onb-git-hint mt-2",
+].join(" ");
+
+const ONB_CARD_CLASS_NAME = [
+  "onb-card flex flex-col gap-[5px] bg-background",
+  "border border-border rounded-lg py-4.5 px-5",
+].join(" ");
+
+const FINISH_ERROR_CLASS_NAME = [
+  "onb-gate-hint mt-4.5 mx-0 mb-0 text-base font-medium leading-normal",
+  "text-text",
+].join(" ");
+
+const RESEARCH_AREAS = [
+  { id: "AI/ML", label: m.onboarding_area_ai_ml },
+  { id: "Biology", label: m.onboarding_area_biology },
+  { id: "Physics", label: m.onboarding_area_physics },
+  { id: "Other", label: m.onboarding_area_other },
+];
 
 /** First-run walkthrough: choose a local coding agent, verify Git, add a
  * research profile, then install and open the demo project. The local tool
  * checks gate setup; the profile is saved best-effort so it never blocks
  * installation. The data-dir choice lives in
  * Settings → Storage (which can also *move* existing data); usage analytics is
- * opt-out via the CLI (`orx telemetry off`). */
-export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
-  const [step, setStep] = useState<0 | 1>(0);
+ * opt-out via Settings or `orx telemetry off`. */
+export function Onboarding({
+  onDone,
+  preferredAgent,
+}: {
+  onDone: (project: Project, selection: AgentSelection) => void;
+  preferredAgent: AgentSelection | null;
+}) {
+  const [step, setStep] = useState<0 | 1 | 2>(0);
   const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
   const [gitVersion, setGitVersion] = useState<string | null>();
   const [finishing, setFinishing] = useState(false);
@@ -44,7 +87,6 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
   const [paperHits, setPaperHits] = useState<PaperHit[]>([]);
   const [searchingPapers, setSearchingPapers] = useState(false);
   const paperSeq = useRef(0);
-  const harnessSelectionInvalidated = useRef(false);
   // Per-probe, not one shared flag: a git failure must not put a connectivity
   // error on the harness gate it has nothing to do with — or worse, hide the
   // actionable "sign in" hint behind it.
@@ -90,14 +132,11 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
     if (harnesses === null) return;
     const ready = harnesses.filter((h) => h.agentReady);
     setPreferredHarness((current) => {
-      if (current && !ready.some((h) => h.id === current)) {
-        harnessSelectionInvalidated.current = true;
-        return null;
-      }
-      if (current) return current;
-      return ready.length === 1 && !harnessSelectionInvalidated.current ? ready[0].id : null;
+      if (current && ready.some((h) => h.id === current)) return current;
+      const saved = preferredAgent && ready.find((h) => h.id === preferredAgent.harness);
+      return saved?.id ?? ready[0]?.id ?? null;
     });
-  }, [harnesses]);
+  }, [harnesses, preferredAgent]);
   useEffect(
     () =>
       onHarnessAuth(() => {
@@ -142,6 +181,7 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
   }, [paperQuery]);
 
   const addPaper = (h: PaperHit) => {
+    const duplicate = papers.some((p) => p.paperId === h.paperId);
     setPapers((cur) =>
       cur.some((p) => p.paperId === h.paperId)
         ? cur
@@ -149,6 +189,17 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
     );
     setPaperQuery("");
     setPaperHits([]);
+    // The search hit's title is a Google-scraped string — truncated, id-prefixed,
+    // sometimes reworded. Resolve the canonical title and correct it in place.
+    if (!duplicate) {
+      void resolvePaper(h.paperId)
+        .then((r) => {
+          const title = r.title?.trim();
+          if (!title) return;
+          setPapers((cur) => cur.map((p) => (p.paperId === h.paperId ? { ...p, title } : p)));
+        })
+        .catch(() => {});
+    }
   };
   const removePaper = (id: string) => setPapers((cur) => cur.filter((p) => p.paperId !== id));
   const toggleResearchArea = (area: string) => {
@@ -173,8 +224,7 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
         background: background || null,
         papers,
       });
-      saveAgentSelection(completion.selection);
-      onDone(completion.project);
+      onDone(completion.project, completion.selection);
     } catch (error) {
       setFinishError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -183,157 +233,225 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
   };
 
   return (
-    <div className="home onboarding">
-      <div className="home-inner">
+    <div
+      className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas onboarding ${
+        step === 0
+          ? "[&_.home-inner]:max-w-300 [&_.home-inner]:pt-0 [&_.home-inner]:pb-0"
+          : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
+      }`}
+    >
+      <div
+        className={`home-inner max-w-155 my-0 mx-auto ${
+          step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
+        }`}
+      >
         {step === 0 ? (
-          <>
-            <div className="onb-eyebrow">
-              <Wordmark /> · Step 1 of 2
+          <div className="onb-intro relative flex min-h-dvh flex-col justify-center gap-4 py-12 min-[1120px]:grid min-[1120px]:grid-cols-[minmax(0,_1.1fr)_minmax(28rem,_1fr)] min-[1120px]:grid-rows-[auto_auto] min-[1120px]:content-center min-[1120px]:gap-x-20 min-[1120px]:gap-y-10">
+            <div className="onb-intro-copy relative z-10 min-[1120px]:col-start-1 min-[1120px]:row-start-1 min-[1120px]:self-start">
+              <div className="onb-intro-brand mb-10 text-6xl font-semibold leading-none tracking-[-0.035em]">
+                <Wordmark />
+              </div>
+              <h2 className="onb-title mt-0 mx-0 text-4xl font-medium leading-[1.08] tracking-[-0.035em]">
+                {m.onboarding_a_workspace_for_your_research_agents()}
+              </h2>
             </div>
-            <h2 className="onb-title">Set up your local tools</h2>
-            <p className="onb-sub">
-              Choose a coding agent and confirm Git is installed. Both run on this machine.
-            </p>
+            <div className="onb-intro-features relative min-[1120px]:col-start-2 min-[1120px]:row-start-1 min-[1120px]:self-end">
+              <div
+                aria-hidden="true"
+                className="absolute -inset-14 rounded-full bg-primary-subtle opacity-70 blur-3xl"
+             />
+              <ul className="onb-intro-list relative flex flex-col gap-4 m-0 p-0 list-none">
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
+                  <span>
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
+                      {m.onboarding_consolidate_your_research()}
+                    </strong>
+                    <span className="block text-lg leading-[1.55] text-text">
+                      {m.onboarding_track_experiments_artifacts_compute_skills_and_code_all()}
+                    </span>
+                  </span>
+                </li>
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
+                  <span>
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
+                      {m.onboarding_ground_your_agents()}
+                    </strong>
+                    <span className="block text-lg leading-[1.55] text-text">
+                      {m.onboarding_sources_description()}
+                    </span>
+                  </span>
+                </li>
+                <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
+                  <span>
+                    <strong className="mb-1.5 block text-xl font-semibold tracking-[-0.015em]">
+                      {m.onboarding_everything_stays_local()}
+                    </strong>
+                    <span className="block text-lg leading-[1.55] text-text">
+                      {m.onboarding_your_code_data_and_experiment_history_stay_on()}
+                    </span>
+                  </span>
+                </li>
+              </ul>
+            </div>
+            <div className="onb-intro-actions relative z-10 mt-8 flex justify-end min-[1120px]:col-start-2 min-[1120px]:row-start-2 min-[1120px]:mt-0 min-[1120px]:self-start">
+              <Button variant="primary" size="large"
+                onClick={() => setStep(1)}
+              >
+                {m.onboarding_continue()} <ArrowRight size={20} />
+              </Button>
+            </div>
+          </div>
+        ) : step === 1 ? (
+          <>
+            <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
+              <Wordmark />
+              <span>{m.onboarding_step_1_of_2()}</span>
+            </div>
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em]">{m.onboarding_choose_a_coding_agent()}</h2>
+            <p className="onb-sub text-text text-base leading-[1.55] mt-0 mx-0 mb-5.5 max-w-120">{m.onboarding_open_research_uses_a_coding_agent_already_installed()}</p>
             {harnesses !== null && !anyAgentReady && (
-              <p className="onb-gate-hint onb-agent-hint">
-                Sign in to at least one agent to continue.
+              <p className={ONB_GATE_HINT_CLASS_NAME}>
+                {m.onboarding_sign_in_to_at_least_one_agent_to()}
               </p>
             )}
             {harnesses !== null && anyAgentReady && preferredHarness === null && (
-              <p className="onb-gate-hint onb-agent-hint">
-                Choose a coding agent to continue.
+              <p className={ONB_GATE_HINT_CLASS_NAME}>
+                {m.onboarding_choose_a_coding_agent_to_continue()}
               </p>
             )}
-            <div className="onb-cards">
+            <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
                 harnesses.map((h) => (
                   <AgentCard
                     key={h.id}
                     h={h}
                     selected={preferredHarness === h.id}
-                    onSelect={() => {
-                      harnessSelectionInvalidated.current = false;
-                      setPreferredHarness(h.id);
-                    }}
-                  />
+                    onSelect={() => setPreferredHarness(h.id)}
+                 />
                 ))
               ) : harnessError ? (
                 // Never a spinner next to an error — detection isn't running.
-                <div className="onb-card-meta">{RETRY_COPY}</div>
+                <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_retry_connection()}</div>
               ) : (
-                <div className="onb-loading">
-                  <span className="spinner" /> Detecting Claude Code, Codex, OpenCode…
-                </div>
+                <LoadingRow className="py-2">
+                  <Spinner /> {m.onboarding_detecting_claude_code_codex_open_code()}
+                </LoadingRow>
               )}
             </div>
-            <div className="onb-git-check" role="status" aria-live="polite">
-              <LocalGitCard gitVersion={gitVersion} error={gitError} />
-              {gitError ? (
-                <p className="onb-gate-hint onb-git-hint">{RETRY_COPY}</p>
-              ) : gitVersion === null ? (
-                <p className="onb-gate-hint onb-git-hint">
-                  Git is required for local experiments. Install Git, then re-check.
-                </p>
-              ) : null}
-            </div>
-            <div className="onb-actions">
-              <button className="btn ghost" onClick={() => load(true, true)} disabled={checking}>
-                <RefreshCw size={12} className={checking ? "spin" : ""} /> Re-check
-              </button>
-              <div style={{ flex: 1 }} />
-              <button
-                className="btn primary"
-                onClick={() => setStep(1)}
+            {(gitVersion === null || gitError) && (
+              <div className="onb-git-check mt-7" role="status" aria-live="polite">
+                <LocalGitCard gitVersion={gitVersion} error={gitError} />
+                {gitError ? (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>
+                    {m.onboarding_git_is_required_for_local_experiments_install_git()}
+                  </p>
+                )}
+              </div>
+            )}
+            <div className="onb-actions flex items-center gap-2.5 mt-5.5">
+              <Button variant="ghost" onClick={() => setStep(0)}>
+                <ArrowLeft size={12} /> {m.onboarding_back()}
+              </Button>
+              {(harnessError ||
+                gitError ||
+                gitVersion === null ||
+                (harnesses !== null && !anyAgentReady)) && (
+                <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
+                  <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
+                </Button>
+              )}
+              <div className="flex-1" />
+              <Button variant="primary"
+                onClick={() => setStep(2)}
                 disabled={checking || !anyAgentReady || preferredHarness === null || !gitReady}
                 title={
                   checking
-                    ? "Waiting for the local tool checks"
+                    ? m.onboarding_waiting_tool_checks()
                     : !anyAgentReady
-                      ? "Sign in to at least one coding agent to continue"
+                      ? m.onboarding_sign_in_agent_to_continue()
                       : preferredHarness === null
-                        ? "Choose your preferred coding agent"
+                        ? m.onboarding_choose_preferred_agent()
                         : gitError
-                          ? "Re-check Git before continuing"
+                          ? m.onboarding_recheck_git_to_continue()
                           : gitVersion === undefined
-                            ? "Waiting for the Git check"
+                            ? m.onboarding_waiting_git_check()
                             : gitVersion === null
-                              ? "Install Git to continue"
+                              ? m.onboarding_install_git_to_continue()
                               : undefined
                 }
               >
-                Continue <ArrowRight size={13} />
-              </button>
+                {m.onboarding_continue()} <ArrowRight size={13} />
+              </Button>
             </div>
           </>
         ) : (
           <>
-            <div className="onb-eyebrow">
-              <Wordmark /> · Step 2 of 2
+            <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
+              <Wordmark />
+              <span>{m.onboarding_step_2_of_2()}</span>
             </div>
-            <h2 className="onb-title">Tell us about your research</h2>
-            <p className="onb-sub">
-              This helps us understand who uses orx and improve it for your kind of research.
-            </p>
-            <div className="onb-cards">
-              <div className="onb-card">
-                <fieldset className="onb-fieldset">
-                  <legend>What areas are you interested in?</legend>
-                  <p className="onb-field-hint">Choose one or more.</p>
-                  <div className="onb-area-options">
+            <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em] onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
+            <div className="onb-cards flex flex-col gap-2.5">
+              <div className={ONB_CARD_CLASS_NAME}>
+                <fieldset className="onb-fieldset border-0 mt-0 mx-0 mb-4.5 p-0 [&_legend]:text-base [&_legend]:font-medium [&_legend]:mb-1.5">
+                  <legend>{m.onboarding_what_areas_are_you_interested_in()}</legend>
+                  <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">{m.onboarding_choose_one_or_more()}</p>
+                  <div className="onb-area-options grid grid-cols-[repeat(2,_minmax(0,_1fr))] gap-2">
                     {RESEARCH_AREAS.map((area) => (
-                      <label key={area} className="onb-area-option">
+                      <label key={area.id} className="onb-area-option flex items-center gap-2 border border-border rounded-md cursor-pointer py-[9px] px-2.5 [&:has(input:checked)]:border-accent [&:has(input:checked)]:bg-primary-subtle [&_input]:m-0">
                         <input
                           type="checkbox"
-                          checked={researchAreas.includes(area)}
-                          onChange={() => toggleResearchArea(area)}
+                          checked={researchAreas.includes(area.id)}
+                          onChange={() => toggleResearchArea(area.id)}
                           disabled={finishing}
-                        />
-                        <span>{area}</span>
+                       />
+                        <span>{area.label()}</span>
                       </label>
                     ))}
                   </div>
                   {researchAreas.includes("Other") && (
                     <input
-                      className="onb-other-area"
+                      className="onb-other-area w-full mt-2"
                       value={otherArea}
                       onChange={(event) => setOtherArea(event.target.value)}
                       disabled={finishing}
-                      placeholder="Tell us your other research area"
-                      aria-label="Other research area"
-                    />
+                      placeholder={m.onboarding_tell_us_your_other_research_area()}
+                      aria-label={m.onboarding_other_research_area()}
+                   />
                   )}
                 </fieldset>
-                <label className="onb-field-label" htmlFor="onb-background">
-                  Research background
+                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-background">
+                  {m.onboarding_research_background()}
                 </label>
                 <textarea
                   id="onb-background"
-                  className="onb-textarea"
+                  className="onb-textarea w-full resize-y min-h-19.5 leading-normal text-base mb-3.5"
                   value={background}
                   onChange={(e) => setBackground(e.target.value)}
                   disabled={finishing}
                   rows={4}
-                  placeholder="e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods."
-                />
-                <label className="onb-field-label" htmlFor="onb-paper-search">
-                  Representative papers
+                  placeholder={m.onboarding_e_g_i_work_on_sample_efficient_rl()}
+               />
+                <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-paper-search">
+                  {m.onboarding_representative_papers()}
                 </label>
-                <p className="onb-field-hint">
-                  Add papers that represent your research interests, including papers by other
-                  authors.
+                <p className="onb-field-hint text-muted text-sm leading-[1.4] mt-0 mx-0 mb-2">
+                  {m.onboarding_add_papers_that_represent_your_research_interests_including()}
                 </p>
-                <div className="onb-paper-search">
+                <div className="onb-paper-search flex flex-col gap-1.5 mt-3 [&_input]:w-full">
                   <input
                     id="onb-paper-search"
                     value={paperQuery}
                     onChange={(e) => setPaperQuery(e.target.value)}
                     disabled={finishing}
-                    placeholder="Search alphaXiv by title to link a paper…"
-                  />
+                    placeholder={m.onboarding_search_alpha_xiv_by_title_to_link_a()}
+                 />
                   {searchingPapers ? (
-                    <div className="onb-card-meta">Searching alphaXiv…</div>
+                    <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_searching_alpha_xiv()}</div>
                   ) : paperHits.length > 0 ? (
-                    <div className="onb-paper-results">
+                    <div className="onb-paper-results flex flex-col border border-border rounded-md max-h-50 overflow-y-auto [&_button]:flex [&_button]:flex-col [&_button]:items-start [&_button]:gap-0.5 [&_button]:py-2 [&_button]:px-2.5 [&_button]:bg-none [&_button]:bg-transparent [&_button]:border-0 [&_button]:border-b [&_button]:border-b-border-variant [&_button]:text-start [&_button]:[font:inherit] [&_button]:text-text [&_button]:cursor-pointer [&_button:last-child]:border-b-0 [&_button:hover]:bg-surface [&_.title]:text-sm [&_.title]:font-medium [&_.id]:text-xs [&_.id]:text-muted">
                       {paperHits.map((h) => (
                         <button
                           key={h.paperId}
@@ -341,7 +459,7 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
                           onClick={() => addPaper(h)}
                           disabled={finishing}
                         >
-                          <span className="title">{cleanPaperTitle(h.title)}</span>
+                          <PaperTitle>{cleanPaperTitle(h.title)}</PaperTitle>
                           <span className="id">{h.paperId}</span>
                         </button>
                       ))}
@@ -349,14 +467,14 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
                   ) : null}
                 </div>
                 {papers.length > 0 && (
-                  <div className="onb-paper-chips">
+                  <div className="onb-paper-chips flex flex-wrap gap-1.5 mt-2.5">
                     {papers.map((p) => (
-                      <span key={p.paperId} className="onb-paper-chip">
-                        <span className="title">{p.title || p.paperId}</span>
+                      <span key={p.paperId} className="onb-paper-chip inline-flex items-center gap-1.5 pt-1 pe-1 pb-1 ps-2.5 border border-border rounded-sm bg-surface text-sm max-w-full [&_.title]:font-medium [&_.title]:overflow-hidden [&_.title]:text-ellipsis [&_.title]:whitespace-nowrap [&_.title]:max-w-60 [&_.id]:text-xs [&_.id]:text-muted [&_button]:inline-flex [&_button]:items-center [&_button]:justify-center [&_button]:p-0.5 [&_button]:border-0 [&_button]:bg-none [&_button]:bg-transparent [&_button]:text-muted [&_button]:cursor-pointer [&_button]:rounded-xs [&_button:hover]:text-text [&_button:hover]:bg-panel">
+                        <PaperTitle>{p.title || p.paperId}</PaperTitle>
                         <span className="id">{p.paperId}</span>
                         <button
                           type="button"
-                          aria-label={`Remove ${p.paperId}`}
+                          aria-label={m.a11y_remove_item({ name: ltr(p.paperId) })}
                           onClick={() => removePaper(p.paperId)}
                           disabled={finishing}
                         >
@@ -369,39 +487,38 @@ export function Onboarding({ onDone }: { onDone: (project: Project) => void }) {
               </div>
             </div>
             {!researchProfileValid && (
-              <p className="onb-profile-hint">
+              <p className="onb-profile-hint text-accent-red text-sm mt-2 mx-0 mb-0">
                 {researchAreas.length === 0
-                  ? "Choose at least one research area to continue."
-                  : "Describe your research area to continue."}
+                  ? m.onboarding_choose_area_to_continue()
+                  : m.onboarding_describe_area_to_continue()}
               </p>
             )}
-            <div className="onb-actions">
-              <button className="btn ghost" onClick={() => setStep(0)} disabled={finishing}>
-                <ArrowLeft size={12} /> Back
-              </button>
-              <div style={{ flex: 1 }} />
-              <button
-                className="btn primary"
+            <div className="onb-actions flex items-center gap-2.5 mt-5.5">
+              <Button variant="ghost" onClick={() => setStep(1)} disabled={finishing}>
+                <ArrowLeft size={12} /> {m.onboarding_back()}
+              </Button>
+              <div className="flex-1" />
+              <Button variant="primary"
                 onClick={() => void finishOnboarding()}
                 disabled={finishing || preferredHarness === null || !researchProfileValid}
               >
                 {finishing ? (
                   <>
-                    <span className="spinner" /> Setting things up…
+                    <Spinner /> {m.onboarding_setting_things_up()}
                   </>
                 ) : (
                   <>
-                    Get started <ArrowRight size={13} />
+                    {m.onboarding_get_started()} <ArrowRight size={13} />
                   </>
                 )}
-              </button>
+              </Button>
             </div>
             {preferredHarness === null && (
-              <p className="onb-gate-hint">
-                Your selected agent is no longer ready. Go back to Step 1 and choose another.
+              <p className={FINISH_ERROR_CLASS_NAME}>
+                {m.onboarding_your_selected_agent_is_no_longer_ready_go()}
               </p>
             )}
-            {finishError && <p className="onb-gate-hint">{finishError}</p>}
+            {finishError && <p className={FINISH_ERROR_CLASS_NAME}>{finishError}</p>}
           </>
         )}
       </div>
@@ -417,13 +534,14 @@ function cleanPaperTitle(title: string): string {
 
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
-function agentBadge(h: Harness): { cls: string; label: string } {
-  if (h.agentReady) return { cls: "st-done", label: "Signed in" };
-  if (!h.installed) return { cls: "st-idle", label: "Not detected" };
-  if (h.authState === "unknown") return { cls: "st-starting", label: "Unable to verify" };
-  if (h.authState === "unsupported") return { cls: "st-starting", label: "Update required" };
-  if (h.installed) return { cls: "st-starting", label: "Not signed in" };
-  return { cls: "st-idle", label: "Not detected" };
+function agentBadge(h: Harness): { tone: StatusTone; label: string } {
+  if (h.agentReady) return { tone: "success", label: m.onboarding_signed_in() };
+  if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
+  if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
+  if (h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
+  if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
+  return { tone: "neutral", label: m.onboarding_not_detected() };
 }
 
 function selectionFor(harness: Harness): AgentSelection {
@@ -437,25 +555,7 @@ function selectionFor(harness: Harness): AgentSelection {
 }
 
 function AgentLogo({ harness }: { harness: HarnessId }) {
-  if (harness === "claude-code") {
-    return (
-      <svg className="onb-agent-logo claude" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
-      </svg>
-    );
-  }
-  if (harness === "opencode") {
-    return (
-      <svg className="onb-agent-logo" viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M22 24H2V0h20zM17 4.8H7v14.4h10z" />
-      </svg>
-    );
-  }
-  return (
-    <svg className="onb-agent-logo" viewBox="146 227 268 265" aria-hidden="true">
-      <path d="M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z" />
-    </svg>
-  );
+  return <HarnessLogo harness={harness} size={26} />;
 }
 
 function AgentCard({
@@ -468,47 +568,57 @@ function AgentCard({
   onSelect: () => void;
 }) {
   const badge = agentBadge(h);
+  const visibleBadge: { tone: StatusTone; label: string } = selected
+    ? { tone: "success", label: m.onboarding_selected() }
+    : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
+  const meta = [
+    version,
+    h.models.length > 0 &&
+      `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
+        .slice(0, 3)
+        .map((m) => harnessModelLabel(m))
+        .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const head = (
+    <div className="onb-card-head flex items-center justify-between gap-3">
+      <span className="onb-card-identity flex items-center gap-3 min-w-0">
+        <AgentLogo harness={h.id} />
+        <span className="onb-card-name text-lg font-semibold tracking-[-0.01em]">{h.name}</span>
+      </span>
+      <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
+    </div>
+  );
+  // An unready agent can't be selected — render it as a plain container, not a
+  // disabled button, so the copy button on its `agentNote` command stays live.
+  if (!h.agentReady) {
+    return (
+      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
+        {head}
+        <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
+      </div>
+    );
+  }
   return (
     <button
       type="button"
-      className={`onb-card onb-agent-choice${selected ? " selected" : ""}`}
-      disabled={!h.agentReady}
+      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
-      <div className="onb-card-head">
-        <span className="onb-card-identity">
-          <AgentLogo harness={h.id} />
-          <span className="onb-card-name">{h.name}</span>
-        </span>
-        <span className={`status-badge ${badge.cls}`}>
-          {h.agentReady ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
-          {badge.label}
-        </span>
+      {head}
+      <div className="onb-card-detail text-sm">
+        {h.account ?? m.onboarding_api_key()}
+        {h.plan ? ` · ${h.plan}` : ""}
       </div>
-      {h.agentReady ? (
-        <>
-          <div className="onb-card-detail mono">
-            {h.account ?? "API key"}
-            {h.plan ? ` · ${h.plan}` : ""}
-          </div>
-          <div className="onb-card-meta">
-            {[
-              version,
-              h.models.length > 0 &&
-                `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
-                  .slice(0, 3)
-                  .map((m) => harnessModelLabel(m))
-                  .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
-            ]
-              .filter(Boolean)
-              .join(" · ")}
-          </div>
-        </>
-      ) : (
-        <div className="onb-card-meta">{renderNote(h.agentNote)}</div>
-      )}
+      <div
+        className={`${ONB_CARD_META_CLASS_NAME} w-full overflow-hidden text-ellipsis whitespace-nowrap`}
+        title={meta}
+      >
+        {meta}
+      </div>
     </button>
   );
 }
@@ -521,18 +631,15 @@ function LocalGitCard({
   error: boolean;
 }) {
   return (
-    <div className="onb-card">
-      <div className="onb-card-head">
-        <span className="onb-card-name">Local Git</span>
-        <span
-          className={`status-badge ${gitVersion ? "st-done" : error || gitVersion === null ? "st-failed" : "st-starting"}`}
-        >
-          {gitVersion ? <Check size={12} strokeWidth={3} /> : <span className="dot" />}
-          {gitVersion ? "Ready" : error ? "Check failed" : gitVersion === null ? "Not found" : "Checking"}
-        </span>
+    <div className={ONB_CARD_CLASS_NAME}>
+      <div className="onb-card-head flex items-center justify-between gap-3">
+        <span className="onb-card-name font-semibold text-base">{m.onboarding_local_git()}</span>
+        <StatusIndicator tone={gitVersion ? "success" : error || gitVersion === null ? "danger" : "warning"}>
+          {gitVersion ? m.onboarding_ready() : error ? m.onboarding_check_failed() : gitVersion === null ? m.onboarding_not_found() : m.onboarding_checking()}
+        </StatusIndicator>
       </div>
       {(gitVersion || (!error && gitVersion === undefined)) && (
-        <div className="onb-card-meta">{gitVersion ?? "Checking Git…"}</div>
+        <div className={ONB_CARD_META_CLASS_NAME}>{gitVersion ?? m.onboarding_checking_git()}</div>
       )}
     </div>
   );

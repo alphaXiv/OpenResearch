@@ -23,31 +23,45 @@ pub async fn run(args: crate::VersionArgs) -> Result<()> {
         return Ok(());
     }
 
-    let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
-    // Keep the update-check cache in sync with this explicit check.
-    updates::write_check_cache(&latest.version.to_string());
-    let update_available = latest.version > current;
+    // Channel-aware: the macOS app installs from a different manifest than the
+    // CLI, and reporting a version this install cannot move to would have a
+    // harness chase an update that never lands.
+    let latest = updates::fetch_latest_for_channel(Duration::from_secs(10)).await?;
+    if let Some(latest) = &latest {
+        // Keep the update-check cache in sync with this explicit check.
+        updates::write_check_cache(&latest.to_string());
+    }
+    let update_available = latest
+        .as_ref()
+        .is_some_and(|latest| updates::is_outdated(&current, latest));
 
     if args.json {
+        let status = updates::status();
         println!(
             "{}",
             serde_json::json!({
                 "current": current.to_string(),
-                "latest": latest.version.to_string(),
+                "latest": latest.as_ref().map(|v| v.to_string()),
                 "updateAvailable": update_available,
+                // How this copy was installed, and whether it keeps itself
+                // current — so a harness can tell "will fix itself" from
+                // "needs a human to run brew upgrade".
+                "channel": status.channel,
+                "autoUpdate": status.self_updates && status.auto_update,
             })
         );
         return Ok(());
     }
 
     println!("orx {}", current);
-    if update_available {
-        println!(
-            "A new release is available: {} → {}. Run `orx update` to upgrade.",
-            current, latest.version
-        );
-    } else {
-        println!("orx is up to date.");
+    match latest.filter(|_| update_available) {
+        Some(latest) => println!(
+            "A new release is available: {} → {}. Run `{} update` to upgrade.",
+            current,
+            latest,
+            crate::invocation::orx()
+        ),
+        None => println!("orx is up to date."),
     }
     Ok(())
 }

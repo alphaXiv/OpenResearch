@@ -2,7 +2,7 @@
 //! (`<data dir>/files/<project slug>/`). The filesystem is the source of
 //! truth: no registry, no upload step. The dashboard's Artifacts tab is an
 //! explorer over this folder. Files may live directly at the root or in any
-//! user-chosen nested layout; no filename or directory name is reserved.
+//! user-chosen nested layout; no user-facing filename receives special handling.
 //!
 //! Serving is contained to the artifacts dir: requested paths are relative
 //! (`is_safe_rel_path`) and must still resolve inside it once symlinks are
@@ -50,7 +50,7 @@ pub fn files_dir(project: &LocalProject) -> PathBuf {
 /// The artifacts dir as the UI sees it, for recognizing artifact paths in chat
 /// links. Deliberately NOT canonicalized: the absolute path the agent inlines
 /// into the transcript comes from the un-canonicalized `files_dir` (the
-/// `{artifacts}` playbook token in `opencode.rs` and the `orx report` guidance),
+/// `{artifacts}` playbook token in `opencode.rs` and report-writing guidance),
 /// so the surfaced string must match it byte-for-byte or the UI's prefix match
 /// misses on symlinked data dirs (e.g. `/tmp` → `/private/tmp`).
 pub fn files_dir_display(project: &LocalProject) -> String {
@@ -129,26 +129,164 @@ fn resolve_contained(base: &Path, rel_path: &str) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FilePresentation {
+    Image,
+    Audio,
+    Video,
+    Pdf,
+    Text,
+    Unknown,
+    Download,
+}
+
+impl FilePresentation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Audio => "audio",
+            Self::Video => "video",
+            Self::Pdf => "pdf",
+            Self::Text => "text",
+            Self::Unknown => "unknown",
+            Self::Download => "download",
+        }
+    }
+}
+
 /// Best-effort content type from a file extension (serving files).
 pub fn content_type_for_path(path: &str) -> &'static str {
-    match path
-        .rsplit('.')
-        .next()
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("md") => "text/markdown; charset=utf-8",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("svg") => "image/svg+xml",
-        Some("pdf") => "application/pdf",
-        Some("json") => "application/json",
-        Some("csv") => "text/csv",
-        Some("txt") => "text/plain; charset=utf-8",
-        Some("html") => "text/html; charset=utf-8",
+    let extension = path
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "md" | "markdown" | "mdx" => "text/markdown; charset=utf-8",
+        "apng" => "image/apng",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "gif" => "image/gif",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "ico" => "image/x-icon",
+        "jfif" | "jpg" | "jpeg" => "image/jpeg",
+        "jxl" => "image/jxl",
+        "pbm" => "image/x-portable-bitmap",
+        "pgm" => "image/x-portable-graymap",
+        "png" => "image/png",
+        "pnm" => "image/x-portable-anymap",
+        "ppm" => "image/x-portable-pixmap",
+        "svg" => "image/svg+xml",
+        "tif" | "tiff" => "image/tiff",
+        "webp" => "image/webp",
+        "aac" => "audio/aac",
+        "aif" | "aiff" => "audio/aiff",
+        "flac" => "audio/flac",
+        "m4a" => "audio/mp4",
+        "mid" | "midi" => "audio/midi",
+        "mp3" => "audio/mpeg",
+        "oga" | "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
+        "wav" => "audio/wav",
+        "weba" => "audio/webm",
+        "3gp" => "video/3gpp",
+        "avi" => "video/x-msvideo",
+        "m4v" | "mp4" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "mpeg" | "mpg" => "video/mpeg",
+        "ogv" => "video/ogg",
+        "webm" => "video/webm",
+        "pdf" => "application/pdf",
+        "eps" | "ps" => "application/postscript",
+        "7z" => "application/x-7z-compressed",
+        "bz2" => "application/x-bzip2",
+        "gz" | "tgz" => "application/gzip",
+        "rar" => "application/vnd.rar",
+        "tar" => "application/x-tar",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "ods" => "application/vnd.oasis.opendocument.spreadsheet",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "eot" => "application/vnd.ms-fontobject",
+        "otf" => "font/otf",
+        "ttf" => "font/ttf",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "wasm" => "application/wasm",
+        "json" | "jsonl" | "ipynb" => "application/json",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "txt" | "log" | "rst" | "bib" | "cfg" | "cmake" | "conf" | "dart" | "dockerignore"
+        | "editorconfig" | "env" | "ex" | "exs" | "fs" | "fsx" | "gitattributes" | "gitignore"
+        | "gitmodules" | "gql" | "graphql" | "gradle" | "hs" | "ini" | "jl" | "lock" | "lua"
+        | "m" | "mm" | "nix" | "npmrc" | "properties" | "proto" | "qmd" | "r" | "rmd" | "swift"
+        | "tex" => "text/plain; charset=utf-8",
+        "htm" | "html" => "text/html; charset=utf-8",
+        "xml" => "application/xml",
+        "c" | "cc" | "cpp" | "cs" | "go" | "h" | "hpp" | "java" | "kt" | "php" | "pl" | "py"
+        | "rb" | "rs" | "scala" | "sh" | "sql" | "toml" | "ts" | "tsx" | "vue" | "yaml" | "yml" => {
+            "text/plain; charset=utf-8"
+        }
+        "css" => "text/css; charset=utf-8",
+        "js" | "jsx" | "mjs" => "text/javascript; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+pub fn presentation_for_path(path: &str) -> FilePresentation {
+    let content_type = content_type_for_path(path);
+    if content_type.starts_with("image/") {
+        FilePresentation::Image
+    } else if content_type.starts_with("audio/") {
+        FilePresentation::Audio
+    } else if content_type.starts_with("video/") {
+        FilePresentation::Video
+    } else if content_type == "application/pdf" {
+        FilePresentation::Pdf
+    } else if content_type.starts_with("text/")
+        || matches!(content_type, "application/json" | "application/xml")
+        || matches!(
+            path.rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .to_ascii_lowercase()
+                .as_str(),
+            "cargo.lock"
+                | "dockerfile"
+                | "gemfile"
+                | "justfile"
+                | "license"
+                | "makefile"
+                | "readme"
+        )
+        || path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with(".env"))
+    {
+        FilePresentation::Text
+    } else if content_type != "application/octet-stream" {
+        FilePresentation::Download
+    } else {
+        FilePresentation::Unknown
+    }
+}
+
+pub fn content_disposition_for_path(path: &str) -> &'static str {
+    if matches!(
+        presentation_for_path(path),
+        FilePresentation::Download | FilePresentation::Unknown
+    ) || matches!(
+        content_type_for_path(path),
+        "application/xml" | "text/html; charset=utf-8"
+    ) {
+        "attachment"
+    } else {
+        "inline"
     }
 }
 
@@ -163,6 +301,8 @@ pub struct ArtifactEntry {
     /// 0 for directories.
     pub size: u64,
     pub modified_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<FilePresentation>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<ArtifactEntry>,
 }
@@ -229,20 +369,22 @@ fn collect_tree(
                 is_dir: true,
                 size: 0,
                 modified_at: mtime_ms(&md),
+                presentation: None,
                 children,
             });
         } else if md.is_file() {
+            let presentation = presentation_for_path(&rel);
             out.push(ArtifactEntry {
                 name,
                 path: rel,
                 is_dir: false,
                 size: md.len(),
                 modified_at: mtime_ms(&md),
+                presentation: Some(presentation),
                 children: Vec::new(),
             });
         }
     }
-    // Dirs first, then files, each alphabetical — stable explorer order.
     out.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.name.cmp(&b.name)));
     (out, truncated)
 }
@@ -262,10 +404,9 @@ pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
     })
 }
 
-/// One file in the artifacts dir, by directory-relative path.
-pub fn read_file(project: &LocalProject, rel_path: &str) -> Result<Vec<u8>> {
-    let path = resolve_contained(&files_dir(project), rel_path)?;
-    std::fs::read(&path).map_err(|e| anyhow!("Could not read {}: {}", path.display(), e))
+/// A contained artifact path suitable for streaming without buffering.
+pub fn file_path(project: &LocalProject, rel_path: &str) -> Result<PathBuf> {
+    resolve_contained(&files_dir(project), rel_path)
 }
 
 /// Delete a file or folder in the artifacts dir.
@@ -444,5 +585,68 @@ mod tests {
             .collect();
         assert_eq!(names, ["analysis.md", "report.md"]);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_types_cover_browser_media_families() {
+        for (path, expected_type, expected_presentation) in [
+            ("figure.AVIF", "image/avif", FilePresentation::Image),
+            ("figure.jpeg", "image/jpeg", FilePresentation::Image),
+            (
+                "figure.ppm",
+                "image/x-portable-pixmap",
+                FilePresentation::Image,
+            ),
+            ("figure.svg", "image/svg+xml", FilePresentation::Image),
+            ("sample.flac", "audio/flac", FilePresentation::Audio),
+            ("sample.m4a", "audio/mp4", FilePresentation::Audio),
+            ("sample.webm", "video/webm", FilePresentation::Video),
+            ("sample.mov", "video/quicktime", FilePresentation::Video),
+            ("paper.pdf", "application/pdf", FilePresentation::Pdf),
+            (
+                "source.rs",
+                "text/plain; charset=utf-8",
+                FilePresentation::Text,
+            ),
+            (
+                "Makefile",
+                "application/octet-stream",
+                FilePresentation::Text,
+            ),
+            (
+                ".gitignore",
+                "text/plain; charset=utf-8",
+                FilePresentation::Text,
+            ),
+            (
+                "Cargo.lock",
+                "text/plain; charset=utf-8",
+                FilePresentation::Text,
+            ),
+            (
+                ".env.local",
+                "application/octet-stream",
+                FilePresentation::Text,
+            ),
+            (
+                "archive.bin",
+                "application/octet-stream",
+                FilePresentation::Unknown,
+            ),
+            (
+                "drawing.eps",
+                "application/postscript",
+                FilePresentation::Download,
+            ),
+        ] {
+            assert_eq!(
+                content_type_for_path(path),
+                expected_type,
+                "wrong type for {path}"
+            );
+            assert_eq!(presentation_for_path(path), expected_presentation);
+        }
+        assert_eq!(content_disposition_for_path("page.html"), "attachment");
+        assert_eq!(content_disposition_for_path("figure.svg"), "inline");
     }
 }

@@ -1,9 +1,18 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import { m } from "./paraglide/messages.js";
+import { getLocale } from "./paraglide/runtime.js";
+import { fmtNumber } from "./i18n";
+
+export { fmtNumber } from "./i18n";
+
 export const DEMO_PROJECT_ID = "demo_nanochat_v1";
+// Bundled demo snapshots reserve this prefix so future demos inherit demo-only UI.
+export const isDemoProjectId = (id: string) => id.startsWith("demo_");
 export const DEMO_MAIN_SESSION_ID = "chat_demo_nanochat_v1";
 export const DEMO_FIGURE_SESSION_ID = "chat_demo_nanochat_figures_v1";
 export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
+export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
 
 export interface Project {
   id: string;
@@ -96,16 +105,51 @@ const patch = <T>(url: string, body: unknown) =>
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => json<T>(r));
+const put = <T>(url: string, body: unknown) =>
+  fetch(url, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }).then((r) => json<T>(r));
 
 export const listProjects = () =>
   get<{ projects: Project[] }>("/api/projects").then((r) => r.projects);
 
+export interface ProjectActivity {
+  projectId: string;
+  activeAgents: number;
+  /** Lifetime sessions for this project, including archived agents. */
+  totalAgents: number;
+  runningExperiments: number;
+  totalExperiments: number;
+  lastMessageAt: number | null;
+}
+
+export const listProjectActivity = () =>
+  get<{ activity: ProjectActivity[] }>("/api/projects/activity").then((r) => r.activity);
+
 export interface OnboardingSelection {
   harness: HarnessId;
   model: string | null;
+  serviceTier?: string | null;
   permissionMode: string | null;
   reasoningLevel: string | null;
 }
+
+export type AgentSelection = OnboardingSelection;
+
+export interface UiState {
+  onboardingCompleted: boolean;
+  tourCompleted: boolean;
+  preferredAgent: AgentSelection | null;
+}
+
+export const getUiState = () => get<UiState>("/api/settings/ui-state");
+
+export const updateUiState = (body: {
+  tourCompleted?: boolean;
+  preferredAgent?: AgentSelection;
+}) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
   post<{ project: Project; selection: OnboardingSelection }>(
@@ -118,7 +162,11 @@ export interface ProjectPathStatus {
   resolvedPath: string | null;
   exists: boolean | null;
   directory: boolean | null;
+  empty: boolean | null;
   initialized: boolean | null;
+  gitState?: "notRepository" | "unborn" | "ready" | "detached" | "invalid" | null;
+  githubOwner?: string | null;
+  githubRepo?: string | null;
 }
 
 export const getProjectPathStatus = (path = "") => {
@@ -136,7 +184,9 @@ export interface NewProject {
   paperId?: string;
   cloneUrl?: string;
   createFolder?: boolean;
+  requireNewFolder?: boolean;
   initializeGit?: boolean;
+  githubSyncEnabled?: boolean;
 }
 
 export interface CreateProjectResult {
@@ -169,9 +219,10 @@ export const searchPapers = (q: string) =>
  * `login` is null when there's no usable token. */
 export const githubAccount = () => get<{ login: string | null }>("/api/github/account");
 
-/** Whether the stored credentials can push to a repo. An unanswerable check
- * (no token / API hiccup) reports `true`, matching the server's own fallback,
- * so an outage never shows a fork choice the server wouldn't honour. */
+export const githubProjectRepoPreview = (name: string) =>
+  get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`);
+
+/** Whether the stored credentials are explicitly confirmed to push to a repo. */
 export const repoAccess = (owner: string, repo: string) =>
   get<{ canPush: boolean }>(
     `/api/github/repo-access?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
@@ -187,7 +238,7 @@ export const resolvePaper = (id: string) =>
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
-/** Record a visit: bumps the project's updatedAt, which drives the recency sort. */
+/** Record a visit so the backend can persist project-level UI recency. */
 export const openProject = (projectId: string) =>
   post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
@@ -264,8 +315,10 @@ export interface ProjectFile {
   path: string;
   content: string;
   truncated: boolean;
+  binary: boolean;
   notFound: boolean;
   root: CheckoutRoot;
+  presentation: FilePresentation;
 }
 
 /** One file from the project — a branch's committed copy when `ref` is given,
@@ -275,6 +328,191 @@ export const getProjectFile = (projectId: string, path: string, opts: CheckoutRe
   get<ProjectFile>(
     `/api/projects/${projectId}/file?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
   );
+
+/** Byte-exact checkout file for browser-native media rendering or download. */
+export const projectFileUrl = (projectId: string, path: string, opts: CheckoutRef = {}) =>
+  `/api/projects/${projectId}/file/raw?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
+
+/** A file read by absolute path, outside the project's checkout and artifacts
+ * (e.g. `/Users/me/.ssh/config`). Same capped/decoded body as `ProjectFile`;
+ * the wire `root` is always `"abs"`, so it's dropped here rather than widening
+ * `CheckoutRoot` — nothing reads it, and it isn't part of any git tree. */
+export type AbsoluteFile = Omit<ProjectFile, "root">;
+
+/** One file by absolute path — the escape hatch for a file an agent references
+ * that lives outside the checkout and artifacts. Server-side capped (~512 KB);
+ * loopback-only, so it reads whatever the user running `orx up` can read. */
+export const getAbsoluteFile = (path: string) =>
+  get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`);
+
+/** Byte-exact absolute-path file for browser-native media rendering or download. */
+export const absoluteFileUrl = (path: string) =>
+  `/api/files/abs/raw?path=${encodeURIComponent(path)}`;
+
+/** Overwrite a text file in the project's live checkout (worktree when
+ * `sessionId` is given, else the hub clone). Committed branch trees are
+ * read-only, so pass no `ref`. */
+export const saveProjectFile = (
+  projectId: string,
+  path: string,
+  content: string,
+  opts: { sessionId?: string } = {},
+) =>
+  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number }>(
+    `/api/projects/${projectId}/file`,
+    { path, content, sessionId: opts.sessionId },
+  );
+
+/** Open a checkout file on the machine running `orx up`, in the OS default app
+ * for its type (the user's editor for source files). */
+export const openFileInEditor = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/file/open`, {
+    path,
+    sessionId: opts.sessionId,
+  });
+
+export interface LatexEngine {
+  /** The engine that will run, or null when the machine has none. */
+  engine: string | null;
+  /** Install guidance, present only when `engine` is null. */
+  hint: string | null;
+  /** A paste-ready install command, where this platform has one. */
+  installCommand: string | null;
+}
+
+/** Whether the machine running `orx up` can compile LaTeX. */
+export const getLatexEngine = () => get<LatexEngine>("/api/latex/engine");
+
+export interface LatexCompileResult {
+  ok: boolean;
+  /** Checkout-relative path of the produced PDF, null when the run failed. */
+  pdfPath: string | null;
+  /** What ran: `latexmk (xelatex)`, `tectonic`, `pdflatex`. */
+  engine: string;
+  /** Set when the toolchain could not honour the document's `% !TeX program`. */
+  note: string | null;
+  /** The engine reported errors. With `ok` true the PDF exists anyway — TeX
+   * recovers from most of them — but the log is worth showing. */
+  hadErrors: boolean;
+  /** Tail of the engine's output — the only useful thing on a failure. */
+  log: string;
+}
+
+/** Compile a checkout `.tex` file to a PDF beside it, using whichever LaTeX
+ * engine is installed on the machine running `orx up`. Rejects with a message
+ * naming the install options when none is. */
+export const compileLatex = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  post<LatexCompileResult>(`/api/projects/${projectId}/file/latex`, {
+    path,
+    sessionId: opts.sessionId,
+  });
+
+/** The Overleaf project a `.tex` pushes to. */
+export interface OverleafLink {
+  projectId: string;
+  /** The project on overleaf.com, for opening it. */
+  url: string;
+}
+
+export interface OverleafState {
+  /** A Git authentication token is stored on this machine. */
+  hasToken: boolean;
+  /** Null until this paper is pointed at a project. */
+  link: OverleafLink | null;
+}
+
+/** Whether a Git authentication token is stored — the machine-wide half of the
+ * Overleaf state, for Settings. */
+export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+
+/** Store an Overleaf Git authentication token. Not validated here: only the Git
+ * bridge can judge a token, and it needs a project to judge it against, so a
+ * bad token surfaces from `linkOverleaf`. */
+export const saveOverleafToken = (token: string) =>
+  post<{ hasToken: boolean }>("/api/overleaf/token", { token });
+
+export const deleteOverleafToken = () =>
+  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+export const getOverleafState = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+
+/** Point this `.tex` at an Overleaf project. The server proves the account can
+ * reach it before storing the link, so this is where a plan without Git
+ * integration — or a bad token — is reported. */
+export const linkOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { project: string; sessionId?: string },
+) =>
+  post<OverleafState>(`/api/projects/${projectId}/file/overleaf`, {
+    path,
+    project: opts.project,
+    sessionId: opts.sessionId,
+  });
+
+export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafState>(r));
+
+/** How the user settled a file both sides changed, keyed by checkout-relative path. */
+export type OverleafResolution = "keep-local" | "take-overleaf";
+
+export interface OverleafSyncResult {
+  ok: boolean;
+  /** Files Overleaf changed alone, now written into the checkout. */
+  pulled: string[];
+  /** Files we changed alone, now committed to Overleaf. */
+  pushed: string[];
+  /** Files both sides changed since the last sync. Left untouched on both
+   * sides until the user says which copy to keep. */
+  conflicts: string[];
+  /** Main-document mismatch, or files left behind. */
+  note: string | null;
+}
+
+/** Bring the paper and the linked Overleaf project into step, both ways. */
+export const syncOverleaf = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; resolve?: Record<string, OverleafResolution> } = {},
+) =>
+  post<OverleafSyncResult>(`/api/projects/${projectId}/file/overleaf/sync`, {
+    path,
+    sessionId: opts.sessionId,
+    resolve: opts.resolve,
+  });
+
+/** Whether Overleaf has moved since the last sync. One request and no transfer,
+ * so a linked paper can be watched while its tab is open. */
+export const getOverleafStatus = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  get<{ remoteChanged: boolean }>(
+    `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+  );
+
+/** Page that posts the paper to Overleaf as a new project — the path for an
+ * account whose plan has no Git integration. Opened in a tab, not fetched. */
+export const overleafUploadUrl = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) => `/api/projects/${projectId}/file/overleaf/upload?${checkoutQuery(opts, new URLSearchParams({ path }))}`;
 
 export interface CodeTree {
   root: CheckoutRoot;
@@ -349,6 +587,48 @@ export interface HfSettings {
 export const getHfSettings = () => get<HfSettings>("/api/settings/hf");
 
 export const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
+
+// --- updates ------------------------------------------------------------------
+
+/** How orx was installed. Only `installer` and `app-bundle` update themselves. */
+export type InstallChannel = "installer" | "app-bundle" | "cargo" | "homebrew" | "nix" | "unknown";
+
+export interface UpdateStatus {
+  current: string;
+  /** Latest release this install can actually move to — the macOS app and the
+   *  CLI read different manifests, and the app's can lag. */
+  latest: string | null;
+  channel: InstallChannel;
+  /** Whether this install is one orx can replace at all. */
+  selfUpdates: boolean;
+  autoUpdate: boolean;
+  /** `autoUpdate` is off because of the environment, not the user's setting. */
+  envDisabled: boolean;
+  updateAvailable: boolean;
+  /** The newer version already on disk. Distinct from `latest`: a release can
+   *  land between the install and the restart. */
+  installedVersion: string | null;
+  restartRequired: boolean;
+}
+
+export interface InstalledCli {
+  link: string;
+  /** The link's directory — what to add to PATH when `onPath` is false. */
+  dir: string;
+  target: string;
+  onPath: boolean;
+  alreadyCurrent: boolean;
+}
+
+export const getUpdateStatus = () => get<UpdateStatus>("/api/update");
+
+export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
+
+export const setAutoUpdate = (enabled: boolean) =>
+  post<UpdateStatus>("/api/update/auto", { enabled });
+
+export const installCli = (force = false) =>
+  post<InstalledCli>("/api/update/install-cli", { force });
 
 // --- settings: kubernetes -----------------------------------------------------
 
@@ -460,17 +740,17 @@ export interface SshHost {
 export const getSshHosts = () =>
   get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
 
+export const getSshMasterStatus = (host: string) =>
+  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+
 export interface SshPreflight {
   reachable: boolean;
-  gitFound: boolean;
+  toolsFound: boolean;
+  missingTools?: string[];
   error: string | null;
   /** Unix millis. */
   testedAt: number;
 }
-
-/** Live-test a host: reachable over ssh (BatchMode) and has `git`. */
-export const sshPreflight = (host: string) =>
-  post<SshPreflight>("/api/settings/ssh/preflight", { host });
 
 // --- settings: slurm ----------------------------------------------------------
 
@@ -498,14 +778,10 @@ export const saveSlurmSettings = (body: {
 export interface SlurmPreflight {
   reachable: boolean;
   slurmFound: boolean;
-  gitFound: boolean;
+  toolsFound: boolean;
   partitions: string[];
   error: string | null;
 }
-
-/** Live-test a login node: reachable, Slurm CLI + git present, partitions. */
-export const slurmPreflight = (host: string) =>
-  post<SlurmPreflight>("/api/settings/slurm/preflight", { host });
 
 // --- settings: ray ------------------------------------------------------------
 
@@ -539,6 +815,7 @@ export const rayPreflight = (address?: string) =>
 
 export type ComputeTargetId =
   | "local"
+  | "tinker"
   | "hf"
   | "modal"
   | "k8s"
@@ -630,8 +907,11 @@ export interface ArtifactEntry {
   /** 0 for directories. */
   size: number;
   modifiedAt: number;
+  presentation?: FilePresentation;
   children?: ArtifactEntry[];
 }
+
+export type FilePresentation = "image" | "audio" | "video" | "pdf" | "text" | "unknown" | "download";
 
 /** Listing of the project's on-disk artifacts directory. */
 export interface ProjectArtifacts {
@@ -653,16 +933,68 @@ export const deleteArtifact = (projectId: string, path: string) =>
 export const artifactUrl = (projectId: string, path: string) =>
   `/api/projects/${projectId}/files/file?path=${encodeURIComponent(path)}`;
 
-/** Text body of an artifact (raw bytes decoded as UTF-8), or `null` when
- *  the file is missing (404). The endpoint returns bytes, not JSON, so this
- *  bypasses the `get`/`json` helpers; a 404 is a normal "not found", not an
- *  error to surface. */
-export const getArtifactFileText = (projectId: string, path: string): Promise<string | null> =>
-  fetch(artifactUrl(projectId, path)).then((r) => {
+export interface FileTextBody {
+  content: string;
+  binary: boolean;
+  truncated: boolean;
+}
+
+export const FILE_PREVIEW_BYTES = 512_000;
+
+/** Decode a raw response only when it is valid, NUL-free UTF-8. */
+const decodeFileText = (bytes: ArrayBuffer, truncated: boolean): FileTextBody => {
+  const view = new Uint8Array(bytes);
+  if (view.includes(0)) return { content: "", binary: true, truncated };
+  try {
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const content = decoder.decode(view, { stream: truncated });
+    return { content, binary: false, truncated };
+  } catch {
+    return { content: "", binary: true, truncated };
+  }
+};
+
+/** Text-safe body of an artifact, or `null` when the file is missing. */
+export const getArtifactFileText = (
+  projectId: string,
+  path: string,
+): Promise<FileTextBody | null> => {
+  return fetch(artifactUrl(projectId, path), {
+    headers: { Range: `bytes=0-${FILE_PREVIEW_BYTES - 1}` },
+  }).then((r) => {
     if (r.status === 404) return null;
+    if (r.status === 416 && r.headers.get("content-range") === "bytes */0") {
+      return { content: "", binary: false, truncated: false };
+    }
     // Bare message — the viewer prefixes "Failed to load file:" itself.
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    return r.text();
+    const total = Number(r.headers.get("content-range")?.split("/").pop());
+    return r.arrayBuffer().then((bytes) => decodeFileText(bytes, Number.isFinite(total) && total > bytes.byteLength));
+  });
+};
+
+const isFilePresentation = (value: string | null): value is FilePresentation =>
+  value === "image" || value === "audio" || value === "video" || value === "pdf" ||
+  value === "text" || value === "unknown" || value === "download";
+
+export interface ArtifactFileMetadata {
+  size: number;
+  presentation: FilePresentation;
+}
+
+/** Lightweight existence/type probe used before an artifact preview. */
+export const getArtifactFileMetadata = (
+  projectId: string,
+  path: string,
+): Promise<ArtifactFileMetadata | null> =>
+  fetch(artifactUrl(projectId, path), { method: "HEAD" }).then((r) => {
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const presentation = r.headers.get("x-openresearch-presentation");
+    return {
+      size: Number(r.headers.get("content-length")) || 0,
+      presentation: isFilePresentation(presentation) ? presentation : "download",
+    };
   });
 
 export interface GitSettings {
@@ -670,20 +1002,13 @@ export interface GitSettings {
   userName: string | null;
   userEmail: string | null;
   ghInstalled: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
+  githubAuthenticated: boolean;
 }
 
 export const getGitSettings = () => get<GitSettings>("/api/settings/git");
 
 export const saveGitSettings = (body: { userName?: string; userEmail?: string }) =>
   post<GitSettings>("/api/settings/git", body);
-
-/** Validate + persist a pasted GitHub token (stored in the synced env file). */
-export const saveGitToken = (token: string) =>
-  post<GitSettings>("/api/settings/git/token", { token });
-
-export const removeGitToken = () =>
-  fetch("/api/settings/git/token", { method: "DELETE" }).then((r) => json<GitSettings>(r));
 
 /** A paper linked to the researcher profile during onboarding. */
 export interface LinkedPaper {
@@ -703,7 +1028,7 @@ export const getProfile = () => get<Profile>("/api/settings/profile");
 
 export const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
-/** Which literature sources `orx lit`/`orx paper` may use (settings.json). */
+/** Which literature sources discovery and paper reading may use (settings.json). */
 export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
@@ -719,8 +1044,8 @@ export const setLitSources = (body: LitSourcesSettings) =>
 export interface ProjectDefaultsSettings {
   githubForNewProjects: boolean;
   githubDefaultPromptSeen: boolean;
+  ghInstalled: boolean;
   githubAuthenticated: boolean;
-  githubTokenSource: "env" | "stored" | "gh" | null;
 }
 
 export const getProjectDefaults = () =>
@@ -750,8 +1075,8 @@ export interface ProjectGitStatus {
     emailSource: "local" | "global" | null;
   };
   github: {
+    ghInstalled: boolean;
     authenticated: boolean;
-    tokenSource: "env" | "stored" | "gh" | null;
     enabled: boolean;
     owner: string;
     repo: string;
@@ -778,6 +1103,10 @@ export const pushProjectGithub = (projectId: string) =>
 export interface TelemetrySettings {
   /** Whether usage analytics linked to the random installation ID is on. */
   enabled: boolean;
+  /** Saved user preference, independent of build and runtime eligibility. */
+  preferenceEnabled: boolean;
+  /** Whether the current build or launch configuration forces analytics off. */
+  locked: boolean;
   /** When off, a short human reason (e.g. "--no-telemetry flag"); null when on. */
   reason: string | null;
 }
@@ -786,11 +1115,6 @@ export const getTelemetry = () => get<TelemetrySettings>("/api/settings/telemetr
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
-
-/** Record the consent decision once when the user leaves onboarding. Eligible
- * official builds send this even for opt-outs; development builds stay inert. */
-export const recordTelemetryConsent = (enabled: boolean) =>
-  post<{ ok: boolean }>("/api/settings/telemetry/consent", { enabled });
 
 export type HarnessId = "claude-code" | "codex" | "opencode";
 
@@ -815,6 +1139,8 @@ export interface HarnessModel {
    * the CLI reports it (codex). When set, `reasoningLevels` has no `default`
    * sentinel and the composer preselects this concrete tier. */
   defaultReasoningLevel?: string;
+  /** Additional processing tiers this model advertises (Codex Fast mode). */
+  serviceTiers?: OptionChoice[];
 }
 
 /** Display label for a harness model: the catalog's own name when it has one,
@@ -825,6 +1151,7 @@ export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabe
 export interface OptionChoice {
   id: string;
   label: string;
+  description?: string;
 }
 
 /**
@@ -836,6 +1163,7 @@ export interface OptionChoice {
 export interface HarnessOptions {
   permissionModes: OptionChoice[];
   defaultPermissionMode?: string | null;
+  planActivation?: "permission" | "command" | null;
   reasoningLevels: OptionChoice[];
   defaultReasoningLevel?: string | null;
 }
@@ -878,6 +1206,38 @@ export function reasoningFor(
   return { choices, defaultId };
 }
 
+export const SERVICE_TIER_DEFAULT_ID = "default";
+
+export function serviceTiersFor(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+): OptionChoice[] {
+  if (harness?.id !== "codex") return [];
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (!tiers?.length) return [];
+  return [
+    { id: SERVICE_TIER_DEFAULT_ID, label: m.service_tier_standard(), description: m.service_tier_default_speed() },
+    ...tiers,
+  ];
+}
+
+export function reconcileServiceTier(
+  harness: Harness | undefined,
+  modelId: string | null | undefined,
+  current: string | null | undefined,
+): string | null {
+  // Harness detection is async; preserve a deliberate choice until its catalog loads.
+  if (!harness) return current ?? null;
+  if (harness.id !== "codex") return null;
+  const tiers = harness.models.find((model) => model.id === modelId)?.serviceTiers;
+  if (tiers === undefined) return null;
+  const choices = serviceTiersFor(harness, modelId);
+  if (choices.length === 0) return SERVICE_TIER_DEFAULT_ID;
+  return current != null && choices.some((choice) => choice.id === current)
+    ? current
+    : SERVICE_TIER_DEFAULT_ID;
+}
+
 /**
  * Keep a stored reasoning level only if the given harness+model still offers
  * it; otherwise fall back to that model's default. This is what makes switching
@@ -908,6 +1268,9 @@ export interface Harness {
   id: HarnessId;
   name: string;
   installed: boolean;
+  /** On PATH, but `--version` failed — a broken install a reinstall repairs.
+   * Never `agentReady`: spawning it just dumps the CLI's own crash into chat. */
+  installBroken: boolean;
   binPath?: string;
   version?: string;
   authenticated: boolean;
@@ -918,6 +1281,9 @@ export interface Harness {
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** A running turn takes further input, so the composer steers instead of
+   * queueing. Narrowed per installation (codex's legacy exec path can't). */
+  supportsSteering: boolean;
   models: HarnessModel[];
   options: HarnessOptions;
 }
@@ -934,10 +1300,65 @@ export const getHarnesses = (refresh = false, retryRejected = false) => {
 export interface SkillInfo {
   name: string;
   description: string;
-  argHint: string;
+  /** Built-in composer commands share the menu with harness/user skills. */
+  source?: "builtin" | "user" | "command";
 }
 
 export const getSkills = () => get<{ skills: SkillInfo[] }>("/api/skills").then((r) => r.skills);
+
+export const getSkillContent = (name: string, projectId?: string) =>
+  get<{ content: string }>(
+    `/api/skills/${encodeURIComponent(name)}${
+      projectId ? `?project=${encodeURIComponent(projectId)}` : ""
+    }`,
+  ).then((r) => r.content);
+
+/** A user-uploaded LaTeX template the paper skill follows, managed in the
+ * Customize tab. */
+export interface LatexTemplate {
+  name: string;
+  /** Relative path of the .tex the agent starts from. */
+  entry: string;
+  /** Class/style files shipped alongside it. */
+  supportFiles: string[];
+  bytes: number;
+  updatedAt: number;
+}
+
+export const listLatexTemplates = () =>
+  get<{ templates: LatexTemplate[] }>("/api/latex-templates").then((r) => r.templates);
+
+export const uploadLatexTemplate = (body: { filename: string; contentBase64: string }) =>
+  post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
+
+export const deleteLatexTemplate = (name: string) =>
+  fetch(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+    json<{ ok: boolean }>(r),
+  );
+
+/** A skill the agent gets in every session: a SKILL.md folder uploaded in the
+ * Customize tab, or one mirrored from an installed coding agent or its plugins. */
+export interface UserSkill {
+  name: string;
+  /** The coding agent or plugin it comes from; absent when uploaded here, which
+   * is also the only case the user can delete. */
+  origin?: string | null;
+  bytes: number;
+  updatedAt: number;
+}
+
+export const listUserSkills = () =>
+  get<{ skills: UserSkill[] }>("/api/user-skills").then((r) => r.skills);
+
+/** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
+ * raw file bytes; `filename`'s extension selects single-file vs archive. */
+export const uploadUserSkill = (req: { filename: string; contentBase64: string }) =>
+  post<{ skill: UserSkill }>("/api/user-skills", req).then((r) => r.skill);
+
+export const deleteUserSkill = (name: string) =>
+  fetch(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+    json<{ ok: boolean }>(r),
+  );
 
 /** "openai/gpt-5.5" → "GPT 5.5", "anthropic/claude-opus-4-8" → "Opus 4.8". */
 export function modelLabel(id: string): string {
@@ -960,7 +1381,20 @@ export function modelLabel(id: string): string {
 
 export interface ChatToolState {
   status: "running" | "completed" | "error";
-  input?: { command?: string; filePath?: string; description?: string; [k: string]: unknown };
+  input?: {
+    command?: string;
+    commandArgv?: string[];
+    filePath?: string;
+    description?: string;
+    retryOwner?: "native" | "orx";
+    attempt?: number;
+    maximum?: number | null;
+    nextRetryAt?: number | null;
+    turnId?: string;
+    errorKind?: string;
+    recoveryAction?: "retry" | "continue";
+    [k: string]: unknown;
+  };
   output?: string;
   error?: string;
   title?: string;
@@ -984,12 +1418,14 @@ export interface ChatPrompt {
   header?: string;
   options?: ChatQuestionOption[];
   multiSelect?: boolean;
+  planExit?: boolean;
   /** Answer echo, stamped on resolve: chosen labels (questions), whether the
    * card was approved (plan/permission), and any freeform note. Absent on
    * cards resolved without an answer (stale-card cleanup). */
   answers?: string[];
   approved?: boolean;
   note?: string;
+  annotations?: ChatTextAnnotation[];
   /** Backend resume routing id. Presence marks a HELD mid-turn card (the
    * turn is blocked open waiting on this answer); absent on end-turn cards. */
   nativeId?: string;
@@ -997,7 +1433,7 @@ export interface ChatPrompt {
 
 export interface ChatPart {
   id: string;
-  type: string; // text | reasoning | tool | prompt | image
+  type: string; // text | reasoning | tool | prompt | image | steer
   text?: string;
   /** Original file name for an `image` (attachment) part, when known. */
   name?: string;
@@ -1014,6 +1450,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   parts: ChatPart[];
   createdAt: number;
+  parentId?: string | null;
 }
 
 /** How much of the model's context window a session has used, measured off the
@@ -1030,13 +1467,20 @@ export interface ChatSession {
   harness: HarnessId;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
-   * (harness auto-title), `"user"` (rename). Null on legacy sessions. */
+   * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
+   * `orx agent spawn --title`). Null on legacy sessions. */
   titleSource?: string | null;
   model: string | null;
+  serviceTier: string | null;
   permissionMode: string | null;
+  /** Independent Plan axis for Codex/OpenCode. */
+  planMode: boolean;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
+  /** Session whose agent spawned this one with `orx agent spawn`; null for
+   * sessions the user started themselves. */
+  parentSessionId?: string | null;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -1051,7 +1495,9 @@ export const listChatSessions = (projectId: string) =>
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
   model?: string | null;
+  serviceTier?: string | null;
   permissionMode?: string | null;
+  planMode?: boolean;
   reasoningLevel?: string | null;
 }
 
@@ -1081,9 +1527,46 @@ export const renameChatSession = (sessionId: string, title: string) =>
     (r) => r.session,
   );
 
+/** Enter/leave the session-specific Plan axis used by Codex/OpenCode. */
+export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
+    (r) => r.session,
+  );
+
+export const setChatSessionPermissionMode = (sessionId: string, permissionMode: string) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { permissionMode }).then(
+    (r) => r.session,
+  );
+
+/** A message the user sent while a turn was running, parked to run next. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  planMode?: boolean;
+  dispatchState?: "queued" | "retrying" | "blocked";
+  nextRetryAt?: number | null;
+  error?: string | null;
+}
+
 export const getChatMessages = (sessionId: string) =>
-  get<{ messages: ChatMessage[] }>(`/api/chat/sessions/${sessionId}/messages`).then(
-    (r) => r.messages,
+  get<{ messages: ChatMessage[]; queued?: QueuedMessage[]; activeLeafId?: string | null }>(
+    `/api/chat/sessions/${sessionId}/messages`,
+  ).then((r) => ({
+    messages: r.messages,
+    queued: r.queued ?? [],
+    activeLeafId: r.activeLeafId ?? null,
+  }));
+
+/** Remove a still-parked message. */
+export const cancelQueuedMessage = (sessionId: string, itemId: string) =>
+  fetch(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+  }).then((r) => json<{ ok: boolean; removed: boolean }>(r));
+
+/** Retry the same parked message after safe queue delivery was exhausted. */
+export const retryQueuedMessage = (sessionId: string, itemId: string) =>
+  post<{ ok: boolean; retried: boolean }>(
+    `/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`,
   );
 
 /** A pasted image or uploaded file riding a chat message. */
@@ -1092,6 +1575,10 @@ export interface ChatImageAttachment {
   dataBase64: string;
   /** Original file name (uploads/drops); pasted images carry none. */
   name?: string;
+}
+
+export interface ChatTextAnnotation {
+  text: string;
 }
 
 /** Image parts store a server-minted file name; this is where it's served. */
@@ -1104,14 +1591,50 @@ export const sendChatMessage = (
   text: string,
   opts: TurnOptions = {},
   images?: ChatImageAttachment[],
+  annotations?: ChatTextAnnotation[],
+  clientTurnId?: string,
+  mode?: "steer",
 ) =>
-  post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/message`, {
+  post<{ ok: boolean; turn?: ChatTurnResult; steered?: boolean }>(
+    `/api/chat/sessions/${sessionId}/message`, {
     text,
+    clientTurnId,
     model: opts.model,
+    serviceTier: opts.serviceTier,
     permissionMode: opts.permissionMode,
+    planMode: opts.planMode,
     reasoningLevel: opts.reasoningLevel,
     images,
-  });
+    annotations,
+      mode,
+    },
+  );
+
+export interface ChatTurnResult {
+  turnId: string;
+  queued: boolean;
+  existing: boolean;
+}
+
+export const recoverChatTurn = (
+  sessionId: string,
+  turnId: string,
+  action: "retry" | "continue",
+  opts: TurnOptions = {},
+) =>
+  post<{ ok: boolean; turn: ChatTurnResult }>(
+    `/api/chat/sessions/${sessionId}/turns/${turnId}/recover`,
+    { action, ...opts },
+  );
+
+/** Pass `text` to re-ask an edited version of a user message; omit it to retry a
+ * response. Returns immediately; the new turn streams over /api/events. */
+export const forkChatTurn = (sessionId: string, messageId: string, text?: string) =>
+  post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/fork`, { messageId, text });
+
+/** Show a different fork of a turn, along with the whole branch under it. */
+export const selectChatBranch = (sessionId: string, leafId: string) =>
+  post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/branch`, { leafId });
 
 export const interruptChat = (sessionId: string) =>
   post<{ ok: boolean }>(`/api/chat/sessions/${sessionId}/interrupt`);
@@ -1125,6 +1648,7 @@ export interface PromptAnswer {
   /** Chosen option labels (questions). */
   answers?: string[];
   note?: string;
+  annotations?: ChatTextAnnotation[];
 }
 
 export const respondChat = (sessionId: string, answer: PromptAnswer) =>
@@ -1151,23 +1675,24 @@ export function statusColor(status: string): string {
 
 export function timeAgo(ms: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
+  const format = new Intl.RelativeTimeFormat(getLocale(), { numeric: "always", style: "narrow" });
+  if (s < 60) return format.format(-s, "second");
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return format.format(-minutes, "minute");
+  const h = Math.floor(minutes / 60);
+  if (h < 24) return format.format(-h, "hour");
+  return format.format(-Math.floor(h / 24), "day");
 }
 
 /** "42s" / "18m" / "2h 28m" / "1d 4h" — an elapsed duration, not a timestamp. */
 export function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ${m % 60}m`;
-  return `${Math.floor(h / 24)}d ${h % 24}h`;
+  if (s < 60) return m.duration_seconds({ value: fmtNumber(s) });
+  const minutes = Math.floor(s / 60);
+  if (minutes < 60) return m.duration_minutes({ value: fmtNumber(minutes) });
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return m.duration_hours_minutes({ hours: fmtNumber(hours), minutes: fmtNumber(minutes % 60) });
+  return m.duration_days_hours({ days: fmtNumber(Math.floor(hours / 24)), hours: fmtNumber(hours % 24) });
 }
 
 /** Compact byte size, e.g. "512 B", "2.0 KB", "5.3 MB". Mirrors the backend's
@@ -1180,20 +1705,16 @@ export function fmtBytes(n: number): string {
     v /= 1024;
     u += 1;
   }
-  return u === 0 ? `${n} B` : `${v.toFixed(1)} ${units[u]}`;
+  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: u === 0 ? 0 : 1, minimumFractionDigits: u === 0 ? 0 : 1 });
+  return `${number.format(u === 0 ? n : v)} ${units[u]}`;
 }
 
 /** Compact token count, e.g. 62300 → "62k", 1_200_000 → "1.2M", 940 → "940". */
 export function fmtTokens(n: number): string {
-  if (n < 1000) return `${Math.round(n)}`;
-  // One decimal, dropped when it's .0 ("31.4k", "200k", "1M"). The k branch
-  // stops where toFixed(1) would round to "1000.0" (e.g. 999_960 → "1M").
-  if (n < 999_950) return `${trimZero((n / 1000).toFixed(1))}k`;
-  return `${trimZero((n / 1_000_000).toFixed(1))}M`;
-}
-
-function trimZero(s: string): string {
-  return s.endsWith(".0") ? s.slice(0, -2) : s;
+  const number = new Intl.NumberFormat(getLocale(), { maximumFractionDigits: 1 });
+  if (n < 1000) return number.format(Math.round(n));
+  if (n < 999_950) return `${number.format(n / 1000)}k`;
+  return `${number.format(n / 1_000_000)}M`;
 }
 
 export function shortId(id: string): string {

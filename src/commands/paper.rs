@@ -3,8 +3,9 @@
 //! Public endpoints, no token required. The source is auto-detected from the id
 //! (override with `--source`):
 //!   - **alphaXiv** (arXiv id / URL): a machine-readable report (default, ≈10 KB)
-//!     or the full extracted text (`--full`). Markdown to stdout. If alphaXiv has
-//!     a GitHub repo linked, a `GitHub: <url>` line is printed first.
+//!     with automatic fallback to extracted text, or raw text directly (`--full`).
+//!     Markdown to stdout. If alphaXiv has a GitHub repo linked, a `GitHub: <url>`
+//!     line is printed before the body.
 //!   - **bioRxiv** (`10.1101/…` DOI): title/authors/date + abstract, with links
 //!     to the DOI and full-text PDF.
 //!   - **OpenAlex** (`W…` id or any other DOI): title/authors/date/citations +
@@ -14,8 +15,8 @@
 //! points you at the PDF.
 
 use crate::client::{
-    fetch_biorxiv, fetch_openalex_work, fetch_paper_github, fetch_paper_markdown, BiorxivDetail,
-    OpenAlexWork,
+    fetch_biorxiv, fetch_openalex_work, fetch_paper_github, fetch_paper_markdown, versionless_id,
+    BiorxivDetail, OpenAlexWork,
 };
 use crate::error::{anyhow, Result};
 use crate::LitSource;
@@ -32,7 +33,7 @@ pub async fn run(args: crate::PaperArgs) -> Result<()> {
 }
 
 /// A source disabled by the user refuses to fetch too, so a
-/// source turned off is off everywhere — the same gate `orx lit` applies.
+/// source turned off is off everywhere, including discovery.
 fn ensure_source_enabled(source: LitSource, disabled: &[String]) -> Result<()> {
     if disabled.iter().any(|d| d == source.as_str()) {
         return Err(anyhow!(
@@ -45,27 +46,41 @@ fn ensure_source_enabled(source: LitSource, disabled: &[String]) -> Result<()> {
 
 async fn run_alphaxiv(args: &crate::PaperArgs) -> Result<()> {
     let id = parse_paper_id(&args.id);
+    let paper_url = alphaxiv_paper_url(&id);
     let kind = if args.full { "abs" } else { "overview" };
 
-    let (md, github) = tokio::join!(fetch_paper_markdown(kind, &id), fetch_paper_github(&id));
+    let (primary, github) = tokio::join!(fetch_paper_markdown(kind, &id), fetch_paper_github(&id));
+    let primary = primary?;
+    // Fetch full text only after a report miss so the common path does not double API traffic.
+    let md = match fallback_markdown_kind(args.full, primary.is_some()) {
+        Some(fallback_kind) => fetch_paper_markdown(fallback_kind, &id).await?,
+        None => primary,
+    };
 
-    // Best-effort: the GitHub link is useful context, never a reason to fail.
-    if let Ok(Some(url)) = github {
-        println!("GitHub: {}", url);
-        println!();
-    }
-
-    match md? {
+    match md {
         Some(md) => {
+            println!("alphaXiv: {paper_url}");
+            // Best-effort: the GitHub link is useful context, never a reason to fail.
+            if let Ok(Some(url)) = github {
+                println!("GitHub: {}", url);
+            }
+            println!();
             println!("{}", md);
             Ok(())
         }
         None if args.full => Err(anyhow!(
-            "No full text extracted for {id} yet. Last resort — the PDF: https://arxiv.org/pdf/{id}"
+            "No full text extracted for {id} yet. Open the paper on alphaXiv: {paper_url}"
         )),
         None => Err(anyhow!(
-            "No report generated for {id} yet. Try `orx paper {id} --full` for the raw extracted text."
+            "No report or extracted text available for {id} yet. Open the paper on alphaXiv: {paper_url}"
         )),
+    }
+}
+
+fn fallback_markdown_kind(full: bool, primary_found: bool) -> Option<&'static str> {
+    match (full, primary_found) {
+        (false, false) => Some("abs"),
+        _ => None,
     }
 }
 
@@ -76,7 +91,7 @@ async fn run_openalex(raw: &str, full: bool) -> Result<()> {
             Ok(())
         }
         None => Err(anyhow!(
-            "No OpenAlex work found for {raw:?}. Check the id/DOI, or search with `orx lit --source openalex`."
+            "No OpenAlex work found for {raw:?}. Check the id/DOI, or search with `orx discover openalex <query>`."
         )),
     }
 }
@@ -89,7 +104,7 @@ async fn run_biorxiv(raw: &str, full: bool) -> Result<()> {
             Ok(())
         }
         None => Err(anyhow!(
-            "No bioRxiv preprint found for {doi}. If it's a medRxiv or non-bioRxiv DOI, try `orx paper {doi} --source openalex`; or search with `orx lit --source biorxiv`."
+            "No bioRxiv preprint found for {doi}. If it's a medRxiv or non-bioRxiv DOI, try `orx paper {doi} --source openalex`; or search with `orx discover biorxiv <query>`."
         )),
     }
 }
@@ -276,9 +291,16 @@ pub(crate) fn parse_paper_id(input: &str) -> String {
         .to_string()
 }
 
+fn alphaxiv_paper_url(id: &str) -> String {
+    format!("https://www.alphaxiv.org/abs/{}", versionless_id(id))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{biorxiv_doi, detect_source, ensure_source_enabled, extract_doi, parse_paper_id};
+    use super::{
+        alphaxiv_paper_url, biorxiv_doi, detect_source, ensure_source_enabled, extract_doi,
+        fallback_markdown_kind, parse_paper_id,
+    };
     use crate::LitSource;
 
     #[test]
@@ -304,6 +326,26 @@ mod tests {
         for (input, want) in cases {
             assert_eq!(parse_paper_id(input), want, "input: {input}");
         }
+    }
+
+    #[test]
+    fn builds_versionless_alphaxiv_links() {
+        assert_eq!(
+            alphaxiv_paper_url("2401.12345v2"),
+            "https://www.alphaxiv.org/abs/2401.12345"
+        );
+        assert_eq!(
+            alphaxiv_paper_url("2401.12345"),
+            "https://www.alphaxiv.org/abs/2401.12345"
+        );
+        assert_eq!(alphaxiv_paper_url("v2"), "https://www.alphaxiv.org/abs/v2");
+    }
+
+    #[test]
+    fn falls_back_only_when_the_default_report_is_missing() {
+        assert_eq!(fallback_markdown_kind(false, false), Some("abs"));
+        assert_eq!(fallback_markdown_kind(false, true), None);
+        assert_eq!(fallback_markdown_kind(true, false), None);
     }
 
     #[test]

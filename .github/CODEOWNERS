@@ -1,0 +1,10 @@
+# Code owners. Requires "Require review from Code Owners" on the main branch
+# protection rule to be enforced. Owners must have write access.
+# Swap these handles for a team (e.g. @alphaXiv/maintainers) when one exists.
+
+# Security-sensitive: release CI and the macOS signing pipeline handle (or can
+# reach) the Developer ID certificate. Changes here must be reviewed.
+/.github/workflows/             @myles332 @sox8502
+/scripts/build-macos-app.sh     @myles332 @sox8502
+/scripts/package-macos-app.sh   @myles332 @sox8502
+/macos/                         @myles332 @sox8502

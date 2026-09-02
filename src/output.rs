@@ -1,6 +1,4 @@
-//! Display helpers for tabular and cell output.
-
-use serde_json::Value;
+//! Display helpers for tabular output.
 
 /// Formats a duration in seconds as a compact human string: `1h42m`, `3m12s`,
 /// `45s`. Negative inputs render as an em dash.
@@ -67,18 +65,5 @@ fn pad_end(s: &str, width: usize) -> String {
         s.to_string()
     } else {
         format!("{}{}", s, " ".repeat(width - len))
-    }
-}
-
-/// Formats an arbitrary SQL cell value for display, matching the TS `cell()`:
-/// `null`/absent -> "", objects/arrays -> compact JSON, scalars -> their string.
-pub fn cell(value: &Value) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::String(s) => s.clone(),
-        Value::Bool(b) => b.to_string(),
-        Value::Number(n) => n.to_string(),
-        // Objects and arrays: compact JSON, like `JSON.stringify`.
-        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }

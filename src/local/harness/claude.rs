@@ -9,7 +9,7 @@
 //! overhead; a config change (permission mode
 //! / effort / bridge), interrupt, or crash respawns it with `--resume`. The
 //! playbook rides `--append-system-prompt-file`; the permission mode is
-//! `--permission-mode` from the session's setting (`auto`/`bypass` — see
+//! `--permission-mode` from the session's setting (`auto`/`bypassPermissions` — see
 //! `options`). AskUserQuestion / ExitPlanMode surface as interactive cards: the
 //! turn ends on them and the user's answer resumes the session — except in plan
 //! mode, where the mcp-gate bridge holds both open mid-turn and the answer
@@ -30,18 +30,24 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, find_on_path, nonempty_str, parse_version, read_json, HarnessAuthState,
-    HarnessInfo, ModelInfo,
+    bin_version, nonempty_str, parse_version, probe_bin, read_json, HarnessAuthState, HarnessInfo,
+    ModelInfo,
 };
-use super::options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
-use super::{Harness, ResumeAction};
+use super::options::{
+    HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
+};
+use super::{
+    Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    find_part_mut, prepare_env, ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart,
-    WirePrompt, WireQuestionOption, WireToolState,
+    find_part_mut, prepare_env, ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx,
+    WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::claude::{SpawnConfig, SpawnSpec, TurnEvent};
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
+use crate::local::shell_env::find_on_path;
 
 /// FALLBACK model list, used only when the `list_models` control request fails
 /// (a CLI too old to answer it, or a spawn/timeout failure). The primary source
@@ -71,6 +77,9 @@ const CLAUDE_ULTRACODE: &str = "ultracode";
 const MIN_CLAUDE_VERSION: (u64, u64, u64) = (2, 1, 211);
 
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Not `claude update` — that runs the very binary that is failing.
+const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AuthProbe {
@@ -183,10 +192,11 @@ pub(crate) fn auth_recovery_note() -> &'static str {
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
 async fn claude_accepts_ultracode(bin: &Path) -> bool {
-    let fut = Command::new(bin)
-        .args(["--effort", CLAUDE_ULTRACODE, "--version"])
-        .stdin(Stdio::null())
-        .output();
+    let mut cmd = Command::new(bin);
+    cmd.args(["--effort", CLAUDE_ULTRACODE, "--version"])
+        .stdin(Stdio::null());
+    prepare_env(&mut cmd);
+    let fut = cmd.output();
     match tokio::time::timeout(Duration::from_secs(10), fut).await {
         Ok(Ok(out)) => {
             let text = format!(
@@ -212,15 +222,17 @@ async fn claude_accepts_ultracode(bin: &Path) -> bool {
 /// caller falls back to the static table.
 async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo>> {
     let fut = async {
-        let mut child = Command::new(bin)
-            .args([
-                "--print",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-            ])
+        let mut cmd = Command::new(bin);
+        cmd.args([
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]);
+        prepare_env(&mut cmd);
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -353,7 +365,7 @@ fn has_api_credential() -> bool {
 /// `claude -p` child pinned to Haiku, mirroring how Claude Code titles its own
 /// conversations with a cheap background model. Deliberately *not* the session's
 /// resident child — a title request there would pollute the real conversation
-/// history.
+/// history. `--no-session-persistence` keeps the throwaway request unrecorded.
 ///
 /// `--model haiku` is a CLI model alias of the kind we already pass through from
 /// the catalog; a CLI too old to know it exits non-zero, which lands on `None`
@@ -368,6 +380,7 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
         "haiku",
         "--max-turns",
         "1",
+        "--no-session-persistence",
         // Naming a chat needs no tools and no MCP: booting the user's servers
         // for a one-line request would cost far more than the request itself.
         // With no tools to call, `--max-turns 1` can't be spent on a tool use.
@@ -391,6 +404,14 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
     // cwd's CLAUDE.md / settings into a request that only needs one sentence.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
+    cmd.env(
+        "CLAUDE_CONFIG_DIR",
+        native_store::prepare_claude(NativeStore::Isolated).ok()?,
+    );
+    cmd.env(
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        native_store::claude_secure_storage_config_dir(),
+    );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the title column.
     cmd.env("NO_COLOR", "1");
@@ -430,16 +451,20 @@ impl Harness for ClaudeCode {
         true
     }
 
+    /// The resident child holds stdin open, so a second stream-json user
+    /// message reaches the turn already running.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_claude() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
         }
-        // The CLI owns OAuth and Keychain refresh. Its live status, including
-        // the effective auth method, decides whether this harness can run.
-        if info.installed {
+        // The CLI owns OAuth and Keychain refresh. Its live status decides
+        // whether this harness can run; a broken binary would only fail it too.
+        if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
             let probe = match bin {
                 Some(bin) => {
@@ -471,8 +496,10 @@ impl Harness for ClaudeCode {
             }
         }
 
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
+            // The resident child is only spawnable once the CLI is ready.
+            info.supports_steering = true;
             // Ask the installed CLI for its own catalog: `list_models` for the
             // models and their per-model effort tiers, and the parser probe for
             // `ultracode` (a session mode the catalog never advertises — see
@@ -493,6 +520,8 @@ impl Harness for ClaudeCode {
                     .map(|id| ModelInfo::new(*id).with_reasoning(&ids))
                     .collect()
             }));
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(CLAUDE_REINSTALL));
         } else if info.auth_state == HarnessAuthState::Unsupported {
             info.agent_note = Some(
                 "Update Claude Code to 2.1.211 or newer, then re-check this harness.".to_string(),
@@ -514,8 +543,11 @@ impl Harness for ClaudeCode {
         Some(info)
     }
 
-    async fn run_turn(&self, ctx: &mut TurnCtx) -> Result<()> {
-        run_turn(ctx).await
+    async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
+        run_turn(ctx)
+            .await
+            .map(|()| TurnOutcome::Completed)
+            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
     async fn generate_title(&self, first_message: &str) -> Option<String> {
@@ -523,26 +555,28 @@ impl Harness for ClaudeCode {
     }
 
     fn options(&self) -> HarnessOptions {
-        // Plan + Auto + Bypass. Headless `claude --print` has no interactive
-        // approval, so `ask`/`accept-edits` can't grant a blocked tool (they just
-        // deny) — those stay out.
-        //   * Plan  — read/propose only: file edits stay blocked until the user
-        //     approves the plan (via the ExitPlanMode card). Plan mode would
-        //     normally also gate `Bash(orx …)`, which would break planning — the
-        //     agent plans by *inspecting* prior runs/logs/evidence via read-only
-        //     `orx`. A `PreToolUse` hook (wired in `run_turn` only for this mode,
-        //     via `write_plan_settings`) lets read-only `orx` verbs through while
-        //     launches (`orx exp run`, `instance`, …) stay gated. See `plan_gate`.
-        //   * Auto  — the balanced default; runs tools without prompting.
-        //   * Bypass— runs everything, no sandbox.
+        // Claude owns planning as one of its five native permission modes. The
+        // permission bridge makes Manual and Accept edits actionable in
+        // headless mode instead of letting their prompts die unseen.
         HarnessOptions::none()
-            .with_permission_modes(
-                &[
-                    PermissionMode::Plan,
-                    PermissionMode::Auto,
-                    PermissionMode::Bypass,
+            .with_permission_choices(
+                vec![
+                    OptionChoice::described("manual", "Manual", "Always ask before making changes"),
+                    OptionChoice::described(
+                        "acceptEdits",
+                        "Accept edits",
+                        "Automatically accept all file edits",
+                    ),
+                    OptionChoice::described("plan", "Plan", "Create a plan before making changes"),
+                    OptionChoice::described("auto", "Auto", "Claude handles permission decisions"),
+                    OptionChoice::described(
+                        "bypassPermissions",
+                        "Bypass permissions",
+                        "Accepts all permissions",
+                    ),
                 ],
-                PermissionMode::Auto,
+                "auto",
+                PlanActivation::Permission,
             )
             // Harness-wide fallback only, and deliberately the conservative
             // five: `options()` is static and can't see the detected CLI
@@ -588,7 +622,7 @@ impl Harness for ClaudeCode {
                             updated_input: prompt.tool_input.clone(),
                         },
                     )?;
-                    Ok(ResumeAction::Handled)
+                    Ok(ResumeAction::Handled { plan_mode: None })
                 }
                 ("permission", false) => {
                     let message = match note {
@@ -602,7 +636,7 @@ impl Harness for ClaudeCode {
                         native_id,
                         crate::local::chat::PermissionDecision::Deny { message },
                     )?;
-                    Ok(ResumeAction::Handled)
+                    Ok(ResumeAction::Handled { plan_mode: None })
                 }
                 // Deny the held ExitPlanMode. With a note it's a revision
                 // request — the model revises the plan in the same turn. With
@@ -617,7 +651,7 @@ impl Harness for ClaudeCode {
                         native_id,
                         crate::local::chat::PermissionDecision::Deny { message },
                     )?;
-                    Ok(ResumeAction::Handled)
+                    Ok(ResumeAction::Handled { plan_mode: None })
                 }
                 // Plan approval: don't settle the held request — the paused
                 // plan turn gets interrupted (respond()'s SendMessage arm) and
@@ -626,7 +660,11 @@ impl Harness for ClaudeCode {
                 // bridge request is denied into the dying child, harmlessly.
                 ("plan", true) => {
                     let (text, mode) = synthesize_resume("plan", answer);
-                    Ok(ResumeAction::SendMessage { text, mode })
+                    Ok(ResumeAction::SendMessage {
+                        text,
+                        mode,
+                        plan_mode: None,
+                    })
                 }
                 // Mid-turn question (a bridge-held AskUserQuestion): the held
                 // tool call is denied with the user's answer as the message —
@@ -649,7 +687,7 @@ impl Harness for ClaudeCode {
                             ),
                         },
                     )?;
-                    Ok(ResumeAction::Handled)
+                    Ok(ResumeAction::Handled { plan_mode: None })
                 }
                 _ => Err(anyhow!("unsupported prompt kind for a bridge card")),
             };
@@ -676,11 +714,15 @@ impl Harness for ClaudeCode {
         if text.trim().is_empty() {
             return Err(anyhow!("no answer provided"));
         }
-        Ok(ResumeAction::SendMessage { text, mode })
+        Ok(ResumeAction::SendMessage {
+            text,
+            mode,
+            plan_mode: None,
+        })
     }
 
     fn config_home(&self) -> Option<PathBuf> {
-        Some(dirs::home_dir()?.join(".claude"))
+        Some(native_store::claude_home(NativeStore::Legacy))
     }
 
     fn skill_target(&self) -> Option<PathBuf> {
@@ -699,20 +741,75 @@ impl Harness for ClaudeCode {
     fn session_skills_dir(&self) -> Option<&'static str> {
         Some(".claude/skills")
     }
+
+    fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
+        self.config_home()
+            .map(|home| installed_plugin_skills_dirs(&home))
+            .unwrap_or_default()
+    }
 }
 
-/// Session mode → Claude Code `--permission-mode` value. The shared wire ids are
-/// harness-agnostic (`ask`/`accept-edits`/`bypass`), so this is where the enum
-/// is spelled back into Claude's own CLI vocabulary; `Auto` is the default when
-/// the session hasn't picked a mode.
+/// The `skills/` dir of every plugin installed in Claude Code, labeled with the
+/// plugin's own name. Keyed off `installed_plugins.json`, whose `installPath` is
+/// the only thing that knows whether an install resolved to the version cache or
+/// a marketplace checkout — and which of the marketplace's plugins are actually
+/// installed rather than merely on offer.
+fn installed_plugin_skills_dirs(config_home: &Path) -> Vec<(String, PathBuf)> {
+    let manifest = config_home.join("plugins").join("installed_plugins.json");
+    let Ok(text) = std::fs::read_to_string(&manifest) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(plugins) = json.get("plugins").and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, PathBuf)> = Vec::new();
+    for (key, installs) in plugins {
+        // Keys are `<plugin>@<marketplace>`, and a plugin name can itself be
+        // scoped (`@acme/tools@market`) — so the marketplace is the last `@`.
+        let label = key.rsplit_once('@').map_or(key.as_str(), |(name, _)| name);
+        let Some(installs) = installs.as_array() else {
+            continue;
+        };
+        for install in installs {
+            let Some(path) = install.get("installPath").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let dir = PathBuf::from(path).join("skills");
+            // Only absolute installs; a relative path would resolve against the
+            // server's working dir, which is not what the manifest meant.
+            if dir.is_absolute()
+                && dir.is_dir()
+                && !out.iter().any(|(_, existing)| *existing == dir)
+            {
+                out.push((label.to_string(), dir));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Internal policy → Claude Code `--permission-mode` value. Each provider-owned
+/// choice already uses the CLI spelling. `Auto` is the default when the session
+/// hasn't picked one.
 pub(crate) fn claude_permission_mode(mode: Option<PermissionMode>) -> &'static str {
     match mode.unwrap_or(PermissionMode::Auto) {
-        PermissionMode::Ask => "default",
+        PermissionMode::Ask => "manual",
         PermissionMode::AcceptEdits => "acceptEdits",
         PermissionMode::Plan => "plan",
         PermissionMode::Auto => "auto",
         PermissionMode::Bypass => "bypassPermissions",
     }
+}
+
+pub(crate) fn uses_permission_bridge(mode: Option<PermissionMode>) -> bool {
+    matches!(
+        mode,
+        Some(PermissionMode::Ask | PermissionMode::AcceptEdits | PermissionMode::Plan)
+    )
 }
 
 /// Path (relative to the worktree) of the plan-mode settings file we write and
@@ -814,9 +911,9 @@ fn claude_effort(level: Option<&str>) -> Option<&str> {
 
 /// The follow-up message + resume mode for an answered Claude prompt — Claude's
 /// resume strategy: a prompt ends the turn and the answer becomes a *new user
-/// message* that continues via `--resume`. `resume_mode` on the answer is a
-/// harness-agnostic wire id; unknown/absent ids fall through to the per-kind
-/// default (or the session's mode, applied downstream). The question arm is
+/// message* that continues via `--resume`. `ChatHost` validates `resume_mode`
+/// against Claude's advertised choices before this helper parses it; an absent
+/// id falls through to the per-kind default. The question arm is
 /// also reused as a plain text builder by the bridge's mid-turn question
 /// resume (the denial message that carries the answer).
 pub(crate) fn synthesize_resume(
@@ -851,25 +948,15 @@ pub(crate) fn synthesize_resume(
             // *grants* it. Claude's `--permission-mode` is coarse: `acceptEdits`
             // only auto-approves file edits, so it leaves a Bash (or any
             // non-edit) denial in place — the tool is denied again and the card
-            // re-appears in a loop. `bypass` is the only mode that lets the
+            // re-appears in a loop. `bypassPermissions` is the only mode that lets the
             // previously-blocked tool through, so that's the default for an
             // approval (a caller can still override via `resume_mode`). Verified
-            // against the CLI: acceptEdits re-denies Bash, bypass clears it.
+            // against the CLI: acceptEdits re-denies Bash, bypassPermissions clears it.
             let text = "The user approved that action. Continue.".to_string();
             (text, chosen.or(Some(PermissionMode::Bypass)))
         }
         // question (or anything else): feed the selection back as the user's reply.
-        _ => {
-            let mut text = if req.answers.is_empty() {
-                note.unwrap_or("").to_string()
-            } else {
-                req.answers.join(", ")
-            };
-            if let (false, Some(note)) = (req.answers.is_empty(), note) {
-                text.push_str(&format!("\n\n{note}"));
-            }
-            (text, None)
-        }
+        _ => (req.contextualized_answer(req.plain_answer_text()), None),
     }
 }
 
@@ -1012,6 +1099,12 @@ fn belongs_to_current_turn(event: &Value, text: &str, saw_user_echo: &mut bool) 
     false
 }
 
+fn observe_turn_boundary(event: &Value, text: &str, saw_user_echo: &mut bool) -> (bool, bool) {
+    let had_user_echo = *saw_user_echo;
+    let belongs = belongs_to_current_turn(event, text, saw_user_echo);
+    (belongs, !had_user_echo && *saw_user_echo)
+}
+
 /// The per-turn state `apply_event` folds each stream-json line into. Kept
 /// store-free so the caller (not the fold) owns every side effect — the native
 /// session id is committed only after an accepted attempt, and every flush happens there
@@ -1023,7 +1116,9 @@ struct TurnState {
     /// bridge on, ExitPlanMode / AskUserQuestion come from the bridge (held,
     /// mid-turn-answerable), so their `tool_use` renders nothing.
     bridge_active: bool,
-    /// The `result` event has landed — the turn is over.
+    /// At least one `result` event has landed. With background tasks a turn
+    /// spans several segments, each with its own result — this validates the
+    /// stream ended shaped like a turn, not that a given result was terminal.
     saw_result: bool,
     /// An interactive card was surfaced this turn (suppresses the synthesized
     /// plan card — see `should_synthesize_plan`).
@@ -1054,6 +1149,19 @@ struct TurnState {
     /// per message id (subagent events namespaced by `parent_tool_use_id`) —
     /// see the `assistant` arm for why this offset exists.
     assistant_blocks_seen: HashMap<String, usize>,
+    /// Background (`local_agent`) tasks spawned this turn that haven't reached
+    /// their terminal `task_notification` yet, task_id → spawning tool_use_id.
+    /// A `result` while entries remain is a segment boundary, not the end of
+    /// the turn — the CLI auto-resumes with the task's report once it
+    /// finishes, and ending the turn there would silently drop that whole
+    /// continuation. The tool_use_id side keeps the spawn part `running` (the
+    /// async launch acknowledgement would otherwise complete it at launch and
+    /// kill every running indicator while the agent works).
+    pending_tasks: HashMap<String, Option<String>>,
+    /// Whether any background task ran this turn (stays true after completion)
+    /// — gates the post-result grace wait for the auto-resume segment, which
+    /// can trail the result even when every task already finished.
+    saw_background_task: bool,
 }
 
 /// The spawning `Task` tool_use id for a sub-agent event (`parent_tool_use_id`),
@@ -1228,13 +1336,61 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 _ => {}
             }
         }
-        Some("system") => {
-            if event.get("subtype").and_then(Value::as_str) == Some("init") {
+        Some("system") => match event.get("subtype").and_then(Value::as_str) {
+            Some("init") => {
                 if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
                     state.native_session_id = Some(sid.to_string());
                 }
             }
-        }
+            // Track background sub-agents so the `result` arm knows a turn
+            // isn't over while one still runs (see `pending_tasks`).
+            Some("task_started") => {
+                if event.get("task_type").and_then(Value::as_str) == Some("local_agent") {
+                    if let Some(id) = event.get("task_id").and_then(Value::as_str) {
+                        // No tool_use_id → no spawn-part association; the
+                        // task still gates the turn's end.
+                        let tool_id = event
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        state.pending_tasks.insert(id.to_string(), tool_id);
+                        state.saw_background_task = true;
+                    }
+                }
+            }
+            // The task's real end: retire it and stamp the spawn part terminal
+            // — the async-launch tool_result deliberately left it `running`.
+            Some("task_notification") => {
+                if let Some(id) = event.get("task_id").and_then(Value::as_str) {
+                    let tool_id = state.pending_tasks.remove(id).flatten();
+                    if let Some(part) = tool_id
+                        .as_deref()
+                        .and_then(|tid| find_part_mut(&mut ctx.assistant.parts, tid))
+                    {
+                        if let Some(part_state) = part.state.as_mut() {
+                            if part_state.status == "running" {
+                                let ok = event.get("status").and_then(Value::as_str)
+                                    == Some("completed");
+                                part_state.status = if ok { "completed" } else { "error" }.into();
+                                if !ok {
+                                    // Give the failure a real message — the
+                                    // spawn tool's own result was only the
+                                    // launch acknowledgement.
+                                    part_state.error = Some(
+                                        event
+                                            .get("summary")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("The background agent failed")
+                                            .to_string(),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
         Some("assistant") => {
             if event
                 .get("error")
@@ -1405,6 +1561,22 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     Some(p) => format!("{p}:{tool_id}"),
                     None => tool_id.to_string(),
                 };
+                // An async spawn's immediate acknowledgement ("Async agent
+                // launched…") is not the call's real end — the agent is still
+                // running, and completing the part here would kill every
+                // running indicator for it. It's internal metadata, not a
+                // report, so it isn't stored either; the terminal
+                // task_notification stamps the part. (Sync spawns are never
+                // pending here: their task_notification precedes this result.)
+                let launch_ack = parent.is_none()
+                    && !is_error
+                    && state
+                        .pending_tasks
+                        .values()
+                        .any(|tid| tid.as_deref() == Some(part_id.as_str()));
+                if launch_ack {
+                    continue;
+                }
                 if let Some(part) = find_part_mut(&mut ctx.assistant.parts, &part_id) {
                     if let Some(state) = part.state.as_mut() {
                         state.status = if is_error { "error" } else { "completed" }.into();
@@ -1453,6 +1625,13 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 }
             }
             state.had_activity |= report_result_usage(ctx, event).is_some_and(|used| used > 0);
+            // A result while background sub-agents still run is only a segment
+            // boundary: the model ended ITS reply, but the CLI auto-resumes
+            // with the agents' reports when they finish. Keep listening — the
+            // continuation's own result (no tasks pending) ends the turn.
+            if !state.pending_tasks.is_empty() {
+                return false;
+            }
             return true;
         }
         _ => {}
@@ -1535,18 +1714,18 @@ fn commit_attempt_session(ctx: &mut TurnCtx, state: &TurnState) {
 
 /// The reasoning-level → `--effort` value the spawn config carries. Split out so
 /// the harness and the host agree on exactly what the child was launched with.
-fn spawn_config(ctx: &TurnCtx) -> SpawnConfig {
+fn spawn_config(ctx: &TurnCtx, native_store: NativeStore) -> SpawnConfig {
     SpawnConfig {
         permission_mode: ctx.permission_mode,
         effort: claude_effort(ctx.reasoning_level.as_deref()).map(str::to_string),
         model: ctx.model.clone(),
+        native_store,
         // The turn WANTS the bridge iff it's plan mode under a bound `orx up`
         // port; whether the bridge was actually achieved is recorded on the
         // spawned child's config (a failed write leaves it false and the next
         // plan turn respawns). Keeping the wanted value here means a plan turn
         // reconciles against a child that already has the bridge and reuses it.
-        bridge_active: ctx.permission_mode == Some(PermissionMode::Plan)
-            && ctx.host.up_port().is_some(),
+        bridge_active: uses_permission_bridge(ctx.permission_mode) && ctx.host.up_port().is_some(),
     }
 }
 
@@ -1559,13 +1738,48 @@ fn spawn_config(ctx: &TurnCtx) -> SpawnConfig {
 /// or an API backoff burst emits nothing for minutes, legitimately).
 const FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// How long after a `result` to wait for the CLI's background-task auto-resume
+/// segment before declaring the turn over. The continuation is queued locally
+/// by the CLI, so it arrives within milliseconds when it exists at all.
+const BACKGROUND_RESUME_GRACE: Duration = Duration::from_secs(3);
+
 async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u64)> {
-    let client = ctx.host.claude.ensure(spec).await?;
+    let (route, mut rx) = loop {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let acquire = ctx.host.claude.acquire_turn(spec.clone(), tx);
+        let result = match ctx.orx_retry_remaining() {
+            Some(remaining) => tokio::time::timeout(remaining, acquire)
+                .await
+                .map_err(|_| anyhow!("Claude Code setup exceeded the ORX retry budget"))?,
+            None => acquire.await,
+        };
+        match result {
+            Ok(route) => {
+                ctx.clear_retry_status();
+                break (route, rx);
+            }
+            Err(error) => {
+                ctx.host.claude.kill_session(&ctx.session_id).await;
+                let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("claude_setup", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Restarting Claude Code",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    };
+    let client = route.client();
     let auth_generation = client.auth_generation();
     let bridge_active = client.config().bridge_active;
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let _route = client.register_turn(tx);
+    ctx.persist_delivery(DeliveryState::Unknown)?;
     if let Err(e) = client.send_user_message(&ctx.text).await {
         ctx.host.claude.kill_session(&ctx.session_id).await;
         return Err(anyhow!(
@@ -1580,16 +1794,56 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
     };
     let mut saw_event = false;
     let mut saw_user_echo = false;
+    // Absolute, so steering can't push it back: a wedged child that the user
+    // keeps typing at must still trip the detector.
+    let mut deadline = tokio::time::Instant::now() + FIRST_EVENT_TIMEOUT;
+    // An event received during the post-result grace wait below, replayed at
+    // the top of the next iteration.
+    let mut queued: Option<TurnEvent> = None;
     loop {
-        let deadline = if saw_event {
-            super::TURN_WATCHDOG
-        } else {
-            FIRST_EVENT_TIMEOUT
+        // A continuation stashed by the grace wait replays without waiting.
+        // Otherwise `steering` is borrowed out of `ctx` so the borrow ends with
+        // the select — the steer arm's handler needs `&mut ctx`.
+        let waited = match queued.take() {
+            Some(event) => Waited::Event(Ok(Some(event))),
+            None => {
+                let steering = &mut ctx.steering;
+                tokio::select! {
+                    event = tokio::time::timeout_at(deadline, rx.recv()) => Waited::Event(event),
+                    steer = super::next_steer(steering) => Waited::Steer(steer),
+                }
+            }
         };
-        let event = match tokio::time::timeout(deadline, rx.recv()).await {
-            Ok(event) => event,
-            Err(_) if ctx.host.has_pending_permission(&ctx.session_id) => continue,
-            Err(_) => {
+        let event = match waited {
+            Waited::Steer(steer) => {
+                // A failed write means the child is gone and this turn is about
+                // to error out — park the text so it survives into the next one.
+                match client.send_user_message(&steer.text).await {
+                    Ok(()) => ctx.record_steer(&steer.display),
+                    Err(_) => {
+                        if let Err(error) = ctx.host.park_steer(&ctx.session_id, steer) {
+                            ctx.push_error(format!("Could not preserve steering message: {error}"));
+                        }
+                    }
+                }
+                continue;
+            }
+            Waited::Event(Ok(event)) => {
+                deadline = tokio::time::Instant::now() + super::TURN_WATCHDOG;
+                event
+            }
+            // Card think-time is unbounded by design: re-arm, or an elapsed
+            // absolute deadline would spin this arm instead of waiting.
+            Waited::Event(Err(_)) if ctx.host.has_pending_permission(&ctx.session_id) => {
+                deadline = tokio::time::Instant::now()
+                    + if saw_event {
+                        super::TURN_WATCHDOG
+                    } else {
+                        FIRST_EVENT_TIMEOUT
+                    };
+                continue;
+            }
+            Waited::Event(Err(_)) => {
                 commit_attempt_session(ctx, &state);
                 ctx.host.claude.kill_session(&ctx.session_id).await;
                 let _ = ctx.flush();
@@ -1619,7 +1873,12 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
         };
         match event {
             TurnEvent::Line(value) => {
-                if !belongs_to_current_turn(&value, &ctx.text, &mut saw_user_echo) {
+                let (belongs, accepted_now) =
+                    observe_turn_boundary(&value, &ctx.text, &mut saw_user_echo);
+                if accepted_now {
+                    ctx.mark_delivery(DeliveryState::Accepted);
+                }
+                if !belongs {
                     saw_event = true;
                     if value.get("type").and_then(Value::as_str) == Some("system")
                         && value.get("subtype").and_then(Value::as_str) == Some("init")
@@ -1637,7 +1896,19 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
                 }
                 ctx.maybe_flush();
                 if done {
-                    break;
+                    // A turn that spawned background sub-agents can auto-resume
+                    // right AFTER its result (the CLI queues a completed task's
+                    // report as a fresh segment: init + messages + another
+                    // result). Give that continuation a short window to show up
+                    // before ending the turn; a quiet window means the report
+                    // was already delivered in this segment.
+                    if !state.saw_background_task {
+                        break;
+                    }
+                    match tokio::time::timeout(BACKGROUND_RESUME_GRACE, rx.recv()).await {
+                        Ok(Some(event)) => queued = Some(event),
+                        _ => break,
+                    }
                 }
             }
             TurnEvent::Closed => {
@@ -1660,6 +1931,10 @@ async fn run_attempt(ctx: &mut TurnCtx, spec: SpawnSpec) -> Result<(TurnState, u
             "claude ended the turn without a result; see {}",
             crate::store::data_dir().join("agent-claude.log").display()
         ));
+    }
+
+    if state.auth_failed && !saw_user_echo {
+        ctx.mark_delivery(DeliveryState::Rejected);
     }
     commit_attempt_session(ctx, &state);
     Ok((state, auth_generation))
@@ -1689,14 +1964,32 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // cards are deliberately left alone — they resume via --resume.
     let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
 
-    let resume = ctx.native_session_id.clone();
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))
+            .await
+            .map_err(|error| anyhow!("Claude session lookup failed: {error}"))??,
+        None => None,
+    };
+    let native_store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    let resume = ctx
+        .native_session_id
+        .clone()
+        .filter(|_| native_session.is_some());
+    if ctx.native_session_id.is_some() && resume.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "Claude Code") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+    }
     let base_spec = SpawnSpec {
         chat: ctx.host.clone(),
         session_id: ctx.session_id.clone(),
         repo,
         playbook,
         resume: resume.clone(),
-        config: spawn_config(ctx),
+        config: spawn_config(ctx, native_store),
     };
     let mut retry_count = 0;
     let mut state;
@@ -1729,8 +2022,28 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 serde_json::json!({ "harness": "claude-code", "authState": snapshot.state }),
             );
         }
-        if auth == HarnessAuthState::Ready && !attempt.had_activity && retry_count == 0 {
+        if auth == HarnessAuthState::Ready
+            && !attempt.had_activity
+            && retry_count == 0
+            && ctx.delivery_state() == crate::local::chat::DeliveryState::Rejected
+        {
             retry_count += 1;
+            let Some((retry_number, delay)) = ctx.schedule_orx_retry(None) else {
+                state = attempt;
+                ctx.mark_terminal_failure(
+                    "claude_auth",
+                    "Claude Code authentication recovery exhausted the ORX retry budget",
+                );
+                break;
+            };
+            ctx.show_retry_status(
+                "orx",
+                "Claude Code authentication recovered",
+                retry_number as i64 + 1,
+                Some(ORX_MAX_ATTEMPTS as i64),
+                Some(crate::store::now_ms() + delay.as_millis() as i64),
+            );
+            tokio::time::sleep(delay).await;
             continue;
         }
 
@@ -1768,6 +2081,16 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             },
         ));
     }
+    if state.turn_errored {
+        let message = ctx
+            .assistant
+            .parts
+            .iter()
+            .rev()
+            .find_map(|part| part.state.as_ref()?.error.clone())
+            .unwrap_or_else(|| "Claude Code reported a terminal turn error".into());
+        ctx.mark_terminal_failure("claude_terminal", message);
+    }
     let _ = ctx.flush();
     Ok(())
 }
@@ -1776,6 +2099,46 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    /// Plugins live in the version cache or a marketplace checkout, and a
+    /// marketplace holds plugins that are merely on offer — so only the
+    /// `installPath` of an actual install counts, and only when it ships skills.
+    #[test]
+    fn plugin_skills_dirs_follow_the_install_manifest() {
+        let home = std::env::temp_dir().join(format!("orx-plugins-test-{}", uuid::Uuid::new_v4()));
+        let installed = home.join("cache/runpod/runpod/1.2.0");
+        let scoped = home.join("cache/market/acme-tools/0.2.0");
+        let no_skills = home.join("cache/other/other/0.1.0");
+        std::fs::create_dir_all(installed.join("skills/flash")).expect("mkdir");
+        std::fs::create_dir_all(scoped.join("skills/lint")).expect("mkdir");
+        std::fs::create_dir_all(&no_skills).expect("mkdir");
+        std::fs::create_dir_all(home.join("plugins")).expect("mkdir");
+        std::fs::write(
+            home.join("plugins/installed_plugins.json"),
+            serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "runpod@runpod": [{"installPath": installed.to_string_lossy(), "version": "1.2.0"}],
+                    "@acme/tools@market": [{"installPath": scoped.to_string_lossy()}],
+                    "skill-less@market": [{"installPath": no_skills.to_string_lossy()}],
+                },
+            })
+            .to_string(),
+        )
+        .expect("write");
+
+        assert_eq!(
+            installed_plugin_skills_dirs(&home),
+            vec![
+                // A plugin name can itself be scoped: the marketplace is the last `@`.
+                ("@acme/tools".to_string(), scoped.join("skills")),
+                ("runpod".to_string(), installed.join("skills")),
+            ]
+        );
+        // No manifest at all is no plugins, not an error.
+        assert!(installed_plugin_skills_dirs(&home.join("nope")).is_empty());
+        let _ = std::fs::remove_dir_all(&home);
+    }
 
     /// A `list_models` response in the live 2.1.212 shape (fields we don't
     /// read trimmed). Covers the four things the parser decides: the `default`
@@ -1946,14 +2309,13 @@ mod tests {
             resume_mode: resume_mode.map(str::to_string),
             answers: answers.iter().map(|s| s.to_string()).collect(),
             note: note.map(str::to_string),
+            annotations: Vec::new(),
         }
     }
 
     #[test]
-    fn permission_mode_maps_neutral_ids_to_claude_cli_strings() {
-        // The shared wire ids are neutral; claude.rs is where they're spelled
-        // back into Claude's own `--permission-mode` vocabulary.
-        assert_eq!(claude_permission_mode(Some(PermissionMode::Ask)), "default");
+    fn permission_mode_maps_to_claude_cli_strings() {
+        assert_eq!(claude_permission_mode(Some(PermissionMode::Ask)), "manual");
         assert_eq!(
             claude_permission_mode(Some(PermissionMode::AcceptEdits)),
             "acceptEdits"
@@ -1969,12 +2331,21 @@ mod tests {
     }
 
     #[test]
+    fn permission_bridge_covers_every_headless_prompting_mode() {
+        assert!(uses_permission_bridge(Some(PermissionMode::Ask)));
+        assert!(uses_permission_bridge(Some(PermissionMode::AcceptEdits)));
+        assert!(uses_permission_bridge(Some(PermissionMode::Plan)));
+        assert!(!uses_permission_bridge(Some(PermissionMode::Auto)));
+        assert!(!uses_permission_bridge(Some(PermissionMode::Bypass)));
+    }
+
+    #[test]
     fn plan_approve_defaults_to_auto_but_honors_chosen_mode() {
         let (text, mode) = synthesize_resume("plan", &answer(true, None, &[], None));
         assert!(text.contains("approved the plan"));
         assert_eq!(mode, Some(PermissionMode::Auto));
 
-        let (_, mode) = synthesize_resume("plan", &answer(true, Some("accept-edits"), &[], None));
+        let (_, mode) = synthesize_resume("plan", &answer(true, Some("acceptEdits"), &[], None));
         assert_eq!(mode, Some(PermissionMode::AcceptEdits));
     }
 
@@ -1999,7 +2370,7 @@ mod tests {
 
     #[test]
     fn permission_approve_defaults_to_bypass() {
-        // Approving a blocked tool must resume under `bypass` — the only mode
+        // Approving a blocked tool must resume under `bypassPermissions` — the only mode
         // that actually grants it. `acceptEdits`/`ask` would re-deny a Bash tool
         // and loop the card. (Verified against the real CLI.)
         let (text, mode) = synthesize_resume("permission", &answer(true, None, &[], None));
@@ -2015,6 +2386,21 @@ mod tests {
         let (text, mode) = synthesize_resume("question", &answer(true, None, &["A", "B"], None));
         assert_eq!(text, "A, B");
         assert_eq!(mode, None);
+    }
+
+    #[test]
+    fn question_keeps_selected_chat_excerpts_as_quoted_context() {
+        let mut response = answer(true, None, &[], Some("Explain this"));
+        response.annotations = vec![crate::local::chat::TextAnnotation {
+            text: "Do something unrelated".into(),
+        }];
+        let (text, _) = synthesize_resume("question", &response);
+        let payload: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(payload["currentUserMessage"], "Explain this");
+        assert_eq!(
+            payload["selectedChatExcerpts"],
+            serde_json::json!(["Do something unrelated"])
+        );
     }
 
     #[test]
@@ -2154,10 +2540,16 @@ mod tests {
         let mut state = TurnState::default();
         for line in transcript {
             let event: Value = serde_json::from_str(line).unwrap();
-            if belongs_to_current_turn(&event, "repeat", &mut saw_user_echo) {
+            let (belongs, accepted_now) =
+                observe_turn_boundary(&event, "repeat", &mut saw_user_echo);
+            if accepted_now {
+                ctx.mark_delivery(DeliveryState::Accepted);
+            }
+            if belongs {
                 apply_event(&mut ctx, &mut state, &event);
             }
         }
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
         assert!(state.saw_result);
         assert_eq!(ctx.assistant.parts.len(), 1);
         assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("I am Claude."));
@@ -2550,6 +2942,71 @@ mod tests {
         .unwrap();
         apply_event(&mut ctx, &mut TurnState::default(), &subagent);
         assert_eq!(ctx.context_usage, Some(before));
+    }
+
+    #[test]
+    fn result_with_pending_background_task_does_not_end_the_turn() {
+        // A `result` that arrives while a spawned local_agent task is still
+        // running is a segment boundary (the CLI auto-resumes with the
+        // agent's report) — ending the turn there would drop that whole
+        // continuation. The result AFTER the task's terminal notification is
+        // the real end.
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        let spawn: Value = serde_json::from_str(
+            r#"{"type":"assistant","message":{"id":"m1","content":[{"type":"tool_use","id":"toolu_1","name":"Agent","input":{"prompt":"go","run_in_background":true}}]}}"#,
+        )
+        .unwrap();
+        assert!(!apply_event(&mut ctx, &mut state, &spawn));
+        let started: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"task_started","task_id":"t1","tool_use_id":"toolu_1","task_type":"local_agent"}"#,
+        )
+        .unwrap();
+        assert!(!apply_event(&mut ctx, &mut state, &started));
+        assert!(state.saw_background_task);
+
+        // The immediate async-launch acknowledgement must not complete the
+        // spawn part — the agent is still running and the row's every running
+        // indicator keys off its status.
+        let ack: Value = serde_json::from_str(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"Async agent launched successfully."}]}}"#,
+        )
+        .unwrap();
+        assert!(!apply_event(&mut ctx, &mut state, &ack));
+        let status = |ctx: &TurnCtx| {
+            ctx.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .status
+                .clone()
+        };
+        assert_eq!(status(&ctx), "running");
+
+        let result: Value =
+            serde_json::from_str(r#"{"type":"result","subtype":"success","is_error":false}"#)
+                .unwrap();
+        assert!(
+            !apply_event(&mut ctx, &mut state, &result),
+            "result with a pending task must not end the turn"
+        );
+        assert!(state.saw_result);
+        assert!(!state.turn_errored);
+
+        let notified: Value = serde_json::from_str(
+            r#"{"type":"system","subtype":"task_notification","task_id":"t1","tool_use_id":"toolu_1","status":"completed"}"#,
+        )
+        .unwrap();
+        assert!(!apply_event(&mut ctx, &mut state, &notified));
+        assert_eq!(
+            status(&ctx),
+            "completed",
+            "task_notification stamps the spawn part"
+        );
+        assert!(
+            apply_event(&mut ctx, &mut state, &result),
+            "the post-continuation result ends the turn"
+        );
     }
 
     #[test]

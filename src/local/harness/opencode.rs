@@ -13,9 +13,8 @@
 //! still open — the turn is paused, not finished. We surface those as
 //! `permission` / `question` cards and reply over the live session
 //! (`resume_from_prompt` → [`ResumeAction::Handled`]), which unblocks the same
-//! POST. `Bypass` mode auto-resolves permission cards (replies "always" without
-//! a blocking card); `Auto`/`Plan` surface them. Questions always need a human,
-//! so they always surface regardless of mode.
+//! POST. Auto-approve resolves native `ask` requests without a card; Default
+//! surfaces them. Questions always need a human, so they always surface.
 //!
 //! Detection: opencode's `auth.json` is `{provider: {type}}`; the signed-in
 //! providers are its account line, and `opencode models --verbose` is the model
@@ -30,15 +29,21 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{bin_version, read_json, HarnessInfo};
-use super::options::{HarnessOptions, PermissionMode, REASONING_DEFAULT_ID};
-use super::{Harness, ResumeAction};
+use super::detect::{probe_bin, read_json, HarnessInfo};
+use super::options::{
+    HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
+};
+use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
-    ContextUsage, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt, WireQuestionOption,
-    WireToolState,
+    ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
+    WireQuestionOption, WireToolState,
 };
+use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
+
+const OPENCODE_REINSTALL: &str =
+    "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
 
 pub struct OpenCode;
 
@@ -56,14 +61,19 @@ impl Harness for OpenCode {
         true
     }
 
+    async fn generate_title(&self, first_message: &str) -> Option<String> {
+        opencode_generate_title(&find_opencode().ok()?, first_message).await
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
         if let Ok(bin) = find_opencode() {
-            info.installed = true;
-            info.version = bin_version(&bin).await;
-            models = opencode_models(&bin).await;
-            info.bin_path = Some(bin.to_string_lossy().into_owned());
+            info.record_bin(&bin, probe_bin(&bin).await);
+            // A binary that failed `--version` has no catalog to give either.
+            if !info.install_broken {
+                models = opencode_models(&bin).await;
+            }
         }
         let providers = opencode_providers();
         if !providers.is_empty() {
@@ -102,9 +112,11 @@ impl Harness for OpenCode {
         // auth.json nor a provider key above now reads "Not signed in", and
         // since step 1 of onboarding gates on this, an opencode-only user is
         // asked to sign in before continuing.
-        info.agent_ready = info.installed && info.authenticated;
+        info.agent_ready = info.ready();
         if info.agent_ready {
             info.models = models;
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
         } else if info.installed {
             info.agent_note =
                 Some("Sign in with `opencode auth login` to chat with it here.".to_string());
@@ -117,36 +129,37 @@ impl Harness for OpenCode {
         Some(info)
     }
 
-    async fn run_turn(&self, ctx: &mut TurnCtx) -> Result<()> {
-        run_turn(ctx).await
+    async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
+        run_turn(ctx)
+            .await
+            .map(|()| TurnOutcome::Completed)
+            .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
     fn options(&self) -> HarnessOptions {
-        // Two native OpenCode axes folded onto the one Mode toggle:
-        //  * which built-in agent runs — `plan` (read-only: allows inspection
-        //    like `orx …`, denies edits) vs `build` (the default). A real, clean
-        //    plan mode, unlike Claude/Codex — verified live.
-        //  * how a `permission.asked` is answered. NOTE opencode's default is
-        //    permissive (`allow *`); it only prompts on a few risky cases
-        //    (runaway loops, out-of-workspace writes, `.env` reads), so a
-        //    dedicated "ask for everything" mode would be hollow (cards would
-        //    almost never fire). So we don't offer one:
-        //      * Plan   → plan agent, and surface the rare cards that do fire.
-        //      * Auto   → build agent, opencode's permissive default (still
-        //                 surfaces those rare cards / questions).
-        //      * Bypass → build agent, auto-approve even those.
+        // OpenCode's agent (plan/build) is independent of permission handling.
+        // Default honors configured allow/ask/deny rules; Auto-approve answers
+        // only native `ask` requests and never overrides explicit denies.
         // Reasoning IS a model property in opencode, so there is no meaningful
         // harness-wide list: the real choices are each model's `variants`, read
         // from `opencode models --verbose` in `detect` and attached per-model.
         // Leaving this axis empty means a model with no variants shows no
         // picker at all, rather than falling back to a bogus union.
-        HarnessOptions::none().with_permission_modes(
-            &[
-                PermissionMode::Plan,
-                PermissionMode::Auto,
-                PermissionMode::Bypass,
+        HarnessOptions::none().with_permission_choices(
+            vec![
+                OptionChoice::described(
+                    "default",
+                    "Default",
+                    "Ask before actions that need your approval",
+                ),
+                OptionChoice::described(
+                    "auto-approve",
+                    "Auto-approve",
+                    "Approve requests automatically, except actions you have denied",
+                ),
             ],
-            PermissionMode::Auto,
+            "default",
+            PlanActivation::Command,
         )
     }
 
@@ -160,8 +173,20 @@ impl Harness for OpenCode {
         prompt: &WirePrompt,
         answer: &PromptAnswer,
     ) -> Result<ResumeAction> {
+        let plan_mode = plan_exit_transition(prompt, answer);
+        if let Some(plan_mode) = plan_mode {
+            // Persist the native answer's Plan transition before OpenCode
+            // consumes it. If delivery fails, restore the active Plan state so
+            // the still-actionable card and ORX continue to agree.
+            ctx.host.set_plan_mode(&ctx.session_id, plan_mode).await?;
+            if let Err(err) = reply_inline(ctx, prompt, answer).await {
+                let _ = ctx.host.set_plan_mode(&ctx.session_id, true).await;
+                return Err(err);
+            }
+            return Ok(ResumeAction::Handled { plan_mode: None });
+        }
         reply_inline(ctx, prompt, answer).await?;
-        Ok(ResumeAction::Handled)
+        Ok(ResumeAction::Handled { plan_mode: None })
     }
 
     fn config_home(&self) -> Option<PathBuf> {
@@ -189,7 +214,7 @@ impl Harness for OpenCode {
 }
 
 fn opencode_auth_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_DATA_HOME")
+    let base = crate::local::shell_env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
     Some(base.join("opencode").join("auth.json"))
@@ -232,13 +257,60 @@ async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
     model_id_lines(&plain).map(super::ModelInfo::new).collect()
 }
 
+/// One-shot session title from the first user message: a throwaway
+/// `opencode run` child on the user's default model. opencode's server no
+/// longer retitles parent sessions itself (only sub-agent child sessions get
+/// task-description titles), so the `session.updated` adoption path never
+/// fires for the session proper — this mirrors the claude/codex one-shot
+/// children instead. Any failure lands on `None` and keeps the placeholder.
+async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(bin);
+    // The user's message is embedded in the prompt, so the child must not be
+    // able to act on it: the built-in read-only `plan` agent denies writes,
+    // `--pure` skips external plugins, and the temp cwd keeps any residual
+    // reads away from real repos. A tool call that still asks for permission
+    // just blocks the unattended child until TITLE_TIMEOUT kills it — the
+    // placeholder title stands.
+    cmd.args([
+        "run",
+        "--agent",
+        "plan",
+        "--pure",
+        &super::title::title_prompt(first_message),
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::null())
+    .kill_on_drop(true)
+    // Outside any repository, so the child doesn't ingest the server cwd's
+    // AGENTS.md into a request that only needs one sentence.
+    .current_dir(std::env::temp_dir());
+    crate::local::chat::prepare_env(&mut cmd);
+    cmd.env(
+        "OPENCODE_DB",
+        native_store::prepare_opencode(NativeStore::Isolated).ok()?,
+    );
+    // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
+    // otherwise write escape codes straight into the title column.
+    cmd.env("NO_COLOR", "1");
+    let out = tokio::time::timeout(super::title::TITLE_TIMEOUT, cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    super::title::sanitize_title(&String::from_utf8_lossy(&out.stdout))
+}
+
 /// Run `opencode <args>` in the home dir, returning stdout on success.
 async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
-    let fut = tokio::process::Command::new(bin)
-        .args(args)
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-        .stdin(std::process::Stdio::null())
-        .output();
+        .stdin(std::process::Stdio::null());
+    crate::local::chat::prepare_env(&mut cmd);
+    let fut = cmd.output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
         return None;
     };
@@ -476,7 +548,7 @@ fn permission_card(props: &Value) -> Option<WirePrompt> {
 /// is the same shape as Claude's AskUserQuestion, so it maps 1:1. Only the first
 /// question is surfaced (the composer answers one at a time); its request id
 /// rides on `native_id` for `POST /question/{id}/reply`.
-fn question_card(props: &Value) -> Option<WirePrompt> {
+fn question_card(props: &Value, plan_exit_calls: &HashSet<String>) -> Option<WirePrompt> {
     let id = props.get("id").and_then(Value::as_str)?.to_string();
     let q = props
         .get("questions")
@@ -508,6 +580,11 @@ fn question_card(props: &Value) -> Option<WirePrompt> {
         header: q.get("header").and_then(Value::as_str).map(str::to_string),
         options,
         multi_select: q.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+        plan_exit: props
+            .get("tool")
+            .and_then(|tool| tool.get("callID"))
+            .and_then(Value::as_str)
+            .is_some_and(|call_id| plan_exit_calls.contains(call_id)),
         native_id: Some(id),
         ..Default::default()
     })
@@ -605,56 +682,193 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
 /// `plan` agent (denies edits, allows inspection); everything else runs the
 /// default `build` agent. The permission-reply behavior (surface vs auto-reply)
 /// is a separate axis handled in `handle_prompt_event`.
-fn opencode_agent(mode: Option<PermissionMode>) -> &'static str {
-    match mode {
-        Some(PermissionMode::Plan) => "plan",
-        _ => "build",
+fn opencode_agent(plan_mode: bool) -> &'static str {
+    if plan_mode {
+        "plan"
+    } else {
+        "build"
     }
 }
 
-async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
-    // Lazy bring-up: spawns serve in this session's worktree or reuses the
-    // session's live child.
+fn opencode_auto_approve(mode: Option<PermissionMode>) -> bool {
+    matches!(mode, Some(PermissionMode::Auto))
+}
+
+fn plan_exit_transition(prompt: &WirePrompt, answer: &PromptAnswer) -> Option<bool> {
+    prompt.plan_exit.then(|| {
+        !answer
+            .answers
+            .iter()
+            .any(|choice| choice.eq_ignore_ascii_case("yes"))
+    })
+}
+
+#[derive(Debug)]
+struct OpenCodeSetupHttpError {
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+}
+
+impl std::fmt::Display for OpenCodeSetupHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "OpenCode setup returned HTTP {}", self.status)
+    }
+}
+
+impl std::error::Error for OpenCodeSetupHttpError {}
+
+#[derive(Debug)]
+struct OpenCodeSetupProtocolError(&'static str);
+
+impl std::fmt::Display for OpenCodeSetupProtocolError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for OpenCodeSetupProtocolError {}
+
+fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Response> {
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs);
+    Err(OpenCodeSetupHttpError {
+        status: response.status(),
+        retry_after,
+    }
+    .into())
+}
+
+async fn opencode_setup_attempt(
+    ctx: &mut TurnCtx,
+    store: NativeStore,
+) -> Result<(String, String, reqwest::Response)> {
     let status = ctx
         .host
         .opencode
-        .ensure(&ctx.project, &ctx.session_id)
+        .ensure(&ctx.project, &ctx.session_id, store)
         .await?;
     let port = status
         .port
-        .ok_or_else(|| anyhow!("opencode agent has no port"))?;
+        .ok_or(OpenCodeSetupProtocolError("opencode agent has no port"))?;
     let base = format!("http://127.0.0.1:{port}");
-
     let native_id = match &ctx.native_session_id {
         Some(id) => id.clone(),
         None => {
-            let session: Value = ctx
+            let response = ctx
                 .http()
                 .post(format!("{base}/session"))
                 .header("content-type", "application/json")
                 .body("{}")
                 .send()
-                .await?
-                .error_for_status()?
-                .json()
                 .await?;
+            let session: Value = opencode_setup_response(response)?.json().await?;
             let id = session
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or_else(|| anyhow!("opencode session response had no id"))?
+                .ok_or(OpenCodeSetupProtocolError(
+                    "opencode session response had no id",
+                ))?
                 .to_string();
             ctx.set_native_session_id(&id);
             id
         }
     };
+    let events = ctx.http().get(format!("{base}/event")).send().await?;
+    let events = opencode_setup_response(events)?;
+    Ok((native_id, base, events))
+}
 
-    // Subscribe before sending so no early part events are missed.
-    let events = ctx
-        .http()
-        .get(format!("{base}/event"))
-        .send()
-        .await?
-        .error_for_status()?;
+async fn opencode_pre_accept_setup(
+    ctx: &mut TurnCtx,
+    store: NativeStore,
+) -> Result<(String, String, reqwest::Response)> {
+    loop {
+        let remaining = ctx.orx_retry_remaining();
+        let attempt = opencode_setup_attempt(ctx, store);
+        let result = match remaining {
+            Some(remaining) => tokio::time::timeout(remaining, attempt)
+                .await
+                .map_err(|_| anyhow!("OpenCode setup exceeded the ORX retry budget"))?,
+            None => attempt.await,
+        };
+        match result {
+            Ok(setup) => {
+                ctx.clear_retry_status();
+                return Ok(setup);
+            }
+            Err(error) => {
+                let (retryable, explicit) =
+                    if let Some(http) = error.downcast_ref::<OpenCodeSetupHttpError>() {
+                        (
+                            http.status.as_u16() == 408
+                                || http.status.as_u16() == 429
+                                || http.status.is_server_error(),
+                            http.retry_after,
+                        )
+                    } else if let Some(request) = error.downcast_ref::<reqwest::Error>() {
+                        (
+                            request.is_connect() || request.is_timeout() || request.is_request(),
+                            None,
+                        )
+                    } else {
+                        (
+                            error.downcast_ref::<OpenCodeSetupProtocolError>().is_none(),
+                            None,
+                        )
+                    };
+                let retry = retryable
+                    .then(|| ctx.schedule_orx_retry(explicit))
+                    .flatten();
+                let Some((retry_number, delay)) = retry else {
+                    ctx.mark_delivery(DeliveryState::NotSent);
+                    ctx.mark_terminal_failure("opencode_setup", error.to_string());
+                    return Err(error);
+                };
+                ctx.show_retry_status(
+                    "orx",
+                    "Reconnecting to OpenCode",
+                    retry_number as i64 + 1,
+                    Some(ORX_MAX_ATTEMPTS as i64),
+                    Some(crate::store::now_ms() + delay.as_millis() as i64),
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
+    // Native permission and question requests die with their turn. Clear any
+    // crash/restart leftovers before a new live request can be surfaced.
+    ctx.host
+        .resolve_stale_prompts(&ctx.session_id, true)
+        .await?;
+
+    let native_session = match ctx.native_session_id.clone() {
+        Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session(&id))
+            .await
+            .map_err(|error| anyhow!("OpenCode session lookup failed: {error}"))??,
+        None => None,
+    };
+    let store = native_session
+        .as_ref()
+        .map(|session| session.store)
+        .unwrap_or(NativeStore::Isolated);
+    if ctx.native_session_id.is_some() && native_session.is_none() {
+        if let Some(recovery) = super::native_recovery_context(ctx, "OpenCode") {
+            ctx.text = format!("{recovery}\n\n{}", ctx.text);
+        }
+        ctx.native_session_id = None;
+    }
+
+    let (native_id, base, events) = opencode_pre_accept_setup(ctx, store).await?;
     let mut stream = events.bytes_stream();
 
     let mut body = json!({
@@ -663,7 +877,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         // read-only planning agent — allows inspection, denies edits) vs `build`
         // (the default). The message endpoint takes `agent` directly (verified),
         // so no separate switch call is needed.
-        "agent": opencode_agent(ctx.permission_mode),
+        "agent": opencode_agent(ctx.plan_mode),
     });
     if let Some(model) = &ctx.model {
         if let Some((provider, model_id)) = model.split_once('/') {
@@ -676,11 +890,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(variant) = opencode_variant(ctx.reasoning_level.as_deref()) {
         body["variant"] = json!(variant);
     }
+    let turn_started_at = crate::store::now_ms();
     let send = ctx
         .http()
         .post(format!("{base}/session/{native_id}/message"))
         .json(&body)
         .send();
+    ctx.persist_delivery(DeliveryState::Unknown)?;
     tokio::pin!(send);
 
     // Parts are attributed via message.updated role info; a part arriving
@@ -691,6 +907,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // sessionID → the task spawn part's id. Their events (a foreign sessionID)
     // route into that part's `children` instead of being dropped.
     let mut sub_sessions: HashMap<String, String> = HashMap::new();
+    // Native plan exit is an ordinary `question.asked`; connect it to the
+    // preceding `plan_exit` tool through the question's `tool.callID`.
+    let mut plan_exit_calls: HashSet<String> = HashSet::new();
     let mut buf = String::new();
 
     loop {
@@ -705,10 +924,31 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                     buf.drain(..=pos);
                     let Some(data) = line.strip_prefix("data: ") else { continue };
                     let Ok(event) = serde_json::from_str::<Value>(data) else { continue };
+                    if let Some(part) = event
+                        .get("properties")
+                        .and_then(|props| props.get("part"))
+                        .filter(|part| {
+                            part.get("sessionID").and_then(Value::as_str) == Some(native_id.as_str())
+                                && part.get("type").and_then(Value::as_str) == Some("tool")
+                                && part.get("tool").and_then(Value::as_str) == Some("plan_exit")
+                        })
+                    {
+                        if let Some(call_id) = part.get("callID").and_then(Value::as_str) {
+                            plan_exit_calls.insert(call_id.to_string());
+                        }
+                    }
                     // Interactive prompts (permission/question) pause the turn and
                     // are handled async (emit a card, or auto-reply per mode); all
                     // other events are message/part updates handled synchronously.
-                    if !handle_prompt_event(ctx, &native_id, &base, &event).await? {
+                    if !handle_prompt_event(
+                        ctx,
+                        &native_id,
+                        &base,
+                        &event,
+                        &plan_exit_calls,
+                    )
+                    .await?
+                    {
                         handle_event(ctx, &native_id, &event, &mut assistant_msgs, &mut sub_sessions);
                     }
                 }
@@ -717,7 +957,14 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 // Turn done — the response body is the final assistant message;
                 // merge its parts as the authoritative versions.
                 let resp = resp?.error_for_status()?;
+                ctx.mark_delivery(DeliveryState::Accepted);
+                ctx.clear_retry_status();
                 if let Ok(message) = resp.json::<Value>().await {
+                    if !opencode_response_is_current(&message, turn_started_at) {
+                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                        ctx.mark_terminal_failure("opencode_stale_response", message);
+                        return Err(anyhow!(message));
+                    }
                     if let Some(parts) = message.get("parts").and_then(Value::as_array) {
                         for part in parts {
                             if let Some(wire) = to_wire_part(part) {
@@ -733,6 +980,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
+    message
+        .pointer("/info/time/created")
+        .and_then(Value::as_i64)
+        .is_some_and(|created| created >= turn_started_at)
 }
 
 /// OpenCode assistant `tokens` occupying the context window:
@@ -768,6 +1022,49 @@ fn handle_event(
 ) {
     let props = event.get("properties").unwrap_or(&Value::Null);
     match event.get("type").and_then(Value::as_str) {
+        Some("session.status") => {
+            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
+                return;
+            }
+            let status = props.get("status").unwrap_or(&Value::Null);
+            let status_type = status.get("type").and_then(Value::as_str);
+            if status_type == Some("retry") {
+                ctx.mark_delivery(DeliveryState::Accepted);
+                let attempt = status.get("attempt").and_then(Value::as_i64).unwrap_or(1) + 1;
+                let next = status.get("next").and_then(Value::as_i64).map(|next| {
+                    if next > 1_000_000_000_000 {
+                        next
+                    } else {
+                        crate::store::now_ms() + next
+                    }
+                });
+                let message = status
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("OpenCode is retrying");
+                ctx.show_retry_status("native", message, attempt, None, next);
+            } else {
+                if status_type == Some("busy") {
+                    ctx.mark_delivery(DeliveryState::Accepted);
+                }
+                ctx.clear_retry_status();
+            }
+        }
+        Some("session.error") => {
+            if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
+                return;
+            }
+            let error = props.get("error").unwrap_or(props);
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("OpenCode reported an error")
+                .to_string();
+            ctx.mark_native_retry_exhausted();
+            ctx.mark_delivery(DeliveryState::Accepted);
+            ctx.mark_terminal_failure("opencode_terminal", message.clone());
+            ctx.push_error(message);
+        }
         // A `task` tool spawns a sub-agent in a child session; opencode announces
         // it with `session.created` carrying the child's `parentID` = our
         // session. Link that child session to the spawning `task` tool row so its
@@ -786,6 +1083,11 @@ fn handle_event(
             let info = props.get("info").unwrap_or(&Value::Null);
             let session = info.get("sessionID").and_then(Value::as_str);
             let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            if session == Some(native_id)
+                && info.get("role").and_then(Value::as_str) == Some("user")
+            {
+                ctx.mark_delivery(DeliveryState::Accepted);
+            }
             // Record assistant message ids for the main session AND registered
             // sub-sessions, so a session's user parts (e.g. the task prompt echo)
             // can be filtered out — for both the transcript and sub-agent nesting.
@@ -903,10 +1205,9 @@ fn surface_card(ctx: &mut TurnCtx, card: WirePrompt) {
 /// for this session. Returns `true` if it consumed the event (so the caller
 /// skips `handle_event`), `false` otherwise.
 ///
-/// Permissions honor the session's mode: only `Bypass` auto-replies `always`
-/// over the live session (no blocking card); `Auto`/`Plan` (and anything else)
-/// surface a card and pause — opencode's default is already permissive, so the
-/// rare card it raises is worth showing. Questions always surface — there's no
+/// Permissions honor the session's policy: Auto-approve replies `always` to an
+/// `ask` request, while Default surfaces a card. Explicit denies never emit an
+/// approval request, so neither policy overrides them. Questions always surface — there's no
 /// sensible auto-answer. A single flaky auto-reply must not lose the whole turn,
 /// so on POST failure we fall back to surfacing the card rather than erroring.
 async fn handle_prompt_event(
@@ -914,6 +1215,7 @@ async fn handle_prompt_event(
     native_id: &str,
     base: &str,
     event: &Value,
+    plan_exit_calls: &HashSet<String>,
 ) -> Result<bool> {
     let props = event.get("properties").unwrap_or(&Value::Null);
     // Only this session's prompts (the /event stream is global across sessions).
@@ -931,10 +1233,8 @@ async fn handle_prompt_event(
                 let _ = ctx.flush();
                 return Ok(true);
             };
-            // Only Bypass auto-approves. Auto is opencode's permissive default —
-            // the rare card it does raise (out-of-workspace write, `.env` read)
-            // is worth surfacing; Plan surfaces them too.
-            let auto_approve = matches!(ctx.permission_mode, Some(PermissionMode::Bypass));
+            // Auto-approve handles native `ask` requests; Default surfaces them.
+            let auto_approve = opencode_auto_approve(ctx.permission_mode);
             match (auto_approve, card.native_id.as_deref()) {
                 (true, Some(id)) => {
                     // Reply without surfacing a card — keep the turn flowing. If
@@ -952,7 +1252,7 @@ async fn handle_prompt_event(
             Ok(true)
         }
         Some("question.asked") => {
-            match question_card(props) {
+            match question_card(props, plan_exit_calls) {
                 Some(card) => surface_card(ctx, card),
                 None => {
                     ctx.push_error("opencode asked a question we couldn't parse".into());
@@ -1160,12 +1460,21 @@ opencode/glm-5
 
     #[test]
     fn plan_mode_uses_the_plan_agent_others_build() {
-        assert_eq!(opencode_agent(Some(PermissionMode::Plan)), "plan");
-        assert_eq!(opencode_agent(Some(PermissionMode::Ask)), "build");
-        assert_eq!(opencode_agent(Some(PermissionMode::Auto)), "build");
-        assert_eq!(opencode_agent(Some(PermissionMode::Bypass)), "build");
-        // No mode set → the default build agent, never plan.
-        assert_eq!(opencode_agent(None), "build");
+        assert_eq!(opencode_agent(true), "plan");
+        assert_eq!(opencode_agent(false), "build");
+    }
+
+    #[test]
+    fn plan_and_permissions_form_four_independent_combinations() {
+        for (plan_mode, permission_mode, agent, auto_approve) in [
+            (false, Some(PermissionMode::Ask), "build", false),
+            (false, Some(PermissionMode::Auto), "build", true),
+            (true, Some(PermissionMode::Ask), "plan", false),
+            (true, Some(PermissionMode::Auto), "plan", true),
+        ] {
+            assert_eq!(opencode_agent(plan_mode), agent);
+            assert_eq!(opencode_auto_approve(permission_mode), auto_approve);
+        }
     }
 
     // `properties` payloads shaped exactly like the live `permission.asked` /
@@ -1213,7 +1522,7 @@ opencode/glm-5
                 "multiple": true
             }]
         });
-        let card = question_card(&props).expect("should parse");
+        let card = question_card(&props, &HashSet::new()).expect("should parse");
         assert_eq!(card.kind, "question");
         assert_eq!(card.native_id.as_deref(), Some("que_xyz"));
         assert_eq!(card.question.as_deref(), Some("Which backend?"));
@@ -1228,9 +1537,51 @@ opencode/glm-5
             "id": "que_1",
             "questions": [{ "question": "q", "header": "h", "options": [], "multiSelect": true }]
         });
-        assert!(!question_card(&claude_shaped).unwrap().multi_select);
+        assert!(
+            !question_card(&claude_shaped, &HashSet::new())
+                .unwrap()
+                .multi_select
+        );
         // No questions → no card.
-        assert!(question_card(&json!({ "id": "que_1" })).is_none());
+        assert!(question_card(&json!({ "id": "que_1" }), &HashSet::new()).is_none());
+    }
+
+    #[test]
+    fn question_card_recognizes_plan_exit_by_tool_call_id() {
+        let props = json!({
+            "id": "que_exit",
+            "tool": { "messageID": "m1", "callID": "call_plan" },
+            "questions": [{
+                "question": "Switch to build?",
+                "header": "Build Agent",
+                "options": [{ "label": "Yes" }, { "label": "No" }],
+                "multiple": false
+            }]
+        });
+        let calls = HashSet::from(["call_plan".to_string()]);
+        assert!(question_card(&props, &calls).unwrap().plan_exit);
+        assert!(!question_card(&props, &HashSet::new()).unwrap().plan_exit);
+    }
+
+    #[test]
+    fn native_plan_exit_yes_leaves_plan_no_keeps_it() {
+        let mut prompt = WirePrompt {
+            plan_exit: true,
+            ..Default::default()
+        };
+        let response = |choice: &str| PromptAnswer {
+            session_id: "session".into(),
+            prompt_id: "question".into(),
+            approve: true,
+            resume_mode: None,
+            answers: vec![choice.into()],
+            note: None,
+            annotations: Vec::new(),
+        };
+        assert_eq!(plan_exit_transition(&prompt, &response("Yes")), Some(false));
+        assert_eq!(plan_exit_transition(&prompt, &response("No")), Some(true));
+        prompt.plan_exit = false;
+        assert_eq!(plan_exit_transition(&prompt, &response("Yes")), None);
     }
 
     #[test]
@@ -1286,6 +1637,18 @@ opencode/glm-5
     }
 
     #[test]
+    fn stale_final_response_is_rejected() {
+        assert!(opencode_response_is_current(
+            &json!({"info":{"time":{"created":100}}}),
+            100
+        ));
+        assert!(!opencode_response_is_current(
+            &json!({"info":{"time":{"created":99}}}),
+            100
+        ));
+    }
+
+    #[test]
     fn seed_title_is_recognized_but_real_titles_pass() {
         // The exact shape opencode stamps at session creation.
         assert!(is_opencode_seed_title(
@@ -1298,6 +1661,30 @@ opencode/glm-5
         assert!(!is_opencode_seed_title("Fix the login redirect"));
         assert!(!is_opencode_seed_title("New session handling in the store"));
         assert!(!is_opencode_seed_title(""));
+    }
+
+    #[test]
+    fn only_active_session_statuses_confirm_turn_acceptance() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.mark_delivery(DeliveryState::Unknown);
+        let mut messages = HashSet::new();
+        let mut sessions = HashMap::new();
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &json!({"type":"session.status","properties":{"sessionID":"ses_x","status":{"type":"idle"}}}),
+            &mut messages,
+            &mut sessions,
+        );
+        assert_eq!(ctx.delivery_state(), DeliveryState::Unknown);
+        handle_event(
+            &mut ctx,
+            "ses_x",
+            &json!({"type":"session.status","properties":{"sessionID":"ses_x","status":{"type":"retry","attempt":1}}}),
+            &mut messages,
+            &mut sessions,
+        );
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
     }
 
     /// A `task` tool spawns a child session (announced via `session.created` with

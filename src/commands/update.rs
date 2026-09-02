@@ -13,33 +13,66 @@
 //!     installer honors).
 //!   - an exclusive file lock, so concurrent `orx update` runs fail fast
 //!     instead of corrupting each other.
-//!   - no install receipt -> this binary wasn't installed by the installer
-//!     script (most likely `cargo install`); refuse with the right
-//!     alternative, since both paths land in `~/.cargo/bin/orx`.
-//!   - receipt prefix or version not matching the running binary -> another
-//!     copy exists or something else overwrote it; require `--force`.
-//!   - Nix-store / Homebrew paths and unwritable bin dirs refuse with
-//!     targeted messages.
+//!   - `updates::preflight`, which classifies the install and refuses the
+//!     channels orx doesn't own (cargo/Homebrew/Nix), the receipt mismatches
+//!     that mean another copy is in play, and unwritable bin dirs.
+//!
+//! Inside the macOS `.app`, preflight resolves to the bundle instead and the
+//! whole thing routes to `updates::macos_app` — same command, same guards,
+//! different payload.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::error::{anyhow, Result};
-use crate::updates;
+use crate::updates::{self, UpdateTarget};
 
-const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/openresearch-cli/releases/latest/download/openresearch-cli-installer.sh | sh";
-
+/// Outcomes are recorded so a repeatedly failing update backs off instead of
+/// respawning on every command. A foreground run records too — a user who fixes
+/// the cause and updates by hand should not stay stuck behind the backoff.
 pub async fn run(args: crate::UpdateArgs) -> Result<()> {
+    // Checked before `apply` so a switched-off install never records a failed
+    // attempt — nothing was attempted, and the backoff must not be waiting on it
+    // if the user turns updates back on.
     if std::env::var("OPENRESEARCH_CLI_DISABLE_UPDATE").as_deref() == Ok("1") {
         return Err(anyhow!(
             "Updates are disabled for this install (OPENRESEARCH_CLI_DISABLE_UPDATE=1)."
         ));
     }
+    let (dry_run, background) = (args.dry_run, args.background);
+    let result = apply(args).await;
+    match &result {
+        // A dry run changes nothing, so neither outcome is an attempt.
+        _ if dry_run => {}
+        // Someone else is mid-update; their outcome is the one that counts, and
+        // recording either way here would skew the backoff they are building.
+        Ok(Outcome::Contended) => updates::record_contended(),
+        Ok(_) => updates::record_attempt(true),
+        Err(_) => updates::record_attempt(false),
+    }
+    match result {
+        Ok(Outcome::Contended) if !background => {
+            Err(anyhow!("Another `orx update` is already running."))
+        }
+        Ok(_) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
 
-    // One updater at a time. The lock file lives in our config dir; flock is
-    // advisory and released automatically when the process exits.
-    let lock_path = crate::config::config_dir().join("update.lock");
+enum Outcome {
+    Done,
+    /// Another updater holds the lock.
+    Contended,
+}
+
+async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
+    // One updater per channel at a time: the app and a script-installed CLI
+    // replace different things, so serializing them against each other would
+    // only have one record a contended attempt and back off for an hour it
+    // never spent. flock is advisory and released when the process exits.
+    let channel = updates::current_channel()
+        .map(updates::InstallChannel::as_str)
+        .unwrap_or("unknown");
+    let lock_path = crate::config::config_dir().join(format!("update-{channel}.lock"));
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -49,87 +82,34 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
         .write(true)
         .open(&lock_path)?;
     let mut lock = fd_lock::RwLock::new(lock_file);
-    let _guard = lock
-        .try_write()
-        .map_err(|_| anyhow!("Another `orx update` is already running."))?;
-
-    let current = updates::current_version();
-    let exe = std::env::current_exe()?
-        .canonicalize()
-        .map_err(|e| anyhow!("Could not resolve the running executable: {}", e))?;
-
-    // Package-manager-shaped paths get a targeted refusal before any network.
-    let exe_str = exe.to_string_lossy();
-    if exe_str.starts_with("/nix/store/") {
-        return Err(anyhow!(
-            "This orx is managed by Nix ({}). Update it through your Nix configuration.",
-            exe.display()
-        ));
-    }
-    if exe_str.starts_with("/opt/homebrew/") || exe_str.contains("/Cellar/") {
-        return Err(anyhow!(
-            "This orx looks Homebrew-managed ({}). Update it with `brew upgrade`.",
-            exe.display()
-        ));
-    }
-
-    // The receipt is the only discriminator between an installer-managed
-    // binary and a `cargo install` one — both live at ~/.cargo/bin/orx.
-    let Some(receipt) = updates::load_receipt()? else {
-        return Err(anyhow!(
-            "orx was not installed by the installer script (no receipt at {}),\n\
-             so `orx update` won't touch it. Update it the way it was installed:\n\
-             - cargo: cargo install --path . (or your original cargo install invocation)\n\
-             - or reinstall with the installer: {}",
-            updates::receipt_path().display(),
-            INSTALL_HINT
-        ));
+    let Ok(_guard) = lock.try_write() else {
+        // `run` turns this into the user-facing error for a foreground call; it
+        // is an outcome rather than an error here so the backoff stays honest.
+        return Ok(Outcome::Contended);
     };
 
-    let prefix = PathBuf::from(&receipt.install_prefix);
-    let prefix = prefix.canonicalize().unwrap_or(prefix);
-    if !updates::exe_matches_prefix(&exe, &prefix) && !args.force {
-        return Err(anyhow!(
-            "The running orx is at {} but the installer's receipt says it installed to {}.\n\
-             Are multiple copies of orx installed? Pass --force to update the receipt's copy anyway.",
-            exe.display(),
-            prefix.display()
-        ));
-    }
-    if receipt.version != current.to_string() && !args.force {
-        return Err(anyhow!(
-            "The running orx is {} but the install receipt records {} — something other than\n\
-             the installer (likely `cargo install`) overwrote {}. Updating would clobber it.\n\
-             Pass --force to proceed anyway.",
-            current,
-            receipt.version,
-            exe.display()
-        ));
-    }
+    let current = updates::current_version();
+    let target = updates::preflight(args.force)?;
 
-    // Probe writability of the bin dir up front (root-owned installs,
-    // read-only filesystems) so we fail before downloading anything.
-    if let Some(bin_dir) = exe.parent() {
-        let probe = bin_dir.join(format!(".orx-update-probe-{}", uuid::Uuid::new_v4()));
-        match std::fs::File::create(&probe) {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&probe);
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "No write permission for {} ({}). If orx was installed with sudo,\n\
-                     update it the same way or reinstall per-user.",
-                    bin_dir.display(),
-                    e
-                ));
-            }
+    let receipt = match target {
+        UpdateTarget::AppBundle(root) => {
+            return updates::macos_app::update(&root, &current, args.dry_run, args.background)
+                .await
+                .map(|_| Outcome::Done)
         }
-    }
+        UpdateTarget::Installer(receipt) => receipt,
+    };
 
     let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
-    if latest.version <= current {
-        println!("orx {} is up to date.", current);
-        return Ok(());
+    // Record what the release actually is before acting on it, so a cache that
+    // was wrong about being behind corrects itself on the next run instead of
+    // warning off a stale answer until the check TTL lapses.
+    updates::write_check_cache(&latest.version.to_string());
+    if !updates::is_outdated(&current, &latest.version) {
+        if !args.background {
+            println!("orx {} is up to date.", current);
+        }
+        return Ok(Outcome::Done);
     }
 
     if args.dry_run {
@@ -137,10 +117,12 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
             "orx {} → {} is available. Re-run without --dry-run to update.",
             current, latest.version
         );
-        return Ok(());
+        return Ok(Outcome::Done);
     }
 
-    eprintln!("Updating orx {} → {} ...", current, latest.version);
+    if !args.background {
+        eprintln!("Updating orx {} → {} ...", current, latest.version);
+    }
 
     // Pin the installer to the same release the manifest described, so the
     // version we report is exactly the version that gets installed.
@@ -163,6 +145,12 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
     if !receipt.modify_path {
         cmd.env("OPENRESEARCH_CLI_NO_MODIFY_PATH", "1");
     }
+    if args.background {
+        // Nobody is watching this child, and its stdio is inherited from a
+        // terminal the user is still using.
+        cmd.stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    }
     let status = cmd.status();
     let _ = std::fs::remove_file(&script);
     let status = status.map_err(|e| anyhow!("Could not run the installer: {}", e))?;
@@ -173,8 +161,11 @@ pub async fn run(args: crate::UpdateArgs) -> Result<()> {
         ));
     }
 
-    // Keep the update-check cache in sync so the warning doesn't fire on a stale answer.
-    updates::write_check_cache(&latest.version.to_string());
-    println!("✓ Updated orx {} → {}.", current, latest.version);
-    Ok(())
+    // Keep the update-check cache in sync so the warning doesn't fire on a stale
+    // answer, and so a running `orx up` learns a restart would pick this up.
+    updates::record_installed(&latest.version.to_string());
+    if !args.background {
+        println!("✓ Updated orx {} → {}.", current, latest.version);
+    }
+    Ok(Outcome::Done)
 }

@@ -15,6 +15,8 @@ use super::chat::{WirePart, WireToolState};
 use super::model::{LocalExperiment, LocalProject};
 
 pub const PROJECT_ID: &str = "demo_nanochat_v1";
+pub const PROJECT_SLUG: &str = "nanochat";
+const FALLBACK_PROJECT_SLUG: &str = "demo_nanochat_v1";
 const EXPERIMENT_ID: &str = "demo_nanochat_cpu_v1";
 const RUN_ID: &str = "demo_nanochat_run_v1";
 const SESSION_ID: &str = "chat_demo_nanochat_v1";
@@ -29,8 +31,12 @@ const LITERATURE_ASSISTANT_MESSAGE_ID: &str = "msg_demo_nanochat_literature_assi
 const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
-const BASELINE_SHA: &str = "1b3a42272a65478d26306696cb7bcb80e26c2e18";
-const EXPERIMENT_SHA: &str = "346231fe75f91cd62b3040195993f33dc0e1853b";
+const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
+const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
+
+const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
+This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
+</openresearch-demo-evidence>"#;
 
 const USER_PROMPT: &str = "Run nanochat's CPU/Apple-Silicon pipeline end-to-end with bash runs/runcpu.sh (the local shrunk-down version, not speedrun.sh, ~40 min), streaming output and surfacing val_bpb/eval numbers as they appear, fixing any setup errors in place, and when it finishes chat with the model via python -m scripts.chat_cli -p \"What is the capital of France?\" to confirm it works.";
 
@@ -68,6 +74,7 @@ const RESULT_MARKDOWN: &str = r#"Completed the nanochat CPU / Apple-Silicon pipe
 - Base evaluation: train BPB 1.152185, validation BPB 1.119301
 - SFT: 1,500 steps, final validation BPB 0.7389
 - Chat confirmation: the model answered that the capital of France is Paris
+- Evidence pack: [README](evidence/README.md), structured metrics, checkpoint metadata, tokenizer, inference transcript, and run manifest
 "#;
 
 const REPORT: &str = r#"# nanochat CPU / Apple-Silicon pipeline results
@@ -94,6 +101,10 @@ This bundled demo records a completed local `runs/runcpu.sh` pipeline on Apple S
 
 The final command loaded the step-1499 SFT checkpoint on MPS and answered: “Paris … The capital of France is Paris.”
 
+## Evidence pack
+
+The `evidence/` directory contains the real checkpoint metadata, trained tokenizer, structured metrics, final inference transcript, and a manifest of both bundled and omitted run outputs. To reduce the bundled demo project's download size, large model weights, optimizer states, datasets, and environments are intentionally omitted.
+
 ## Portable setup repairs
 
 - Kept nanochat and uv caches inside the checkout.
@@ -115,6 +126,10 @@ struct ExperimentAssets;
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/figures/"]
 struct FigureAssets;
+
+#[derive(RustEmbed)]
+#[folder = "demo/nanochat/evidence/"]
+struct EvidenceAssets;
 
 const BOTTLENECK_REPORT: &str =
     include_str!("../../demo/nanochat/reports/nanochat-bottleneck-diagnosis.md");
@@ -150,6 +165,10 @@ pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
     Store::open().ok()?.get_local_project(PROJECT_ID).ok()??;
     let origin = crate::store::data_dir().join("demo-repos/nanochat.git");
     origin.exists().then_some(origin)
+}
+
+pub(crate) fn turn_context(project_id: &str) -> Option<&'static str> {
+    (project_id == PROJECT_ID).then_some(TURN_CONTEXT)
 }
 
 pub(crate) fn session_start_ref(owner: &str, repo: &str, session_id: &str) -> Option<&'static str> {
@@ -208,7 +227,8 @@ fn seed_at(
     let bare = data_root.join("demo-repos").join("nanochat.git");
     let commit_sha = install_repository(repo, &bare)?;
 
-    let files = data_root.join("files").join("nanochat");
+    let project_slug = demo_project_slug(store)?;
+    let files = data_root.join("files").join(&project_slug);
     std::fs::create_dir_all(&files)?;
     std::fs::write(files.join("cpu-apple-silicon-pipeline-results.md"), REPORT)?;
     std::fs::write(
@@ -220,6 +240,7 @@ fn seed_at(
             .ok_or_else(|| anyhow!("embedded demo figure is missing: {name}"))?;
         std::fs::write(files.join(name.as_ref()), asset.data.as_ref())?;
     }
+    write_assets::<EvidenceAssets>(&files.join("evidence"))?;
     let logs = data_root.join("run-logs");
     std::fs::create_dir_all(&logs)?;
     std::fs::write(logs.join(format!("{RUN_ID}.log")), RUN_LOG)?;
@@ -227,7 +248,7 @@ fn seed_at(
     let project = LocalProject {
         id: PROJECT_ID.into(),
         name: "nanochat (demo)".into(),
-        slug: "nanochat".into(),
+        slug: project_slug,
         github_owner: OWNER.into(),
         github_repo: REPO.into(),
         github_sync_enabled: false,
@@ -279,11 +300,16 @@ fn seed_at(
         title: Some("Run Nanochat CPU Pipeline End-to-End".into()),
         title_source: Some("generated".into()),
         model: selection.model.clone(),
+        service_tier: None,
         permission_mode: selection.permission_mode.clone(),
+        plan_mode: false,
+        plan_reset_pending: false,
         reasoning_level: selection.reasoning_level.clone(),
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(BOOTSTRAP_CONTEXT.into()),
+        active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_614,
         updated_at: 1_785_879_263_859,
     };
@@ -293,6 +319,9 @@ fn seed_at(
         role: "user".into(),
         parts_json: serde_json::to_string(&vec![WirePart::text("user-prompt", USER_PROMPT)])?,
         created_at: 1_785_824_322_627,
+        parent_id: None,
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let assistant = StoredChatMessage {
         id: ASSISTANT_MESSAGE_ID.into(),
@@ -300,6 +329,9 @@ fn seed_at(
         role: "assistant".into(),
         parts_json: serde_json::to_string(&assistant_parts(&selection.harness))?,
         created_at: 1_785_824_322_629,
+        parent_id: Some(USER_MESSAGE_ID.into()),
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let figure_session = StoredChatSession {
         id: FIGURE_SESSION_ID.into(),
@@ -309,11 +341,16 @@ fn seed_at(
         title: Some("Visualize Nanochat Training Results".into()),
         title_source: Some("generated".into()),
         model: selection.model.clone(),
+        service_tier: None,
         permission_mode: selection.permission_mode.clone(),
+        plan_mode: false,
+        plan_reset_pending: false,
         reasoning_level: selection.reasoning_level.clone(),
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(FIGURE_BOOTSTRAP_CONTEXT.into()),
+        active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_630,
         updated_at: 1_785_879_263_858,
     };
@@ -326,6 +363,9 @@ fn seed_at(
             FIGURE_USER_PROMPT,
         )])?,
         created_at: 1_785_824_322_631,
+        parent_id: None,
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let figure_assistant = StoredChatMessage {
         id: FIGURE_ASSISTANT_MESSAGE_ID.into(),
@@ -333,6 +373,9 @@ fn seed_at(
         role: "assistant".into(),
         parts_json: serde_json::to_string(&figure_assistant_parts(&selection.harness))?,
         created_at: 1_785_824_322_633,
+        parent_id: Some(FIGURE_USER_MESSAGE_ID.into()),
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let literature_session = StoredChatSession {
         id: LITERATURE_SESSION_ID.into(),
@@ -342,11 +385,16 @@ fn seed_at(
         title: Some("Diagnosing Nanochat Training Bottlenecks".into()),
         title_source: Some("generated".into()),
         model: selection.model,
+        service_tier: None,
         permission_mode: selection.permission_mode,
+        plan_mode: false,
+        plan_reset_pending: false,
         reasoning_level: selection.reasoning_level,
         archived: false,
         context_usage_json: None,
         bootstrap_context: Some(LITERATURE_BOOTSTRAP_CONTEXT.into()),
+        active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
+        parent_session_id: None,
         created_at: 1_785_824_322_634,
         updated_at: 1_785_879_263_857,
     };
@@ -359,6 +407,9 @@ fn seed_at(
             LITERATURE_USER_PROMPT,
         )])?,
         created_at: 1_785_824_322_635,
+        parent_id: None,
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let literature_assistant = StoredChatMessage {
         id: LITERATURE_ASSISTANT_MESSAGE_ID.into(),
@@ -366,6 +417,9 @@ fn seed_at(
         role: "assistant".into(),
         parts_json: serde_json::to_string(&literature_assistant_parts(&selection.harness))?,
         created_at: 1_785_824_322_636,
+        parent_id: Some(LITERATURE_USER_MESSAGE_ID.into()),
+        base_native_session_id: None,
+        result_native_session_id: None,
     };
     let cache_root = repo
         .parent()
@@ -402,6 +456,22 @@ fn seed_at(
         ],
     )?;
     validate_snapshot(store, repo, newly_created)
+}
+
+fn demo_project_slug(store: &Store) -> Result<String> {
+    if let Some(project) = store.get_local_project(PROJECT_ID)? {
+        return Ok(project.slug);
+    }
+    if store.get_local_project_by_slug(PROJECT_SLUG)?.is_none() {
+        return Ok(PROJECT_SLUG.into());
+    }
+    let mut candidate = FALLBACK_PROJECT_SLUG.to_string();
+    let mut suffix = 2;
+    while store.get_local_project_by_slug(&candidate)?.is_some() {
+        candidate = format!("{FALLBACK_PROJECT_SLUG}_{suffix}");
+        suffix += 1;
+    }
+    Ok(candidate)
 }
 
 fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<DemoCompletion> {
@@ -910,7 +980,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     for (id, path, title) in [
         (
             "literature-skill",
-            ".agents/skills/orx-lit/SKILL.md",
+            ".agents/skills/orx-lit-review/SKILL.md",
             "Load literature search workflow",
         ),
         (
@@ -990,7 +1060,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         parts.push(tool_part(
             &format!("literature-search-{index}"),
             shell_tool,
-            json!({ "command": format!("orx lit \"{query}\" --limit 8") }),
+            json!({ "command": format!("orx discover keyword \"{query}\" --limit 8") }),
             Some("Relevant papers and passages retrieved."),
             Some("Search the literature"),
         ));
@@ -1446,10 +1516,12 @@ mod tests {
         let selection = DemoSelection {
             harness: "codex".into(),
             model: None,
-            permission_mode: Some("auto".into()),
+            permission_mode: None,
             reasoning_level: None,
         };
         let first = seed_at(&store, &data, &repo, selection.clone()).unwrap();
+        let user_notes = data.join("files/nanochat/user-notes.md");
+        std::fs::write(&user_notes, "# User notes\n").unwrap();
         let second = seed_at(
             &store,
             &data,
@@ -1491,6 +1563,19 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[1].role, "assistant");
+        // Seeding runs long after the tree backfill, so an unparented reply here
+        // would stay unparented: the first message the user sends would start a
+        // second branch root and hide the whole seeded transcript.
+        assert_eq!(messages[0].parent_id, None);
+        assert_eq!(
+            messages[1].parent_id.as_deref(),
+            Some(messages[0].id.as_str())
+        );
+        let session = store.get_chat_session(SESSION_ID).unwrap().unwrap();
+        assert_eq!(
+            session.active_leaf_id.as_deref(),
+            Some(messages[1].id.as_str())
+        );
         let assistant: Vec<WirePart> = serde_json::from_str(&messages[1].parts_json).unwrap();
         assert!(!assistant.is_empty());
         assert!(!messages[1].parts_json.contains("/Users/"));
@@ -1553,14 +1638,30 @@ mod tests {
             .join("files/nanochat/cpu-apple-silicon-pipeline-results.md")
             .is_file());
         assert_eq!(
+            std::fs::read_to_string(&user_notes).unwrap(),
+            "# User notes\n"
+        );
+        assert_eq!(
             std::fs::read_dir(data.join("files/nanochat"))
                 .unwrap()
                 .count(),
-            6
+            8
         );
         for name in FigureAssets::iter() {
             assert!(data.join("files/nanochat").join(name.as_ref()).is_file());
         }
+        for name in EvidenceAssets::iter() {
+            assert!(data
+                .join("files/nanochat/evidence")
+                .join(name.as_ref())
+                .is_file());
+        }
+        assert_eq!(
+            std::fs::metadata(data.join("files/nanochat/evidence/tokenizer/tokenizer.pkl"))
+                .unwrap()
+                .len(),
+            412_105
+        );
         assert!(data
             .join("files/nanochat/nanochat-bottleneck-diagnosis.md")
             .is_file());
@@ -1572,6 +1673,60 @@ mod tests {
         assert!(log.contains("The capital of France is Paris"));
         assert!(!log.contains("/Users/"));
         assert!(!log.contains("Traceback"));
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn demo_seed_preserves_legacy_user_artifacts_with_the_nanochat_slug() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let data = root.join("data");
+        let repo = root.join("cache/repos").join(OWNER).join(REPO);
+        let store = Store::open_at(data.clone()).unwrap();
+        store
+            .create_local_project(&LocalProject {
+                id: "user-nanochat".into(),
+                name: "nanochat".into(),
+                slug: PROJECT_SLUG.into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: root.join("user-nanochat").to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        let user_files = data.join("files").join(PROJECT_SLUG);
+        std::fs::create_dir_all(&user_files).unwrap();
+        let user_report = user_files.join("cpu-apple-silicon-pipeline-results.md");
+        std::fs::write(&user_report, "user-owned\n").unwrap();
+
+        let completion = seed_at(
+            &store,
+            &data,
+            &repo,
+            DemoSelection {
+                harness: "codex".into(),
+                model: None,
+                permission_mode: None,
+                reasoning_level: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(completion.project.slug, FALLBACK_PROJECT_SLUG);
+        assert_eq!(
+            std::fs::read_to_string(user_report).unwrap(),
+            "user-owned\n"
+        );
+        assert!(data
+            .join("files")
+            .join(FALLBACK_PROJECT_SLUG)
+            .join("cpu-apple-silicon-pipeline-results.md")
+            .is_file());
         drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }

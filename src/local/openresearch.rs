@@ -6,9 +6,9 @@
 
 use crate::client::{create_sandbox, list_orgs, CreateSandboxBody};
 use crate::commands::exp::spawn_detached_supervise;
+use crate::compute::SourceSnapshot;
 use crate::error::{anyhow, require_credentials, Result};
 use crate::jobs::{openresearch, BackendDescriptor};
-use crate::local::git;
 use crate::local::ssh_identity;
 use crate::store::{now_ms, Store, StoredRun};
 
@@ -31,8 +31,8 @@ pub async fn launch_local_openresearch(args: &crate::ExpRunArgs) -> Result<()> {
     println!("  run     {}", run.id);
     println!("  The box is provisioning; the supervisor launches the run once it's online.");
     println!(
-        "  Follow it with `orx exp wait {}` or `orx logs {}`.",
-        run.experiment_id, run.id
+        "{}",
+        crate::invocation::follow_up(&run.experiment_id, &run.id)
     );
     Ok(())
 }
@@ -41,13 +41,14 @@ pub async fn launch_local_openresearch(args: &crate::ExpRunArgs) -> Result<()> {
 /// supervisor. Requires `--backend openresearch` and `--flavor <shape>`
 /// (`h100_sxm[:count]` or `cpu5c|cpu5g|cpu5m[:vcpus]`), plus `orx login`.
 pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<StoredRun> {
-    if args.sandbox.is_some() || args.gpu.is_some() || args.cpu.is_some() {
-        return Err(anyhow!(
-            "--gpu/--cpu/--sandbox are the managed server-experiment flags; with \
-             --backend openresearch pass the shape as --flavor (e.g. --flavor h100_sxm \
-             or --flavor cpu5c)."
-        ));
-    }
+    crate::compute::submit(args).await
+}
+
+pub async fn submit_local_openresearch_with_source(
+    args: &crate::ExpRunArgs,
+    source: SourceSnapshot,
+    run_id: String,
+) -> Result<StoredRun> {
     if args.host.is_some() {
         return Err(anyhow!(
             "--host doesn't apply to --backend openresearch — the box is provisioned \
@@ -59,8 +60,9 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
     }
     if args.image.is_some() {
         return Err(anyhow!(
-            "--image doesn't apply to --backend openresearch — boxes run the platform's \
-             fixed image (CUDA + PyTorch + uv preinstalled)."
+            "--image doesn't apply to --backend openresearch — provider base images are fixed \
+             by OpenResearch; install project dependencies from the project's lockfile in the \
+             run command."
         ));
     }
     let flavor = args.flavor.clone().ok_or_else(|| {
@@ -147,41 +149,7 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
     let run_command = Some(exp.run_command.clone())
         .filter(|c| !c.trim().is_empty())
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
-        .ok_or_else(|| {
-            anyhow!(
-                "No run command set for this experiment or its project. Set the project \
-                 default with `orx project edit {} --run-command '<cmd>'`, or pass \
-                 `--run-command '<cmd>'` to `orx create-experiment` — then relaunch.",
-                project.id
-            )
-        })?;
-
-    // One run in flight per experiment unless deliberately forced.
-    if !args.force {
-        if let Some(r) = store
-            .list_runs_by_experiment(&exp.id)?
-            .into_iter()
-            .find(|r| !crate::local::is_terminal(&r.status))
-        {
-            return Err(anyhow!(
-                "Run {} is already in flight for this experiment ({}). \
-                 Cancel it with `orx exp cancel {}` or pass --force to launch anyway.",
-                r.id,
-                r.status,
-                exp.id
-            ));
-        }
-    }
-
-    // The box clones from GitHub, so the branch tip must exist there — push
-    // BEFORE provisioning so a git failure never bills a box.
-    let commit_sha = {
-        let project = project.clone();
-        let branch = exp.branch_name.clone();
-        tokio::task::spawn_blocking(move || git::publish_branch_commit(&project, &branch))
-            .await
-            .map_err(|e| anyhow!("git task failed: {e}"))??
-    };
+        .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
     let sandbox = create_sandbox(
         &creds,
@@ -194,8 +162,7 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
     .map_err(billing_friendly)?
     .sandbox;
 
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let descriptor = BackendDescriptor {
+    let mut descriptor = BackendDescriptor {
         kind: "openresearch_job".to_string(),
         namespace: Some(org_id),
         job_id: Some(sandbox.id.clone()),
@@ -209,7 +176,15 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
         ssh_port: None,
         ssh_user: None,
         timeout_secs: Some(timeout_secs),
+        source_digest: None,
+        source_path: None,
+        source_size: None,
     };
+    source.apply_to_descriptor(&mut descriptor);
+    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
+        let _ = openresearch::teardown(&creds, &sandbox.id).await;
+        return Err(error);
+    }
     let run = StoredRun {
         id: run_id.clone(),
         experiment_id: exp.id.clone(),
@@ -221,10 +196,12 @@ pub async fn submit_local_openresearch(args: &crate::ExpRunArgs) -> Result<Store
         updated_at: now_ms(),
         ended_at: None,
         exit_code: None,
-        commit_sha: Some(commit_sha),
+        commit_sha: Some(source.revision),
         result_markdown: None,
-        cancel_requested: false,
-        chat_session_id: crate::local::chat::launching_chat_session(),
+        cancel_requested: store
+            .get_run(&run_id)?
+            .is_some_and(|run| run.cancel_requested),
+        chat_session_id: args.launching_chat_session(),
     };
 
     // From here the box is billing: never leak it behind an error the store

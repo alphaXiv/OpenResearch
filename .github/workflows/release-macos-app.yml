@@ -1,0 +1,164 @@
+# Attaches the signed, notarized OpenResearch.app (as a DMG) to a GitHub Release.
+#
+# Two triggers:
+#  - workflow_run: fires when the "Release" workflow (release.yml) completes —
+#    the automatic path. IMPORTANT: GitHub suppresses workflow_run when the
+#    upstream run was authored by GITHUB_TOKEN (its anti-recursion rule), so
+#    release.yml must be dispatched by a PAT (see release-on-bump.yml) for this
+#    to fire on a real release. release.yml also runs on pull_request (a dry-run
+#    that publishes nothing), so we only proceed for a successful
+#    `workflow_dispatch` run and then confirm the tag's release actually exists.
+#  - workflow_dispatch: manually re-attach the DMG for a given tag — the recovery
+#    path, and how a release cut before this pipeline worked gets its DMG.
+#
+# Signing secrets live in the `release-signing` environment (not repo secrets),
+# so only the reviewed, environment-gated `macos-app` job can read them. The
+# cheap gate keys on the non-secret repo variable MACOS_SIGNING_ENABLED and never
+# touches the certificate. Third-party actions are pinned to commit SHAs so a
+# moved tag can't inject code into the job that holds the cert. See
+# macos/DISTRIBUTION.md for setup.
+
+name: Attach macOS app to release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the macOS app to (e.g. v0.1.99)
+        required: true
+        type: string
+
+permissions:
+  contents: write # upload release assets
+
+concurrency:
+  group: release-macos-app
+  cancel-in-progress: false
+
+jobs:
+  # Cheap ubuntu gate: only proceed for signing-enabled runs that map to a real
+  # release — an automatic workflow_run from a successful workflow_dispatch
+  # Release, or a manual workflow_dispatch of this workflow. Keys on the
+  # non-secret MACOS_SIGNING_ENABLED variable and confirms the release exists, so
+  # a macOS runner (billed 10x) never boots otherwise and no secret is read here.
+  check:
+    if: ${{ vars.MACOS_SIGNING_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch')) }}
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+      tag: ${{ steps.gate.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+      - id: gate
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # Manual dispatch names the tag; the automatic path derives it from the
+          # released commit's Cargo.toml.
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+            tag="v${version}"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  macos-app:
+    needs: check
+    if: ${{ needs.check.outputs.ok == 'true' }}
+    runs-on: macos-14 # Apple Silicon runner
+    timeout-minutes: 45 # bound the 10x-billed runner (build + notarize + Finder styling)
+    # The cert-using job. Secrets come from this environment; add required
+    # reviewers to it (Settings → Environments) so the Developer ID certificate
+    # is never used without a human approving the run — even if an unwanted change
+    # reaches main. Restrict its deployment branches to main. See DISTRIBUTION.md.
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Add Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Import signing certificate into a temp keychain
+        env:
+          CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
+          # Prepend the temp keychain to the search list, keeping the login keychain.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Store notary credentials
+        env:
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials orx-notary \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --password "$NOTARY_PASSWORD"
+
+      - name: Build universal app
+        run: ORX_OFFICIAL_RELEASE_BUILD=1 ORX_APP_UNIVERSAL=1 bash scripts/build-macos-app.sh
+
+      - name: Verify bundled production channel
+        env:
+          ORX_TELEMETRY_ENV: "off"
+        run: test "$(dist/OpenResearch.app/Contents/MacOS/OpenResearch version --build-channel)" = production
+
+      - name: Sign, notarize, and package the DMG
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          MACOS_NOTARY_PROFILE: orx-notary
+        run: bash scripts/package-macos-app.sh
+
+      # macos-app.json is what the app's self-updater reads; it is the proof that
+      # this release's app build exists, so it must never be published without —
+      # or ahead of — the DMG it describes. On a re-run the old manifest is
+      # deleted first, so no window has a stale digest against the new DMG.
+      # See macos/DISTRIBUTION.md.
+      - name: Upload the DMG and its manifest to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.check.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release delete-asset "$TAG" macos-app.json --yes 2>/dev/null || true
+          gh release upload "$TAG" dist/OpenResearch.dmg --clobber
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg tag "$TAG" \
+            --arg asset OpenResearch.dmg \
+            --arg sha256 "$(shasum -a 256 dist/OpenResearch.dmg | cut -d' ' -f1)" \
+            '$ARGS.named' > dist/macos-app.json
+          cat dist/macos-app.json
+          gh release upload "$TAG" dist/macos-app.json --clobber

@@ -20,6 +20,38 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Localization catalogs
+        run: node ui/scripts/check-i18n.mjs
+
+      - name: Style tokens
+        run: node ui/scripts/check-styles.mjs
+
+      - name: Dev-slot helper tests
+        run: node --test scripts/dev-slot.test.mjs
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate localized messages
+        working-directory: ui
+        run: pnpm exec paraglide-js compile --silent --emit-ts-declarations
+
+      - name: UI typecheck
+        working-directory: ui
+        run: pnpm exec tsc --noEmit
+
+      - name: UI unit tests
+        run: node --test --experimental-strip-types ui/tests/*.test.mjs
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

@@ -1,0 +1,223 @@
+@theme inline {
+  --color-*: initial;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-white: #fff;
+  --color-background: var(--base);
+  --color-canvas: var(--canvas);
+  --color-panel: var(--panel);
+  --color-surface: var(--surface);
+  --color-surface-bright: var(--surface-bright);
+  --color-highlight: var(--highlight);
+  --color-text: var(--text);
+  --color-subtext: var(--subtext);
+  --color-muted: var(--muted);
+  --color-primary: var(--primary);
+  --color-primary-subtle: var(--primary-subtle);
+  --color-border: var(--border);
+  --color-border-variant: var(--border-variant);
+  --color-border-strong: var(--border-strong);
+  --color-accent: var(--accent);
+  --color-accent-orange: var(--accent-orange);
+  --color-accent-red: var(--accent-red);
+  --color-accent-teal: var(--accent-teal);
+  --color-accent-blue: var(--accent-blue);
+  --color-accent-amber: var(--accent-amber);
+  --color-accent-green: var(--accent-green);
+  --color-accent-purple: var(--accent-purple);
+  --color-accent-green-subtle: var(--accent-green-subtle);
+  --color-accent-amber-subtle: var(--accent-amber-subtle);
+  --color-accent-red-subtle: var(--accent-red-subtle);
+  --color-accent-blue-subtle: var(--accent-blue-subtle);
+  --color-dots-strong: var(--dots-strong);
+  --color-syntax-comment: var(--syntax-comment);
+  --color-syntax-text: var(--syntax-text);
+  --color-syntax-red: var(--syntax-red);
+  --color-syntax-orange: var(--syntax-orange);
+  --color-syntax-green: var(--syntax-green);
+  --color-syntax-yellow: var(--syntax-yellow);
+  --color-syntax-cyan: var(--syntax-cyan);
+  --color-syntax-purple: var(--syntax-purple);
+  --color-syntax-blue: var(--syntax-blue);
+  --color-skill-blue: var(--skill-blue);
+  --color-skill-blue-subtle: var(--skill-blue-subtle);
+  --color-skill-blue-slash: var(--skill-blue-slash);
+  --color-terminal: var(--term-bg);
+  --color-hover-faint: color-mix(in oklab, var(--text) 3%, transparent);
+  --color-divider-faint: color-mix(in oklab, var(--text) 6%, transparent);
+  --color-divider-subtle: color-mix(in oklab, var(--text) 7%, transparent);
+  --color-hover-muted: color-mix(in oklab, var(--text) 8%, transparent);
+  --color-hover-subtle: color-mix(in oklab, var(--text) 10%, transparent);
+  --color-resizer-hover: color-mix(in oklab, var(--text) 12%, transparent);
+  --color-hover-strong: color-mix(in oklab, var(--text) 15%, transparent);
+  --color-border-muted: color-mix(in oklab, var(--border) 50%, transparent);
+  --color-border-hover-strong: color-mix(in oklab, var(--border) 55%, var(--text));
+  --color-danger-outline: color-mix(in oklab, var(--accent-red) 55%, transparent);
+  --color-danger-notice-border: color-mix(in srgb, var(--accent-red) 35%, var(--border-variant));
+  --color-primary-hover: color-mix(in oklab, var(--primary) 88%, var(--text));
+  --color-primary-active: color-mix(in oklab, var(--primary) 80%, var(--text));
+  --color-stop-hover: color-mix(in oklab, var(--surface) 88%, var(--text));
+  --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
+  --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
+  --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
+  --color-modal-backdrop: rgb(29 27 26 / 42%);
+  --color-modal-backdrop-light: rgb(29 27 26 / 40%);
+  --color-diff-selection: color-mix(in oklab, var(--surface) 76%, var(--primary));
+  --color-diff-gutter-selection: color-mix(in oklab, var(--surface) 68%, var(--primary));
+  --color-diff-insert-gutter: color-mix(in oklab, var(--base) 84%, var(--accent-green));
+  --color-diff-delete-gutter: color-mix(in oklab, var(--base) 86%, var(--accent-red));
+  --color-diff-insert-code: color-mix(in oklab, var(--base) 91%, var(--accent-green));
+  --color-diff-delete-code: color-mix(in oklab, var(--base) 92%, var(--accent-red));
+  --color-diff-insert-edit: color-mix(in oklab, var(--base) 72%, var(--accent-green));
+  --color-diff-delete-edit: color-mix(in oklab, var(--base) 78%, var(--accent-red));
+  --color-diff-omit-gutter: color-mix(in oklab, var(--base) 86%, var(--text));
+  --color-diff-gutter-text: color-mix(in oklab, var(--text) 45%, var(--base));
+
+  --text-prose-emphasis: 1.05em;
+
+  --shadow-elevated: 0 6px 24px color-mix(in oklab, var(--text) 5%, transparent), 0 1px 4px color-mix(in oklab, var(--text) 4%, transparent);
+  --shadow-panel-max: 0 12px 40px color-mix(in oklab, var(--text) 22%, transparent);
+  --shadow-segment: 0 1px 3px color-mix(in oklab, var(--text) 25%, transparent);
+  --shadow-menu: 0 12px 32px rgb(0 0 0 / 18%);
+  --shadow-modal: 0 24px 60px rgb(0 0 0 / 22%);
+  --shadow-dropdown: 0 10px 26px rgb(0 0 0 / 16%);
+  --shadow-popover: 0 4px 16px rgb(0 0 0 / 10%);
+  --shadow-control: 0 2px 8px rgb(0 0 0 / 10%);
+  --shadow-control-subtle: 0 2px 8px rgb(0 0 0 / 5%);
+  --shadow-floating: 0 8px 24px rgb(0 0 0 / 14%);
+  --shadow-hairline: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-card: 0 14px 36px color-mix(in oklab, var(--text) 6%, transparent);
+  --shadow-plan: 0 2px 10px rgb(0 0 0 / 6%);
+  --shadow-plan-menu: 0 6px 20px rgb(0 0 0 / 12%);
+  --shadow-logo: 0 0 0 1px rgb(0 0 0 / 8%);
+  --shadow-tree: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-tree-hover: 0 2px 8px rgb(0 0 0 / 8%);
+  --shadow-tree-live: 0 2px 12px rgb(32 154 132 / 20%);
+  --shadow-file-line: inset 2px 0 0 var(--accent-blue);
+  --shadow-diff-active: inset 2px 0 0 var(--text);
+  --shadow-selected: 0 0 0 1px var(--accent);
+
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  --ease-standard: ease;
+  --container-readable: var(--readable-col);
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-full: 999px;
+}
+
+:root {
+  /* Theme is resolved by theme.ts; do not add prefers-color-scheme overrides. */
+  --base: #ffffff;
+  --canvas: #faf8f4;
+  --panel: #f3f0ea;
+  --surface: #faf7f2;
+  --surface-bright: #fdfbfb;
+  --highlight: #fdf3f1;
+  --chat-annotation-highlight: #b8d4ff;
+  --text: #1d1b1a;
+  --subtext: #737373;
+  --muted: #a1a1a1;
+  --primary: #9a2036;
+  --primary-subtle: #f7e9ec;
+  --border: #d4d4d4;
+  --border-variant: #e5e5e5;
+
+  --accent-orange: #da642c;
+  --accent-red: #d94654;
+  --accent-teal: #209a84;
+  --accent-blue: #3a8dff;
+  --accent-amber: #da9100;
+  --accent-green: #5eb64c;
+  --accent-purple: #9c5cff;
+
+  --accent-green-subtle: #e7f4e5;
+  --accent-amber-subtle: #fff3e1;
+  --accent-teal-subtle: #e1f3f0;
+  --accent-red-subtle: #fbe9ea;
+  --accent-blue-subtle: #e5f0ff;
+  --skill-blue: #184f91;
+  --skill-blue-subtle: #d9e9fb;
+  --skill-blue-slash: #7fa6d2;
+  --accent-purple-subtle: #f1e8ff;
+
+  --dots-muted: #e3ded5;
+  --dots-strong: #bdb6a8;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+  --modal-top: min(30vh, 260px);
+  /* Keep synchronized with LogTerminal's xterm theme. */
+  --term-bg: #1a1a1a;
+  --term-foreground: #e6e1e0;
+  --term-selection: #2c3441;
+  --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
+  --editor-selection: color-mix(in oklab, var(--primary) 22%, transparent);
+  /* Shared reading width for chat, markdown, and plan surfaces. */
+  --readable-col: 840px;
+  --border-strong: var(--border);
+  --accent: var(--primary);
+  --teal: var(--accent-teal);
+  --green: var(--accent-green);
+  --red: var(--accent-red);
+  --amber: var(--accent-amber);
+
+  --syntax-comment: #a0a1a7;
+  --syntax-text: #383a42;
+  --syntax-red: #e45649;
+  --syntax-orange: #986801;
+  --syntax-green: #50a14f;
+  --syntax-yellow: #c18401;
+  --syntax-cyan: #56b6c2;
+  --syntax-purple: #a626a4;
+  --syntax-blue: #4078f2;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --base: #0e0c0c;
+  --canvas: #141110;
+  --panel: #221f1e;
+  --surface: #1d1b1a;
+  --surface-bright: #130f0f;
+  --highlight: #393433;
+  --chat-annotation-highlight: #244e7a;
+  --text: #e6e1e0;
+  --subtext: #a68e8b;
+  --muted: #737373;
+  --primary: #ffb3ad;
+  --primary-subtle: #33191b;
+  --border: #525252;
+  --border-variant: #404040;
+
+  --accent-amber: #e67e22;
+
+  --accent-green-subtle: #1c2b18;
+  --accent-amber-subtle: #33260f;
+  --accent-teal-subtle: #12332d;
+  --accent-red-subtle: #331418;
+  --accent-blue-subtle: #10233a;
+  --skill-blue: #79adf0;
+  --skill-blue-subtle: #183452;
+  --skill-blue-slash: #527ca8;
+  --accent-purple-subtle: #251933;
+
+  --dots-muted: #2a2523;
+  --dots-strong: #555555;
+
+  --syntax-comment: #7f848e;
+  --syntax-text: #abb2bf;
+  --syntax-red: #e06c75;
+  --syntax-orange: #d19a66;
+  --syntax-green: #98c379;
+  --syntax-yellow: #e5c07b;
+  --syntax-purple: #c678dd;
+  --syntax-blue: #61afef;
+
+  color-scheme: dark;
+}

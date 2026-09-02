@@ -20,7 +20,7 @@ fn unique_project_slug(store: &Store, base: &str) -> Result<String> {
         .into_iter()
         .map(|p| p.slug)
         .collect();
-    if !taken.contains(base) {
+    if base != super::demo::PROJECT_SLUG && !taken.contains(base) {
         return Ok(base.to_string());
     }
     let mut n = 2;
@@ -31,6 +31,10 @@ fn unique_project_slug(store: &Store, base: &str) -> Result<String> {
         }
         n += 1;
     }
+}
+
+pub fn project_slug_preview(store: &Store, name: &str) -> Result<String> {
+    unique_project_slug(store, &slugify(name))
 }
 
 pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
@@ -55,11 +59,16 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
     }
 }
 
+const PAPER_PDF_NAME: &str = "paper.pdf";
+
 fn prepare_path(
     path: &str,
     create_folder: bool,
+    require_new_folder: bool,
     initialize_git: bool,
     clone_url: Option<&str>,
+    shallow_clone: bool,
+    paper_pdf: Option<&[u8]>,
 ) -> Result<PathBuf> {
     let path = expand_path(path)?;
     if let Some(url) = clone_url.map(str::trim).filter(|url| !url.is_empty()) {
@@ -74,8 +83,13 @@ fn prepare_path(
         } else if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        git::clone_public(url, &path)?;
+        git::clone_public(url, &path, shallow_clone)?;
         git::rename_origin_to_upstream(&path)?;
+    } else if require_new_folder && path.exists() {
+        return Err(crate::error::anyhow!(
+            "{} already exists; choose a new folder for a blank project",
+            path.display()
+        ));
     } else if !path.exists() {
         if !create_folder {
             return Err(crate::error::anyhow!(
@@ -88,14 +102,52 @@ fn prepare_path(
         return Err(crate::error::anyhow!("{} is not a folder", path.display()));
     }
 
-    if !git::is_repository(&path) {
+    if paper_pdf.is_some() && std::fs::read_dir(&path)?.next().is_some() {
+        return Err(crate::error::anyhow!(
+            "{} must be empty to start a paper project",
+            path.display()
+        ));
+    }
+
+    // A blank or paper project owns the folder it was given — it was empty or
+    // freshly created — so it gets a repository of its own even when it sits
+    // inside an unrelated checkout, such as a dotfiles repository at `$HOME`.
+    // Adopting an existing folder keeps looking outwards, where the enclosing
+    // repository is the project the user means.
+    let owns_folder = require_new_folder || paper_pdf.is_some();
+    let repository_state = if owns_folder {
+        git::own_repository_state(&path)
+    } else {
+        git::repository_state(&path)
+    };
+    if repository_state == git::RepositoryState::Invalid {
+        return Err(crate::error::anyhow!(
+            "{} is not a valid Git repository",
+            path.display()
+        ));
+    }
+    if matches!(
+        repository_state,
+        git::RepositoryState::NotRepository | git::RepositoryState::Unborn
+    ) {
         if !initialize_git {
             return Err(crate::error::anyhow!(
                 "Experiments need a local Git repository. Confirm initialization for {} and try again.",
                 path.display()
             ));
         }
-        git::initialize_repository(&path)?;
+        // Written before initialization so the paper lands in the initial commit.
+        if let Some(pdf) = paper_pdf {
+            let pdf_path = path.join(PAPER_PDF_NAME);
+            std::fs::write(&pdf_path, pdf).map_err(|e| {
+                crate::error::anyhow!("Could not write {}: {}", pdf_path.display(), e)
+            })?;
+        }
+        if owns_folder {
+            git::initialize_own_repository(&path)?;
+        } else {
+            git::initialize_repository(&path)?;
+        }
     }
     let root = git::repository_root(&path)?;
     git::validate_project_repository(&root)?;
@@ -113,13 +165,24 @@ pub fn create_project(
 ) -> Result<LocalProject> {
     let CreateProjectOptions {
         create_folder,
+        require_new_folder,
         initialize_git,
         clone_url,
+        shallow_clone,
         run_command,
         paper_id,
+        paper_pdf,
     } = options;
     let slug = unique_project_slug(store, &slugify(name))?;
-    let repo_path = prepare_path(path, create_folder, initialize_git, clone_url.as_deref())?;
+    let repo_path = prepare_path(
+        path,
+        create_folder,
+        require_new_folder,
+        initialize_git,
+        clone_url.as_deref(),
+        shallow_clone,
+        paper_pdf.as_deref(),
+    )?;
     if store
         .list_local_projects()?
         .iter()
@@ -131,9 +194,9 @@ pub fn create_project(
         ));
     }
     let baseline_branch = git::require_current_branch(&repo_path)?;
-
     let publication = git::github_publication(&repo_path);
     let (github_owner, github_repo) = publication.unwrap_or_default();
+
     let now = now_ms();
     let project = LocalProject {
         id: uuid::Uuid::new_v4().to_string(),
@@ -156,15 +219,19 @@ pub fn create_project(
 #[derive(Default)]
 pub struct CreateProjectOptions {
     pub create_folder: bool,
+    pub require_new_folder: bool,
     pub initialize_git: bool,
     pub clone_url: Option<String>,
+    pub shallow_clone: bool,
     pub run_command: Option<String>,
     pub paper_id: Option<String>,
+    pub paper_pdf: Option<Vec<u8>>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::process::Command;
 
     fn root() -> PathBuf {
@@ -178,6 +245,20 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "git {}", args.join(" "));
+    }
+
+    fn git_output(path: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {}", args.join(" "));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn sparse_file(path: &Path, bytes: u64) {
+        File::create(path).unwrap().set_len(bytes).unwrap();
     }
 
     fn initialized(path: &Path) {
@@ -197,6 +278,17 @@ mod tests {
                 "initial",
             ],
         );
+    }
+
+    #[test]
+    fn reserves_the_demo_slug_for_onboarding() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        assert_eq!(
+            project_slug_preview(&store, "nanochat").unwrap(),
+            "nanochat-2"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -223,6 +315,681 @@ mod tests {
             std::fs::canonicalize(&project_path).unwrap()
         );
         assert!(git::remotes(&project_path).unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_an_existing_folder_for_a_blank_project() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let error = create_project(
+            &store,
+            "Blank project",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                require_new_folder: true,
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("choose a new folder"));
+        assert!(store.list_local_projects().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn create_folder_permission_still_accepts_an_existing_folder() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+
+        let project = create_project(
+            &store,
+            "Existing project",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(project_path).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn creates_a_blank_project_nested_in_an_existing_repository() {
+        let root = root();
+        let repository = root.join("repository");
+        initialized(&repository);
+        let project_path = repository.join("blank-project");
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let project = create_project(
+            &store,
+            "Blank project",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                require_new_folder: true,
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // The nested folder is its own repository, not the enclosing checkout.
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(&project_path).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn paper_project(store: &Store, path: &Path) -> Result<LocalProject> {
+        create_project(
+            store,
+            "Paper project",
+            path.to_str().unwrap(),
+            CreateProjectOptions {
+                create_folder: true,
+                initialize_git: true,
+                paper_pdf: Some(b"%PDF-1.7 test".to_vec()),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn commits_the_paper_pdf_into_a_blank_paper_project() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let project = paper_project(&store, &root.join("project")).unwrap();
+        let repo_path = Path::new(&project.repo_path);
+        assert_eq!(
+            std::fs::read(repo_path.join(PAPER_PDF_NAME)).unwrap(),
+            b"%PDF-1.7 test"
+        );
+        assert_eq!(
+            git_output(repo_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            PAPER_PDF_NAME
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn seeds_a_paper_project_in_a_folder_inside_an_existing_repository() {
+        let root = root();
+        let store = Store::open_at(root.join("data")).unwrap();
+        let repository = root.join("repository");
+        initialized(&repository);
+        let nested = repository.join("nested");
+        let project = paper_project(&store, &nested).unwrap();
+        // The paper is committed to the nested folder's own repository.
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(&nested).unwrap()
+        );
+        assert_eq!(
+            git_output(&nested, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            PAPER_PDF_NAME
+        );
+
+        let error = paper_project(&store, &repository).unwrap_err().to_string();
+        assert!(error.contains("must be empty"), "{error}");
+        assert!(!repository.join(PAPER_PDF_NAME).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn imports_files_inside_plain_subdirectories() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(project_path.join("src/components")).unwrap();
+        std::fs::write(project_path.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(
+            project_path.join("src/components/mod.rs"),
+            "pub struct Component;\n",
+        )
+        .unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Nested source files",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            "src/components/mod.rs\nsrc/main.rs"
+        );
+        assert!(!project_path.join(".gitignore").exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imports_an_existing_repository_without_commits() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        run_git(&project_path, &["init", "-b", "trunk"]);
+        std::fs::write(project_path.join("README.md"), "# zero commits\n").unwrap();
+        run_git(&project_path, &["add", "README.md"]);
+        std::fs::write(project_path.join("README.md"), "# working tree wins\n").unwrap();
+        std::fs::write(project_path.join("notes.md"), "untracked\n").unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let project = create_project(
+            &store,
+            "Zero commits",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(project.baseline_branch, "trunk");
+        assert_eq!(
+            git_output(&project_path, &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
+        assert_eq!(
+            git_output(&project_path, &["log", "-1", "--format=%an <%ae>"]),
+            "OpenResearch <local@openresearch.sh>"
+        );
+        assert_eq!(
+            git_output(&project_path, &["show", "HEAD:README.md"]),
+            "# working tree wins"
+        );
+        assert_eq!(
+            git_output(&project_path, &["show", "HEAD:notes.md"]),
+            "untracked"
+        );
+        assert!(git::is_clean(&project_path).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_an_invalid_repository_without_reinitializing_it() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(project_path.join(".git")).unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let error = create_project(
+            &store,
+            "Invalid",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not a valid Git repository"));
+        assert!(!project_path.join(".git/HEAD").exists());
+        assert!(store.list_local_projects().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excludes_files_at_the_fifty_megabyte_boundary() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(project_path.join("data set")).unwrap();
+        std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
+        std::fs::write(project_path.join(".gitignore"), "ignored.bin\n").unwrap();
+        sparse_file(&project_path.join("ignored.bin"), 2 * 1024 * 1024 * 1024);
+        let large_file = project_path.join("data set/checkpoint[1].bin");
+        sparse_file(&large_file, git::INITIAL_SNAPSHOT_MAX_FILE_BYTES);
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Large local data",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(large_file.exists());
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
+        );
+        let gitignore = std::fs::read_to_string(project_path.join(".gitignore")).unwrap();
+        assert!(gitignore.starts_with("ignored.bin\n"));
+        assert!(gitignore.contains("/data\\ set/checkpoint\\[1\\].bin"));
+        assert_eq!(
+            gitignore
+                .matches("/data\\ set/checkpoint\\[1\\].bin")
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excludes_a_staged_large_file_even_when_a_nested_ignore_negates_the_exclusion() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(project_path.join("data")).unwrap();
+        run_git(&project_path, &["init", "-b", "main"]);
+        std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
+        std::fs::write(project_path.join("data/.gitignore"), "!checkpoint.bin\n").unwrap();
+        let large_file = project_path.join("data/checkpoint.bin");
+        sparse_file(&large_file, git::INITIAL_SNAPSHOT_MAX_FILE_BYTES);
+        run_git(&project_path, &["add", "-A"]);
+        let store = Store::open_at(root.join("data-store")).unwrap();
+
+        create_project(
+            &store,
+            "Staged large file",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let committed = git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(committed.contains("README.md"));
+        assert!(committed.contains("data/.gitignore"));
+        assert!(!committed.contains("checkpoint.bin"));
+        assert!(large_file.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn does_not_commit_a_large_file_that_was_force_staged_despite_gitignore() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        run_git(&project_path, &["init", "-b", "main"]);
+        std::fs::write(project_path.join(".gitignore"), "checkpoint.bin\n").unwrap();
+        let large_file = project_path.join("checkpoint.bin");
+        sparse_file(&large_file, git::INITIAL_SNAPSHOT_MAX_FILE_BYTES);
+        run_git(&project_path, &["add", ".gitignore"]);
+        run_git(&project_path, &["add", "-f", "checkpoint.bin"]);
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Ignored staged file",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore"
+        );
+        assert!(large_file.exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_a_symlinked_gitignore_while_excluding_large_files() {
+        use std::os::unix::fs::symlink;
+
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        let shared_ignore = root.join("shared-ignore");
+        std::fs::write(&shared_ignore, "shared rule\n").unwrap();
+        symlink(&shared_ignore, project_path.join(".gitignore")).unwrap();
+        std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
+        let large_file = project_path.join("checkpoint.bin");
+        sparse_file(&large_file, git::INITIAL_SNAPSHOT_MAX_FILE_BYTES);
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Symlinked ignore",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(project_path.join(".gitignore"))
+            .unwrap()
+            .is_symlink());
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
+        );
+        assert!(large_file.exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&shared_ignore).unwrap(),
+            "shared rule\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_gitignore_does_not_block_excluding_a_nested_unborn_repository() {
+        use std::os::unix::fs::symlink;
+
+        let root = root();
+        let project_path = root.join("project");
+        let nested = project_path.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-b", "main"]);
+        sparse_file(
+            &nested.join("checkpoint.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        let shared_ignore = root.join("shared-ignore");
+        std::fs::write(&shared_ignore, "shared rule\n").unwrap();
+        symlink(&shared_ignore, project_path.join(".gitignore")).unwrap();
+        std::fs::write(project_path.join("README.md"), "# parent\n").unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Symlinked ignore and nested repo",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(std::fs::symlink_metadata(project_path.join(".gitignore"))
+            .unwrap()
+            .is_symlink());
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
+        );
+        assert!(nested.join(".git").exists());
+        assert!(nested.join("checkpoint.bin").exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&shared_ignore).unwrap(),
+            "shared rule\n"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excludes_a_nested_unborn_repository_without_blocking_import() {
+        let root = root();
+        let project_path = root.join("project");
+        let nested = project_path.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-b", "main"]);
+        std::fs::write(nested.join("draft.md"), "nested work\n").unwrap();
+        std::fs::write(project_path.join("README.md"), "# parent\n").unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Nested unborn repository",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
+        );
+        let gitignore = std::fs::read_to_string(project_path.join(".gitignore")).unwrap();
+        assert!(gitignore.contains("/nested/"));
+        assert!(nested.join(".git").exists());
+        assert!(nested.join("draft.md").exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn commits_a_nested_ready_repository_as_a_gitlink() {
+        let root = root();
+        let project_path = root.join("project");
+        let nested = project_path.join("nested");
+        initialized(&nested);
+        std::fs::write(project_path.join("README.md"), "# parent\n").unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Nested ready repository",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            git_output(&project_path, &["ls-tree", "HEAD", "nested"]).starts_with("160000 commit ")
+        );
+        assert!(nested.join("README.md").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excludes_an_invalid_nested_repository() {
+        let root = root();
+        let project_path = root.join("project");
+        let nested = project_path.join("nested");
+        std::fs::create_dir_all(nested.join(".git")).unwrap();
+        sparse_file(
+            &nested.join("checkpoint.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        std::fs::write(project_path.join("README.md"), "# parent\n").unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Invalid nested repository",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
+        );
+        assert!(nested.join(".git").exists());
+        assert!(nested.join("checkpoint.bin").exists());
+        assert!(git::is_clean(&project_path).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn blocks_a_one_gigabyte_initial_snapshot_without_mutating_the_folder() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        for index in 0..20 {
+            sparse_file(
+                &project_path.join(format!("part-{index}.bin")),
+                49 * 1024 * 1024,
+            );
+        }
+        sparse_file(&project_path.join("remainder.bin"), 44 * 1024 * 1024);
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let error = create_project(
+            &store,
+            "Too large",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "This project is too large to import. After excluding files 50 MB or larger, the remaining files exceed OpenResearch's 1 GB limit."
+        );
+        assert!(!project_path.join(".git").exists());
+        assert!(!project_path.join(".gitignore").exists());
+        assert!(store.list_local_projects().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn restores_gitignore_when_the_managed_block_crosses_the_total_limit() {
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        let original_gitignore = b"custom\n";
+        std::fs::write(project_path.join(".gitignore"), original_gitignore).unwrap();
+        for index in 0..20 {
+            sparse_file(
+                &project_path.join(format!("part-{index}.bin")),
+                49 * 1024 * 1024,
+            );
+        }
+        let base_bytes = 20 * 49 * 1024 * 1024 + original_gitignore.len() as u64;
+        sparse_file(
+            &project_path.join("remainder.bin"),
+            git::INITIAL_SNAPSHOT_MAX_TOTAL_BYTES - base_bytes - 1,
+        );
+        sparse_file(
+            &project_path.join("large.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let error = create_project(
+            &store,
+            "Managed ignore overflow",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("too large to import"));
+        assert_eq!(
+            std::fs::read(project_path.join(".gitignore")).unwrap(),
+            original_gitignore
+        );
+        assert!(!project_path.join(".git").exists());
+        assert!(store.list_local_projects().unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn leaves_existing_repositories_with_commits_untouched() {
+        let root = root();
+        let project_path = root.join("project");
+        initialized(&project_path);
+        let original_head = git_output(&project_path, &["rev-parse", "HEAD"]);
+        sparse_file(
+            &project_path.join("local-checkpoint.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Existing",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["rev-parse", "HEAD"]),
+            original_head
+        );
+        assert!(!project_path.join(".gitignore").exists());
+        assert!(project_path.join("local-checkpoint.bin").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_initial_commit_bypasses_signing_and_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = root();
+        let project_path = root.join("project");
+        std::fs::create_dir_all(&project_path).unwrap();
+        run_git(&project_path, &["init", "-b", "main"]);
+        run_git(&project_path, &["config", "commit.gpgsign", "true"]);
+        run_git(&project_path, &["config", "gpg.program", "false"]);
+        std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
+        let hook = project_path.join(".git/hooks/post-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut permissions = std::fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&hook, permissions).unwrap();
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        create_project(
+            &store,
+            "Managed commit",
+            project_path.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            git_output(&project_path, &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -282,12 +1049,12 @@ mod tests {
         let remotes = git::remotes(Path::new(&project.repo_path)).unwrap();
         assert_eq!(remotes[0].0, "upstream");
         assert!(!remotes.iter().any(|(name, _)| name == "origin"));
-        assert!(!project.github_enabled());
+        assert!(project.github_owner.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn ordinary_github_origin_remains_local_only() {
+    fn ordinary_github_origin_remains_opt_in() {
         let root = root();
         let project_path = root.join("project");
         initialized(&project_path);
@@ -315,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn dedicated_github_remote_is_recognized() {
+    fn dedicated_github_remote_is_recognized_but_remains_opt_in() {
         let root = root();
         let project_path = root.join("project");
         initialized(&project_path);
@@ -324,7 +1091,7 @@ mod tests {
             &[
                 "remote",
                 "add",
-                git::GITHUB_REMOTE,
+                "github",
                 "git@github.com:example/research.git",
             ],
         );
@@ -336,6 +1103,7 @@ mod tests {
             CreateProjectOptions::default(),
         )
         .unwrap();
+        assert!(!project.github_enabled());
         assert_eq!(project.github_owner, "example");
         assert_eq!(project.github_repo, "research");
         std::fs::remove_dir_all(root).unwrap();
@@ -359,6 +1127,43 @@ mod tests {
         assert_eq!(
             Path::new(&project.repo_path),
             std::fs::canonicalize(project_path).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn nested_folder_in_an_unborn_repository_initializes_the_repository_root() {
+        let root = root();
+        let project_path = root.join("project");
+        let nested = project_path.join("src/nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        run_git(&project_path, &["init", "-b", "main"]);
+        std::fs::write(project_path.join("README.md"), "# test\n").unwrap();
+        sparse_file(
+            &project_path.join("checkpoint.bin"),
+            git::INITIAL_SNAPSHOT_MAX_FILE_BYTES,
+        );
+        let store = Store::open_at(root.join("data")).unwrap();
+
+        let project = create_project(
+            &store,
+            "Nested unborn",
+            nested.to_str().unwrap(),
+            CreateProjectOptions {
+                initialize_git: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            Path::new(&project.repo_path),
+            std::fs::canonicalize(&project_path).unwrap()
+        );
+        assert!(project_path.join(".gitignore").exists());
+        assert_eq!(
+            git_output(&project_path, &["ls-tree", "-r", "--name-only", "HEAD"]),
+            ".gitignore\nREADME.md"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

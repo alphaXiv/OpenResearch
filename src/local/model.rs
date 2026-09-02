@@ -17,7 +17,7 @@ pub struct LocalProject {
     /// where any experiment lives (legacy roots predating per-baseline
     /// branches may still ride it).
     pub baseline_branch: String,
-    /// Local clone path (`~/.cache/openresearch/repos/<owner>/<repo>`).
+    /// Local repository path.
     pub repo_path: String,
     pub run_command: Option<String>,
     /// arXiv id the project starts from (versionless, e.g. `2401.12345`).

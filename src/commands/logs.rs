@@ -21,8 +21,9 @@ fn parse_integer(s: &str) -> Option<i64> {
 
 /// Prints a run's terminal log. Tail by default (the end is usually what you
 /// want); `--head` reads from the start, `--range <start>:<end>` an exact byte
-/// window (offsets come from `orx search-logs`).
+/// window.
 pub async fn run(args: crate::LogsArgs) -> Result<()> {
+    crate::local::chat::record_chat_target("runs", &args.run_id);
     let mut mode: &str = if args.head { "head" } else { "tail" };
     let mut start_byte: Option<i64> = None;
     let mut end_byte: Option<i64> = None;
@@ -57,8 +58,6 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
         None => None,
     };
 
-    // Local run (orx up): the log is a plain file beside the store — read it
-    // directly, no api / login needed. The plane resolver decides.
     let store = Store::open()?;
     let plane = resolve_run(store, &args.run_id)?;
     let log = plane

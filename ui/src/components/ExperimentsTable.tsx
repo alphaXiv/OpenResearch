@@ -1,7 +1,11 @@
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
-import { runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { Button } from "./ui";
 
 export function ExperimentsTable({
   runs,
@@ -9,17 +13,15 @@ export function ExperimentsTable({
   emptyHint,
   onOpen,
   onOpenLogs,
-  onOpenChanges,
   onOpenCode,
   onCancel,
 }: {
   runs: Run[];
   experiments: Experiment[];
   emptyHint?: string;
-  onOpen: (experiment: Experiment) => void;
-  onOpenLogs: (experimentId: string, runId: string) => void;
-  onOpenChanges: (experimentId: string) => void;
-  onOpenCode: (experimentId: string) => void;
+  onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
+  onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
+  onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -42,8 +44,8 @@ export function ExperimentsTable({
 
   if (sortedExperiments.length === 0) {
     return (
-      <div className="empty-state">
-        <p>{emptyHint ?? "No experiments yet."}</p>
+      <div className="empty-state absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-6 text-center text-subtext [&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:leading-normal [&_p]:text-balance [&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext experiments-empty-state [&_p]:text-2xl">
+        <p>{emptyHint ?? m.experiments_none_yet()}</p>
       </div>
     );
   }
@@ -64,13 +66,13 @@ export function ExperimentsTable({
   }
 
   return (
-    <div className="experiments-table-wrap">
+    <div className="experiments-table-wrap absolute inset-0 overflow-auto bg-background @container">
       {cancelError && (
-        <div className="experiments-table-error" role="alert">
-          Stop failed: {cancelError}
+        <div className="experiments-table-error py-2 px-3 text-accent-red text-sm border-b border-b-border" role="alert">
+          {m.experiments_table_stop_failed()} {cancelError}
         </div>
       )}
-      <div className="experiments-table" role="list" aria-label="Experiments">
+      <div className="experiments-table w-full text-sm bg-background" role="list" aria-label={m.experiments_table_experiments()}>
         {sortedExperiments.map((experiment) => {
           const experimentRuns = runsByExperiment.get(experiment.id) ?? [];
           const latestRun = experimentRuns[0] ?? null;
@@ -92,80 +94,83 @@ export function ExperimentsTable({
           return (
             <div
               key={experiment.id}
-              className="experiment-table-group"
+              className="experiment-table-group grid grid-cols-[minmax(0,_1fr)_auto] [grid-template-areas:'name_meta'_'actions_actions'] gap-x-8 items-center py-4 px-5 gap-y-[7px] border-b border-b-divider-subtle bg-background cursor-pointer [&:hover]:bg-canvas [&:last-child]:border-b-0 [@container((max-width:_560px))]:grid-cols-[minmax(0,_1fr)_auto] [@container((max-width:_560px))]:gap-x-3.5 [@container((max-width:_560px))]:gap-y-[9px] [@container((max-width:_400px))]:grid-cols-[minmax(0,_1fr)] [@container((max-width:_400px))]:[grid-template-areas:'name'_'meta'_'actions']"
               role="listitem"
-              onClick={() => onOpen(experiment)}
+              onClick={() => onOpen(experiment, "preview")}
+              onDoubleClick={() => onOpen(experiment, "keepOpen")}
+              onAuxClick={(event) => {
+                if (event.button !== 1) return;
+                event.preventDefault();
+                onOpen(experiment, "keepOpen");
+              }}
             >
-              <div className="experiment-table-name">
+              <div className="experiment-table-name [grid-area:name] self-start min-w-0">
                 <button
                   type="button"
-                  className="experiment-table-title"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onOpen(experiment);
-                  }}
+                  className="experiment-table-title block w-full overflow-hidden text-text font-semibold text-start text-ellipsis whitespace-nowrap"
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpen(experiment, intent),
+                  { stopPropagation: true })}
                 >
                   {experiment.title || experiment.slug}
                 </button>
-                <span className="experiment-table-subtitle" title={experiment.branchName}>
+                <span className="experiment-table-subtitle flex items-center min-w-0 gap-1.5 mt-1 overflow-hidden text-subtext text-sm [&_>_svg]:shrink-0 [&_code]:min-w-0 [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={experiment.branchName}>
                   <GitBranch size={14} aria-hidden="true" />
                   <code>{experiment.branchName}</code>
                 </span>
               </div>
-              <div className="experiment-table-meta">
-                <div className="experiment-table-status">
+              <div className="experiment-table-meta [grid-area:meta] self-start flex items-center justify-end gap-4.5 whitespace-nowrap [@container((max-width:_560px))]:flex-col [@container((max-width:_560px))]:items-end [@container((max-width:_560px))]:gap-1.5 [@container((max-width:_400px))]:!flex-row [@container((max-width:_400px))]:!items-center [@container((max-width:_400px))]:flex-wrap [@container((max-width:_400px))]:justify-start [@container((max-width:_400px))]:gap-3">
+                <div className="experiment-table-status flex items-center min-w-0">
                   <StatusBadge status={status} />
                 </div>
-                <div className="experiment-run-summary">
-                  <span>
-                    {experimentRuns.length} {experimentRuns.length === 1 ? "run" : "runs"}
-                  </span>
+                <div className="experiment-run-summary flex items-center min-w-0 gap-2 text-subtext text-sm font-medium">
+                  <span>{experimentRuns.length === 1 ? m.experiments_one_run() : m.experiments_run_count({ count: fmtNumber(experimentRuns.length) })}</span>
                 </div>
-                <div className="experiment-table-latest">
-                  <span>{latestRun ? timeAgo(latestRun.createdAt) : "Not run yet"}</span>
+                <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-sm font-medium whitespace-nowrap">
+                  <span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
                 </div>
               </div>
               <div
-                className="experiment-table-actions"
+                className="experiment-table-actions [grid-area:actions] flex flex-wrap items-center justify-start gap-2 mt-3"
                 role="group"
-                aria-label={`Actions for ${experiment.title || experiment.slug}`}
+                aria-label={m.a11y_actions_for({ name: experiment.title || experiment.slug })}
                 onClick={(event) => event.stopPropagation()}
+                onDoubleClick={(event) => event.stopPropagation()}
+                onAuxClick={(event) => event.stopPropagation()}
               >
-                <button
-                  className="experiment-table-action"
+                <Button
+                  size="small"
                   disabled={!logsRun}
-                  title={logsRun ? "Open logs" : "No runs yet"}
-                  onClick={() => logsRun && onOpenLogs(experiment.id, logsRun.id)}
+                  title={logsRun ? m.experiments_open_logs() : m.experiments_no_runs_yet()}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => {
+                    if (logsRun) onOpenLogs(experiment.id, logsRun.id, intent);
+                  }, { stopPropagation: true })}
                 >
                   <Terminal size={15} />
-                  Logs
-                </button>
-                <button
-                  className="experiment-table-action"
-                  title="Open changes"
-                  onClick={() => onOpenChanges(experiment.id)}
-                >
-                  <GitBranch size={15} />
-                  Changes
-                </button>
-                <button
-                  className="experiment-table-action"
-                  title={`Browse code on ${experiment.branchName}`}
-                  onClick={() => onOpenCode(experiment.id)}
+                  {m.experiments_table_logs()}
+                </Button>
+                <Button
+                  size="small"
+                  title={m.a11y_browse_code_on({ branch: ltr(experiment.branchName) })}
+                  {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+                    onOpenCode(experiment.id, intent),
+                  { stopPropagation: true })}
                 >
                   <FolderTree size={15} />
-                  Code
-                </button>
+                  {m.experiments_table_code()}
+                </Button>
                 {liveRun && (
-                  <button
-                    className="experiment-table-action danger"
+                  <Button
+                    size="small"
+                    variant="danger"
+                    className="[@container((max-width:_560px))]:ms-auto"
                     disabled={cancelling}
-                    title={cancelling ? "Stop requested" : "Stop run"}
+                    title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
                     onClick={() => void requestCancel(liveRun.id)}
                   >
                     <CircleStop size={15} />
-                    {cancelling ? "Stopping…" : "Stop"}
-                  </button>
+                    {cancelling ? m.common_stopping() : m.common_stop()}
+                  </Button>
                 )}
               </div>
             </div>

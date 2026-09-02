@@ -31,7 +31,10 @@ pub async fn require_credentials() -> Credentials {
     match load_credentials().await {
         Ok(Some(creds)) => creds,
         _ => {
-            eprintln!("Not logged in. Run `orx login` first.");
+            eprintln!(
+                "Not logged in. Run `{} login` first.",
+                crate::invocation::orx()
+            );
             std::process::exit(1);
         }
     }

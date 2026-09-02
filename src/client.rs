@@ -24,105 +24,12 @@ use crate::error::{anyhow, Result};
 // Response DTOs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Org {
     pub id: String,
     pub name: String,
     pub created_by: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Project {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub archived: bool,
-    /// When true, anyone (incl. logged-out visitors) can view the project
-    /// read-only. The `/projects/public` directory only returns these.
-    #[serde(default)]
-    pub is_public: bool,
-    /// GitHub repo the project's experiment branches live on. Clone this to edit
-    /// experiments locally: `git clone https://github.com/<owner>/<repo>.git`.
-    #[serde(default)]
-    pub github_owner: String,
-    #[serde(default)]
-    pub github_repo: String,
-    /// One short, ready-to-send example question derived from the repo README.
-    /// `None` until generated.
-    #[serde(default)]
-    pub example_question: Option<String>,
-    /// arXiv id of the paper this project reproduces, derived from the repo
-    /// README at creation. `None` when the repo names no paper. This is the
-    /// key the publish-to-alphaXiv sweep matches a finished report against.
-    #[serde(default)]
-    pub paper_id: Option<String>,
-    /// Newest run in the project (UUIDv7 encodes the time), or `None` if no runs.
-    #[serde(default)]
-    pub last_activity_run_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Experiment {
-    pub id: String,
-    pub project_id: String,
-    /// `null` for root experiments.
-    pub parent_experiment_id: Option<String>,
-    pub slug: String,
-    /// The experiment's git branch on the project's GitHub repo (`orx/<slug>`).
-    /// This is what you `git checkout` to edit the experiment's code.
-    #[serde(default)]
-    pub branch_name: String,
-    pub title: String,
-    /// Free-form notes / write-up for the experiment; empty string when unset.
-    #[serde(default)]
-    pub description: String,
-    /// Optional analysis write-up; `null` when unset.
-    #[serde(default)]
-    pub analysis: Option<String>,
-    pub run_command: String,
-    /// `null` until the experiment has been linked to a sandbox.
-    #[serde(default)]
-    pub sandbox_id: Option<String>,
-    /// The experiment agent's state, e.g. `"idle"` or `"implementing"`.
-    #[serde(default)]
-    pub agent_status: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Run {
-    pub id: String,
-    pub experiment_id: String,
-    pub command: String,
-    pub status: String,
-    pub commit_sha: Option<String>,
-    pub updated_at: String,
-    // The compute the run executed on. Optional so older API deployments (which
-    // omit the field) still deserialize.
-    #[serde(default)]
-    pub sandbox_id: Option<String>,
-    // Object-storage key for the run's logs, once captured. Where to look for the
-    // "why" when a run fails *after* the box is up (e.g. the script exited
-    // non-zero) and `result_markdown` is therefore empty.
-    #[serde(default)]
-    pub log_key: Option<String>,
-    // Human-readable terminal detail. On failure during compute spin-up this
-    // holds the provider error the website shows as a toast (e.g. "Provisioning
-    // failed: RunPod … Out of capacity"); on a successful run it's the run's
-    // EVAL.md. Null for runtime failures after the box came up — see `log_key`.
-    #[serde(default)]
-    pub result_markdown: Option<String>,
-    // Terminal time; only meaningful once `status` is terminal. Optional so
-    // older API deployments (without the field) still deserialize.
-    #[serde(default)]
-    pub ended_at: Option<String>,
-    // Seconds from run creation to end (or to now while still in-flight).
-    #[serde(default)]
-    pub duration_seconds: i64,
 }
 
 /// Disk pricing for an offer. Mirrors the backend `zDisk` discriminated union,
@@ -185,215 +92,6 @@ pub struct ListCpuCatalog {
     pub offers: Vec<CpuOffer>,
 }
 
-/// Response of `GET /experiments/{id}`: the experiment plus its most recent run.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GetExperimentResult {
-    pub experiment: Experiment,
-    /// `null` when the experiment has never been run.
-    pub latest_run: Option<Run>,
-}
-
-/// Mirrors the TS `"degraded" | "ready" | "warming"` union.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub enum SyncStatus {
-    Degraded,
-    Ready,
-    Warming,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectQueryResult {
-    pub columns: Vec<String>,
-    /// Each row is a list of arbitrary JSON cell values (`unknown[][]`).
-    pub rows: Vec<Vec<Value>>,
-    pub row_count: i64,
-    pub total_row_count: i64,
-    pub more_rows_available: bool,
-    pub sync_status: SyncStatus,
-    pub sync_errors: Vec<String>,
-    pub last_synced_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbSummary {
-    pub label: String,
-    pub n: i64,
-    pub min: f64,
-    pub max: f64,
-    pub last: f64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbFailed {
-    pub label: String,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbChartResult {
-    /// `null` when no run produced any points.
-    pub chart_id: Option<String>,
-    /// Presigned PNG URL, or `null` when nothing was rendered.
-    pub url: Option<String>,
-    pub metric_key: String,
-    pub summaries: Vec<WandbSummary>,
-    pub failed: Vec<WandbFailed>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunLogExcerpt {
-    pub content: String,
-    pub start_byte: i64,
-    pub end_byte: i64,
-    pub total_bytes: i64,
-    pub source: String,
-    pub truncated_before: bool,
-    pub truncated_after: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogSearchMatchingLine {
-    pub line_number: i64,
-    pub start_byte: i64,
-    pub end_byte: i64,
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogSearchRunResult {
-    pub run_id: String,
-    pub match_count: i64,
-    pub total_lines: i64,
-    pub source: String,
-    pub matching_lines: Vec<LogSearchMatchingLine>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogSearchResult {
-    pub capped: bool,
-    pub pattern: String,
-    pub results: Vec<LogSearchRunResult>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ArtifactExcerpt {
-    pub content: String,
-    pub key: String,
-    pub start_byte: i64,
-    pub end_byte: i64,
-    pub total_bytes: i64,
-    pub truncated_before: bool,
-    pub truncated_after: bool,
-}
-
-/// One artifact uploaded during a run (`GET /runs/{id}/artifacts`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RunArtifact {
-    pub key: String,
-    pub size: i64,
-    /// Presigned download URL.
-    pub url: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListArtifacts {
-    pub artifacts: Vec<RunArtifact>,
-}
-
-/// One W&B run linked to an OpenResearch run (`GET /runs/{id}/wandb-runs`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbRunLink {
-    pub base_url: String,
-    pub entity: String,
-    pub project: String,
-    pub wandb_run_id: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListWandbRuns {
-    pub wandb_runs: Vec<WandbRunLink>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillRef {
-    pub name: String,
-    pub description: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListSkills {
-    pub skills: Vec<SkillRef>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillContent {
-    pub content: String,
-}
-
-/// A research report attached to a project (`GET /projects/{id}/reports`).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectReport {
-    pub id: String,
-    pub project_id: String,
-    pub title: String,
-    pub slug: String,
-    pub created_at: String,
-    pub created_by: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListReports {
-    pub reports: Vec<ProjectReport>,
-}
-
-/// Response of `GET /projects/{id}/reports/{reportId}`: a report's metadata plus
-/// its rendered markdown body (`report.md`). `markdown` is empty if the body was
-/// never uploaded.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReportDetail {
-    pub report: ProjectReport,
-    pub markdown: String,
-}
-
-/// One presigned upload slot returned by `POST /projects/{id}/reports`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReportUploadSlot {
-    pub path: String,
-    pub url: String,
-    pub content_type: String,
-}
-
-/// Response of `POST /projects/{id}/reports`: the created report plus the
-/// presigned PUT URLs to upload each of its files directly to storage.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateReportResult {
-    pub report: ProjectReport,
-    pub uploads: Vec<ReportUploadSlot>,
-}
-
 // Thin envelope DTOs for the list endpoints.
 
 #[derive(Debug, Clone, Deserialize)]
@@ -401,220 +99,12 @@ pub struct ListOrgs {
     pub orgs: Vec<Org>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListProjects {
-    pub projects: Vec<Project>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListExperiments {
-    pub experiments: Vec<Experiment>,
-}
-
-/// A single environment variable the project's runs will see. Only the name and
-/// where it's set are returned — values are never exposed over the CLI.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EnvVarName {
-    pub key: String,
-    /// `"org"`, `"project"`, or `"user"`.
-    pub source: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ListEnvVarNames {
-    pub env_vars: Vec<EnvVarName>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ListRuns {
-    pub runs: Vec<Run>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExperimentEnvelope {
-    pub experiment: Experiment,
-}
-
-/// Response of `POST /orgs/{orgId}/projects`.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateProjectResult {
-    pub is_first_project: bool,
-    pub project: Project,
-}
-
-/// Response of `PATCH /projects/{id}`: the updated project row.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProjectEnvelope {
-    pub project: Project,
-}
-
 // ---------------------------------------------------------------------------
 // Request bodies (mirroring the inline TS body shapes)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbRunSpec {
-    pub run_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WandbChartBody {
-    pub metric_key: String,
-    pub runs: Vec<WandbRunSpec>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub smoothing: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateChildBody {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    pub parent_experiment_id: String,
-    /// Populated from `launching_chat_session()`; None outside a chat session.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chat_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateBaselineExperimentBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Run command seeded onto the baseline so it's launchable immediately.
-    /// Omit to set it later (`orx exp cmd`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_command: Option<String>,
-    /// Populated from `launching_chat_session()`; None outside a chat session.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chat_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateProjectBody {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// `owner/repo` (or github.com URL) to bind the project to — the user's own
-    /// repo, or a readable source it gets copied from. Omit to start the
-    /// project on a fresh blank repo (a stub root commit on `main`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub repo_full_name: Option<String>,
-    /// Branch of the repo the project binds to (only with `repo_full_name`) —
-    /// the baseline experiment branches off it. Omit for the repo's default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateReportBody {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub slug: Option<String>,
-    /// Report-relative paths to upload, e.g. ["report.md", "images/a.png"].
-    pub files: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SearchLogsBody {
-    pub pattern: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub experiment_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_matching_lines: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct QueryBody<'a> {
-    sql: &'a str,
-}
-
-/// PATCH body for `update_experiment`. Only the fields the CLI sets are
-/// included; every field is optional and omitted when `None`.
-#[derive(Debug, Clone, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateExperimentBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub run_command: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-}
-
-/// PATCH body for `update_project`. Only the fields the CLI sets are included;
-/// every field is optional and omitted when `None`.
-#[derive(Debug, Clone, Serialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateProjectBody {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Project visibility (`isPublic`): `Some(true)` lists it in the public
-    /// directory, `Some(false)` makes it private. `None` leaves it unchanged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_public: Option<bool>,
-}
-
-/// The `target` of a run launch (`POST /experiments/{id}/run`). Internally
-/// tagged by `type`, with camelCase fields to match the API.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum RunTarget {
-    /// Reuse an already-provisioned sandbox.
-    Existing {
-        #[serde(rename = "sandboxId")]
-        sandbox_id: String,
-    },
-    /// Provision a fresh instance for the chosen GPU.
-    New {
-        gpu: String,
-        #[serde(rename = "gpuCount")]
-        gpu_count: i64,
-        #[serde(rename = "diskGb")]
-        disk_gb: i64,
-        /// Single lowercase word — same under camelCase, so no rename needed.
-        /// Omitted from the payload when `None`.
-        #[serde(skip_serializing_if = "Option::is_none")]
-        provider: Option<String>,
-    },
-    /// Provision a fresh CPU-only instance.
-    #[serde(rename = "new-cpu")]
-    NewCpu {
-        #[serde(rename = "cpuFlavor")]
-        cpu_flavor: String,
-        #[serde(rename = "vcpuCount")]
-        vcpu_count: i64,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct RunBody {
-    target: RunTarget,
-    /// Bypass the server's "branch unchanged vs parent" guard. Omitted when false.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    force: bool,
-}
-
 /// The `target` of a standalone instance (`POST /sandboxes`). Mirrors
-/// `RunTarget`'s `New`/`NewCpu` variants, minus `Existing` — a standalone box is
-/// always freshly provisioned, never an existing-sandbox reuse. Kept separate
-/// from `RunTarget` because the two hit different endpoints whose contracts may
-/// diverge.
+/// the provider catalog's GPU and CPU variants.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SandboxTarget {
@@ -650,7 +140,7 @@ pub struct CreateSandboxBody {
 }
 
 /// A sandbox as returned by `POST /sandboxes`. Mirrors the API's `zSandbox`;
-/// fields are nullable while a hosted box is still provisioning.
+/// fields are nullable while a box is still provisioning.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sandbox {
@@ -665,6 +155,12 @@ pub struct Sandbox {
     pub created_by: Option<String>,
     pub updated_at: String,
     pub provision_warnings: Option<String>,
+    #[serde(default)]
+    pub failure_code: Option<String>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
+    #[serde(default)]
+    pub failed_at: Option<String>,
     pub provider_name: Option<String>,
     pub provider_instance_id: Option<String>,
     pub price_per_hour: Option<f64>,
@@ -803,10 +299,6 @@ async fn api_post<T: DeserializeOwned>(creds: &Credentials, path: &str, body: Va
     request(creds, Method::POST, path, Some(body)).await
 }
 
-async fn api_patch<T: DeserializeOwned>(creds: &Credentials, path: &str, body: Value) -> Result<T> {
-    request(creds, Method::PATCH, path, Some(body)).await
-}
-
 // ---------------------------------------------------------------------------
 // Endpoint fns (one per TS export, same path/method/shape)
 // ---------------------------------------------------------------------------
@@ -815,224 +307,12 @@ pub async fn list_orgs(creds: &Credentials) -> Result<ListOrgs> {
     api_get(creds, "/orgs").await
 }
 
-pub async fn list_projects(creds: &Credentials, org_id: &str) -> Result<ListProjects> {
-    api_get(creds, &format!("/orgs/{}/projects", org_id)).await
-}
-
-/// The public project directory — every project flagged `isPublic`, viewable by
-/// anyone. A PAT still works here but doesn't widen the result set.
-pub async fn list_public_projects(creds: &Credentials) -> Result<ListProjects> {
-    api_get(creds, "/projects/public").await
-}
-
-/// Fetch a single project by id (`GET /projects/{id}`). Works for any public
-/// project, or any private one in an org the caller belongs to.
-pub async fn get_project(creds: &Credentials, project_id: &str) -> Result<ProjectEnvelope> {
-    api_get(creds, &format!("/projects/{}", project_id)).await
-}
-
-/// Find a project by id by scanning the caller's orgs. Prefer [`get_project`]
-/// when you only need the row; this stays for callers that need org context.
-pub async fn find_project(creds: &Credentials, project_id: &str) -> Result<Option<Project>> {
-    for org in list_orgs(creds).await?.orgs {
-        let found = list_projects(creds, &org.id)
-            .await?
-            .projects
-            .into_iter()
-            .find(|p| p.id == project_id);
-        if found.is_some() {
-            return Ok(found);
-        }
-    }
-    Ok(None)
-}
-
-pub async fn create_project(
-    creds: &Credentials,
-    org_id: &str,
-    body: &CreateProjectBody,
-) -> Result<CreateProjectResult> {
-    let body = serde_json::to_value(body)?;
-    api_post(creds, &format!("/orgs/{}/projects", org_id), body).await
-}
-
-pub async fn update_project(
-    creds: &Credentials,
-    project_id: &str,
-    body: &UpdateProjectBody,
-) -> Result<ProjectEnvelope> {
-    let body = serde_json::to_value(body)?;
-    api_patch(creds, &format!("/projects/{}", project_id), body).await
-}
-
-pub async fn list_experiments(creds: &Credentials, project_id: &str) -> Result<ListExperiments> {
-    api_get(creds, &format!("/projects/{}/experiments", project_id)).await
-}
-
-pub async fn list_env_var_names(creds: &Credentials, project_id: &str) -> Result<ListEnvVarNames> {
-    api_get(creds, &format!("/projects/{}/env-var-names", project_id)).await
-}
-
-pub async fn list_runs(creds: &Credentials, project_id: &str) -> Result<ListRuns> {
-    api_get(creds, &format!("/projects/{}/runs", project_id)).await
-}
-
-pub async fn query_project(
-    creds: &Credentials,
-    project_id: &str,
-    sql: &str,
-) -> Result<ProjectQueryResult> {
-    let body = serde_json::to_value(QueryBody { sql })?;
-    api_post(creds, &format!("/projects/{}/query", project_id), body).await
-}
-
-pub async fn render_wandb_chart(
-    creds: &Credentials,
-    project_id: &str,
-    body: &WandbChartBody,
-) -> Result<WandbChartResult> {
-    let body = serde_json::to_value(body)?;
-    api_post(
-        creds,
-        &format!("/projects/{}/charts/wandb", project_id),
-        body,
-    )
-    .await
-}
-
-pub async fn create_child_experiment(
-    creds: &Credentials,
-    project_id: &str,
-    body: &CreateChildBody,
-) -> Result<ExperimentEnvelope> {
-    let body = serde_json::to_value(body)?;
-    api_post(
-        creds,
-        &format!("/projects/{}/experiments", project_id),
-        body,
-    )
-    .await
-}
-
-pub async fn create_baseline_experiment(
-    creds: &Credentials,
-    project_id: &str,
-    body: &CreateBaselineExperimentBody,
-) -> Result<ExperimentEnvelope> {
-    // Repo is bound at project creation; this materializes a baseline (root
-    // node) on it. `None` fields are omitted so the server applies its
-    // defaults. Repeat calls create additional roots — projects may hold
-    // multiple baselines.
-    let json = serde_json::to_value(body)?;
-    api_post(
-        creds,
-        &format!("/projects/{}/baseline-experiment", project_id),
-        json,
-    )
-    .await
-}
-
-pub async fn read_run_log(
-    creds: &Credentials,
-    run_id: &str,
-    mode: Option<&str>,
-    max_bytes: Option<i64>,
-    start_byte: Option<i64>,
-    end_byte: Option<i64>,
-) -> Result<RunLogExcerpt> {
-    let mut params: Vec<String> = Vec::new();
-    if let Some(m) = mode {
-        params.push(format!("mode={}", m));
-    }
-    if let Some(v) = max_bytes {
-        params.push(format!("maxBytes={}", v));
-    }
-    if let Some(v) = start_byte {
-        params.push(format!("startByte={}", v));
-    }
-    if let Some(v) = end_byte {
-        params.push(format!("endByte={}", v));
-    }
-    let qs = if params.is_empty() {
-        String::new()
-    } else {
-        format!("?{}", params.join("&"))
-    };
-    api_get(creds, &format!("/runs/{}/log{}", run_id, qs)).await
-}
-
-pub async fn search_logs(
-    creds: &Credentials,
-    project_id: &str,
-    body: &SearchLogsBody,
-) -> Result<LogSearchResult> {
-    let body = serde_json::to_value(body)?;
-    api_post(
-        creds,
-        &format!("/projects/{}/search-logs", project_id),
-        body,
-    )
-    .await
-}
-
-pub async fn read_artifact(
-    creds: &Credentials,
-    run_id: &str,
-    key: &str,
-    mode: Option<&str>,
-    max_bytes: Option<i64>,
-) -> Result<ArtifactExcerpt> {
-    let mut params: Vec<String> = vec![format!("key={}", urlencoding::encode(key))];
-    if let Some(m) = mode {
-        params.push(format!("mode={}", m));
-    }
-    if let Some(v) = max_bytes {
-        params.push(format!("maxBytes={}", v));
-    }
-    api_get(
-        creds,
-        &format!("/runs/{}/artifact?{}", run_id, params.join("&")),
-    )
-    .await
-}
-
-pub async fn list_artifacts(creds: &Credentials, run_id: &str) -> Result<ListArtifacts> {
-    api_get(creds, &format!("/runs/{}/artifacts", run_id)).await
-}
-
-pub async fn list_wandb_runs(creds: &Credentials, run_id: &str) -> Result<ListWandbRuns> {
-    api_get(creds, &format!("/runs/{}/wandb-runs", run_id)).await
-}
-
 pub async fn list_catalog(creds: &Credentials) -> Result<ListCatalog> {
     api_get(creds, "/compute/catalog").await
 }
 
 pub async fn list_cpu_catalog(creds: &Credentials) -> Result<ListCpuCatalog> {
     api_get(creds, "/compute/catalog/cpu").await
-}
-
-pub async fn get_experiment(creds: &Credentials, exp_id: &str) -> Result<GetExperimentResult> {
-    api_get(creds, &format!("/experiments/{}", exp_id)).await
-}
-
-pub async fn update_experiment(
-    creds: &Credentials,
-    exp_id: &str,
-    body: &UpdateExperimentBody,
-) -> Result<ExperimentEnvelope> {
-    let body = serde_json::to_value(body)?;
-    api_patch(creds, &format!("/experiments/{}", exp_id), body).await
-}
-
-pub async fn start_experiment_run(
-    creds: &Credentials,
-    exp_id: &str,
-    target: RunTarget,
-    force: bool,
-) -> Result<ExperimentEnvelope> {
-    let body = serde_json::to_value(RunBody { target, force })?;
-    api_post(creds, &format!("/experiments/{}/run", exp_id), body).await
 }
 
 /// Spin up a standalone instance in an org (no experiment) — `POST /sandboxes`.
@@ -1088,186 +368,11 @@ pub async fn create_ssh_key(
     .await
 }
 
-pub async fn cancel_experiment_run(creds: &Credentials, exp_id: &str) -> Result<()> {
-    request_no_content(
-        creds,
-        Method::POST,
-        &format!("/experiments/{}/cancel", exp_id),
-        Some(serde_json::json!({})),
-    )
-    .await
-}
-
-pub async fn list_reports(creds: &Credentials, project_id: &str) -> Result<ListReports> {
-    api_get(creds, &format!("/projects/{}/reports", project_id)).await
-}
-
-/// Fetch one report's metadata and its rendered markdown body.
-pub async fn get_report(
-    creds: &Credentials,
-    project_id: &str,
-    report_id: &str,
-) -> Result<ReportDetail> {
-    api_get(
-        creds,
-        &format!("/projects/{}/reports/{}", project_id, report_id),
-    )
-    .await
-}
-
-/// Download the raw bytes of one file within a report (e.g. `report.md` or an
-/// image referenced from it). The endpoint 302-redirects to a presigned R2 URL;
-/// `reqwest` follows it (and drops the bearer header on the cross-host hop, which
-/// is correct — the signature in the URL authorizes the read). `path` is a
-/// report-relative POSIX path like `images/loss.png`.
-pub async fn download_report_file(
-    creds: &Credentials,
-    project_id: &str,
-    report_id: &str,
-    path: &str,
-) -> Result<Vec<u8>> {
-    let encoded = urlencoding::encode(path);
-    let res = send_request(
-        creds,
-        Method::GET,
-        &format!(
-            "/projects/{}/reports/{}/file?path={}",
-            project_id, report_id, encoded
-        ),
-        None,
-    )
-    .await?;
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|e| anyhow!("Could not read {}: {}", path, e))?;
-    Ok(bytes.to_vec())
-}
-
-pub async fn create_report(
-    creds: &Credentials,
-    project_id: &str,
-    body: &CreateReportBody,
-) -> Result<CreateReportResult> {
-    let body = serde_json::to_value(body)?;
-    api_post(creds, &format!("/projects/{}/reports", project_id), body).await
-}
-
-/// Upload raw bytes to a presigned PUT URL (R2). No auth header — the signature
-/// in the URL authorizes the write. `content_type` must match what the server
-/// signed (the value returned alongside the URL).
-pub async fn upload_to_presigned(url: &str, content_type: &str, bytes: Vec<u8>) -> Result<()> {
-    let res = http()
-        .put(url)
-        .header("content-type", content_type)
-        .body(bytes)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not upload to storage: {}", e))?;
-    let status = res.status();
-    if !status.is_success() {
-        let reason = status.canonical_reason().unwrap_or("");
-        return Err(anyhow!("Upload failed ({} {})", status.as_u16(), reason));
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// External runs (jobs executed by orx itself — HF Jobs etc.). The api is a
-// mirror: create registers the row, PATCH reports transitions (and returns
-// cancel intent), the log presign hands back a PUT URL for the final log.
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalRunLite {
-    pub id: String,
-    pub status: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalRunCreated {
-    pub run: ExternalRunLite,
-    pub project_id: String,
-    pub run_command: String,
-    pub branch_name: String,
-    pub github_owner: String,
-    pub github_repo: String,
-    /// Short-lived repo-scoped read token from the org's connected GitHub app,
-    /// for the job's private-repo clone. Null for mint failures.
-    #[serde(default)]
-    pub github_token: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalRunPatched {
-    pub cancel_requested: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalRunState {
-    pub status: String,
-    pub cancel_requested: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PresignedUrl {
-    pub url: String,
-}
-
-pub async fn create_external_run(
-    creds: &Credentials,
-    exp_id: &str,
-    backend: Value,
-) -> Result<ExternalRunCreated> {
-    api_post(
-        creds,
-        &format!("/experiments/{}/external-run", exp_id),
-        serde_json::json!({ "backend": backend }),
-    )
-    .await
-}
-
-/// Report a transition and/or descriptor update. Fields are all optional; the
-/// response's `cancelRequested` doubles as the supervisor's cancel poll.
-pub async fn update_external_run(
-    creds: &Credentials,
-    run_id: &str,
-    body: Value,
-) -> Result<ExternalRunPatched> {
-    api_patch(creds, &format!("/runs/{}/external", run_id), body).await
-}
-
-pub async fn get_external_run_state(creds: &Credentials, run_id: &str) -> Result<ExternalRunState> {
-    api_get(creds, &format!("/runs/{}/external", run_id)).await
-}
-
-pub async fn presign_external_run_log(creds: &Credentials, run_id: &str) -> Result<PresignedUrl> {
-    api_post(
-        creds,
-        &format!("/runs/{}/external-log", run_id),
-        serde_json::json!({}),
-    )
-    .await
-}
-
-pub async fn list_skills(creds: &Credentials) -> Result<ListSkills> {
-    api_get(creds, "/skills").await
-}
-
-pub async fn read_skill(creds: &Credentials, path: &str) -> Result<SkillContent> {
-    let p = urlencoding::encode(path);
-    api_get(creds, &format!("/skills/read?path={}", p)).await
-}
-
 // ---------------------------------------------------------------------------
 // alphaXiv literature endpoints (public — no auth, different hosts).
 //
 // These do NOT go through `send_request`/`Credentials`: they hit alphaXiv's
-// public API/web hosts and require no token, so `orx lit` / `orx paper` work
+// public API/web hosts and require no token, so discovery and paper reading work
 // even without `orx login`. They keep their own (simpler) error semantics and
 // translate a 404 into `Ok(None)` where "not generated yet" is a normal answer.
 // ---------------------------------------------------------------------------
@@ -1275,8 +380,8 @@ pub async fn read_skill(creds: &Credentials, path: &str) -> Result<SkillContent>
 /// Sent on external requests — some CDNs reject the default (empty) UA.
 const ALPHAXIV_UA: &str = concat!("openresearch-cli/", env!("CARGO_PKG_VERSION"));
 
-/// One full-text search hit (`GET /search/v2/paper/full-text`). Serialize is
-/// derived so `orx lit --json` can re-emit hits verbatim.
+/// One alphaXiv full-text or discovery search hit. Serialize is derived so the
+/// CLI can emit endpoint results verbatim.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaperHit {
@@ -1300,18 +405,52 @@ pub struct PaperSnippet {
     pub snippet: String,
 }
 
-/// Full-text literature search across alphaXiv. Returns the hits in relevance
-/// order (most relevant first), capped at `limit`.
-pub async fn search_papers(query: &str, limit: u32) -> Result<Vec<PaperHit>> {
+#[derive(Clone, Copy)]
+pub struct PaperDiscoveryOptions<'a> {
+    pub published_after: Option<&'a str>,
+    pub published_before: Option<&'a str>,
+    pub prioritize: &'a str,
+}
+
+#[derive(Clone, Copy)]
+pub struct OpenAlexDiscoveryOptions<'a> {
+    pub limit: u32,
+    pub published_after: Option<&'a str>,
+    pub published_before: Option<&'a str>,
+    pub prioritize: &'a str,
+    pub source_filter: Option<&'a str>,
+}
+
+fn paper_discovery_url(
+    base: &str,
+    strategy: &str,
+    query: &str,
+    options: PaperDiscoveryOptions<'_>,
+) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&format!("{base}/search/v2/paper/discover/{strategy}"))?;
+    {
+        let mut params = url.query_pairs_mut();
+        params.append_pair("q", query);
+        params.append_pair("prioritize", options.prioritize);
+        if let Some(date) = options.published_after {
+            params.append_pair("publishedAfter", date);
+        }
+        if let Some(date) = options.published_before {
+            params.append_pair("publishedBefore", date);
+        }
+    }
+    Ok(url)
+}
+
+async fn discover_papers(
+    strategy: &str,
+    query: &str,
+    options: PaperDiscoveryOptions<'_>,
+) -> Result<Vec<PaperHit>> {
     let base = crate::config::alphaxiv_api_url();
-    let url = format!(
-        "{}/search/v2/paper/full-text?q={}&limit={}",
-        base,
-        urlencoding::encode(query),
-        limit
-    );
+    let url = paper_discovery_url(&base, strategy, query, options)?;
     let res = http()
-        .get(&url)
+        .get(url)
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
@@ -1320,7 +459,8 @@ pub async fn search_papers(query: &str, limit: u32) -> Result<Vec<PaperHit>> {
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
         return Err(anyhow!(
-            "alphaXiv search failed ({} {})",
+            "alphaXiv {} retrieval failed ({} {})",
+            strategy,
             status.as_u16(),
             reason
         ));
@@ -1328,8 +468,22 @@ pub async fn search_papers(query: &str, limit: u32) -> Result<Vec<PaperHit>> {
     Ok(res.json::<Vec<PaperHit>>().await?)
 }
 
+pub async fn discover_papers_by_keyword(
+    query: &str,
+    options: PaperDiscoveryOptions<'_>,
+) -> Result<Vec<PaperHit>> {
+    discover_papers("keyword", query, options).await
+}
+
+pub async fn discover_papers_by_embedding(
+    query: &str,
+    options: PaperDiscoveryOptions<'_>,
+) -> Result<Vec<PaperHit>> {
+    discover_papers("embedding", query, options).await
+}
+
 /// `2401.12345v2` → `2401.12345`; alphaXiv lookups want the versionless id.
-fn versionless_id(paper_id: &str) -> &str {
+pub(crate) fn versionless_id(paper_id: &str) -> &str {
     paper_id
         .rfind('v')
         .filter(|&i| i > 0 && !paper_id[i + 1..].is_empty())
@@ -1338,7 +492,7 @@ fn versionless_id(paper_id: &str) -> &str {
 }
 
 /// One hit from the fast (Google-backed) paper search — the endpoint built for
-/// title lookups, vs the BM25 full-text search `orx lit` uses.
+/// title lookups, versus the BM25 discovery primitive.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FastPaperHit {
@@ -1479,6 +633,67 @@ pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
     Ok(resolved)
 }
 
+/// A declared length past this is not a paper; arXiv's own submission limit is
+/// far below it.
+const MAX_PAPER_PDF_BYTES: u64 = 64 * 1024 * 1024;
+
+/// `export.arxiv.org` is the host arXiv asks automated clients to use. Old-style
+/// ids (`hep-th/9901001`) carry a slash, so each segment is encoded separately.
+fn paper_pdf_url(paper_id: &str) -> String {
+    let path = versionless_id(paper_id)
+        .split('/')
+        .map(|segment| urlencoding::encode(segment).into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    format!("https://export.arxiv.org/pdf/{path}")
+}
+
+/// Download a paper's PDF, for paper projects that start blank because the
+/// paper has no linked public code repository.
+pub async fn fetch_paper_pdf(paper_id: &str) -> Result<Vec<u8>> {
+    // The id reaches here straight from the request body; `..` would walk to
+    // another paper's PDF on the same host.
+    if paper_id
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err(anyhow!("{} is not an arXiv id", paper_id));
+    }
+    let url = paper_pdf_url(paper_id);
+    let res = http()
+        .get(&url)
+        .header("user-agent", ALPHAXIV_UA)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not reach arXiv at {}: {}", url, e))?;
+    let status = res.status();
+    if !status.is_success() {
+        let reason = status.canonical_reason().unwrap_or("");
+        return Err(anyhow!(
+            "arXiv PDF download failed ({} {})",
+            status.as_u16(),
+            reason
+        ));
+    }
+    // arXiv answers some unknown ids with an HTML page rather than a 404.
+    let is_pdf = res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("application/pdf"));
+    if !is_pdf {
+        return Err(anyhow!("{} did not return a PDF", url));
+    }
+    if res
+        .content_length()
+        .is_some_and(|len| len > MAX_PAPER_PDF_BYTES)
+    {
+        return Err(anyhow!("{} is too large to download", url));
+    }
+    Ok(res.bytes().await?.to_vec())
+}
+
 /// Look up a paper's linked GitHub repository (the most-starred repo associated
 /// with it on alphaXiv). Returns `Ok(None)` when the paper has no linked repo or
 /// isn't known to alphaXiv. Best-effort metadata — callers shouldn't fail on it.
@@ -1551,8 +766,8 @@ pub async fn fetch_paper_markdown(kind: &str, paper_id: &str) -> Result<Option<S
 // ---------------------------------------------------------------------------
 // Unified literature hit + OpenAlex / bioRxiv sources.
 //
-// `orx lit` searches one source per call and prints a uniform list; `orx paper`
-// fetches one paper. Like the alphaXiv block above, these hit public hosts with
+// Discovery returns a uniform list and `orx paper` fetches one paper. Like the
+// alphaXiv block above, these hit public hosts with
 // no token and keep their own light error semantics. bioRxiv has no search API,
 // so `--source biorxiv` searches OpenAlex filtered to bioRxiv's source and
 // bioRxiv's own API is used only to fetch a preprint by DOI.
@@ -1561,9 +776,8 @@ pub async fn fetch_paper_markdown(kind: &str, paper_id: &str) -> Result<Option<S
 /// OpenAlex source id for the bioRxiv repository — `--source biorxiv` filters to it.
 pub const BIORXIV_SOURCE_ID: &str = "S4306402567";
 
-/// A single literature search hit, uniform across sources. `orx lit --json`
-/// emits these verbatim, so per-source-only fields (`votes`, `citations`,
-/// `snippets`) are omitted when empty.
+/// A single discovery hit, uniform across sources. Per-source-only fields
+/// (`votes`, `citations`, `snippets`) are omitted when empty.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LitHit {
@@ -1749,31 +963,75 @@ impl OpenAlexWork {
 const OPENALEX_SELECT: &str =
     "id,doi,title,publication_date,cited_by_count,abstract_inverted_index";
 
-/// Search OpenAlex works by relevance, capped at `limit`. When `source_filter`
-/// is set (an OpenAlex source id like [`BIORXIV_SOURCE_ID`]), results are
-/// restricted to that venue. Hits come back already mapped to [`LitHit`].
-pub async fn search_openalex(
+fn openalex_discovery_url(
+    base: &str,
     query: &str,
-    limit: u32,
-    source_filter: Option<&str>,
+    mailto: &str,
+    options: OpenAlexDiscoveryOptions<'_>,
+) -> Result<reqwest::Url> {
+    // Preserve relevance by reranking a broader page instead of sorting the whole corpus by date.
+    let fetch_limit = if options.prioritize == "default" {
+        options.limit
+    } else {
+        options.limit.saturating_mul(4).max(50)
+    };
+    let mut url = reqwest::Url::parse(&format!("{base}/works"))?;
+    {
+        let mut params = url.query_pairs_mut();
+        params.append_pair("search", query);
+        params.append_pair("per_page", &fetch_limit.clamp(1, 200).to_string());
+        params.append_pair("mailto", mailto);
+        params.append_pair("select", OPENALEX_SELECT);
+
+        let mut filters = Vec::new();
+        if let Some(source) = options.source_filter {
+            filters.push(format!("primary_location.source.id:{source}"));
+        }
+        if let Some(date) = options.published_after {
+            filters.push(format!("from_publication_date:{date}"));
+        }
+        if let Some(date) = options.published_before {
+            filters.push(format!("to_publication_date:{date}"));
+        }
+        if !filters.is_empty() {
+            params.append_pair("filter", &filters.join(","));
+        }
+    }
+    Ok(url)
+}
+
+fn rerank_openalex_works(works: &mut [OpenAlexWork], prioritize: &str) {
+    match prioritize {
+        "recency" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
+            (Some(a), Some(b)) => b.cmp(a),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }),
+        "historical" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
+            (Some(a), Some(b)) => a.cmp(b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }),
+        "popular" => works.sort_by(|a, b| {
+            b.cited_by_count
+                .unwrap_or_default()
+                .cmp(&a.cited_by_count.unwrap_or_default())
+        }),
+        _ => {}
+    }
+}
+
+/// Search OpenAlex works, optionally restricted to a source such as bioRxiv.
+pub async fn discover_openalex(
+    query: &str,
+    options: OpenAlexDiscoveryOptions<'_>,
 ) -> Result<Vec<LitHit>> {
     let base = crate::config::openalex_api_url();
-    // OpenAlex rejects per_page outside 1..=200 with a 400.
-    let per_page = limit.clamp(1, 200);
-    let mut url = format!(
-        "{}/works?search={}&per_page={}&mailto={}&select={}",
-        base,
-        urlencoding::encode(query),
-        per_page,
-        urlencoding::encode(&crate::config::openalex_mailto()),
-        OPENALEX_SELECT,
-    );
-    if let Some(sid) = source_filter {
-        url.push_str("&filter=primary_location.source.id:");
-        url.push_str(sid);
-    }
+    let url = openalex_discovery_url(&base, query, &crate::config::openalex_mailto(), options)?;
     let res = http()
-        .get(&url)
+        .get(url)
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
@@ -1793,11 +1051,13 @@ pub async fn search_openalex(
         #[serde(default)]
         results: Vec<OpenAlexWork>,
     }
-    let biorxiv = source_filter == Some(BIORXIV_SOURCE_ID);
-    let body = res.json::<WorksResponse>().await?;
+    let biorxiv = options.source_filter == Some(BIORXIV_SOURCE_ID);
+    let mut body = res.json::<WorksResponse>().await?;
+    rerank_openalex_works(&mut body.results, options.prioritize);
     Ok(body
         .results
         .into_iter()
+        .take(options.limit as usize)
         .map(|w| w.into_lit_hit(biorxiv))
         .collect())
 }
@@ -1999,11 +1259,144 @@ pub async fn search_youcom(query: &str, limit: u32) -> Result<Vec<LitHit>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        openalex_selector, reconstruct_abstract, CreateBaselineExperimentBody, CreateChildBody,
-        CreateSandboxBody, ListCatalog, ListCpuCatalog, LitHit, OpenAlexWork, PaperHit, RunBody,
-        RunTarget, SandboxEnvelope, SandboxTarget, BIORXIV_SOURCE_ID,
+        openalex_discovery_url, openalex_selector, paper_discovery_url, reconstruct_abstract,
+        rerank_openalex_works, CreateSandboxBody, ListCatalog, ListCpuCatalog, LitHit,
+        OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions, PaperHit, SandboxEnvelope,
+        SandboxTarget, BIORXIV_SOURCE_ID,
     };
     use serde_json::json;
+
+    #[test]
+    fn paper_pdf_url_drops_the_version_and_keeps_legacy_id_slashes() {
+        assert_eq!(
+            super::paper_pdf_url("2401.12345v2"),
+            "https://export.arxiv.org/pdf/2401.12345"
+        );
+        assert_eq!(
+            super::paper_pdf_url("hep-th/9901001"),
+            "https://export.arxiv.org/pdf/hep-th/9901001"
+        );
+    }
+
+    #[test]
+    fn paper_discovery_url_encodes_strategy_and_controls() {
+        let url = paper_discovery_url(
+            "https://api.alphaxiv.org",
+            "keyword",
+            "attention & memory",
+            PaperDiscoveryOptions {
+                published_after: Some("2024-01-01"),
+                published_before: Some("2025-12-31"),
+                prioritize: "historical",
+            },
+        )
+        .expect("valid discovery URL");
+        let params = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(url.path(), "/search/v2/paper/discover/keyword");
+        assert_eq!(
+            params.get("q").map(|value| value.as_ref()),
+            Some("attention & memory")
+        );
+        assert_eq!(
+            params.get("publishedAfter").map(|value| value.as_ref()),
+            Some("2024-01-01")
+        );
+        assert_eq!(
+            params.get("publishedBefore").map(|value| value.as_ref()),
+            Some("2025-12-31")
+        );
+        assert_eq!(
+            params.get("prioritize").map(|value| value.as_ref()),
+            Some("historical")
+        );
+    }
+
+    #[test]
+    fn openalex_discovery_url_encodes_source_dates_and_priority() {
+        let url = openalex_discovery_url(
+            "https://api.openalex.org",
+            "protein folding & agents",
+            "dev@example.org",
+            OpenAlexDiscoveryOptions {
+                limit: 15,
+                published_after: Some("2024-01-01"),
+                published_before: Some("2026-01-31"),
+                prioritize: "popular",
+                source_filter: Some(BIORXIV_SOURCE_ID),
+            },
+        )
+        .expect("valid OpenAlex URL");
+        let params = url
+            .query_pairs()
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            params.get("search").map(|value| value.as_ref()),
+            Some("protein folding & agents")
+        );
+        assert_eq!(
+            params.get("per_page").map(|value| value.as_ref()),
+            Some("60")
+        );
+        assert_eq!(params.get("sort"), None);
+        assert_eq!(
+            params.get("filter").map(|value| value.as_ref()),
+            Some("primary_location.source.id:S4306402567,from_publication_date:2024-01-01,to_publication_date:2026-01-31")
+        );
+    }
+
+    #[test]
+    fn reranks_only_the_relevant_openalex_result_pool() {
+        let json = r#"[
+            {"title":"middle","publication_date":"2020-01-01","cited_by_count":5},
+            {"title":"new","publication_date":"2025-01-01","cited_by_count":1},
+            {"title":"old","publication_date":"2010-01-01","cited_by_count":20},
+            {"title":"unknown","publication_date":null,"cited_by_count":2}
+        ]"#;
+        let works = || serde_json::from_str::<Vec<OpenAlexWork>>(json).expect("valid works");
+
+        let mut recency = works();
+        rerank_openalex_works(&mut recency, "recency");
+        assert_eq!(recency[0].title.as_deref(), Some("new"));
+
+        let mut historical = works();
+        rerank_openalex_works(&mut historical, "historical");
+        assert_eq!(historical[0].title.as_deref(), Some("old"));
+        assert_eq!(historical[3].title.as_deref(), Some("unknown"));
+
+        let mut popular = works();
+        rerank_openalex_works(&mut popular, "popular");
+        assert_eq!(popular[0].title.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn openresearch_client_contains_only_account_and_compute_paths() {
+        let source = include_str!("client.rs");
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("client source has a production section");
+        for forbidden in ["\"/projects", "\"/experiments", "\"/runs", "\"/skills"] {
+            assert!(
+                !production.contains(forbidden),
+                "research-state endpoint remains in client.rs: {forbidden}"
+            );
+        }
+        for retained in [
+            "\"/orgs\"",
+            "\"/compute/catalog",
+            "\"/sandboxes",
+            "\"/ssh-keys",
+        ] {
+            assert!(
+                production.contains(retained),
+                "missing infrastructure endpoint: {retained}"
+            );
+        }
+    }
 
     /// The GPU catalog wire format carries `disk` as a discriminated union and an
     /// optional `region`, plus `bandwidth*` fields the CLI ignores. Pin that we
@@ -2079,64 +1472,6 @@ mod tests {
         assert_eq!(parsed.offers.len(), 1);
         assert!(parsed.offers[0].disk.sizable);
         assert_eq!(parsed.offers[0].disk.per_gb_hour, Some(0.0001));
-    }
-
-    /// The `new` GPU run target serializes with the discriminant and camelCase
-    /// keys the API expects, including `provider` when set.
-    #[test]
-    fn serializes_run_target_new_with_provider() {
-        let target = RunTarget::New {
-            gpu: "H100_SXM".into(),
-            gpu_count: 1,
-            disk_gb: 100,
-            provider: Some("runpod".into()),
-        };
-        assert_eq!(
-            serde_json::to_value(&target).unwrap(),
-            json!({"type": "new", "gpu": "H100_SXM", "gpuCount": 1, "diskGb": 100, "provider": "runpod"}),
-        );
-    }
-
-    /// A `None` provider must be omitted from the payload entirely (so the server
-    /// falls back to its own default), not sent as `null`.
-    #[test]
-    fn serializes_run_target_new_without_provider() {
-        let target = RunTarget::New {
-            gpu: "H100_SXM".into(),
-            gpu_count: 2,
-            disk_gb: 200,
-            provider: None,
-        };
-        let value = serde_json::to_value(&target).unwrap();
-        assert_eq!(
-            value,
-            json!({"type": "new", "gpu": "H100_SXM", "gpuCount": 2, "diskGb": 200}),
-        );
-        assert!(value.get("provider").is_none());
-    }
-
-    /// `force` is omitted when false and present when true.
-    #[test]
-    fn serializes_run_body_force_flag() {
-        let target = RunTarget::New {
-            gpu: "H100_SXM".into(),
-            gpu_count: 1,
-            disk_gb: 100,
-            provider: Some("vast".into()),
-        };
-        let with_force = serde_json::to_value(RunBody {
-            target: target.clone(),
-            force: true,
-        })
-        .unwrap();
-        assert_eq!(with_force.get("force"), Some(&json!(true)));
-
-        let without_force = serde_json::to_value(RunBody {
-            target,
-            force: false,
-        })
-        .unwrap();
-        assert!(without_force.get("force").is_none());
     }
 
     /// The standalone GPU sandbox target mirrors the run target's wire shape.
@@ -2277,46 +1612,46 @@ mod tests {
         assert_eq!(sb.ssh_username.as_deref(), Some("root"));
     }
 
-    /// The api declares `chatSessionId` optional: a lost `rename_all` would send
-    /// `chat_session_id` and a lost `skip_serializing_if` would send `null`,
-    /// either of which silently drops the row's attribution.
     #[test]
-    fn serializes_experiment_chat_session_id() {
-        let child = serde_json::to_value(CreateChildBody {
-            title: "Child".into(),
-            description: None,
-            parent_experiment_id: "exp_parent".into(),
-            chat_session_id: Some("ses_abc123".into()),
-        })
-        .unwrap();
-        assert_eq!(child.get("chatSessionId"), Some(&json!("ses_abc123")));
+    fn deserializes_retained_sandbox_failure() {
+        let json = r#"{
+            "sandbox": {
+                "id": "sb_1",
+                "organizationId": "org_1",
+                "projectId": null,
+                "sshHostname": null,
+                "sshPort": null,
+                "sshUsername": null,
+                "status": "failed",
+                "machineType": "persistent",
+                "createdBy": "user_1",
+                "updatedAt": "2026-06-18T00:05:00Z",
+                "provisionWarnings": null,
+                "failureCode": "capacity_unavailable",
+                "failureMessage": "No capacity is available.",
+                "failedAt": "2026-06-18T00:05:00Z",
+                "providerName": "runpod",
+                "providerInstanceId": null,
+                "pricePerHour": 2.5,
+                "gpu": "RTX_4090",
+                "gpuCount": 2,
+                "vcpuCount": null
+            }
+        }"#;
 
-        let child_without = serde_json::to_value(CreateChildBody {
-            title: "Child".into(),
-            description: None,
-            parent_experiment_id: "exp_parent".into(),
-            chat_session_id: None,
-        })
-        .unwrap();
-        assert!(child_without.get("chatSessionId").is_none());
-
-        let baseline = serde_json::to_value(CreateBaselineExperimentBody {
-            title: Some("Baseline".into()),
-            description: None,
-            run_command: None,
-            chat_session_id: Some("ses_abc123".into()),
-        })
-        .unwrap();
-        assert_eq!(baseline.get("chatSessionId"), Some(&json!("ses_abc123")));
-
-        let baseline_without = serde_json::to_value(CreateBaselineExperimentBody {
-            title: Some("Baseline".into()),
-            description: None,
-            run_command: None,
-            chat_session_id: None,
-        })
-        .unwrap();
-        assert!(baseline_without.get("chatSessionId").is_none());
+        let sandbox = serde_json::from_str::<SandboxEnvelope>(json)
+            .expect("failed sandbox should deserialize")
+            .sandbox;
+        assert_eq!(sandbox.status, "failed");
+        assert_eq!(
+            sandbox.failure_code.as_deref(),
+            Some("capacity_unavailable")
+        );
+        assert_eq!(
+            sandbox.failure_message.as_deref(),
+            Some("No capacity is available.")
+        );
+        assert_eq!(sandbox.failed_at.as_deref(), Some("2026-06-18T00:05:00Z"));
     }
 
     /// The inverted index maps token → positions; reconstruction must restore the

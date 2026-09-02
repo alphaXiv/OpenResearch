@@ -1,11 +1,29 @@
 // The nested file-tree primitives shared by the code browsers: the committed
 // CodeTab and the live WorktreeTab's Files view. A flat, sorted, repo-relative
 // path list (from a git listing) becomes a nested dir tree that renders as
+import { m } from "../paraglide/messages.js";
+import { ltr } from "../i18n";
 // collapsible rows; clicking a file bubbles its repo-relative path up. Kept
 // source-agnostic — the caller decides which checkout the paths came from and
 // how a file open resolves.
 
-import { ChevronDown, ChevronRight, File as FileIcon, Folder, FolderOpen } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
+import { FileTypeIcon } from "./FileTypeIcon";
+import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+
+const FILE_TREE_ROW_CLASS_NAME = [
+  "file-tree-row flex items-center gap-1.5 w-full py-[3px] px-2.5 border-0",
+  "bg-transparent text-text text-start cursor-pointer font-[inherit]",
+  "[&:hover]:bg-panel [&_>_svg]:shrink-0",
+  "[&_>_svg]:text-subtext [&_>_svg.file-tree-chevron]:text-muted",
+].join(" ");
+
+const FILE_TREE_CHEVRON_CLASS_NAME = [
+  "file-tree-chevron text-muted shrink-0 [button&]:inline-flex",
+  "[button&]:items-center [button&]:justify-center [button&]:w-[13px]",
+  "[button&]:h-[13px] [button&]:p-0 [button&]:border-0 [button&]:bg-transparent",
+  "[button&_>_svg]:transition-transform [button&_>_svg]:duration-120 [button&_>_svg]:ease-standard [button&_>_svg.open]:rotate-90",
+].join(" ");
 
 /** A node in the nested tree derived from the flat path list. */
 export interface DirNode {
@@ -60,7 +78,7 @@ function DirRow({
   depth: number;
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, intent: TabOpenIntent) => void;
 }) {
   const defaultOpen = depth === 0;
   const isOpen = toggled.has(path) ? !defaultOpen : defaultOpen;
@@ -68,18 +86,17 @@ function DirRow({
     <>
       <button
         type="button"
-        className="code-tree-row"
-        style={{ paddingLeft: 8 + depth * 14 }}
+        className={FILE_TREE_ROW_CLASS_NAME}
+        style={{ paddingInlineStart: 8 + depth * 14 }}
         onClick={() => onToggle(path)}
         title={path}
       >
         {isOpen ? (
-          <ChevronDown size={13} className="code-tree-chev" />
+          <ChevronDown size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         ) : (
-          <ChevronRight size={13} className="code-tree-chev" />
+          <ChevronRight size={13} className={FILE_TREE_CHEVRON_CLASS_NAME} />
         )}
-        {isOpen ? <FolderOpen size={13} /> : <Folder size={13} />}
-        <span className="code-tree-name">{name}</span>
+        <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
       </button>
       {isOpen && (
         <TreeLevel
@@ -89,7 +106,7 @@ function DirRow({
           toggled={toggled}
           onToggle={onToggle}
           onOpenFile={onOpenFile}
-        />
+       />
       )}
     </>
   );
@@ -108,7 +125,7 @@ export function TreeLevel({
   depth: number;
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, intent: TabOpenIntent) => void;
 }) {
   const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
   const fileNames = [...node.files].sort((a, b) => a.localeCompare(b));
@@ -126,7 +143,7 @@ export function TreeLevel({
             toggled={toggled}
             onToggle={onToggle}
             onOpenFile={onOpenFile}
-          />
+         />
         );
       })}
       {fileNames.map((name) => {
@@ -135,13 +152,15 @@ export function TreeLevel({
           <button
             key={`f:${path}`}
             type="button"
-            className="code-tree-row"
-            style={{ paddingLeft: 8 + depth * 14 }}
-            onClick={() => onOpenFile(path)}
-            title={path}
+            className={FILE_TREE_ROW_CLASS_NAME}
+            style={{ paddingInlineStart: 8 + depth * 14 }}
+            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+              onOpenFile(path, intent),
+            )}
+            title={m.a11y_keep_open({ name: ltr(path) })}
           >
-            <FileIcon size={13} />
-            <span className="code-tree-name">{name}</span>
+            <FileTypeIcon name={name} />
+            <span className="file-tree-name flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">{name}</span>
           </button>
         );
       })}

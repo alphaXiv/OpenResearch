@@ -1,25 +1,23 @@
-//! Opt-out usage analytics → PostHog.
+//! Opt-out usage analytics → the first-party OpenResearch API.
 //!
 //! Why this exists: `orx` shipped with no telemetry, so we had no way to see
 //! installs, DAU/WAU, retention, or which commands people actually use. This
 //! module sends events under a random per-install UUID that is not tied to an
-//! account. The disclosed onboarding research profile is included unfiltered
-//! in its own event; prompts, file paths, and repo contents are never read from
-//! the workspace or added automatically.
+//! account. The onboarding research profile includes selected categories and
+//! user-entered area/background text; paper identifiers stay local.
 //!
 //! Guarantees, enforced by this module:
 //! - **Official builds only.** Source builds never send production telemetry or
 //!   generate an install id. The official release workflow embeds the immutable
 //!   production build channel; a runtime override may only disable it.
 //! - **Opt-out.** A `--no-telemetry` flag and a persistent `orx telemetry off`
-//!   (also toggleable from the `orx up` onboarding step). A disabled run sends
-//!   nothing, touches no disk, and generates no install id. (In an eligible
-//!   official build, *agreeing* to the consent step persists the install id —
-//!   an opt-in; see `record_consent`.)
-//! - **Never blocks or crashes the CLI.** Sends are fire-and-forget on a
-//!   background task with a bounded flush window (modeled on
-//!   [`crate::updates::UpdateWarning`]); every error is swallowed. A telemetry
-//!   fn returning to a command's `?` chain is impossible — they all return `()`.
+//!   (also toggleable from `orx up`). Disabled product telemetry sends nothing
+//!   and generates no install id. The telemetry choice itself is the sole
+//!   exception: it is queued durably so opt-outs are observable; see
+//!   `record_consent`.
+//! - **Never blocks or crashes the CLI.** Events enter a disk-backed outbox,
+//!   then send on a background task with a bounded flush window. Failed sends
+//!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
 use std::io::IsTerminal;
@@ -30,19 +28,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-/// Public, write-only PostHog project key (openresearch CLI project). A `phc_`
-/// key can only *ingest* events — it cannot read data or change settings — so
-/// it is safe to commit and ship in the binary, exactly as PostHog intends for
-/// client-side keys. Do NOT put a personal (`phx_`) key here.
-const POSTHOG_KEY: &str = "phc_u2i23xa8CBjcZpQprf6kdDzzR8vb2iTpRT8FmdcREBvX";
-
-/// Prefix stamped onto EVERY event name. This PostHog project is shared with
-/// the website/cloud-agent analytics, so CLI events must be separable by name
-/// alone — not just by the `source: "cli"` property (which one forgotten
-/// dashboard filter would leak past). Applied centrally in `build_payload`, so
-/// every current and future CLI event is `cli_*` by construction; call sites
-/// pass the bare name (`command`, `experiment_started`).
+/// Prefix stamped onto every event name by the single wire encoder.
 const EVENT_PREFIX: &str = "cli_";
+const ANALYTICS_PATH: &str = "/analytics/v1/cli-events";
 
 const BUILD_CHANNEL: &str = env!("ORX_BUILD_CHANNEL");
 
@@ -50,10 +38,35 @@ pub(crate) fn build_channel() -> &'static str {
     BUILD_CHANNEL
 }
 
-/// US PostHog cloud. Overridable with `ORX_TELEMETRY_HOST` so tests can point
+/// First-party API origin. Overridable with `ORX_TELEMETRY_HOST` so tests can point
 /// at a throwaway local listener instead of production.
-fn posthog_host() -> String {
-    std::env::var("ORX_TELEMETRY_HOST").unwrap_or_else(|_| "https://us.i.posthog.com".to_string())
+fn telemetry_host() -> String {
+    const DEFAULT: &str = "https://api.openresearch.sh";
+    let Ok(candidate) = std::env::var("ORX_TELEMETRY_HOST") else {
+        return DEFAULT.to_string();
+    };
+    let candidate = candidate.trim_end_matches('/');
+    let Ok(url) = reqwest::Url::parse(candidate) else {
+        return DEFAULT.to_string();
+    };
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    });
+    if loopback
+        && matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/"
+    {
+        candidate.to_string()
+    } else {
+        DEFAULT.to_string()
+    }
 }
 
 /// Flush window granted to an in-flight send before `#[tokio::main]` tears the
@@ -98,14 +111,6 @@ pub(crate) struct Settings {
     /// Set by `orx telemetry off`. `Some(true)` = user opted out persistently.
     #[serde(default)]
     pub telemetry_disabled: Option<bool>,
-    /// Machine context tag (e.g. `"cloud-agent"` on OpenResearch cloud boxes),
-    /// set once by `orx telemetry context <value>` during box provisioning.
-    /// Stamped on every event as the `install_kind` property so first-party
-    /// automation can be excluded from human usage metrics centrally (the
-    /// PostHog internal/test-users filter) instead of per-insight. Absent = a
-    /// human install (`install_kind: "human"`).
-    #[serde(default)]
-    pub machine_context: Option<String>,
     /// User-chosen data directory (Storage settings). Absent = fall back to the
     /// env/XDG/default chain in `store::data_dir()`. Persisted here — in the one
     /// `settings.json` — so a write can't clobber `install_id`/`telemetry_disabled`
@@ -142,9 +147,14 @@ pub(crate) struct Settings {
     pub github_default_prompt_seen: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
-    /// source added later defaults to enabled. Enforced by `orx lit`/`orx paper`.
+    /// source added later defaults to enabled. Enforced by discovery and paper reading.
     #[serde(default)]
     pub disabled_lit_sources: Vec<String>,
+    /// Whether orx may install updates on its own (Settings → Updates). Absent =
+    /// enabled. Turning it off still leaves the outdated-version warning in
+    /// place; only the silent apply stops.
+    #[serde(default)]
+    pub auto_update: Option<bool>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -238,7 +248,7 @@ pub(crate) fn set_profile(profile: ResearchProfile) -> std::io::Result<()> {
 }
 
 /// Literature sources the user has disabled (their `LitSource::as_str()` names).
-/// Read by `orx lit`/`orx paper`; `crate::config` re-exports this as
+/// Read by discovery and paper reading; `crate::config` re-exports this as
 /// `disabled_lit_sources`.
 pub(crate) fn disabled_lit_sources() -> Vec<String> {
     load_settings()
@@ -262,6 +272,18 @@ pub(crate) fn set_github_for_new_projects(enabled: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_for_new_projects = Some(enabled))
 }
 
+/// Whether orx may apply updates on its own. Defaults to enabled — the whole
+/// point is that an install nobody tends stays current.
+pub(crate) fn auto_update_enabled() -> bool {
+    load_settings()
+        .and_then(|settings| settings.auto_update)
+        .unwrap_or(true)
+}
+
+pub(crate) fn set_auto_update_enabled(enabled: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.auto_update = Some(enabled))
+}
+
 pub(crate) fn github_default_prompt_seen() -> bool {
     load_settings()
         .and_then(|settings| settings.github_default_prompt_seen)
@@ -274,6 +296,10 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
 
 fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
+}
+
+fn outbox_dir() -> PathBuf {
+    crate::config::config_dir().join("telemetry-outbox")
 }
 
 /// How reading `settings.json` turned out. The corrupt case is kept distinct
@@ -408,7 +434,7 @@ fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
     write_settings(&settings)
 }
 
-/// The anonymous `distinct_id`: an existing install id, or a freshly generated
+/// The anonymous installation ID: an existing install id, or a freshly generated
 /// one persisted on first use. Returns `None` only if the id can't be persisted
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
@@ -507,6 +533,10 @@ pub(crate) fn effective_disabled_reason() -> Option<DisabledReason> {
     disabled_reason(flag())
 }
 
+pub(crate) fn preference_enabled() -> bool {
+    preference_disabled_reason(false).is_none()
+}
+
 /// Convenience: `true` when events should be sent.
 fn is_enabled(cli_flag: bool) -> bool {
     disabled_reason(cli_flag).is_none()
@@ -517,42 +547,14 @@ fn is_enabled(cli_flag: bool) -> bool {
 /// lock as every other mutation so a concurrent install-id write can't clobber
 /// it. Returns the io result so the command can report a write failure.
 pub(crate) fn set_persisted_disabled(disabled: bool) -> std::io::Result<()> {
-    mutate_settings(|s| {
+    let result = mutate_settings(|s| {
         s.telemetry_disabled = if disabled { Some(true) } else { None };
-    })
-}
-
-/// The effective machine context: the `ORX_TELEMETRY_CONTEXT` env var when set
-/// and non-empty (so a fleet can re-tag per-process without touching disk),
-/// else the persisted `machine_context`. `None` = a human install.
-pub(crate) fn machine_context() -> Option<String> {
-    if let Ok(v) = std::env::var("ORX_TELEMETRY_CONTEXT") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return Some(v.to_string());
-        }
+    });
+    if result.is_ok() && disabled {
+        cancel_pending();
+        remove_queued_product_events();
     }
-    load_settings()
-        .and_then(|s| s.machine_context)
-        .filter(|v| !v.is_empty())
-}
-
-/// Persist (or clear, with `None`) the machine context, preserving every other
-/// settings field via the locked RMW. Used by `orx telemetry context`.
-pub(crate) fn set_machine_context(context: Option<String>) -> std::io::Result<()> {
-    mutate_settings(|s| {
-        s.machine_context = context
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-    })
-}
-
-/// The value stamped as every event's `install_kind` property: the machine
-/// context when one is set, else `"human"`. This is the delineation axis for
-/// "installs by humans" vs first-party automation (cloud agent boxes) — kept
-/// separate from `ci`, which flags *third-party* automation (a user's own CI).
-fn install_kind() -> String {
-    machine_context().unwrap_or_else(|| "human".to_string())
+    result
 }
 
 /// Process-global capture of the `--no-telemetry` flag, set once in `main`
@@ -586,49 +588,40 @@ fn is_ci() -> bool {
     std::env::var_os("CI").is_some()
 }
 
-/// Builds the PostHog capture payload for an event. Every event carries the
-/// same base context (source, version, build channel, os, arch, ci, install
-/// kind) plus `$process_person_profile: false` so PostHog does not create a
-/// person profile.
-/// `extra` supplies event-specific properties. Most callers use coarse enums;
-/// the onboarding research-profile event deliberately includes the fields
-/// disclosed in the UI.
-fn build_payload(event: &str, distinct_id: &str, extra: serde_json::Value) -> serde_json::Value {
-    let mut props = json!({
-        // Keep this random installation id out of PostHog person profiles.
-        "$process_person_profile": false,
-        "source": "cli",
-        "cli_version": crate::updates::current_version().to_string(),
-        "build_channel": build_channel(),
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "ci": is_ci(),
-        // Human install vs first-party automation (e.g. "cloud-agent" boxes).
-        // Fed into PostHog's internal-users filter so human-facing metrics
-        // exclude our own fleet by default, without per-insight filters.
-        "install_kind": install_kind(),
-    });
-    // Merge event-specific props FIRST so the invariant base context above can
-    // never be silently overwritten by a caller's `extra` (defense in depth —
-    // callers keep keys disjoint, but a stray `source`/`ci`/`os` key must not
-    // be able to corrupt identity fields).
-    if let (Some(obj), Some(add)) = (props.as_object_mut(), extra.as_object()) {
-        for (k, v) in add {
-            obj.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-    }
+fn build_payload_with_id(
+    event: &str,
+    install_id: &str,
+    event_id: uuid::Uuid,
+    properties: serde_json::Value,
+) -> serde_json::Value {
     json!({
-        "api_key": POSTHOG_KEY,
-        // Every CLI event name is `cli_`-prefixed so it's separable from the
-        // website's events in this shared project by name alone.
-        "event": format!("{EVENT_PREFIX}{event}"),
-        "distinct_id": distinct_id,
-        // Client-side event time (UTC ISO-8601). Without this PostHog buckets on
-        // ingestion time, which for a fire-and-forget send that may land seconds
-        // late would smear DAU/retention — the metrics this feature exists for.
-        "timestamp": iso8601_utc(crate::store::now_ms()),
-        "properties": props,
+        "schemaVersion": 1,
+        "installId": install_id,
+        "context": {
+            "cliVersion": crate::updates::current_version().to_string(),
+            "buildChannel": build_channel(),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "ci": is_ci(),
+            // Hosted cloud agents were retired; released CLI installs are human-driven.
+            "installKind": "human",
+        },
+        "events": [{
+            "eventId": event_id.to_string(),
+            "name": format!("{EVENT_PREFIX}{event}"),
+            "occurredAt": iso8601_utc(crate::store::now_ms()),
+            "properties": properties,
+        }],
     })
+}
+
+#[cfg(test)]
+fn build_payload(
+    event: &str,
+    install_id: &str,
+    properties: serde_json::Value,
+) -> serde_json::Value {
+    build_payload_with_id(event, install_id, uuid::Uuid::new_v4(), properties)
 }
 
 /// Format epoch milliseconds as a UTC ISO-8601 timestamp
@@ -658,37 +651,149 @@ fn iso8601_utc(ms: i64) -> String {
     format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}.{millis:03}Z")
 }
 
-/// Fire one event, right now, on the current task, awaiting the send. All
-/// errors are swallowed — telemetry never fails a command. Intended to be
-/// wrapped in `tokio::spawn` by callers that don't want to wait.
-async fn send(event: String, extra: serde_json::Value) {
-    let Some(distinct_id) = install_id() else {
-        return;
-    };
-    let payload = build_payload(&event, &distinct_id, extra);
-    let url = format!("{}/i/v0/e/", posthog_host());
-    // Bounded per-request timeout so a hung endpoint can't keep the background
-    // task alive indefinitely.
-    let _ = http()
-        .post(&url)
-        .timeout(Duration::from_secs(3))
-        .json(&payload)
-        .send()
-        .await;
+#[derive(Debug, PartialEq, Eq)]
+enum DeliveryOutcome {
+    Acknowledged,
+    Rejected,
+    Retryable,
 }
 
-/// Spawn a fire-and-forget send, returning its handle (or `None` when disabled).
+async fn post_payload(payload: &serde_json::Value) -> DeliveryOutcome {
+    let url = format!("{}{ANALYTICS_PATH}", telemetry_host());
+    let Ok(response) = http()
+        .post(&url)
+        .timeout(Duration::from_secs(3))
+        .json(payload)
+        .send()
+        .await
+    else {
+        return DeliveryOutcome::Retryable;
+    };
+    if response.status().is_success() {
+        DeliveryOutcome::Acknowledged
+    } else if matches!(response.status().as_u16(), 400 | 413) {
+        DeliveryOutcome::Rejected
+    } else {
+        DeliveryOutcome::Retryable
+    }
+}
+
+fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<PathBuf> {
+    let dir = outbox_dir();
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{event_id}.json"));
+    let tmp = dir.join(format!(".{event_id}.tmp"));
+    std::fs::write(&tmp, serde_json::to_vec(payload).ok()?).ok()?;
+    if std::fs::rename(&tmp, &path).is_err() {
+        let _ = std::fs::remove_file(tmp);
+        return None;
+    }
+    Some(path)
+}
+
+async fn deliver_payload(path: Option<PathBuf>, payload: serde_json::Value) {
+    if !is_enabled(flag()) {
+        return;
+    }
+    deliver_queued_payload(path, payload).await;
+}
+
+async fn deliver_queued_payload(path: Option<PathBuf>, payload: serde_json::Value) {
+    if post_payload(&payload).await != DeliveryOutcome::Retryable {
+        if let Some(path) = path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+async fn deliver_retry_payload(path: PathBuf, payload: serde_json::Value) {
+    if is_consent_payload(&payload) {
+        deliver_queued_payload(Some(path), payload).await;
+    } else {
+        deliver_payload(Some(path), payload).await;
+    }
+}
+
+fn register_pending(handle: tokio::task::JoinHandle<()>) {
+    if let Ok(mut handles) = pending().lock() {
+        handles.retain(|pending| !pending.is_finished());
+        handles.push(handle);
+    }
+}
+
+fn is_consent_payload(payload: &serde_json::Value) -> bool {
+    payload["events"][0]["name"] == "cli_telemetry_consent"
+}
+
+fn remove_queued_product_events() {
+    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
+        return;
+    };
+    for path in entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+    {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let keep = serde_json::from_slice(&bytes).is_ok_and(|payload| is_consent_payload(&payload));
+        if !keep {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+pub(crate) fn retry_outbox() {
+    if environment_disabled_reason().is_some() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
+        return;
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect();
+    paths.sort_by_key(|path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    });
+    // ponytail: no eviction preserves retryable events; move to SQLite if queue scans become costly.
+    for path in paths.into_iter().take(20) {
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(payload) = serde_json::from_slice(&bytes) else {
+            let _ = std::fs::remove_file(path);
+            continue;
+        };
+        if !is_consent_payload(&payload) && !is_enabled(flag()) {
+            continue;
+        }
+        // Stable event IDs make concurrent retries harmless at the API dedupe constraint.
+        register_pending(tokio::spawn(deliver_retry_payload(path, payload)));
+    }
+}
+
+/// Queue an event and spawn its send, returning the handle (or `None` when disabled).
 /// Not awaited here — callers hold the handle and optionally grant it a flush
 /// window at shutdown. Reads the `--no-telemetry` flag from the process-global
 /// set in `main`, so there is exactly one flag-access idiom.
 fn spawn_event(
     event: impl Into<String>,
-    extra: serde_json::Value,
+    properties: serde_json::Value,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !is_enabled(flag()) {
         return None;
     }
-    Some(tokio::spawn(send(event.into(), extra)))
+    let event_id = uuid::Uuid::new_v4();
+    let install_id = install_id()?;
+    let payload = build_payload_with_id(&event.into(), &install_id, event_id, properties);
+    let path = persist_payload(event_id, &payload);
+    Some(tokio::spawn(deliver_payload(path, payload)))
 }
 
 /// Handles of spawned event sends that haven't been flushed yet. Draining +
@@ -702,31 +807,33 @@ fn pending() -> &'static std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>> {
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// Fire an event without blocking: spawn the send and register its handle for
-/// the single exit-time flush. Crucially does NOT await the flush window here —
-/// awaiting inline would delay the caller's next `println!` (the "✓ …" success
-/// line) by up to the flush duration. Safe to call unconditionally — no-ops when
-/// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
-/// await.
-fn capture(event: impl Into<String>, extra: serde_json::Value) {
-    if let Some(handle) = spawn_event(event, extra) {
-        if let Ok(mut v) = pending().lock() {
-            v.push(handle);
+fn cancel_pending() {
+    if let Ok(mut handles) = pending().lock() {
+        for handle in handles.drain(..) {
+            handle.abort();
         }
     }
 }
 
-/// Shared `distinct_id` for consent events that must not touch the install id
-/// (declines, and agrees whose id could not be persisted). A FIXED sentinel, not
-/// a per-event UUID: a fresh UUID per event minted a brand-new PostHog person
-/// every time (67 phantom "users" in the launch week alone), silently inflating
-/// any unique-user metric that included the consent event. With one shared
-/// sentinel, all such events collapse into a single well-known person that is
-/// trivially excluded — while still writing nothing to disk and remaining
-/// unlinkable to any real install.
+/// Queue an event on disk, spawn the send, and register its handle for the
+/// single exit-time flush. Crucially does NOT await the flush window here —
+/// awaiting inline would delay the caller's next `println!` (the "✓ …" success
+/// line) by up to the flush duration. Safe to call unconditionally — no-ops when
+/// telemetry is disabled. Deliberately not `async` beyond the spawn: nothing to
+/// await.
+pub(crate) fn capture(event: impl Into<String>, extra: serde_json::Value) {
+    if let Some(handle) = spawn_event(event, extra) {
+        register_pending(handle);
+    }
+}
+
+/// Shared installation ID for consent events that must not touch the install id
+/// (declines, and agrees whose id could not be persisted). A fixed sentinel keeps
+/// declines from becoming unique installations while remaining unlinkable to a
+/// real install.
 const CONSENT_SENTINEL_ID: &str = "cli-consent-anonymous";
 
-/// Resolve the consent event's `distinct_id` per the identity policy on
+/// Resolve the consent event's installation ID per the identity policy on
 /// [`record_consent`] below. Split out so the identity rules are unit-testable
 /// without a network send. NB the `agreed` path calls `install_id()`, which
 /// generates + persists an id if absent — acceptable precisely because the
@@ -740,12 +847,10 @@ fn consent_distinct_id(agreed: bool) -> String {
     CONSENT_SENTINEL_ID.to_string()
 }
 
-/// Record a telemetry consent decision — `cli_telemetry_consent` with
+/// Record a telemetry toggle choice — `cli_telemetry_consent` with
 /// `{ agreed: bool }`. Within an eligible official build, this is the ONE event
 /// that ignores the user's telemetry preference: it must land even when the
-/// user chose to disable telemetry, otherwise every rejection would be
-/// invisible and the agree/reject ratio would be hopelessly skewed toward
-/// "agree".
+/// user chose to disable telemetry, otherwise off choices would be invisible.
 ///
 /// Identity policy (phantom-free by construction):
 /// - `agreed` → the persistent install id. The user just consented to
@@ -763,20 +868,15 @@ pub(crate) async fn record_consent(agreed: bool) {
         return;
     }
     let distinct_id = consent_distinct_id(agreed);
-    let payload = build_payload(
+    let event_id = uuid::Uuid::new_v4();
+    let payload = build_payload_with_id(
         "telemetry_consent",
         &distinct_id,
+        event_id,
         json!({ "agreed": agreed }),
     );
-    let url = format!("{}/i/v0/e/", posthog_host());
-    let send = async {
-        let _ = http()
-            .post(&url)
-            .timeout(Duration::from_secs(3))
-            .json(&payload)
-            .send()
-            .await;
-    };
+    let path = persist_payload(event_id, &payload);
+    let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
     // network is slow; the send itself also has its own 3s request timeout.
     let _ = tokio::time::timeout(Duration::from_secs(3), send).await;
@@ -787,26 +887,13 @@ pub(crate) fn capture_onboarding_completed() {
 }
 
 pub(crate) fn capture_onboarding_research_profile(profile: &ResearchProfile) {
-    let paper_ids: Vec<_> = profile
-        .papers
-        .iter()
-        .map(|paper| paper.paper_id.as_str())
-        .collect();
-    let paper_titles: Vec<_> = profile
-        .papers
-        .iter()
-        .map(|paper| paper.title.as_deref())
-        .collect();
     capture(
         "onboarding_research_profile_submitted",
         json!({
-            "research_areas": profile.research_areas,
-            "other_area": profile.other_area,
+            "researchAreas": profile.research_areas,
+            "otherArea": profile.other_area,
             "background": profile.background,
-            "papers": profile.papers,
-            "paper_ids": paper_ids,
-            "paper_titles": paper_titles,
-            "paper_count": profile.papers.len(),
+            "paperCount": profile.papers.len(),
         }),
     );
 }
@@ -817,6 +904,18 @@ pub(crate) fn capture_project_created(local: bool) {
 
 pub(crate) fn capture_chat_session_started(harness: &str) {
     capture("chat_session_started", json!({ "harness": harness }));
+}
+
+pub(crate) fn capture_chat_message_sent(harness: &str) {
+    capture("chat_message_sent", json!({ "harness": harness }));
+}
+
+pub(crate) fn capture_skill_invoked(skill: &str, source: &str, harness: Option<&str>) {
+    let mut properties = json!({ "skill": skill, "source": source });
+    if let Some(harness) = harness {
+        properties["harness"] = json!(harness);
+    }
+    capture("skill_invoked", properties);
 }
 
 /// Flush every pending event send (the session's `cli_command` plus any key
@@ -840,21 +939,31 @@ async fn flush_pending() {
 // Per-invocation session — the DAU/retention/command-usage backbone
 // ---------------------------------------------------------------------------
 
-/// Fires a `cli_command` event at the start of a run (so commands that
-/// `std::process::exit` on their own are still counted) and, in `finish`, grants
-/// all pending sends a brief window to land. Modeled on
+/// Starts CLI or desktop telemetry and, in `finish`, grants all pending sends a
+/// brief window to land. Modeled on
 /// [`crate::updates::UpdateWarning`].
 pub(crate) struct TelemetrySession;
 
 impl TelemetrySession {
-    /// Fire the invocation event now. `command` is a stable event label (see
-    /// `command_name` in `main.rs`), not raw user input. Inert when disabled.
+    /// Drain queued events and optionally fire the invocation event now.
+    /// `command` is a stable event label (see `command_name` in `main.rs`), not
+    /// raw user input. Inert when disabled.
     /// The `--no-telemetry` flag is read from the process-global (set in `main`
     /// before this is called), matching every other event path. The handle is
     /// registered in the pending set and flushed by `finish`.
-    pub(crate) fn start(command: &str) -> TelemetrySession {
-        // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
-        capture("command", json!({ "command": command }));
+    pub(crate) fn start(command: Option<&str>) -> TelemetrySession {
+        retry_outbox();
+        if let Some(command) = command {
+            // Bare base name; `build_payload` prefixes it → wire event `cli_command`.
+            capture("command", json!({ "command": command }));
+        }
+        TelemetrySession
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn start_app() -> TelemetrySession {
+        retry_outbox();
+        capture("app_started", json!({}));
         TelemetrySession
     }
 
@@ -876,15 +985,13 @@ impl TelemetrySession {
 /// The motivating key event. Fire only on success.
 ///
 /// - `kind`: `"create"` (a node was created) or `"run"` (a run was launched).
-/// - `local`: `true` when dispatched via the local `orx up` store path,
-///   `false` for a hosted server experiment. NB this is a dispatch axis, not a
-///   "runs on this machine" axis — e.g. `local=true, target="openresearch"` is
-///   an ephemeral OpenResearch box provisioned for a local-mode run, and
-///   `local=true, target="hf"` drives the user's own HF account from local mode.
+/// - `local`: `true` when dispatched via the local `orx up` store path.
+///   This is a dispatch axis, not a "runs on this machine" axis — for example,
+///   `target="openresearch"` provisions an ephemeral OpenResearch box. Every
+///   current dispatch uses the local store path, so callers pass `true` today.
 /// - `target`: for a run, a COARSE compute label — the backend/provider name
 ///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"ray"`, `"openresearch"`,
-///   `"local"`) for local-mode runs, or the managed compute shape (`"gpu"`,
-///   `"cpu"`, `"existing"`) for server runs. `None` for `create` (no compute).
+///   `"local"`) for local-mode runs. `None` for `create` (no compute).
 ///   Always a fixed enum label, never an id, name, or path.
 ///
 /// One vocabulary axis per property: `target` is always "what compute", `local`
@@ -895,7 +1002,7 @@ impl TelemetrySession {
 pub(crate) fn capture_experiment_started(kind: &str, local: bool, target: Option<&str>) {
     let mut extra = json!({ "kind": kind, "local": local });
     if let (Some(obj), Some(t)) = (extra.as_object_mut(), target) {
-        obj.insert("target".to_string(), json!(t));
+        obj.insert("computeTarget".to_string(), json!(t));
     }
     capture("experiment_started", extra);
 }
@@ -946,12 +1053,7 @@ mod tests {
         }
     }
 
-    const OPT_VARS: &[&str] = &[
-        "XDG_CONFIG_HOME",
-        "ORX_TELEMETRY_CONTEXT",
-        "ORX_TELEMETRY_ENV",
-        "ORX_TELEMETRY_HOST",
-    ];
+    const OPT_VARS: &[&str] = &["XDG_CONFIG_HOME", "ORX_TELEMETRY_ENV", "ORX_TELEMETRY_HOST"];
 
     #[test]
     fn environment_policy_is_fail_closed_and_downgrade_only() {
@@ -984,7 +1086,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("orx-tel-persist-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
 
-        assert!(preference_disabled_reason(false).is_none());
+        assert!(preference_enabled());
 
         // Persist an opt-out and confirm it disables.
         set_persisted_disabled(true).unwrap();
@@ -992,16 +1094,61 @@ mod tests {
             preference_disabled_reason(false),
             Some(DisabledReason::Persisted)
         ));
+        assert!(!preference_enabled());
 
         // Clearing it re-enables (and doesn't wipe the install id via the lock).
         let _ = install_id();
         set_persisted_disabled(false).unwrap();
-        assert!(preference_disabled_reason(false).is_none());
+        assert!(preference_enabled());
         assert!(
             load_settings().and_then(|s| s.install_id).is_some(),
             "clearing opt-out must not clobber the install id"
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opt_out_preserves_consent_and_never_consumes_temporary_files() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-prune-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+
+        let product = outbox_dir().join("product.json");
+        let consent = outbox_dir().join("consent.json");
+        let malformed = outbox_dir().join("malformed.json");
+        let active = outbox_dir().join(".active.tmp");
+        #[cfg(unix)]
+        let unreadable = outbox_dir().join("unreadable.json");
+        std::fs::write(
+            &product,
+            serde_json::to_vec(&build_payload("command", "did", json!({ "command": "up" })))
+                .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            &consent,
+            serde_json::to_vec(&build_payload(
+                "telemetry_consent",
+                CONSENT_SENTINEL_ID,
+                json!({ "agreed": false }),
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(&malformed, b"not-json").unwrap();
+        std::fs::write(&active, b"partial").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", &unreadable).unwrap();
+
+        set_persisted_disabled(true).unwrap();
+        assert!(!product.exists());
+        assert!(!malformed.exists());
+        assert!(consent.exists());
+        assert!(active.exists());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(unreadable).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1257,40 +1404,34 @@ mod tests {
 
     #[test]
     fn standard_payload_shape_excludes_sensitive_fields() {
-        // build_payload reads the machine context (env + settings), so isolate.
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-shape-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         let payload = build_payload(
             "experiment_started",
             "test-distinct-id",
-            json!({ "kind": "run", "local": false, "target": "modal" }),
+            json!({ "kind": "run", "local": false, "computeTarget": "modal" }),
         );
 
-        assert_eq!(payload["api_key"], POSTHOG_KEY);
-        // The bare name is `cli_`-prefixed on the wire so CLI events are
-        // separable from the website's events in this shared PostHog project.
-        assert_eq!(payload["event"], "cli_experiment_started");
-        assert_eq!(payload["distinct_id"], "test-distinct-id");
+        assert_eq!(payload["schemaVersion"], 1);
+        assert_eq!(payload["installId"], "test-distinct-id");
+        assert_eq!(payload["events"][0]["name"], "cli_experiment_started");
+        assert!(payload["events"][0]["eventId"].is_string());
 
-        let props = &payload["properties"];
-        // Anonymous marker present and false.
-        assert_eq!(props["$process_person_profile"], false);
-        assert_eq!(props["source"], "cli");
-        assert!(props["cli_version"].is_string());
-        assert_eq!(props["build_channel"], build_channel());
-        assert!(props["os"].is_string());
-        assert!(props["arch"].is_string());
-        assert!(props["ci"].is_boolean());
-        // No context configured → a human install.
-        assert_eq!(props["install_kind"], "human");
+        let context = &payload["context"];
+        assert!(context["cliVersion"].is_string());
+        assert_eq!(context["buildChannel"], build_channel());
+        assert!(context["os"].is_string());
+        assert!(context["arch"].is_string());
+        assert!(context["ci"].is_boolean());
+        assert_eq!(context["installKind"], "human");
+        let props = &payload["events"][0]["properties"];
         // Event-specific coarse props.
         assert_eq!(props["kind"], "run");
-        assert_eq!(props["target"], "modal");
+        assert_eq!(props["local"], false);
+        assert_eq!(props["computeTarget"], "modal");
 
-        // Client timestamp present at top level (so PostHog buckets on event
-        // time, not ingestion time).
-        assert!(payload["timestamp"].is_string());
+        assert!(payload["events"][0]["occurredAt"].is_string());
 
         // Standard product events must not automatically add obvious
         // identifying fields.
@@ -1315,61 +1456,20 @@ mod tests {
             "did",
             json!({
                 "source": "EVIL",
-                "build_channel": "EVIL",
+                "buildChannel": "EVIL",
                 "ci": "EVIL",
-                "install_kind": "EVIL",
                 "command": "login"
             }),
         );
-        let props = &payload["properties"];
-        assert_eq!(props["source"], "cli", "base source must win");
+        let context = &payload["context"];
         assert_eq!(
-            props["build_channel"],
+            context["buildChannel"],
             build_channel(),
             "embedded build channel must win"
         );
-        assert!(props["ci"].is_boolean(), "base ci must win");
-        assert_eq!(props["install_kind"], "human", "base install_kind must win");
+        assert!(context["ci"].is_boolean(), "base ci must win");
         // Non-colliding extra keys still land.
-        assert_eq!(props["command"], "login");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn install_kind_resolution_env_over_persisted_over_default() {
-        let _g = EnvGuard::new(OPT_VARS);
-        let dir = std::env::temp_dir().join(format!("orx-tel-kind-{}", uuid::Uuid::new_v4()));
-        std::env::set_var("XDG_CONFIG_HOME", &dir);
-
-        // Nothing configured → human.
-        assert_eq!(install_kind(), "human");
-
-        // Persisted context wins over the default and survives sibling writes.
-        set_machine_context(Some("cloud-agent".into())).unwrap();
-        assert_eq!(install_kind(), "cloud-agent");
-        set_persisted_disabled(true).unwrap();
-        let s = load_settings().expect("settings present");
-        assert_eq!(
-            s.machine_context.as_deref(),
-            Some("cloud-agent"),
-            "context survived a sibling mutation"
-        );
-        assert_eq!(s.telemetry_disabled, Some(true));
-        set_persisted_disabled(false).unwrap();
-
-        // Env var wins over the persisted value; whitespace-only is ignored.
-        std::env::set_var("ORX_TELEMETRY_CONTEXT", "ci-fleet");
-        assert_eq!(install_kind(), "ci-fleet");
-        std::env::set_var("ORX_TELEMETRY_CONTEXT", "   ");
-        assert_eq!(install_kind(), "cloud-agent");
-        std::env::remove_var("ORX_TELEMETRY_CONTEXT");
-
-        // Clearing restores the default; empty string means clear.
-        set_machine_context(None).unwrap();
-        assert_eq!(install_kind(), "human");
-        set_machine_context(Some("  ".into())).unwrap();
-        assert!(load_settings().unwrap().machine_context.is_none());
-
+        assert_eq!(payload["events"][0]["properties"]["command"], "login");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1406,12 +1506,10 @@ mod tests {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-prefix-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
-        // This PostHog project is shared with the website; CLI events must be
-        // separable by name alone. `build_payload` prefixes unconditionally, so
-        // the base names map to their prefixed wire names and nothing can
-        // emit an unprefixed event.
+        // Event names remain stable across the first-party migration.
         for (bare, wire) in [
             ("command", "cli_command"),
+            ("app_started", "cli_app_started"),
             ("onboarding_completed", "cli_onboarding_completed"),
             (
                 "onboarding_research_profile_submitted",
@@ -1419,13 +1517,261 @@ mod tests {
             ),
             ("project_created", "cli_project_created"),
             ("chat_session_started", "cli_chat_session_started"),
+            ("chat_message_sent", "cli_chat_message_sent"),
+            ("chat_retry_started", "cli_chat_retry_started"),
+            ("chat_retry_exhausted", "cli_chat_retry_exhausted"),
+            ("chat_recovery_action", "cli_chat_recovery_action"),
+            ("skill_invoked", "cli_skill_invoked"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
         ] {
             let p = build_payload(bare, "did", json!({}));
-            assert_eq!(p["event"], wire, "`{bare}` must serialize as `{wire}`");
+            assert_eq!(
+                p["events"][0]["name"], wire,
+                "`{bare}` must serialize as `{wire}`"
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn payloads_reuse_the_supplied_client_event_id() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-event-id-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let event_id = uuid::Uuid::new_v4();
+        let first = build_payload_with_id("command", "did", event_id, json!({ "command": "run" }));
+        let second = build_payload_with_id("command", "did", event_id, json!({ "command": "run" }));
+        assert_eq!(
+            first["events"][0]["eventId"],
+            second["events"][0]["eventId"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn sender_posts_the_first_party_endpoint() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let _g = EnvGuard::new(OPT_VARS);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var("ORX_TELEMETRY_HOST", format!("http://{address}"));
+        let event_id = uuid::Uuid::new_v4();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                {
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .map(str::to_owned)
+                        })
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .unwrap();
+                    if bytes.len() >= header_end + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            bytes
+        });
+
+        let payload =
+            build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
+        assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
+        let request = String::from_utf8(server.await.unwrap()).unwrap();
+        assert!(request.starts_with("POST /analytics/v1/cli-events HTTP/1.1\r\n"));
+        let body = request.split("\r\n\r\n").nth(1).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(payload["events"][0]["eventId"], event_id.to_string());
+        assert_eq!(payload["events"][0]["name"], "cli_command");
+    }
+
+    #[tokio::test]
+    async fn outbox_deletes_terminal_responses_and_retries_transient_responses() {
+        use tokio::io::AsyncWriteExt;
+
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-outbox-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "ORX_TELEMETRY_HOST",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            for status in [
+                "400 Bad Request",
+                "413 Payload Too Large",
+                "408 Request Timeout",
+                "429 Too Many Requests",
+                "500 Internal Server Error",
+                "202 Accepted",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let response =
+                    format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        for should_remain in [false, false, true, true, true, false] {
+            let event_id = uuid::Uuid::new_v4();
+            let payload =
+                build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
+            let path = outbox_dir().join(format!("{event_id}.json"));
+            std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
+            deliver_queued_payload(Some(path.clone()), payload).await;
+            assert_eq!(path.exists(), should_remain);
+        }
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn consent_retry_bypasses_persisted_opt_out() {
+        use tokio::io::AsyncWriteExt;
+
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir =
+            std::env::temp_dir().join(format!("orx-tel-consent-retry-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        std::env::set_var(
+            "ORX_TELEMETRY_HOST",
+            format!("http://{}", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        std::fs::create_dir_all(outbox_dir()).unwrap();
+        set_persisted_disabled(true).unwrap();
+
+        let product_path = outbox_dir().join("product.json");
+        let product = build_payload("command", "install", json!({ "command": "run" }));
+        std::fs::write(&product_path, serde_json::to_vec(&product).unwrap()).unwrap();
+        deliver_retry_payload(product_path.clone(), product).await;
+        assert!(product_path.exists());
+
+        let consent_path = outbox_dir().join("consent.json");
+        let consent = build_payload(
+            "telemetry_consent",
+            CONSENT_SENTINEL_ID,
+            json!({ "agreed": false }),
+        );
+        std::fs::write(&consent_path, serde_json::to_vec(&consent).unwrap()).unwrap();
+        deliver_retry_payload(consent_path.clone(), consent).await;
+        assert!(!consent_path.exists());
+
+        server.await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    #[ignore = "release workflow production contract gate"]
+    async fn production_contract_is_accepted() {
+        assert_eq!(build_channel(), "production");
+        let payloads = [
+            build_payload(
+                "command",
+                "cli-release-contract-test",
+                json!({ "command": "up" }),
+            ),
+            build_payload("app_started", "cli-release-contract-test", json!({})),
+            build_payload(
+                "telemetry_consent",
+                "cli-release-contract-test",
+                json!({ "agreed": true }),
+            ),
+            build_payload(
+                "onboarding_completed",
+                "cli-release-contract-test",
+                json!({}),
+            ),
+            build_payload(
+                "onboarding_research_profile_submitted",
+                "cli-release-contract-test",
+                json!({ "researchAreas": ["AI/ML"], "paperCount": 1 }),
+            ),
+            build_payload(
+                "project_created",
+                "cli-release-contract-test",
+                json!({ "local": true }),
+            ),
+            build_payload(
+                "chat_session_started",
+                "cli-release-contract-test",
+                json!({ "harness": "codex" }),
+            ),
+            build_payload(
+                "chat_message_sent",
+                "cli-release-contract-test",
+                json!({ "harness": "codex" }),
+            ),
+            build_payload(
+                "chat_retry_started",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "provider_transient", "attempt": 1 }),
+            ),
+            build_payload(
+                "chat_retry_exhausted",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "provider_transient", "attempt": 3 }),
+            ),
+            build_payload(
+                "chat_recovery_action",
+                "cli-release-contract-test",
+                json!({ "harness": "codex", "owner": "orx", "reason": "terminal_turn", "attempt": 2, "action": "continue" }),
+            ),
+            build_payload(
+                "skill_invoked",
+                "cli-release-contract-test",
+                json!({ "skill": "reproduce-paper", "source": "slash", "harness": "codex" }),
+            ),
+            build_payload(
+                "experiment_started",
+                "cli-release-contract-test",
+                json!({ "kind": "run", "local": true, "computeTarget": "local" }),
+            ),
+        ];
+        for payload in payloads {
+            assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
+        }
+    }
+
+    #[test]
+    fn telemetry_host_override_only_accepts_loopback_origins() {
+        let _g = EnvGuard::new(OPT_VARS);
+        std::env::set_var("ORX_TELEMETRY_HOST", "http://127.0.0.1:4000");
+        assert_eq!(telemetry_host(), "http://127.0.0.1:4000");
+        std::env::set_var("ORX_TELEMETRY_HOST", "https://example.com");
+        assert_eq!(telemetry_host(), "https://api.openresearch.sh");
+        std::env::set_var("ORX_TELEMETRY_HOST", "http://localhost:4000/path");
+        assert_eq!(telemetry_host(), "https://api.openresearch.sh");
     }
 
     #[test]
@@ -1435,8 +1781,8 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
         for agreed in [true, false] {
             let p = build_payload("telemetry_consent", "did", json!({ "agreed": agreed }));
-            assert_eq!(p["event"], "cli_telemetry_consent");
-            assert_eq!(p["properties"]["agreed"], agreed);
+            assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
+            assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1448,71 +1794,76 @@ mod tests {
         std::env::set_var("XDG_CONFIG_HOME", &dir);
 
         let onboarding = build_payload("onboarding_completed", "did", json!({}));
-        assert_eq!(onboarding["event"], "cli_onboarding_completed");
-        assert_eq!(
-            property_keys(&onboarding),
-            vec![
-                "$process_person_profile",
-                "arch",
-                "build_channel",
-                "ci",
-                "cli_version",
-                "install_kind",
-                "os",
-                "source",
-            ]
-        );
+        assert_eq!(onboarding["events"][0]["name"], "cli_onboarding_completed");
+        assert!(property_keys(&onboarding).is_empty());
+
+        let app = build_payload("app_started", "did", json!({}));
+        assert_eq!(app["events"][0]["name"], "cli_app_started");
+        assert!(property_keys(&app).is_empty());
 
         let research_profile = build_payload(
             "onboarding_research_profile_submitted",
             "did",
             json!({
-                "research_areas": ["AI/ML", "Other"],
-                "other_area": "AI for theorem proving",
-                "background": "I study RL",
-                "papers": [{"paperId": "1706.03762", "title": "Attention Is All You Need"}],
-                "paper_ids": ["1706.03762"],
-                "paper_titles": ["Attention Is All You Need"],
-                "paper_count": 1,
+                "researchAreas": ["AI/ML", "Other"],
+                "otherArea": "AI for theorem proving",
+                "background": "I study formal reasoning systems.",
+                "paperCount": 1,
             }),
         );
         assert_eq!(
-            research_profile["event"],
+            research_profile["events"][0]["name"],
             "cli_onboarding_research_profile_submitted"
         );
-        assert_eq!(research_profile["properties"]["research_areas"][1], "Other");
         assert_eq!(
-            research_profile["properties"]["other_area"],
+            research_profile["events"][0]["properties"]["researchAreas"][1],
+            "Other"
+        );
+        assert_eq!(
+            research_profile["events"][0]["properties"]["otherArea"],
             "AI for theorem proving"
         );
-        assert_eq!(research_profile["properties"]["background"], "I study RL");
         assert_eq!(
-            research_profile["properties"]["papers"][0]["title"],
-            "Attention Is All You Need"
+            research_profile["events"][0]["properties"]["background"],
+            "I study formal reasoning systems."
         );
-        assert_eq!(research_profile["properties"]["paper_ids"][0], "1706.03762");
+        assert_eq!(research_profile["events"][0]["properties"]["paperCount"], 1);
+        let profile_text = serde_json::to_string(&research_profile).unwrap();
+        for forbidden in ["paperId", "title"] {
+            assert!(!profile_text.contains(forbidden));
+        }
 
         let project = build_payload("project_created", "did", json!({ "local": true }));
-        assert_eq!(project["event"], "cli_project_created");
-        assert_eq!(project["properties"]["local"], true);
-        let mut project_keys = property_keys(&onboarding);
-        project_keys.push("local");
-        project_keys.sort_unstable();
-        assert_eq!(property_keys(&project), project_keys);
+        assert_eq!(project["events"][0]["name"], "cli_project_created");
+        assert_eq!(project["events"][0]["properties"]["local"], true);
+        assert_eq!(property_keys(&project), vec!["local"]);
 
         let chat = build_payload("chat_session_started", "did", json!({ "harness": "codex" }));
-        assert_eq!(chat["event"], "cli_chat_session_started");
-        assert_eq!(chat["properties"]["harness"], "codex");
-        let mut chat_keys = property_keys(&onboarding);
-        chat_keys.push("harness");
-        chat_keys.sort_unstable();
-        assert_eq!(property_keys(&chat), chat_keys);
+        assert_eq!(chat["events"][0]["name"], "cli_chat_session_started");
+        assert_eq!(chat["events"][0]["properties"]["harness"], "codex");
+        assert_eq!(property_keys(&chat), vec!["harness"]);
+
+        let message = build_payload("chat_message_sent", "did", json!({ "harness": "codex" }));
+        assert_eq!(message["events"][0]["name"], "cli_chat_message_sent");
+        assert_eq!(message["events"][0]["properties"]["harness"], "codex");
+        assert_eq!(property_keys(&message), vec!["harness"]);
+
+        let skill = build_payload(
+            "skill_invoked",
+            "did",
+            json!({ "skill": "reproduce-paper", "source": "slash", "harness": "codex" }),
+        );
+        assert_eq!(skill["events"][0]["name"], "cli_skill_invoked");
+        assert_eq!(skill["events"][0]["properties"]["skill"], "reproduce-paper");
+        assert_eq!(skill["events"][0]["properties"]["source"], "slash");
+        assert_eq!(skill["events"][0]["properties"]["harness"], "codex");
+        assert_eq!(property_keys(&skill), vec!["harness", "skill", "source"]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn property_keys(payload: &serde_json::Value) -> Vec<&str> {
-        let mut keys: Vec<_> = payload["properties"]
+        let mut keys: Vec<_> = payload["events"][0]["properties"]
             .as_object()
             .unwrap()
             .keys()
@@ -1552,11 +1903,13 @@ mod tests {
         }
         assert!(environment_disabled_reason().is_some());
 
-        let session = TelemetrySession::start("up");
+        let session = TelemetrySession::start(Some("up"));
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true);
         capture_chat_session_started("codex");
+        capture_chat_message_sent("codex");
+        capture_skill_invoked("reproduce-paper", "slash", Some("codex"));
         capture_experiment_started("run", true, Some("local"));
 
         assert!(pending().lock().unwrap().is_empty());

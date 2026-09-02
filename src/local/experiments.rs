@@ -64,12 +64,11 @@ pub fn legacy_root_warning(project: &LocalProject, experiment: &LocalExperiment)
         })
 }
 
-/// Create a local experiment. Every node gets its own `orx/<slug>` branch,
-/// pushed to origin: a child forks off its parent's tip, a baseline/root off
+/// Create a local experiment. Every node gets its own `orx/<slug>` branch:
+/// a child forks off its parent's tip, a baseline/root off
 /// the project's base branch. The base branch itself is never an experiment
 /// node — it stays mutable (README, notebooks, publication surface) while
-/// `orx/*` branches hold the experiment nodes' recorded code. Matches the
-/// server path, which also branches baselines to `orx/<slug>`.
+/// `orx/*` branches hold the experiment nodes' recorded code.
 pub fn create_experiment(
     store: &Store,
     project: &LocalProject,
@@ -98,10 +97,7 @@ pub fn create_experiment(
         .map(|p| p.branch_name.as_str())
         .unwrap_or(&project.baseline_branch);
     let branch_name = format!("orx/{slug}");
-    let publication = project
-        .github_enabled()
-        .then_some((project.github_owner.as_str(), project.github_repo.as_str()));
-    git::create_experiment_branch(repo, fork_point, &branch_name, publication)?;
+    git::create_experiment_branch(repo, fork_point, &branch_name)?;
 
     // Inherit: explicit > parent's command > project default > "".
     let run_command = run_command

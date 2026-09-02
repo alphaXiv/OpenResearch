@@ -7,8 +7,6 @@ use crate::store::Store;
 
 /// Lists a project's runs as a table, newest first.
 pub async fn run(args: crate::RunsArgs) -> Result<()> {
-    // Local project (orx up): the store is the truth, no api / login needed —
-    // the plane resolver decides which side owns the id.
     let store = Store::open()?;
     let plane = resolve_project(store, &args.project_id)?;
     let listing = plane.list_runs().await?;
