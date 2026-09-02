@@ -354,7 +354,7 @@ function HarnessesTab() {
                 : m.settings_none()}
             </span>
           </div>
-          {!h.agentReady && h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{h.agentNote}</p>}
+          {h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{h.agentNote}</p>}
         </div>
       )}
     </>
