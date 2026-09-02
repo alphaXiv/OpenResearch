@@ -103,7 +103,7 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
-import { SshConnectTerminal } from "./SshConnectTerminal";
+import { SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
@@ -576,28 +576,31 @@ function ModalSection() {
 
 // --- compute (ssh) ---------------------------------------------------------------
 
+const CONNECTION_BADGE_IDLE_CLASS = "rounded-sm border-border-strong bg-surface text-subtext";
+const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-accent-blue-subtle text-accent-blue";
+
 function HostTestCell({ test, connecting }: { test: SshPreflight | undefined; connecting: boolean }) {
   if (connecting)
     return (
-      <span className="inline-flex items-center gap-1.5 text-text text-sm" role="status">
-        <Spinner aria-hidden="true" /> {m.settings_connecting()}
+      <span role="status">
+        <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>
       </span>
     );
-  if (test === undefined) return <span className="block text-start text-sm text-text">{m.settings_page_not_checked()}</span>;
+  if (test === undefined) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   const missingTools = test.missingTools ?? [];
   const badge = !test.reachable ? (
-    <Badge variant="error">{m.settings_page_failed()}</Badge>
+    <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>
   ) : !test.toolsFound ? (
-    <Badge variant="error">
+    <Badge className="rounded-sm" variant="error">
       {missingTools.length === 1 ? m.settings_needs_tool({ tool: ltr(missingTools[0]) }) : m.settings_needs_tools()}
     </Badge>
   ) : (
-    <Badge variant="success">{m.settings_page_ready()}</Badge>
+    <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>
   );
   return (
-    <div role="status">
+    <div className="flex items-center gap-4" role="status">
       {badge}
-      <span className="ssh-tested-at block mt-2 text-xs text-text">{timeAgo(test.testedAt)}</span>
+      <span className="ssh-tested-at whitespace-nowrap text-xs text-subtext">{timeAgo(test.testedAt)}</span>
     </div>
   );
 }
@@ -607,6 +610,8 @@ function SshSection() {
   const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
 
   useEffect(() => {
     getSshHosts()
@@ -615,16 +620,18 @@ function SshSection() {
   }, []);
 
   function connect(host: string) {
+    setConnectionFailed(false);
+    setConnectionAttempt((attempt) => attempt + 1);
     setConnectingHost(host);
     setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
   }
 
   function cancelConnect() {
+    setConnectionFailed(false);
     setConnectingHost(null);
   }
 
   function toggle(host: string, open: boolean) {
-    if (open && connectingHost === host) cancelConnect();
     setExpandedHosts((expanded) => ({ ...expanded, [host]: !open }));
   }
 
@@ -643,78 +650,84 @@ function SshSection() {
             const hostTest = tests[h.host] ?? h.lastTest;
             const connecting = connectingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
+            const hasTerminal = connecting || hostTest?.reachable === false;
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
               <div key={h.host}>
                 <div
-                  className="flex items-center gap-3 py-3 px-2 cursor-pointer transition-colors duration-120 ease-standard [&:hover]:bg-surface"
-                  onClick={() => toggle(h.host, open)}
+                  className="flex items-center gap-3 py-3 px-2"
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                    <button
-                      type="button"
-                      className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
-                      aria-expanded={open}
-                      aria-label={open ? m.a11y_collapse_item({ name: ltr(h.host) }) : m.a11y_expand_item({ name: ltr(h.host) })}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggle(h.host, open);
-                      }}
-                    >
-                      <ChevronDown
-                        size={15}
-                        className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
-                     />
-                    </button>
+                    {hasTerminal ? (
+                      <button
+                        type="button"
+                        className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
+                        aria-expanded={open}
+                        aria-label={open ? m.a11y_collapse_item({ name: ltr(h.host) }) : m.a11y_expand_item({ name: ltr(h.host) })}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggle(h.host, open);
+                        }}
+                      >
+                        <ChevronDown
+                          size={15}
+                          className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
+                       />
+                      </button>
+                    ) : (
+                      <span className="w-5 flex-none" aria-hidden="true" />
+                    )}
                     <div className="min-w-0">
                       <div className="truncate text-base font-medium text-text" title={h.host}>{h.host}</div>
                       <div className="mt-1 truncate text-sm text-subtext" title={address}>{address}</div>
                     </div>
                   </div>
-                  <div className="grid flex-none grid-cols-[6rem_5rem] items-center gap-x-[clamp(1rem,2vw,2.5rem)]">
+                  <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="text-start">
-                      <HostTestCell test={hostTest} connecting={connecting} />
+                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} />
                     </div>
                     <Button size="small"
                       type="button"
                       className="justify-self-end"
                       onClick={(event) => {
                         event.stopPropagation();
-                        connect(h.host);
+                        if (connecting && !connectionFailed) cancelConnect();
+                        else connect(h.host);
                       }}
-                      disabled={connectingHost !== null}
+                      disabled={!connecting && connectingHost !== null && !connectionFailed}
                     >
-                      {connecting ? m.settings_connecting() : hostTest ? m.settings_reconnect() : m.settings_connect()}
+                      {connecting
+                        ? connectionFailed
+                          ? m.app_retry()
+                          : m.settings_page_cancel()
+                        : hostTest?.reachable === false
+                          ? m.app_retry()
+                          : hostTest
+                          ? m.settings_reconnect()
+                          : m.settings_connect()}
                     </Button>
                   </div>
                 </div>
-                {open && (
-                  <div className="border-t border-t-border-variant py-3 pe-2 ps-10">
-                    <dl className="m-0 grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2">
-                      <dt className="text-sm font-medium text-subtext">{m.settings_page_identity()}</dt>
-                      <dd className="m-0 text-base text-text wrap-anywhere">
-                        {h.identityFile ?? m.settings_ssh_defaults()}
-                      </dd>
-                      {!connecting && hostTest?.error && (
-                        <>
-                          <dt className="text-sm font-medium text-subtext">{m.settings_page_last_error()}</dt>
-                          <dd className="m-0 text-base leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
-                            {hostTest.error}
-                          </dd>
-                        </>
-                      )}
-                    </dl>
+                {hasTerminal && (open || connecting) && (
+                  <div className={`border-t border-t-border-variant py-3 pe-2 ps-10${open ? "" : " hidden"}`}>
+                    {!connecting && hostTest?.error && (
+                      <SshTerminalTranscript host={h.host} transcript={hostTest.error} />
+                    )}
                     {connecting && (
                       <SshConnectTerminal
+                        key={connectionAttempt}
                         host={h.host}
                         backend="ssh"
+                        active={open}
                         onComplete={(complete) => {
                           if (complete.backend !== "ssh") return;
                           setTests((tests) => ({ ...tests, [h.host]: complete.result }));
+                          setConnectionFailed(false);
                           setConnectingHost(null);
                         }}
                         onError={(error) => {
+                          setConnectionFailed(true);
                           setTests((tests) => ({
                             ...tests,
                             [h.host]: {
@@ -726,7 +739,6 @@ function SshSection() {
                             },
                           }));
                         }}
-                        onCancel={cancelConnect}
                       />
                     )}
                   </div>
@@ -743,12 +755,13 @@ function SshSection() {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test }: { test: SlurmPreflight | null }) {
-  if (test === null) return null;
-  if (!test.reachable) return <Badge variant="error">{m.settings_page_failed()}</Badge>;
-  if (!test.slurmFound) return <Badge variant="error">{m.settings_page_no_slurm_cli()}</Badge>;
-  if (!test.toolsFound) return <Badge variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
-  return <Badge variant="success">{m.settings_page_ready()}</Badge>;
+function SlurmTestBadge({ test, connecting }: { test: SlurmPreflight | null; connecting: boolean }) {
+  if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
+  if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
+  if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
+  if (!test.slurmFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_no_slurm_cli()}</Badge>;
+  if (!test.toolsFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
+  return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
 }
 
 function SlurmSection() {
@@ -762,6 +775,14 @@ function SlurmSection() {
   const [error, setError] = useState<string | null>(null);
   const [test, setTest] = useState<SlurmPreflight | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+
+  function connect() {
+    setConnectionFailed(false);
+    setConnectionAttempt((attempt) => attempt + 1);
+    setConnecting(true);
+  }
 
   const apply = (s: SlurmSettings) => {
     setSettings(s);
@@ -815,7 +836,7 @@ function SlurmSection() {
         </LoadingRow>
       ) : (
         <>
-          {test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
+          {!connecting && test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
           {test && test.partitions.length > 0 && (
             <div className={COMPUTE_DETAILS_CLASS_NAME}>
               <span className="k">{m.settings_page_partitions()}</span>
@@ -842,6 +863,7 @@ function SlurmSection() {
                     setHost(id);
                     setTest(null); // a badge earned by cluster A must not vouch for cluster B
                     setConnecting(false);
+                    setConnectionFailed(false);
                   }}
                />
               </label>
@@ -892,25 +914,43 @@ function SlurmSection() {
               </Button>
               <Button
                 type="button"
-                onClick={() => setConnecting(true)}
-                disabled={!host || connecting}
+                onClick={() => {
+                  if (connecting && !connectionFailed) {
+                    setConnectionFailed(false);
+                    setConnecting(false);
+                  } else {
+                    connect();
+                  }
+                }}
+                disabled={!host}
                 title={host ? undefined : m.settings_pick_login_node()}
               >
-                {connecting ? m.settings_connecting() : test ? m.settings_reconnect() : m.settings_connect()}
+                {connecting
+                  ? connectionFailed
+                    ? m.app_retry()
+                    : m.settings_page_cancel()
+                  : test
+                    ? m.settings_reconnect()
+                    : m.settings_connect()}
               </Button>
-              <SlurmTestBadge test={test} />
+              <span role="status">
+                <SlurmTestBadge test={test} connecting={connecting && !connectionFailed} />
+              </span>
             </div>
           </form>
           {connecting && (
             <SshConnectTerminal
+              key={connectionAttempt}
               host={host}
               backend="slurm"
               onComplete={(complete) => {
                 if (complete.backend !== "slurm") return;
                 setTest(complete.result);
+                setConnectionFailed(false);
                 setConnecting(false);
               }}
               onError={(error) => {
+                setConnectionFailed(true);
                 setTest({
                   reachable: false,
                   slurmFound: false,
@@ -919,7 +959,6 @@ function SlurmSection() {
                   error,
                 });
               }}
-              onCancel={() => setConnecting(false)}
             />
           )}
         </>

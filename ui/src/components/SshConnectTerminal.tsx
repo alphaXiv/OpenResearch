@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import type { SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { Button } from "./ui";
 import { mountTerminal } from "./terminal";
 
 export type SshConnectResult =
   | { backend: "ssh"; result: SshPreflight }
   | { backend: "slurm"; result: SlurmPreflight };
+
+const TERMINAL_CLASS_NAME = "h-40 overflow-hidden rounded-md bg-terminal p-2";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -59,21 +60,20 @@ function serverError(value: unknown): string | null {
 export function SshConnectTerminal({
   host,
   backend,
+  active = true,
   onComplete,
   onError,
-  onCancel,
 }: {
   host: string;
   backend: "ssh" | "slurm";
+  active?: boolean;
   onComplete: (result: SshConnectResult) => void;
   onError: (error: string) => void;
-  onCancel: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const socketRef = useRef<WebSocket | null>(null);
+  const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
   const completeRef = useRef(onComplete);
   const errorRef = useRef(onError);
-  const [attempt, setAttempt] = useState(0);
   const [error, setError] = useState<string | null>(null);
   completeRef.current = onComplete;
   errorRef.current = onError;
@@ -81,7 +81,8 @@ export function SshConnectTerminal({
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, false);
+    const { terminal, dispose } = mountTerminal(wrap, false, true);
+    terminalRef.current = terminal;
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL("/api/settings/ssh/connect", `${protocol}//${location.host}`);
@@ -89,12 +90,15 @@ export function SshConnectTerminal({
     url.searchParams.set("backend", backend);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
-    socketRef.current = socket;
     let completed = false;
     let failed = false;
+    let receivedOutput = false;
     const fail = (message: string) => {
       if (failed) return;
       failed = true;
+      if (!receivedOutput) terminal.writeln(message);
+      terminal.options.disableStdin = true;
+      terminal.blur();
       setError(message);
       errorRef.current(message);
     };
@@ -112,6 +116,7 @@ export function SshConnectTerminal({
     };
     socket.onmessage = (event) => {
       if (event.data instanceof ArrayBuffer) {
+        receivedOutput = true;
         terminal.write(new Uint8Array(event.data));
         return;
       }
@@ -145,42 +150,51 @@ export function SshConnectTerminal({
       input.dispose();
       resize.dispose();
       socket.close();
-      socketRef.current = null;
+      terminalRef.current = null;
       dispose();
     };
-  }, [attempt, backend, host]);
+  }, [backend, host]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.disableStdin = !active || error !== null;
+    if (active && error === null) terminal.focus();
+    else terminal.blur();
+  }, [active, error]);
 
   return (
     <div className="mt-3">
       <div
-        ref={wrapRef}
-        className="h-64 overflow-hidden rounded-md border border-border bg-background p-2"
+        className={TERMINAL_CLASS_NAME}
         role="group"
         aria-label={m.settings_ssh_connection_terminal({ host: ltr(host) })}
-      />
-      {error ? <p role="alert" className="mt-2 whitespace-pre-wrap text-sm text-accent-red">{error}</p> : null}
-      <div className="mt-3 flex justify-end gap-2">
-        {error ? (
-          <Button
-            type="button"
-            onClick={() => {
-              setError(null);
-              setAttempt((value) => value + 1);
-            }}
-          >
-            {m.app_retry()}
-          </Button>
-        ) : null}
-        <Button
-          type="button"
-          onClick={() => {
-            socketRef.current?.close();
-            onCancel();
-          }}
-        >
-          {m.settings_page_cancel()}
-        </Button>
+      >
+        <div ref={wrapRef} className="h-full overflow-hidden" />
       </div>
+      {error ? <p role="alert" className="sr-only">{error}</p> : null}
+    </div>
+  );
+}
+
+export function SshTerminalTranscript({ host, transcript }: { host: string; transcript: string }) {
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const { terminal, dispose } = mountTerminal(wrap, true, true);
+    terminal.write(transcript);
+    return dispose;
+  }, [transcript]);
+
+  return (
+    <div
+      className={`mt-3 ${TERMINAL_CLASS_NAME}`}
+      role="group"
+      aria-label={m.settings_ssh_connection_terminal({ host: ltr(host) })}
+    >
+      <div ref={wrapRef} className="h-full overflow-hidden" />
     </div>
   );
 }

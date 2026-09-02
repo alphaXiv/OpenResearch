@@ -1,7 +1,12 @@
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 
-export function mountTerminal(wrap: HTMLDivElement, disableStdin: boolean) {
+export function mountTerminal(
+  wrap: HTMLDivElement,
+  disableStdin: boolean,
+  enableWebLinks = false,
+) {
   const rootStyles = getComputedStyle(document.documentElement);
   const terminal = new Terminal({
     convertEol: true,
@@ -22,6 +27,21 @@ export function mountTerminal(wrap: HTMLDivElement, disableStdin: boolean) {
   });
   const fit = new FitAddon();
   terminal.loadAddon(fit);
+  if (enableWebLinks) {
+    terminal.loadAddon(
+      new WebLinksAddon((_event, uri) => {
+        let url: URL;
+        try {
+          url = new URL(uri);
+        } catch {
+          return;
+        }
+        if (url.protocol === "http:" || url.protocol === "https:") {
+          window.open(url, "_blank", "noopener,noreferrer");
+        }
+      }),
+    );
+  }
   terminal.open(wrap);
   const resize = () => {
     try {

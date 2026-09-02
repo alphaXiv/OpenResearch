@@ -4275,6 +4275,35 @@ fn same_origin(headers: &HeaderMap) -> bool {
     origin == format!("http://{host}") || origin == format!("https://{host}")
 }
 
+fn ssh_connect_failure(host: &str, error: String) -> SshHostTest {
+    SshHostTest {
+        host: host.to_string(),
+        reachable: false,
+        tools_found: false,
+        missing_tools: Vec::new(),
+        error: Some(error),
+        tested_at: now_ms(),
+    }
+}
+
+async fn send_ssh_connect_error(
+    socket: &mut WebSocket,
+    host: &str,
+    backend: SshConnectBackend,
+    error: String,
+) {
+    if matches!(backend, SshConnectBackend::Ssh) {
+        record_ssh_host_test(&ssh_connect_failure(host, error.clone())).await;
+    }
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error })
+                .to_string()
+                .into(),
+        ))
+        .await;
+}
+
 async fn ssh_connect(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
@@ -4379,36 +4408,24 @@ async fn ssh_connect_socket(mut socket: WebSocket, host: String, backend: SshCon
     let args = match crate::jobs::ssh::interactive_args(&target) {
         Ok(args) => args,
         Err(error) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "error": error.to_string() })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
             return;
         }
     };
     let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
         Ok(Ok(session)) => session,
         Ok(Err(error)) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "error": error.to_string() })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
             return;
         }
         Err(error) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "error": format!("SSH terminal task failed: {error}") })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            send_ssh_connect_error(
+                &mut socket,
+                &host,
+                backend,
+                format!("SSH terminal task failed: {error}"),
+            )
+            .await;
             return;
         }
     };
@@ -4478,23 +4495,17 @@ async fn ssh_connect_socket(mut socket: WebSocket, host: String, backend: SshCon
     match status {
         Ok(status) if status.success() => {}
         Ok(status) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "error": format!("ssh {host} exited with code {}", status.exit_code()) })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            send_ssh_connect_error(
+                &mut socket,
+                &host,
+                backend,
+                format!("ssh {host} exited with code {}", status.exit_code()),
+            )
+            .await;
             return;
         }
         Err(error) => {
-            let _ = socket
-                .send(Message::Text(
-                    json!({ "type": "error", "error": error })
-                        .to_string()
-                        .into(),
-                ))
-                .await;
+            send_ssh_connect_error(&mut socket, &host, backend, error).await;
             return;
         }
     }
@@ -6240,6 +6251,16 @@ mod tests {
             serde_json::from_str(r#"{"type":"resize","cols":120,"rows":40}"#).unwrap();
         let SshTerminalInput::Resize { cols, rows } = input;
         assert_eq!((cols, rows), (120, 40));
+    }
+
+    #[test]
+    fn ssh_connection_failure_is_a_persistable_preflight_result() {
+        let test = ssh_connect_failure("cluster", "authentication failed".into());
+        assert_eq!(test.host, "cluster");
+        assert!(!test.reachable);
+        assert!(!test.tools_found);
+        assert_eq!(test.error.as_deref(), Some("authentication failed"));
+        assert!(test.tested_at > 0);
     }
 
     #[cfg(unix)]
