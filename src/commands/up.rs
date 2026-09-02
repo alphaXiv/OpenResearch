@@ -17,6 +17,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -25,6 +26,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use futures::Stream;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
@@ -421,7 +423,9 @@ fn router(state: AppState) -> Router {
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route("/api/settings/ssh", get(ssh_settings))
+        .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
+        .route("/api/settings/ssh/connect", get(ssh_connect))
         .route(
             "/api/settings/slurm",
             get(slurm_settings).post(set_slurm_settings),
@@ -4302,6 +4306,328 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
 
 // --- ssh hosts ----------------------------------------------------------------
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SshConnectBackend {
+    Ssh,
+    Slurm,
+}
+
+#[derive(Deserialize)]
+struct SshConnectReq {
+    host: String,
+    backend: SshConnectBackend,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum SshTerminalInput {
+    Resize { cols: u16, rows: u16 },
+}
+
+enum PtyEvent {
+    Output(Vec<u8>),
+    Eof,
+    Exit(std::result::Result<portable_pty::ExitStatus, String>),
+}
+
+struct PtySession {
+    master: Box<dyn MasterPty + Send>,
+    input: std::sync::mpsc::Sender<Vec<u8>>,
+    events: mpsc::Receiver<PtyEvent>,
+    kill: std::sync::mpsc::Sender<()>,
+}
+
+struct PtyChildGuard {
+    kill: std::sync::mpsc::Sender<()>,
+    running: bool,
+}
+
+impl Drop for PtyChildGuard {
+    fn drop(&mut self) {
+        if self.running {
+            let _ = self.kill.send(());
+        }
+    }
+}
+
+fn same_origin(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    let Some(host) = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    origin == format!("http://{host}") || origin == format!("https://{host}")
+}
+
+fn ssh_connect_failure(host: &str, error: String) -> SshHostTest {
+    SshHostTest {
+        host: host.to_string(),
+        reachable: false,
+        tools_found: false,
+        missing_tools: Vec::new(),
+        error: Some(error),
+        tested_at: now_ms(),
+    }
+}
+
+async fn send_ssh_connect_error(
+    socket: &mut WebSocket,
+    host: &str,
+    backend: SshConnectBackend,
+    error: String,
+) {
+    if matches!(backend, SshConnectBackend::Ssh) {
+        record_ssh_host_test(&ssh_connect_failure(host, error.clone())).await;
+    }
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error })
+                .to_string()
+                .into(),
+        ))
+        .await;
+}
+
+async fn ssh_connect(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Query(req): Query<SshConnectReq>,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(StatusCode::FORBIDDEN, "SSH terminal origin rejected".into())
+            .into_response();
+    }
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return bad_request("host is required").into_response();
+    }
+    ws.on_upgrade(move |socket| ssh_connect_socket(socket, host, req.backend))
+}
+
+fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
+    use std::io::{Read as _, Write as _};
+
+    let pair = native_pty_system().openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
+    let mut child = pair.slave.spawn_command(command)?;
+    drop(pair.slave);
+
+    let mut reader = pair.master.try_clone_reader()?;
+    let mut writer = pair.master.take_writer()?;
+    let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (kill_tx, kill_rx) = std::sync::mpsc::channel();
+    let (event_tx, event_rx) = mpsc::channel(64);
+
+    let output_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if output_tx
+                        .blocking_send(PtyEvent::Output(buf[..n].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = output_tx.blocking_send(PtyEvent::Eof);
+    });
+    std::thread::spawn(move || {
+        while let Ok(bytes) = input_rx.recv() {
+            if writer
+                .write_all(&bytes)
+                .and_then(|_| writer.flush())
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    std::thread::spawn(move || loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = event_tx.blocking_send(PtyEvent::Exit(Ok(status)));
+                return;
+            }
+            Err(error) => {
+                let _ = event_tx.blocking_send(PtyEvent::Exit(Err(error.to_string())));
+                return;
+            }
+            Ok(None) => {}
+        }
+        match kill_rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                let status = child
+                    .kill()
+                    .and_then(|_| child.wait())
+                    .map_err(|error| error.to_string());
+                let _ = event_tx.blocking_send(PtyEvent::Exit(status));
+                return;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    });
+
+    Ok(PtySession {
+        master: pair.master,
+        input: input_tx,
+        events: event_rx,
+        kill: kill_tx,
+    })
+}
+
+async fn ssh_connect_socket(mut socket: WebSocket, host: String, backend: SshConnectBackend) {
+    let target = crate::jobs::ssh::SshTarget::alias(&host);
+    let args = match crate::jobs::ssh::interactive_args(&target) {
+        Ok(args) => args,
+        Err(error) => {
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+            return;
+        }
+    };
+    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+            return;
+        }
+        Err(error) => {
+            send_ssh_connect_error(
+                &mut socket,
+                &host,
+                backend,
+                format!("SSH terminal task failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let PtySession {
+        master,
+        input,
+        mut events,
+        kill,
+    } = session;
+    let mut child = PtyChildGuard {
+        kill,
+        running: true,
+    };
+
+    let status = loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(PtyEvent::Output(bytes)) => {
+                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        return;
+                    }
+                }
+                Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
+                Some(PtyEvent::Exit(status)) => break status,
+                None => break Err("SSH terminal ended without an exit status".into()),
+            },
+            message = socket.recv() => match message {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if input.send(bytes.to_vec()).is_err() {
+                        break Err("SSH terminal input closed".into());
+                    }
+                }
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
+                        if cols > 0 && rows > 0 {
+                            let _ = master.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
+                Some(Ok(_)) => {}
+            }
+        }
+    };
+    child.running = false;
+
+    // The waiter and PTY reader run on separate threads. Drain the final bytes
+    // briefly so a last SSH diagnostic reaches the terminal before completion.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        match event {
+            PtyEvent::Output(bytes) => {
+                if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    return;
+                }
+            }
+            PtyEvent::Eof | PtyEvent::Exit(_) => break,
+        }
+    }
+
+    match status {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            send_ssh_connect_error(
+                &mut socket,
+                &host,
+                backend,
+                format!("ssh {host} exited with code {}", status.exit_code()),
+            )
+            .await;
+            return;
+        }
+        Err(error) => {
+            send_ssh_connect_error(&mut socket, &host, backend, error).await;
+            return;
+        }
+    }
+
+    let (backend_name, result, ssh_test) = match backend {
+        SshConnectBackend::Ssh => {
+            let test = probe_ssh_host_preflight(host.clone()).await;
+            let result = json!(&test);
+            ("ssh", result, Some(test))
+        }
+        SshConnectBackend::Slurm => {
+            let result = crate::jobs::slurm::preflight(&host).await;
+            ("slurm", slurm_preflight_value(&result), None)
+        }
+    };
+    if socket
+        .send(Message::Text(
+            json!({ "type": "complete", "backend": backend_name, "result": result })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .is_ok()
+    {
+        if let Some(test) = ssh_test {
+            record_ssh_host_test(&test).await;
+        }
+    }
+}
+
 /// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
 /// read-only groundwork for an SSH compute backend. No keys are read.
 fn list_ssh_hosts() -> Vec<Value> {
@@ -4386,21 +4712,43 @@ struct SshPreflightReq {
     host: String,
 }
 
+async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
+    let host = req.host.trim();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+    let running = crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host))?;
+    Ok(Json(json!({ "running": running })))
+}
+
 /// Live check for one host: can we reach it and run bash/tar snapshots?
 async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
     let host = req.host.trim().to_string();
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
+    Ok(Json(json!(run_ssh_host_preflight(host).await)))
+}
+
+async fn run_ssh_host_preflight(host: String) -> SshHostTest {
+    let test = probe_ssh_host_preflight(host).await;
+    record_ssh_host_test(&test).await;
+    test
+}
+
+async fn probe_ssh_host_preflight(host: String) -> SshHostTest {
     let p = crate::jobs::ssh::preflight(&crate::jobs::ssh::SshTarget::alias(&host)).await;
-    let test = SshHostTest {
+    SshHostTest {
         host,
         reachable: p.reachable,
         tools_found: p.tools_found,
         missing_tools: p.missing_tools,
         error: p.error,
         tested_at: now_ms(),
-    };
+    }
+}
+
+async fn record_ssh_host_test(test: &SshHostTest) {
     // Best-effort persistence — the UI shows "last tested" across restarts,
     // but a store hiccup shouldn't hide a test result that already ran.
     let record = test.clone();
@@ -4412,7 +4760,6 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
     {
         eprintln!("orx up: could not record ssh test for {}: {e}", test.host);
     }
-    Ok(Json(json!(test)))
 }
 
 // --- slurm --------------------------------------------------------------------
@@ -4492,13 +4839,17 @@ async fn slurm_preflight(Json(req): Json<SlurmPreflightReq>) -> ApiResult {
         return Err(bad_request("host is required"));
     }
     let p = slurm::preflight(&host).await;
-    Ok(Json(json!({
+    Ok(Json(slurm_preflight_value(&p)))
+}
+
+fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
+    json!({
         "reachable": p.reachable,
         "slurmFound": p.slurm_found,
         "toolsFound": p.tools_found,
         "partitions": p.partitions,
         "error": p.error,
-    })))
+    })
 }
 
 // --- ray --------------------------------------------------------------------
@@ -5981,6 +6332,92 @@ async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_terminal_requires_the_dashboard_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "127.0.0.1:4791".parse().unwrap());
+        headers.insert(header::ORIGIN, "http://127.0.0.1:4791".parse().unwrap());
+        assert!(same_origin(&headers));
+
+        headers.insert(header::ORIGIN, "https://example.com".parse().unwrap());
+        assert!(!same_origin(&headers));
+        headers.remove(header::ORIGIN);
+        assert!(!same_origin(&headers));
+    }
+
+    #[test]
+    fn ssh_terminal_resize_message_deserializes() {
+        let input: SshTerminalInput =
+            serde_json::from_str(r#"{"type":"resize","cols":120,"rows":40}"#).unwrap();
+        let SshTerminalInput::Resize { cols, rows } = input;
+        assert_eq!((cols, rows), (120, 40));
+    }
+
+    #[test]
+    fn ssh_connection_failure_is_a_persistable_preflight_result() {
+        let test = ssh_connect_failure("cluster", "authentication failed".into());
+        assert_eq!(test.host, "cluster");
+        assert!(!test.reachable);
+        assert!(!test.tools_found);
+        assert_eq!(test.error.as_deref(), Some("authentication failed"));
+        assert!(test.tested_at > 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pty_relays_input_output_resize_exit_and_cancel() {
+        let mut session = start_pty(
+            "sh",
+            vec![
+                "-c".into(),
+                "read value; printf 'reply:%s\\n' \"$value\"".into(),
+            ],
+        )
+        .unwrap();
+        session
+            .master
+            .resize(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        session.input.send(b"hello\n".to_vec()).unwrap();
+
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = session.events.recv().await {
+                match event {
+                    PtyEvent::Output(bytes) => output.extend(bytes),
+                    PtyEvent::Exit(Ok(status)) => {
+                        assert!(status.success());
+                        break;
+                    }
+                    PtyEvent::Exit(Err(error)) => panic!("PTY wait failed: {error}"),
+                    PtyEvent::Eof => {}
+                }
+            }
+        })
+        .await
+        .expect("PTY did not exit");
+        assert!(String::from_utf8_lossy(&output).contains("reply:hello"));
+
+        let mut cancelled =
+            start_pty("sh", vec!["-c".into(), "trap '' HUP; sleep 30".into()]).unwrap();
+        cancelled.kill.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = cancelled.events.recv().await {
+                if matches!(event, PtyEvent::Exit(_)) {
+                    return;
+                }
+            }
+            panic!("cancelled PTY ended without an exit event");
+        })
+        .await
+        .expect("cancelled PTY did not exit");
+    }
 
     #[tokio::test]
     async fn project_path_status_reports_an_unborn_repository_as_importable() {

@@ -1,8 +1,7 @@
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { fetchLog } from "../api";
 import { onRunLog } from "../events";
+import { mountTerminal } from "./terminal";
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -23,40 +22,7 @@ export function LogTerminal({ runId }: { runId: string }) {
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const rootStyles = getComputedStyle(document.documentElement);
-
-    const term = new Terminal({
-      convertEol: true,
-      disableStdin: true,
-      fontSize: 12,
-      // xterm needs a resolved font string, so read --mono off the root element.
-      fontFamily:
-        rootStyles.getPropertyValue("--mono").trim() ||
-        "ui-monospace, Menlo, Consolas, monospace",
-      scrollback: 20000,
-      theme: {
-        background: rootStyles.getPropertyValue("--term-bg").trim(),
-        foreground: rootStyles.getPropertyValue("--term-foreground").trim(),
-        cursor: rootStyles.getPropertyValue("--term-bg").trim(),
-        selectionBackground: rootStyles.getPropertyValue("--term-selection").trim(),
-      },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(wrap);
-    try {
-      fit.fit();
-    } catch {
-      // container may have zero size briefly
-    }
-    const observer = new ResizeObserver(() => {
-      try {
-        fit.fit();
-      } catch {
-        // ignore
-      }
-    });
-    observer.observe(wrap);
+    const { terminal: term, dispose } = mountTerminal(wrap, true);
 
     let disposed = false;
     let nextOffset = 0;
@@ -103,8 +69,7 @@ export function LogTerminal({ runId }: { runId: string }) {
     return () => {
       disposed = true;
       unsubscribe();
-      observer.disconnect();
-      term.dispose();
+      dispose();
     };
   }, [runId]);
 
