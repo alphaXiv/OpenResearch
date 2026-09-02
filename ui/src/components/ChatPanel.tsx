@@ -4028,10 +4028,10 @@ function SessionRow({
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
 // One outline colour per step so the four boxes read as distinct choices.
 const STARTER_TONES = [
-  { box: "border-accent-blue", icon: "text-accent-blue" },
-  { box: "border-accent-green", icon: "text-accent-green" },
-  { box: "border-accent-amber", icon: "text-accent-amber" },
-  { box: "border-primary", icon: "text-primary" },
+  { box: "border-accent-blue/45", icon: "text-accent-blue" },
+  { box: "border-accent-green/45", icon: "text-accent-green" },
+  { box: "border-accent-amber/45", icon: "text-accent-amber" },
+  { box: "border-primary/45", icon: "text-primary" },
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
