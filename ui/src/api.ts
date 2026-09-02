@@ -740,6 +740,9 @@ export interface SshHost {
 export const getSshHosts = () =>
   get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
 
+export const getSshMasterStatus = (host: string) =>
+  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+
 export interface SshPreflight {
   reachable: boolean;
   toolsFound: boolean;
@@ -748,10 +751,6 @@ export interface SshPreflight {
   /** Unix millis. */
   testedAt: number;
 }
-
-/** Live-test a host: reachable over ssh and has bash + tar for snapshots. */
-export const sshPreflight = (host: string) =>
-  post<SshPreflight>("/api/settings/ssh/preflight", { host });
 
 // --- settings: slurm ----------------------------------------------------------
 
@@ -783,10 +782,6 @@ export interface SlurmPreflight {
   partitions: string[];
   error: string | null;
 }
-
-/** Live-test a login node: reachable, Slurm CLI + snapshot tools present. */
-export const slurmPreflight = (host: string) =>
-  post<SlurmPreflight>("/api/settings/slurm/preflight", { host });
 
 // --- settings: ray ------------------------------------------------------------
 

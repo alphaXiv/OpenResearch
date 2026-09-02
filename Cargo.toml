@@ -35,9 +35,10 @@ base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for
 # the stream plumbing. TLS-free, so the rustls-only musl build stays intact.
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 rust-embed = "8"
 futures = "0.3"
+portable-pty = "0.9"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
 sha2 = "0.10"
