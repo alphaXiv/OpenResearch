@@ -1034,5 +1034,11 @@
   "a11y_run_id": "Run {id}",
   "a11y_open_branch_github": "Open {branch} on GitHub",
   "settings_updates_disabled_by_env": " Updates are switched off for this environment by ORX_NO_UPDATE_CHECK, so this setting has no effect.",
-  "skills_description": "SKILL.md folders the agent discovers on its own and you invoke with /name in chat. Skills installed in your coding agents are picked up automatically."
+  "skills_description": "SKILL.md folders the agent discovers on its own and you invoke with /name in chat. Skills installed in your coding agents are picked up automatically.",
+  "settings_open": "Open",
+  "settings_opening": "Opening…",
+  "remote_ssh_host": "SSH: {host}",
+  "remote_close_connection": "Close remote connection",
+  "remote_closing": "Closing…",
+  "remote_dashboard_title": "OpenResearch on {host}"
 }

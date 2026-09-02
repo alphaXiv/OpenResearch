@@ -1034,5 +1034,11 @@
   "a11y_run_id": "اجرای {id}",
   "a11y_open_branch_github": "باز کردن {branch} در GitHub",
   "settings_updates_disabled_by_env": " به‌روزرسانی در این محیط با ORX_NO_UPDATE_CHECK خاموش شده است؛ بنابراین این تنظیم اثری ندارد.",
-  "skills_description": "پوشه‌های SKILL.md که عامل خودش پیدا می‌کند و شما با ‎/name در گفتگو فراخوانی می‌کنید. مهارت‌های نصب‌شده در عامل‌های کدنویسی شما به‌طور خودکار در نظر گرفته می‌شوند."
+  "skills_description": "پوشه‌های SKILL.md که عامل خودش پیدا می‌کند و شما با ‎/name در گفتگو فراخوانی می‌کنید. مهارت‌های نصب‌شده در عامل‌های کدنویسی شما به‌طور خودکار در نظر گرفته می‌شوند.",
+  "settings_open": "باز کردن",
+  "settings_opening": "در حال باز کردن…",
+  "remote_ssh_host": "SSH: {host}",
+  "remote_close_connection": "بستن اتصال راه‌دور",
+  "remote_closing": "در حال بستن…",
+  "remote_dashboard_title": "OpenResearch روی {host}"
 }

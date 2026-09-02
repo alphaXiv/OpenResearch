@@ -743,6 +743,22 @@ export const getSshHosts = () =>
 export const getSshMasterStatus = (host: string) =>
   get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
 
+export interface RemoteDashboardSession {
+  host: string;
+  url: string;
+  orxPath: string;
+  version: string;
+}
+
+export const getRemoteDashboard = () =>
+  get<{ session: RemoteDashboardSession | null }>("/api/remote").then((r) => r.session);
+
+export const openRemoteDashboard = (host: string) =>
+  post<RemoteDashboardSession>("/api/remote", { host });
+
+export const closeRemoteDashboard = () =>
+  fetch("/api/remote", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+
 export interface SshPreflight {
   reachable: boolean;
   toolsFound: boolean;

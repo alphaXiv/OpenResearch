@@ -75,6 +75,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
+        remote_dashboard: Arc::new(tokio::sync::Mutex::new(None)),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(port);
@@ -112,7 +113,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
     spawn_background_tasks();
 
-    let app = router(state);
+    let app = router(state.clone());
     let url = format!("http://127.0.0.1:{port}");
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
@@ -137,6 +138,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
         _ = shutdown_signal() => eprintln!("orx up: shutting down"),
     }
+    stop_remote_dashboard(&state).await;
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
@@ -191,6 +193,29 @@ struct AppState {
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     /// Serializes wake-up store writes with a live data-directory move.
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
+    remote_dashboard: Arc<tokio::sync::Mutex<Option<RemoteDashboardState>>>,
+}
+
+enum RemoteDashboardState {
+    Opening {
+        cancel: tokio::sync::oneshot::Sender<()>,
+        token: Arc<()>,
+    },
+    Open(Box<RemoteDashboard>),
+}
+
+struct RemoteDashboard {
+    info: RemoteDashboardInfo,
+    child: tokio::process::Child,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteDashboardInfo {
+    host: String,
+    url: String,
+    orx_path: String,
+    version: String,
 }
 
 async fn project_publication_lock(
@@ -418,6 +443,12 @@ fn router(state: AppState) -> Router {
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
+        .route(
+            "/api/remote",
+            get(remote_dashboard_status)
+                .post(open_remote_dashboard)
+                .delete(close_remote_dashboard),
+        )
         .route(
             "/api/settings/slurm",
             get(slurm_settings).post(set_slurm_settings),
@@ -4626,7 +4657,8 @@ async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let running = crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host))?;
+    let running =
+        crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?;
     Ok(Json(json!({ "running": running })))
 }
 
@@ -4637,6 +4669,149 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
         return Err(bad_request("host is required"));
     }
     Ok(Json(json!(run_ssh_host_preflight(host).await)))
+}
+
+async fn remote_dashboard_status(State(state): State<AppState>) -> ApiResult {
+    let mut dashboard = state.remote_dashboard.lock().await;
+    reap_remote_dashboard(&mut dashboard)?;
+    Ok(Json(json!({
+        "session": match dashboard.as_ref() {
+            Some(RemoteDashboardState::Open(dashboard)) => Some(&dashboard.info),
+            _ => None,
+        },
+    })))
+}
+
+async fn open_remote_dashboard(
+    State(state): State<AppState>,
+    Json(req): Json<SshPreflightReq>,
+) -> ApiResult {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+
+    if !list_ssh_hosts()
+        .iter()
+        .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(host.as_str()))
+    {
+        return Err(bad_request("Choose a host from ~/.ssh/config."));
+    }
+
+    let (cancel, cancelled) = tokio::sync::oneshot::channel();
+    let token = Arc::new(());
+    {
+        let mut dashboard = state.remote_dashboard.lock().await;
+        reap_remote_dashboard(&mut dashboard)?;
+        if dashboard.is_some() {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Close the current remote connection before opening another.".into(),
+            ));
+        }
+        *dashboard = Some(RemoteDashboardState::Opening {
+            cancel,
+            token: token.clone(),
+        });
+    }
+
+    let result = tokio::select! {
+        result = launch_remote_dashboard(host) => result.map_err(ApiError::from),
+        _ = cancelled => Err(ApiError(StatusCode::CONFLICT, "Remote connection cancelled.".into())),
+    };
+    let mut dashboard = state.remote_dashboard.lock().await;
+    match result {
+        Ok(opened) if matches!(dashboard.as_ref(), Some(RemoteDashboardState::Opening { token: active, .. }) if Arc::ptr_eq(active, &token)) =>
+        {
+            let info = opened.info.clone();
+            *dashboard = Some(RemoteDashboardState::Open(Box::new(opened)));
+            Ok(Json(json!(info)))
+        }
+        Ok(mut opened) => {
+            drop(dashboard);
+            let _ = opened.child.start_kill();
+            let _ = opened.child.wait().await;
+            Err(ApiError(
+                StatusCode::CONFLICT,
+                "Remote connection cancelled.".into(),
+            ))
+        }
+        Err(error) => {
+            if matches!(dashboard.as_ref(), Some(RemoteDashboardState::Opening { token: active, .. }) if Arc::ptr_eq(active, &token))
+            {
+                *dashboard = None;
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn launch_remote_dashboard(host: String) -> Result<RemoteDashboard> {
+    let target = crate::jobs::ssh::SshTarget::alias(&host);
+    let remote_orx = crate::commands::up_remote::resolve_remote_orx(&target, &host).await?;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .map_err(|e| anyhow!("Could not allocate a local port: {e}"))?;
+    let port = listener.local_addr()?.port();
+    // A remote collision makes this exact child exit; wait_healthy checks it
+    // before and after the version-matched response, so another user's orx cannot win.
+    let forward = crate::commands::up_remote::forward_spec(port, port);
+    let remote_cmd = crate::commands::up_remote::remote_up_cmd(&remote_orx.path, port);
+    let mut command =
+        crate::commands::up_remote::ssh_forward_command(&target, &forward, &remote_cmd)?;
+    command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
+    drop(listener);
+    let mut child = command
+        .spawn()
+        .map_err(|e| crate::commands::up_remote::ssh_spawn_error(e, "remote access"))?;
+
+    if let Err(error) =
+        crate::commands::up_remote::wait_healthy(&mut child, port, &remote_orx.version).await
+    {
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(error);
+    }
+
+    let info = RemoteDashboardInfo {
+        host,
+        url: format!("http://127.0.0.1:{port}"),
+        orx_path: remote_orx.path,
+        version: remote_orx.version,
+    };
+    Ok(RemoteDashboard { info, child })
+}
+
+async fn close_remote_dashboard(State(state): State<AppState>) -> ApiResult {
+    stop_remote_dashboard(&state).await;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn stop_remote_dashboard(state: &AppState) {
+    let dashboard = state.remote_dashboard.lock().await.take();
+    match dashboard {
+        Some(RemoteDashboardState::Opening { cancel, .. }) => {
+            let _ = cancel.send(());
+        }
+        Some(RemoteDashboardState::Open(mut dashboard)) => {
+            let _ = dashboard.child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(2), dashboard.child.wait()).await;
+        }
+        None => {}
+    }
+}
+
+fn reap_remote_dashboard(dashboard: &mut Option<RemoteDashboardState>) -> Result<()> {
+    let ended = match dashboard.as_mut() {
+        Some(RemoteDashboardState::Opening { token, .. }) => Arc::strong_count(token) == 1,
+        Some(RemoteDashboardState::Open(dashboard)) => dashboard.child.try_wait()?.is_some(),
+        _ => false,
+    };
+    if ended {
+        *dashboard = None;
+    }
+    Ok(())
 }
 
 async fn run_ssh_host_preflight(host: String) -> SshHostTest {

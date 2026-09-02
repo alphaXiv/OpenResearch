@@ -656,13 +656,15 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
   );
 }
 
-function SshSection() {
+function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<void> }) {
   const [hosts, setHosts] = useState<SshHost[] | null>(null);
   const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const [openingHost, setOpeningHost] = useState<string | null>(null);
+  const [remoteErrors, setRemoteErrors] = useState<Record<string, string>>({});
   const checkedHosts = hosts
     ?.filter((host) => {
       const test = tests[host.host] ?? host.lastTest;
@@ -693,6 +695,21 @@ function SshSection() {
     setExpandedHosts((expanded) => ({ ...expanded, [host]: !open }));
   }
 
+  async function openRemote(host: string) {
+    setOpeningHost(host);
+    try {
+      await onOpenRemote(host);
+    } catch (error) {
+      setRemoteErrors((errors) => ({
+        ...errors,
+        [host]: error instanceof Error ? error.message : String(error),
+      }));
+      setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
+    } finally {
+      setOpeningHost(null);
+    }
+  }
+
   return (
     <>
       {hosts === null ? (
@@ -707,8 +724,10 @@ function SshSection() {
             // Session-local result wins; the persisted one covers restarts.
             const hostTest = tests[h.host] ?? h.lastTest;
             const connecting = connectingHost === h.host;
+            const opening = openingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
-            const hasTerminal = connecting || hostTest?.reachable === false;
+            const remoteReady = hostTest?.reachable && hostTest.toolsFound && masterRunning[h.host] === true;
+            const hasTerminal = connecting || hostTest?.reachable === false || Boolean(remoteErrors[h.host]);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
@@ -750,12 +769,17 @@ function SshSection() {
                       className="justify-self-end"
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (connecting && !connectionFailed) cancelConnect();
+                        if (remoteReady) void openRemote(h.host);
+                        else if (connecting && !connectionFailed) cancelConnect();
                         else connect(h.host);
                       }}
-                      disabled={!connecting && connectingHost !== null && !connectionFailed}
+                      disabled={openingHost !== null || (!connecting && connectingHost !== null && !connectionFailed)}
                     >
-                      {connecting
+                      {opening
+                        ? m.settings_opening()
+                        : remoteReady
+                        ? m.settings_open()
+                        : connecting
                         ? connectionFailed
                           ? m.app_retry()
                           : m.settings_page_cancel()
@@ -771,6 +795,9 @@ function SshSection() {
                   <div className={`border-t border-t-border-variant py-3 pe-2 ps-10${open ? "" : " hidden"}`}>
                     {!connecting && hostTest?.error && (
                       <SshTerminalTranscript host={h.host} transcript={hostTest.error} />
+                    )}
+                    {remoteErrors[h.host] && (
+                      <p className="m-0 whitespace-pre-wrap text-sm text-accent-red">{remoteErrors[h.host]}</p>
                     )}
                     {connecting && (
                       <SshConnectTerminal
@@ -1613,10 +1640,12 @@ function BackendDetailPage({
   target,
   isDefault,
   onBack,
+  onOpenRemote,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   onBack: () => void;
+  onOpenRemote: (host: string) => Promise<void>;
 }) {
   return (
     <>
@@ -1647,7 +1676,7 @@ function BackendDetailPage({
           {target.id === "hf" && <HfSection />}
           {target.id === "modal" && <ModalSection />}
           {target.id === "k8s" && <K8sSection />}
-          {target.id === "ssh" && <SshSection />}
+          {target.id === "ssh" && <SshSection onOpenRemote={onOpenRemote} />}
           {target.id === "slurm" && <SlurmSection />}
           {target.id === "ray" && <RaySection />}
           {target.id === "openresearch" && <OpenResearchSection />}
@@ -1660,9 +1689,11 @@ function BackendDetailPage({
 function ComputeTab({
   project,
   onViewHistory,
+  onOpenRemote,
 }: {
   project: Project | null;
   onViewHistory: () => void;
+  onOpenRemote: (host: string) => Promise<void>;
 }) {
   const [settings, setSettings] = useState<ComputeSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1736,6 +1767,7 @@ function ComputeTab({
         target={selected}
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
+        onOpenRemote={onOpenRemote}
      />
     );
   }
@@ -3314,12 +3346,14 @@ export function SettingsView({
   githubPublicationError,
   onProjectUpdate,
   onSelectTab,
+  onOpenRemote,
 }: {
   tab: Tab;
   project: Project | null;
   githubPublicationError: string | null;
   onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
+  onOpenRemote: (host: string) => Promise<void>;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
 
@@ -3354,6 +3388,7 @@ export function SettingsView({
         <ComputeTab
           project={project}
           onViewHistory={() => onSelectTab("instances")}
+          onOpenRemote={onOpenRemote}
        />
       )}
       {tab === "instances" && (

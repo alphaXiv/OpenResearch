@@ -1034,5 +1034,11 @@
   "a11y_run_id": "运行 {id}",
   "a11y_open_branch_github": "在 GitHub 上打开 {branch}",
   "settings_updates_disabled_by_env": " 此环境已通过 ORX_NO_UPDATE_CHECK 关闭更新，因此此设置不会生效。",
-  "skills_description": "智能体会自动发现的 SKILL.md 技能文件夹，你可以在聊天中通过 /name 调用。你的编码智能体中已安装的技能会自动纳入。"
+  "skills_description": "智能体会自动发现的 SKILL.md 技能文件夹，你可以在聊天中通过 /name 调用。你的编码智能体中已安装的技能会自动纳入。",
+  "settings_open": "打开",
+  "settings_opening": "正在打开…",
+  "remote_ssh_host": "SSH：{host}",
+  "remote_close_connection": "关闭远程连接",
+  "remote_closing": "正在关闭…",
+  "remote_dashboard_title": "{host} 上的 OpenResearch"
 }

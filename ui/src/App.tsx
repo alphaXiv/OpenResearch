@@ -1,7 +1,7 @@
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { useLocale } from "./locale";
-import { autoDir } from "./i18n";
+import { autoDir, ltr } from "./i18n";
 import {
   ChartSpline,
   Check,
@@ -12,6 +12,7 @@ import {
   FolderOpen,
   Maximize2,
   Minimize2,
+  Monitor,
   Package,
   ScrollText,
   Terminal,
@@ -28,16 +29,20 @@ import {
   getArtifacts,
   getChatMessages,
   getUiState,
+  getRemoteDashboard,
   isDemoProjectId,
   listExperiments,
   listProjects,
   listRuns,
   openProject,
+  openRemoteDashboard,
+  closeRemoteDashboard,
   updateUiState,
   type AgentSelection,
   type Experiment,
   type ProjectArtifacts,
   type Project,
+  type RemoteDashboardSession,
   type Run,
   type ChatMessage,
   type UiState,
@@ -76,6 +81,54 @@ const EMPTY_STATE_CLASS_NAME = [
   "[&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text",
   "[&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext",
 ].join(" ");
+
+function RemoteWorkspace({
+  session,
+  onClose,
+}: {
+  session: RemoteDashboardSession;
+  onClose: () => Promise<void>;
+}) {
+  const [closing, setClosing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  return (
+    <div className="app flex h-full flex-col bg-background">
+      <header className="flex h-11 shrink-0 items-center justify-between gap-4 border-b border-border px-3.5">
+        <div className="flex min-w-0 items-center gap-2 text-sm font-medium text-text">
+          <Monitor size={15} className="shrink-0 text-primary" />
+          <span className="truncate">{m.remote_ssh_host({ host: ltr(session.host) })}</span>
+          <span className="hidden truncate text-xs font-normal text-subtext sm:inline">
+            {session.orxPath} · {session.version}
+          </span>
+        </div>
+        <div className="flex shrink-0 items-center gap-3">
+          {error && <span role="alert" title={error} className="max-w-96 truncate text-xs text-accent-red">{error}</span>}
+          <Button
+            size="small"
+            autoFocus
+            disabled={closing}
+            onClick={() => {
+              setClosing(true);
+              setError(null);
+              void onClose().catch((reason) => {
+                setError(reason instanceof Error ? reason.message : String(reason));
+                setClosing(false);
+              });
+            }}
+          >
+            {closing ? m.remote_closing() : m.remote_close_connection()}
+          </Button>
+        </div>
+      </header>
+      <iframe
+        className="min-h-0 flex-1 border-0 bg-background"
+        src={session.url}
+        title={m.remote_dashboard_title({ host: ltr(session.host) })}
+      />
+    </div>
+  );
+}
 
 /** An experiment view open as a right-panel tab. */
 interface ExpViewDef {
@@ -451,6 +504,21 @@ export default function App() {
   const locale = useLocale();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [uiState, setUiState] = useState<UiState | null>(null);
+  const [remoteDashboard, setRemoteDashboard] = useState<RemoteDashboardSession | null>(null);
+  const remoteDashboardGeneration = useRef(0);
+  useEffect(() => {
+    const refresh = () => {
+      const generation = remoteDashboardGeneration.current;
+      void getRemoteDashboard()
+        .then((session) => {
+          if (remoteDashboardGeneration.current === generation) setRemoteDashboard(session);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const interval = window.setInterval(refresh, 5_000);
+    return () => window.clearInterval(interval);
+  }, []);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
   const demoOverviewSeededRef = useRef(false);
@@ -807,9 +875,13 @@ export default function App() {
 
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
-    const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
+    const name = remoteDashboard
+      ? m.remote_ssh_host({ host: ltr(remoteDashboard.host) })
+      : homeOpen || startupError || uiState === null
+        ? null
+        : activeProject?.name;
     document.title = name ? `${autoDir(name)} - OpenResearch` : "OpenResearch";
-  }, [homeOpen, startupError, uiState, activeProject]);
+  }, [homeOpen, startupError, uiState, activeProject, remoteDashboard]);
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
@@ -1653,6 +1725,20 @@ export default function App() {
     );
   };
 
+  if (remoteDashboard) {
+    return (
+      <RemoteWorkspace
+        session={remoteDashboard}
+        onClose={async () => {
+          remoteDashboardGeneration.current++;
+          await closeRemoteDashboard();
+          remoteDashboardGeneration.current++;
+          setRemoteDashboard(null);
+        }}
+      />
+    );
+  }
+
   if (startupError) {
     return (
       <div className="app flex flex-col h-full">
@@ -1779,6 +1865,12 @@ export default function App() {
                   if (project.githubEnabled) setGithubPublicationError(null);
                 }}
                 onSelectTab={selectMainView}
+                onOpenRemote={async (host) => {
+                  remoteDashboardGeneration.current++;
+                  const session = await openRemoteDashboard(host);
+                  remoteDashboardGeneration.current++;
+                  setRemoteDashboard(session);
+                }}
              />
             ) : null}
           </ChatPanel>

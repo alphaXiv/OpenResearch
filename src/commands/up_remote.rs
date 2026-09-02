@@ -26,62 +26,8 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
     let port = args.port;
     let target = parse_remote_target(host);
 
-    // One round-trip that both proves the host is reachable and checks `orx` is
-    // installed there — the forward would come up but nothing would serve on it
-    // otherwise. A transport error means unreachable; a clean run without the
-    // marker means `orx` is missing. (No separate preflight: its git check is
-    // irrelevant to `orx up`, and it'd cost an extra unmultiplexed handshake.)
     eprintln!("orx up --remote: checking {host}…");
-    // The command exits 0 either way (emitting a distinct marker) so a non-zero
-    // exit from ssh_run unambiguously means "transport failed / unreachable" —
-    // not "orx missing". Without the `else` branch, a missing orx exits non-zero
-    // and would be misreported as an unreachable host.
-    match crate::jobs::ssh::ssh_run(
-        &target,
-        &remote_orx_cmd(
-            "if command -v orx >/dev/null 2>&1; then echo ORX_OK; else echo ORX_MISSING; fi",
-        ),
-        None,
-    )
-    .await
-    {
-        Err(e) => {
-            return Err(anyhow!(
-                "can't reach '{host}' over SSH: {e}. Check it's an ~/.ssh/config \
-                 alias, or a user@host (add :PORT for a non-standard SSH port, \
-                 e.g. root@1.2.3.4:2222) you can `ssh` into. A custom key or jump \
-                 host isn't reconstructed here — put it in ~/.ssh/config. If it's a \
-                 new host reached by name, `ssh` in once first to trust its key; if \
-                 its key changed (a reused IP), clear it with `ssh-keygen -R`."
-            ));
-        }
-        Ok(out) if out.contains("ORX_MISSING") => {
-            return Err(anyhow!(
-                "`orx` isn't installed on '{host}' (we look on PATH plus \
-                 ~/.cargo/bin and ~/.local/bin). Install it there \
-                 (curl -LsSf https://openresearch.sh/install.sh | sh), then \
-                 re-run `orx up --remote {host}`."
-            ));
-        }
-        Ok(out) if !out.contains("ORX_OK") => {
-            // Neither marker, yet ssh exited 0: the probe ran but its stdout
-            // carried neither answer — e.g. a box that echoes something on every
-            // command and swallowed the marker, or `sh` itself was unavailable.
-            // Not "unreachable" and not a clean "missing", so echo what we saw.
-            let out = out.trim();
-            let saw = if out.is_empty() {
-                String::new()
-            } else {
-                format!(" (got: {out:?})")
-            };
-            return Err(anyhow!(
-                "couldn't confirm `orx` on '{host}': the check returned no clear \
-                 answer{saw}. Make sure you can `ssh {host}` and that `orx` is \
-                 installed there."
-            ));
-        }
-        Ok(_) => {}
-    }
+    let remote_orx = resolve_remote_orx(&target, host).await?;
 
     // One ssh invocation that both forwards the port and starts the remote
     // server. `-N` would suppress the remote command, so we pass the command
@@ -91,13 +37,17 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
     // `localhost`, which can resolve to ::1 first on a dual-stack host) so it
     // matches the IPv4 address `wait_healthy` and the browser use.
     // `--no-browser` on the remote: there's no display there, and we open ours.
-    let remote_cmd = remote_up_cmd(port);
-    let forward = forward_spec(port);
-    let mut child = spawn_ssh_forward(&target, &forward, &remote_cmd)?;
+    let remote_cmd = remote_up_cmd(&remote_orx.path, port);
+    let forward = forward_spec(port, port);
+    let mut child = ssh_forward_command(&target, &forward, &remote_cmd)?
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| ssh_spawn_error(e, "remote access"))?;
 
     // Wait until the remote server answers through the forward (or ssh dies).
     eprintln!("orx up --remote: starting orx up on {host} and forwarding port {port}…");
-    if let Err(e) = wait_healthy(&mut child, port).await {
+    if let Err(e) = wait_healthy(&mut child, port, &remote_orx.version).await {
         let _ = child.start_kill();
         let _ = child.wait().await;
         return Err(e);
@@ -127,6 +77,51 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteOrx {
+    pub path: String,
+    pub version: String,
+}
+
+const REMOTE_PATH_MARKER: &str = "ORX_REMOTE_PATH=";
+const REMOTE_VERSION_MARKER: &str = "ORX_REMOTE_VERSION=";
+
+fn parse_remote_orx(output: &str) -> Option<RemoteOrx> {
+    let path = output
+        .lines()
+        .find_map(|line| line.strip_prefix(REMOTE_PATH_MARKER))?
+        .to_string();
+    if !path.starts_with('/') {
+        return None;
+    }
+    let version = output
+        .lines()
+        .find_map(|line| line.strip_prefix(REMOTE_VERSION_MARKER))?;
+    let version = version.strip_prefix("orx ").unwrap_or(version).to_string();
+    (!version.is_empty()).then_some(RemoteOrx { path, version })
+}
+
+/// Resolve the authenticated remote user's existing binary once, then launch
+/// that exact path so a different non-interactive PATH cannot select another.
+pub(crate) async fn resolve_remote_orx(target: &SshTarget, host: &str) -> Result<RemoteOrx> {
+    let probe = remote_login_orx_cmd(&format!(
+        "p=$(command -v orx 2>/dev/null || true); \
+         if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
+         v=$(\"$p\" --version 2>/dev/null || true); \
+         printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi",
+        REMOTE_PATH_MARKER, REMOTE_VERSION_MARKER
+    ));
+    let output = crate::jobs::ssh::ssh_run(target, &probe, None)
+        .await
+        .map_err(|e| anyhow!("Can't reach '{host}' over SSH: {e}"))?;
+    parse_remote_orx(&output).ok_or_else(|| {
+        anyhow!(
+            "No working `orx` binary was found for your account on '{host}'. \
+             Install orx there, then reconnect."
+        )
+    })
 }
 
 /// Turn the `--remote` value into an [`SshTarget`], supporting a trailing
@@ -226,8 +221,11 @@ const REMOTE_ORX_PATH: &str = "${CARGO_HOME:-$HOME/.cargo}/bin:$HOME/.local/bin"
 
 /// The remote command: start `orx up` bound to the remote's loopback, no
 /// browser there (we open ours), on the port we forward.
-fn remote_up_cmd(port: u16) -> String {
-    remote_orx_cmd(&format!("orx up --no-browser --port {port}"))
+pub(crate) fn remote_up_cmd(path: &str, port: u16) -> String {
+    remote_orx_cmd(&format!(
+        "exec {} up --no-browser --port {port}",
+        crate::jobs::ssh::sh_quote(path)
+    ))
 }
 
 /// Wrap a remote command so `orx` is found even though ssh runs it in a shell
@@ -256,65 +254,52 @@ fn remote_orx_cmd(cmd: &str) -> String {
     format!("sh -c {}", crate::jobs::ssh::sh_quote(&body))
 }
 
+/// Discover through the account's login environment, then hand the probe back
+/// to POSIX sh so custom bash/zsh/fish startup syntax cannot change its meaning.
+fn remote_login_orx_cmd(cmd: &str) -> String {
+    let body = format!(r#"export PATH="{REMOTE_ORX_PATH}:$PATH"; {cmd}"#);
+    let login_command = format!("exec /bin/sh -c {}", crate::jobs::ssh::sh_quote(&body));
+    let outer = format!(
+        "exec \"${{SHELL:-/bin/sh}}\" -ilc {}",
+        crate::jobs::ssh::sh_quote(&login_command)
+    );
+    format!("sh -c {}", crate::jobs::ssh::sh_quote(&outer))
+}
+
 /// The `-L` forward value. Local bind pinned to `127.0.0.1` (see the call site).
-fn forward_spec(port: u16) -> String {
-    format!("127.0.0.1:{port}:localhost:{port}")
+pub(crate) fn forward_spec(local_port: u16, remote_port: u16) -> String {
+    format!("127.0.0.1:{local_port}:localhost:{remote_port}")
 }
 
-/// The full ssh argv (minus the `ssh` program name). Pure, so it can be tested.
-fn ssh_forward_args(target: &SshTarget, forward: &str, remote_cmd: &str) -> Vec<String> {
-    let mut args = base_ssh_opts();
-    args.push("-L".into());
-    args.push(forward.into());
-    args.extend(target.extra_opts.iter().cloned());
-    args.push("--".into());
-    args.push(target.dest.clone());
-    args.push(remote_cmd.into());
-    args
-}
-
-/// Spawn `ssh <opts> -L <forward> -- <dest> <remote_cmd>` with the shared
-/// connection options, detaching stdin so ssh never blocks on a password prompt.
-fn spawn_ssh_forward(target: &SshTarget, forward: &str, remote_cmd: &str) -> Result<Child> {
+/// Build `ssh <opts> -L <forward> -- <dest> <remote_cmd>` over the settings
+/// ControlMaster, detaching stdin so the dashboard never opens a hidden prompt.
+pub(crate) fn ssh_forward_command(
+    target: &SshTarget,
+    forward: &str,
+    remote_cmd: &str,
+) -> Result<Command> {
     let mut cmd = Command::new("ssh");
-    cmd.args(ssh_forward_args(target, forward, remote_cmd))
+    cmd.args(crate::jobs::ssh::forward_args(target, forward, remote_cmd)?)
         .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    cmd.spawn().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            anyhow!("`ssh` not found on PATH — remote access needs the OpenSSH client.")
-        } else {
-            anyhow!("could not run ssh: {e}")
-        }
-    })
+        .kill_on_drop(true);
+    Ok(cmd)
 }
 
-/// Connection options for the tunnel. Notable choices:
-/// - `ExitOnForwardFailure=yes`: if the local port is already taken (e.g. your
-///   own `orx up` on the same port), ssh exits instead of running the remote
-///   server anyway and leaving us to health-check the *wrong* local server.
-/// - `BatchMode=yes`: never prompt — fail fast rather than hang.
-/// - keepalives so a silent forward isn't reaped by a NAT/idle timeout.
-///
-/// We don't multiplex here (this is a long-lived foreground session, not the
-/// job backend's many short polls), so no ControlMaster.
-fn base_ssh_opts() -> Vec<String> {
-    [
-        "ExitOnForwardFailure=yes",
-        "BatchMode=yes",
-        "ConnectTimeout=10",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=3",
-    ]
-    .iter()
-    .flat_map(|o| ["-o".to_string(), (*o).to_string()])
-    .collect()
+pub(crate) fn ssh_spawn_error(error: std::io::Error, purpose: &str) -> crate::error::Error {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        anyhow!("`ssh` not found on PATH — {purpose} needs the OpenSSH client.")
+    } else {
+        anyhow!("Could not run ssh: {error}")
+    }
 }
 
 /// Poll the forwarded `/api/health` until the remote server answers, giving up
 /// after [`HEALTH_TIMEOUT`] or if the ssh child exits first.
-async fn wait_healthy(child: &mut Child, port: u16) -> Result<()> {
+pub(crate) async fn wait_healthy(
+    child: &mut Child,
+    port: u16,
+    expected_version: &str,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()?;
@@ -323,13 +308,23 @@ async fn wait_healthy(child: &mut Child, port: u16) -> Result<()> {
     loop {
         if let Some(status) = child.try_wait()? {
             return Err(anyhow!(
-                "ssh exited before the remote server came up ({status}). \
-                 Is `orx` runnable on the remote's non-interactive shell?"
+                "SSH closed before the remote dashboard started ({status}). \
+                 Reconnect the host in Settings and confirm `orx up` can start there."
             ));
         }
         if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                return Ok(());
+            if let Ok(health) = resp.json::<serde_json::Value>().await {
+                if health.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                    && health.get("version").and_then(serde_json::Value::as_str)
+                        == Some(expected_version)
+                {
+                    if child.try_wait()?.is_none() {
+                        return Ok(());
+                    }
+                    return Err(anyhow!(
+                        "ssh exited while the remote dashboard was starting."
+                    ));
+                }
             }
         }
         if Instant::now() >= deadline {
@@ -348,12 +343,10 @@ mod tests {
 
     #[test]
     fn forward_and_remote_cmd_use_the_same_port() {
-        assert_eq!(forward_spec(4899), "127.0.0.1:4899:localhost:4899");
-        // The remote command carries the port and starts orx headless…
-        assert!(remote_up_cmd(4899).contains("orx up --no-browser --port 4899"));
-        // …behind a PATH prelude so a non-interactive shell still finds orx in
-        // the installer dir (the common target on minimal RunPod images).
-        assert!(remote_up_cmd(4899).contains(r#"PATH="${CARGO_HOME:-$HOME/.cargo}/bin"#));
+        assert_eq!(forward_spec(4899, 4900), "127.0.0.1:4899:localhost:4900");
+        let command = remote_up_cmd("/home/me/.cargo/bin/orx", 4900);
+        assert!(command.contains("/home/me/.cargo/bin/orx"));
+        assert!(command.contains("up --no-browser --port 4900"));
     }
 
     #[test]
@@ -372,32 +365,45 @@ mod tests {
     }
 
     #[test]
-    fn preflight_probe_is_also_wrapped() {
-        // The reachability/installed probe MUST go through remote_orx_cmd too —
-        // else a box with orx only in ~/.cargo/bin false-negatives as "missing".
-        // This mirrors the exact string run() hands to ssh_run at the call site.
-        let probe = remote_orx_cmd(
-            "if command -v orx >/dev/null 2>&1; then echo ORX_OK; else echo ORX_MISSING; fi",
-        );
+    fn discovery_probe_is_also_wrapped() {
+        let probe = remote_login_orx_cmd("command -v orx");
         assert!(probe.starts_with("sh -c "));
+        assert!(probe.contains("${SHELL:-/bin/sh}"));
+        assert!(probe.contains("-ilc"));
         assert!(probe.contains("${CARGO_HOME:-$HOME/.cargo}/bin"));
-        assert!(probe.contains("ORX_OK") && probe.contains("ORX_MISSING"));
+        assert!(probe.contains("command -v orx"));
     }
 
     #[test]
-    fn base_opts_exit_on_forward_failure() {
-        // Without this, a busy local port lets ssh run the remote server anyway
-        // and we'd health-check the wrong (local) server. Load-bearing.
-        let opts = base_ssh_opts();
+    fn discovery_ignores_shell_noise_and_returns_the_exact_binary() {
+        let found = parse_remote_orx(
+            "welcome\nORX_REMOTE_PATH=/srv/users/me/bin/orx\nORX_REMOTE_VERSION=orx 1.2.3\n",
+        )
+        .unwrap();
+        assert_eq!(found.path, "/srv/users/me/bin/orx");
+        assert_eq!(found.version, "1.2.3");
+    }
+
+    #[test]
+    fn tunnel_reuses_control_master_and_exits_on_forward_failure() {
+        let opts = crate::jobs::ssh::forward_args(
+            &SshTarget::alias("mybox"),
+            "127.0.0.1:7:localhost:7",
+            "orx up",
+        )
+        .unwrap();
         let joined = opts.join(" ");
         assert!(joined.contains("-o ExitOnForwardFailure=yes"));
         assert!(joined.contains("-o BatchMode=yes"));
+        assert!(joined.contains("-o ControlMaster=auto"));
+        assert!(opts.contains(&"-tt".to_string()));
     }
 
     #[test]
     fn ssh_args_are_ordered_opts_then_forward_then_dest_then_cmd() {
         let target = SshTarget::alias("mybox");
-        let args = ssh_forward_args(&target, "127.0.0.1:7:localhost:7", "orx up");
+        let args =
+            crate::jobs::ssh::forward_args(&target, "127.0.0.1:7:localhost:7", "orx up").unwrap();
         // -L and its value are adjacent and precede the `--` separator.
         let l = args.iter().position(|a| a == "-L").unwrap();
         assert_eq!(args[l + 1], "127.0.0.1:7:localhost:7");
@@ -414,7 +420,8 @@ mod tests {
             dest: "mybox".into(),
             extra_opts: vec!["-p".into(), "2222".into()],
         };
-        let args = ssh_forward_args(&target, "127.0.0.1:7:localhost:7", "orx up");
+        let args =
+            crate::jobs::ssh::forward_args(&target, "127.0.0.1:7:localhost:7", "orx up").unwrap();
         let sep = args.iter().position(|a| a == "--").unwrap();
         let p = args.iter().position(|a| a == "-p").unwrap();
         assert!(p < sep, "extra_opts must precede the -- separator");
@@ -447,7 +454,7 @@ mod tests {
             "user-typed host must keep its real known_hosts"
         );
         // And it flows all the way into the ssh argv, before the `--`.
-        let args = ssh_forward_args(&t, "127.0.0.1:7:localhost:7", "orx up");
+        let args = crate::jobs::ssh::forward_args(&t, "127.0.0.1:7:localhost:7", "orx up").unwrap();
         let sep = args.iter().position(|a| a == "--").unwrap();
         let p = args.iter().position(|a| a == "-p").unwrap();
         assert!(p < sep && args[p + 1] == "38455");
