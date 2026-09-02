@@ -4995,16 +4995,17 @@ export function ChatPanel({
 
   // Keyed by project+harness so a switch never shows another project's prompts.
   const starterHarness = composerSelection?.harness ?? null;
+  const starterModel = composerSelection?.model ?? null;
   const [starter, setStarter] = useState<{
     key: string;
     prompts: StarterPrompt[] | null;
   } | null>(null);
-  const starterKey = `${projectId}\0${starterHarness ?? ""}`;
+  const starterKey = `${projectId}\0${starterHarness ?? ""}\0${starterModel ?? ""}`;
   const starterVisible = mainView === "chat" && !threadMounted && !historyLoading;
   useEffect(() => {
     if (!starterVisible || !starterHarness) return;
     let current = true;
-    getProjectStarterPrompts(projectId, starterHarness, getLocale())
+    getProjectStarterPrompts(projectId, starterHarness, starterModel, getLocale())
       .then((result) => {
         if (current) setStarter({ key: starterKey, prompts: result.prompts });
       })
@@ -5014,7 +5015,7 @@ export function ChatPanel({
     return () => {
       current = false;
     };
-  }, [projectId, starterHarness, starterKey, starterVisible]);
+  }, [projectId, starterHarness, starterModel, starterKey, starterVisible]);
   const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
   const starterLoading = starterHarness !== null && starter?.key !== starterKey;
   const applyStarterPrompt = (prompt: string) => {

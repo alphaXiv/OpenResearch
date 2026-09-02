@@ -262,9 +262,14 @@ export const prewarmStarterPrompts = (body: {
 }) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
 
 /** Slow on a cache miss (one headless model call over a brief of the project). */
-export const getProjectStarterPrompts = (projectId: string, harness: HarnessId, locale: string) =>
+export const getProjectStarterPrompts = (
+  projectId: string,
+  harness: HarnessId,
+  model: string | null,
+  locale: string,
+) =>
   get<ProjectStarterPrompts>(
-    `/api/projects/${projectId}/starter-prompts?harness=${encodeURIComponent(harness)}&locale=${encodeURIComponent(locale)}`,
+    `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
   );
 
 /** Record a visit so the backend can persist project-level UI recency. */

@@ -259,8 +259,8 @@ async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
     model_id_lines(&plain).map(super::ModelInfo::new).collect()
 }
 
-/// One headless request on a throwaway `opencode run` child on the user's
-/// default model. opencode's server no longer retitles parent sessions itself
+/// One headless request on a throwaway `opencode run` child on
+/// `request.model`, else the user's default model. opencode's server no longer retitles parent sessions itself
 /// (only sub-agent child sessions get task-description titles), so titles run
 /// through here like the claude/codex one-shot children. opencode has no
 /// system-prompt flag, so `system` leads the message. Any failure lands on
@@ -273,7 +273,9 @@ async fn opencode_one_shot(bin: &PathBuf, request: OneShot<'_>) -> Option<String
     // `--pure` skips external plugins, and the temp cwd keeps any residual
     // reads away from real repos. A tool call that still asks for permission
     // just blocks the unattended child until the timeout kills it.
-    cmd.args(["run", "--agent", "plan", "--pure", &message])
+    cmd.args(["run", "--agent", "plan", "--pure"])
+        .args(request.model.iter().flat_map(|model| ["--model", model]))
+        .arg(&message)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())

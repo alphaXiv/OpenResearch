@@ -488,6 +488,10 @@ pub struct OneShot<'a> {
     pub system: &'a str,
     pub prompt: &'a str,
     pub quality: OneShotQuality,
+    /// The model the user has picked for chat, in the harness's own id form.
+    /// Codex and OpenCode run on it (their configured default may point at a
+    /// provider with no working key); Claude keeps its per-quality alias.
+    pub model: Option<&'a str>,
     pub timeout: Duration,
 }
 
