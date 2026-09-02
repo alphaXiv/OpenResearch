@@ -37,6 +37,7 @@ import {
   getRaySettings,
   getSlurmSettings,
   getSshHosts,
+  getSshMasterStatus,
   listRuns,
   setComputeDefault,
   setProjectDefaults,
@@ -578,8 +579,53 @@ function ModalSection() {
 
 const CONNECTION_BADGE_IDLE_CLASS = "rounded-sm border-border-strong bg-surface text-subtext";
 const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-accent-blue-subtle text-accent-blue";
+const SSH_MASTER_POLL_MS = 5_000;
 
-function HostTestCell({ test, connecting }: { test: SshPreflight | undefined; connecting: boolean }) {
+function useSshMasterStatuses(hosts: string[]) {
+  const [statuses, setStatuses] = useState<Record<string, boolean>>({});
+  const hostsKey = hosts.join("\0");
+
+  useEffect(() => {
+    const activeHosts = hostsKey ? hostsKey.split("\0") : [];
+    if (activeHosts.length === 0) {
+      setStatuses({});
+      return;
+    }
+    let cancelled = false;
+    const refresh = async () => {
+      const results = await Promise.all(activeHosts.map(async (host) => {
+        try {
+          return [host, (await getSshMasterStatus(host)).running] as const;
+        } catch {
+          return null;
+        }
+      }));
+      if (cancelled) return;
+      setStatuses((current) => {
+        const next: Record<string, boolean> = {};
+        for (const result of results) {
+          if (result) next[result[0]] = result[1];
+        }
+        // Preserve the last known value when only one status request fails.
+        for (const host of activeHosts) {
+          if (next[host] === undefined && current[host] !== undefined) next[host] = current[host];
+        }
+        return next;
+      });
+    };
+    void refresh();
+    const interval = window.setInterval(refresh, SSH_MASTER_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [hostsKey]);
+
+  const markRunning = (host: string) => setStatuses((current) => ({ ...current, [host]: true }));
+  return [statuses, markRunning] as const;
+}
+
+function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | undefined }) {
   if (connecting)
     return (
       <span role="status">
@@ -588,19 +634,24 @@ function HostTestCell({ test, connecting }: { test: SshPreflight | undefined; co
     );
   if (test === undefined) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   const missingTools = test.missingTools ?? [];
+  const disconnected = test.reachable && test.toolsFound && masterRunning === false;
   const badge = !test.reachable ? (
     <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>
   ) : !test.toolsFound ? (
     <Badge className="rounded-sm" variant="error">
       {missingTools.length === 1 ? m.settings_needs_tool({ tool: ltr(missingTools[0]) }) : m.settings_needs_tools()}
     </Badge>
+  ) : disconnected ? (
+    <Badge className="rounded-sm" variant="warning">{m.settings_disconnected()}</Badge>
   ) : (
     <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>
   );
   return (
     <div className="flex items-center gap-4" role="status">
       {badge}
-      <span className="ssh-tested-at whitespace-nowrap text-xs text-subtext">{timeAgo(test.testedAt)}</span>
+      {!disconnected && (
+        <span className="ssh-tested-at whitespace-nowrap text-xs text-subtext">{timeAgo(test.testedAt)}</span>
+      )}
     </div>
   );
 }
@@ -612,6 +663,13 @@ function SshSection() {
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const checkedHosts = hosts
+    ?.filter((host) => {
+      const test = tests[host.host] ?? host.lastTest;
+      return test?.reachable && test.toolsFound;
+    })
+    .map((host) => host.host) ?? [];
+  const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
 
   useEffect(() => {
     getSshHosts()
@@ -685,7 +743,7 @@ function SshSection() {
                   </div>
                   <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="text-start">
-                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} />
+                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} />
                     </div>
                     <Button size="small"
                       type="button"
@@ -723,6 +781,7 @@ function SshSection() {
                         onComplete={(complete) => {
                           if (complete.backend !== "ssh") return;
                           setTests((tests) => ({ ...tests, [h.host]: complete.result }));
+                          markMasterRunning(h.host);
                           setConnectionFailed(false);
                           setConnectingHost(null);
                         }}
@@ -755,12 +814,13 @@ function SshSection() {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test, connecting }: { test: SlurmPreflight | null; connecting: boolean }) {
+function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
   if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
   if (!test.slurmFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_no_slurm_cli()}</Badge>;
   if (!test.toolsFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
+  if (masterRunning === false) return <Badge className="rounded-sm" variant="warning">{m.settings_disconnected()}</Badge>;
   return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
 }
 
@@ -777,6 +837,8 @@ function SlurmSection() {
   const [connecting, setConnecting] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const readyHost = host && test?.reachable && test.slurmFound && test.toolsFound ? [host] : [];
+  const [masterRunning, markMasterRunning] = useSshMasterStatuses(readyHost);
 
   function connect() {
     setConnectionFailed(false);
@@ -934,7 +996,11 @@ function SlurmSection() {
                     : m.settings_connect()}
               </Button>
               <span role="status">
-                <SlurmTestBadge test={test} connecting={connecting && !connectionFailed} />
+                <SlurmTestBadge
+                  test={test}
+                  connecting={connecting && !connectionFailed}
+                  masterRunning={masterRunning[host]}
+                />
               </span>
             </div>
           </form>
@@ -946,6 +1012,7 @@ function SlurmSection() {
               onComplete={(complete) => {
                 if (complete.backend !== "slurm") return;
                 setTest(complete.result);
+                markMasterRunning(host);
                 setConnectionFailed(false);
                 setConnecting(false);
               }}

@@ -415,6 +415,7 @@ fn router(state: AppState) -> Router {
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route("/api/settings/ssh", get(ssh_settings))
+        .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
         .route(
@@ -4618,6 +4619,15 @@ async fn ssh_settings() -> ApiResult {
 #[derive(Deserialize)]
 struct SshPreflightReq {
     host: String,
+}
+
+async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
+    let host = req.host.trim();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+    let running = crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host))?;
+    Ok(Json(json!({ "running": running })))
 }
 
 /// Live check for one host: can we reach it and run bash/tar snapshots?

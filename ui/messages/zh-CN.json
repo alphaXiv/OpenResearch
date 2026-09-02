@@ -921,6 +921,7 @@
   "settings_sign_in": "登录",
   "settings_connect": "连接",
   "settings_connecting": "正在连接…",
+  "settings_disconnected": "已断开连接",
   "settings_reconnect": "重新连接",
   "settings_ssh_connection_closed": "SSH 连接在设置完成前已关闭。",
   "settings_ssh_connection_terminal": "{host} 的 SSH 连接终端",

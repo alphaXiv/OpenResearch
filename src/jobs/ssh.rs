@@ -131,17 +131,20 @@ impl SshTarget {
     }
 }
 
-/// Shared ssh options: connection setup permits prompts; background work never
-/// does. Both modes use the same control socket, kept for ten idle minutes, so
-/// one interactive login covers later status, log, and job commands.
-fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
+fn control_path(target: &SshTarget) -> PathBuf {
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     target.dest.hash(&mut h);
     target.extra_opts.hash(&mut h);
-    let cp = control_dir().join(format!("{:016x}", h.finish()));
+    control_dir().join(format!("{:016x}", h.finish()))
+}
+
+/// Shared ssh options: connection setup permits prompts; background work never
+/// does. Both modes use the same control socket, kept for ten idle minutes, so
+/// one interactive login covers later status, log, and job commands.
+fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
@@ -150,7 +153,7 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
-        format!("ControlPath={}", cp.display()),
+        format!("ControlPath={}", control_path(target).display()),
         "-o".into(),
         "ControlPersist=600".into(),
     ];
@@ -166,6 +169,14 @@ pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     let mut args = ssh_opts(target, false);
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
     Ok(args)
+}
+
+/// OpenSSH removes this path on normal shutdown.
+/// ponytail: existence-only can show Ready after an abrupt kill; a future probe must not reset ControlPersist.
+pub(crate) fn master_is_running(target: &SshTarget) -> Result<bool> {
+    let path = control_path(target);
+    path.try_exists()
+        .map_err(|e| anyhow!("Could not inspect SSH control path {}: {e}", path.display()))
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.

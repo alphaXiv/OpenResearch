@@ -921,6 +921,7 @@
   "settings_sign_in": "Sign in",
   "settings_connect": "Connect",
   "settings_connecting": "Connecting…",
+  "settings_disconnected": "Disconnected",
   "settings_reconnect": "Reconnect",
   "settings_ssh_connection_closed": "The SSH connection closed before setup completed.",
   "settings_ssh_connection_terminal": "SSH connection terminal for {host}",

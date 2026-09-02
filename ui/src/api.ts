@@ -740,6 +740,9 @@ export interface SshHost {
 export const getSshHosts = () =>
   get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
 
+export const getSshMasterStatus = (host: string) =>
+  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+
 export interface SshPreflight {
   reachable: boolean;
   toolsFound: boolean;

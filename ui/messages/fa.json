@@ -921,6 +921,7 @@
   "settings_sign_in": "ورود",
   "settings_connect": "اتصال",
   "settings_connecting": "در حال اتصال…",
+  "settings_disconnected": "قطع اتصال",
   "settings_reconnect": "اتصال دوباره",
   "settings_ssh_connection_closed": "اتصال SSH پیش از تکمیل راه‌اندازی بسته شد.",
   "settings_ssh_connection_terminal": "پایانهٔ اتصال SSH برای {host}",
