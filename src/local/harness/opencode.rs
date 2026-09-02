@@ -33,7 +33,9 @@ use super::detect::{probe_bin, read_json, HarnessInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
-use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS};
+use super::{
+    Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
@@ -61,8 +63,8 @@ impl Harness for OpenCode {
         true
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        opencode_generate_title(&find_opencode().ok()?, first_message).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
+        opencode_one_shot(&find_opencode().ok()?, request).await
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
@@ -257,50 +259,44 @@ async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
     model_id_lines(&plain).map(super::ModelInfo::new).collect()
 }
 
-/// One-shot session title from the first user message: a throwaway
-/// `opencode run` child on the user's default model. opencode's server no
-/// longer retitles parent sessions itself (only sub-agent child sessions get
-/// task-description titles), so the `session.updated` adoption path never
-/// fires for the session proper — this mirrors the claude/codex one-shot
-/// children instead. Any failure lands on `None` and keeps the placeholder.
-async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<String> {
+/// One headless request on a throwaway `opencode run` child on the user's
+/// default model. opencode's server no longer retitles parent sessions itself
+/// (only sub-agent child sessions get task-description titles), so titles run
+/// through here like the claude/codex one-shot children. opencode has no
+/// system-prompt flag, so `system` leads the message. Any failure lands on
+/// `None` and the caller keeps its fallback.
+async fn opencode_one_shot(bin: &PathBuf, request: OneShot<'_>) -> Option<String> {
+    let message = format!("{}\n\n{}", request.system, request.prompt);
     let mut cmd = tokio::process::Command::new(bin);
-    // The user's message is embedded in the prompt, so the child must not be
-    // able to act on it: the built-in read-only `plan` agent denies writes,
+    // The request embeds user-controlled text, so the child must not be able
+    // to act on it: the built-in read-only `plan` agent denies writes,
     // `--pure` skips external plugins, and the temp cwd keeps any residual
     // reads away from real repos. A tool call that still asks for permission
-    // just blocks the unattended child until TITLE_TIMEOUT kills it — the
-    // placeholder title stands.
-    cmd.args([
-        "run",
-        "--agent",
-        "plan",
-        "--pure",
-        &super::title::title_prompt(first_message),
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::null())
-    .kill_on_drop(true)
-    // Outside any repository, so the child doesn't ingest the server cwd's
-    // AGENTS.md into a request that only needs one sentence.
-    .current_dir(std::env::temp_dir());
+    // just blocks the unattended child until the timeout kills it.
+    cmd.args(["run", "--agent", "plan", "--pure", &message])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        // Outside any repository, so the child doesn't ingest the server cwd's
+        // AGENTS.md into a request that carries its own context.
+        .current_dir(std::env::temp_dir());
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env(
         "OPENCODE_DB",
         native_store::prepare_opencode(NativeStore::Isolated).ok()?,
     );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
-    // otherwise write escape codes straight into the title column.
+    // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(super::title::TITLE_TIMEOUT, cmd.output())
+    let out = tokio::time::timeout(request.timeout, cmd.output())
         .await
         .ok()?
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    super::title::sanitize_title(&String::from_utf8_lossy(&out.stdout))
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.

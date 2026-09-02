@@ -37,7 +37,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited,
+    ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -361,47 +362,51 @@ fn has_api_credential() -> bool {
         .any(|key| super::detect::api_key(key).is_some())
 }
 
-/// One-shot session title from the first user message: a throwaway
-/// `claude -p` child pinned to Haiku, mirroring how Claude Code titles its own
-/// conversations with a cheap background model. Deliberately *not* the session's
-/// resident child — a title request there would pollute the real conversation
-/// history. `--no-session-persistence` keeps the throwaway request unrecorded.
+/// One headless request on a throwaway `claude -p` child, mirroring how
+/// Claude Code titles its own conversations with a cheap background model.
+/// Deliberately *not* the session's resident child — a request there would
+/// pollute the real conversation history. `--no-session-persistence` keeps
+/// the throwaway request unrecorded.
 ///
-/// `--model haiku` is a CLI model alias of the kind we already pass through from
-/// the catalog; a CLI too old to know it exits non-zero, which lands on `None`
-/// and leaves the placeholder title in place. Every other failure (spawn,
-/// timeout, garbage output) degrades the same silent way.
-async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String> {
+/// `--model haiku`/`sonnet` are CLI model aliases of the kind we already pass
+/// through from the catalog; a CLI too old to know them exits non-zero, which
+/// lands on `None`. Every other failure (spawn, timeout, garbage output)
+/// degrades the same silent way.
+async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+    let model = match request.quality {
+        OneShotQuality::Cheap => "haiku",
+        OneShotQuality::Standard => "sonnet",
+    };
     let mut cmd = Command::new(bin);
     cmd.args([
         "-p",
-        &super::title::title_prompt(first_message),
+        request.prompt,
         "--model",
-        "haiku",
+        model,
         "--max-turns",
         "1",
         "--no-session-persistence",
-        // Naming a chat needs no tools and no MCP: booting the user's servers
-        // for a one-line request would cost far more than the request itself.
+        // A one-shot needs no tools and no MCP: booting the user's servers
+        // for a single request would cost far more than the request itself.
         // With no tools to call, `--max-turns 1` can't be spent on a tool use.
         // The empty list is the documented "disable all tools" form; an older
-        // CLI that rejects it exits non-zero, so the placeholder is kept.
+        // CLI that rejects it exits non-zero, so the caller keeps its fallback.
         "--strict-mcp-config",
         "--tools",
         "",
         // Replace the agent system prompt: the default hauls ~8.5k tokens of
         // Claude Code scaffolding into a request that ignores it (measured
-        // 8.5k → 1.9k input). Latency is unchanged — the ~3s is node boot plus
-        // one API round trip — but every title gets ~78% cheaper.
+        // 8.5k → 1.9k input for titles). Latency is unchanged — the ~3s is
+        // node boot plus one API round trip — but every request gets cheaper.
         "--system-prompt",
-        "You generate short chat titles.",
+        request.system,
     ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
     .kill_on_drop(true)
     // Hermetic: run outside any repo so the child doesn't ingest the server
-    // cwd's CLAUDE.md / settings into a request that only needs one sentence.
+    // cwd's CLAUDE.md / settings into a request that carries its own context.
     .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
     cmd.env(
@@ -413,17 +418,17 @@ async fn claude_generate_title(bin: &Path, first_message: &str) -> Option<String
         native_store::claude_secure_storage_config_dir(),
     );
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
-    // otherwise write escape codes straight into the title column.
+    // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
     let fut = cmd.output();
-    let out = tokio::time::timeout(super::title::TITLE_TIMEOUT, fut)
+    let out = tokio::time::timeout(request.timeout, fut)
         .await
         .ok()?
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    super::title::sanitize_title(&String::from_utf8_lossy(&out.stdout))
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// `claude` on PATH, else the common install drop locations.
@@ -550,8 +555,8 @@ impl Harness for ClaudeCode {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        claude_generate_title(&find_claude()?, first_message).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
+        claude_one_shot(&find_claude()?, request).await
     }
 
     fn options(&self) -> HarnessOptions {

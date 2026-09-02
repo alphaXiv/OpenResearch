@@ -187,6 +187,8 @@ export interface NewProject {
   requireNewFolder?: boolean;
   initializeGit?: boolean;
   githubSyncEnabled?: boolean;
+  /** UI locale for the starter prompts the server warms up on creation. */
+  locale?: string;
 }
 
 export interface CreateProjectResult {
@@ -237,6 +239,33 @@ export const resolvePaper = (id: string) =>
 
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+
+/** One suggested opening message for the empty chat, written by a model that
+ *  read the project. */
+export interface StarterPrompt {
+  title: string;
+  prompt: string;
+}
+
+export interface ProjectStarterPrompts {
+  /** Null when the project already has experiments or no harness could answer. */
+  prompts: StarterPrompt[] | null;
+}
+
+/** Start generating starter prompts for a project that is about to be created,
+ *  so they are cached by the time its chat opens. Fire-and-forget. */
+export const prewarmStarterPrompts = (body: {
+  name: string;
+  paperId?: string;
+  path?: string;
+  locale: string;
+}) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
+
+/** Slow on a cache miss (one headless model call over a brief of the project). */
+export const getProjectStarterPrompts = (projectId: string, harness: HarnessId, locale: string) =>
+  get<ProjectStarterPrompts>(
+    `/api/projects/${projectId}/starter-prompts?harness=${encodeURIComponent(harness)}&locale=${encodeURIComponent(locale)}`,
+  );
 
 /** Record a visit so the backend can persist project-level UI recency. */
 export const openProject = (projectId: string) =>
