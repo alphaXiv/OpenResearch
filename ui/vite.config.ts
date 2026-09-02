@@ -23,7 +23,7 @@ export default defineConfig({
   build: { outDir: "dist" },
   server: {
     proxy: {
-      "/api": backend,
+      "/api": { target: backend, ws: true },
       "/opencode": backend,
     },
   },

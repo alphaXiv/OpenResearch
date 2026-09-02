@@ -58,8 +58,6 @@ import {
   type DataDirValidation,
   rayPreflight,
   runDisplayStatus,
-  slurmPreflight,
-  sshPreflight,
   timeAgo,
   type ComputeSettings,
   type ComputeTargetId,
@@ -105,6 +103,7 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
+import { SshConnectTerminal } from "./SshConnectTerminal";
 import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
@@ -577,16 +576,14 @@ function ModalSection() {
 
 // --- compute (ssh) ---------------------------------------------------------------
 
-type HostTest = "testing" | SshPreflight;
-
-function HostTestCell({ test }: { test: HostTest | undefined }) {
-  if (test === undefined) return <span className="block text-start text-sm text-text">{m.settings_page_not_checked()}</span>;
-  if (test === "testing")
+function HostTestCell({ test, connecting }: { test: SshPreflight | undefined; connecting: boolean }) {
+  if (connecting)
     return (
       <span className="inline-flex items-center gap-1.5 text-text text-sm" role="status">
-        <Spinner aria-hidden="true" /> {m.settings_page_testing()}
+        <Spinner aria-hidden="true" /> {m.settings_connecting()}
       </span>
     );
+  if (test === undefined) return <span className="block text-start text-sm text-text">{m.settings_page_not_checked()}</span>;
   const missingTools = test.missingTools ?? [];
   const badge = !test.reachable ? (
     <Badge variant="error">{m.settings_page_failed()}</Badge>
@@ -607,8 +604,9 @@ function HostTestCell({ test }: { test: HostTest | undefined }) {
 
 function SshSection() {
   const [hosts, setHosts] = useState<SshHost[] | null>(null);
-  const [tests, setTests] = useState<Record<string, HostTest>>({});
+  const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
+  const [connectingHost, setConnectingHost] = useState<string | null>(null);
 
   useEffect(() => {
     getSshHosts()
@@ -616,28 +614,17 @@ function SshSection() {
       .catch(() => setHosts([]));
   }, []);
 
-  async function test(host: string) {
-    setTests((t) => ({ ...t, [host]: "testing" }));
-    try {
-      const r = await sshPreflight(host);
-      setTests((t) => ({ ...t, [host]: r }));
-      if (r.error) setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
-    } catch (err) {
-      setTests((t) => ({
-        ...t,
-        [host]: {
-          reachable: false,
-          toolsFound: false,
-          missingTools: [],
-          error: err instanceof Error ? err.message : String(err),
-          testedAt: Date.now(),
-        },
-      }));
-      setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
-    }
+  function connect(host: string) {
+    setConnectingHost(host);
+    setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
+  }
+
+  function cancelConnect() {
+    setConnectingHost(null);
   }
 
   function toggle(host: string, open: boolean) {
+    if (open && connectingHost === host) cancelConnect();
     setExpandedHosts((expanded) => ({ ...expanded, [host]: !open }));
   }
 
@@ -654,7 +641,7 @@ function SshSection() {
           {hosts.map((h) => {
             // Session-local result wins; the persisted one covers restarts.
             const hostTest = tests[h.host] ?? h.lastTest;
-            const testing = hostTest === "testing";
+            const connecting = connectingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
@@ -687,18 +674,18 @@ function SshSection() {
                   </div>
                   <div className="grid flex-none grid-cols-[6rem_5rem] items-center gap-x-[clamp(1rem,2vw,2.5rem)]">
                     <div className="text-start">
-                      <HostTestCell test={hostTest} />
+                      <HostTestCell test={hostTest} connecting={connecting} />
                     </div>
                     <Button size="small"
                       type="button"
                       className="justify-self-end"
                       onClick={(event) => {
                         event.stopPropagation();
-                        void test(h.host);
+                        connect(h.host);
                       }}
-                      disabled={testing}
+                      disabled={connectingHost !== null}
                     >
-                      {testing ? m.settings_testing() : hostTest ? m.settings_retest() : m.settings_test()}
+                      {connecting ? m.settings_connecting() : hostTest ? m.settings_reconnect() : m.settings_connect()}
                     </Button>
                   </div>
                 </div>
@@ -709,7 +696,7 @@ function SshSection() {
                       <dd className="m-0 text-base text-text wrap-anywhere">
                         {h.identityFile ?? m.settings_ssh_defaults()}
                       </dd>
-                      {hostTest !== "testing" && hostTest?.error && (
+                      {!connecting && hostTest?.error && (
                         <>
                           <dt className="text-sm font-medium text-subtext">{m.settings_page_last_error()}</dt>
                           <dd className="m-0 text-base leading-relaxed text-text whitespace-pre-wrap wrap-anywhere">
@@ -718,6 +705,30 @@ function SshSection() {
                         </>
                       )}
                     </dl>
+                    {connecting && (
+                      <SshConnectTerminal
+                        host={h.host}
+                        backend="ssh"
+                        onComplete={(complete) => {
+                          if (complete.backend !== "ssh") return;
+                          setTests((tests) => ({ ...tests, [h.host]: complete.result }));
+                          setConnectingHost(null);
+                        }}
+                        onError={(error) => {
+                          setTests((tests) => ({
+                            ...tests,
+                            [h.host]: {
+                              reachable: false,
+                              toolsFound: false,
+                              missingTools: [],
+                              error,
+                              testedAt: Date.now(),
+                            },
+                          }));
+                        }}
+                        onCancel={cancelConnect}
+                      />
+                    )}
                   </div>
                 )}
               </div>
@@ -732,9 +743,8 @@ function SshSection() {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test }: { test: "testing" | SlurmPreflight | null }) {
+function SlurmTestBadge({ test }: { test: SlurmPreflight | null }) {
   if (test === null) return null;
-  if (test === "testing") return <Badge>{m.settings_page_testing()}</Badge>;
   if (!test.reachable) return <Badge variant="error">{m.settings_page_failed()}</Badge>;
   if (!test.slurmFound) return <Badge variant="error">{m.settings_page_no_slurm_cli()}</Badge>;
   if (!test.toolsFound) return <Badge variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
@@ -750,8 +760,8 @@ function SlurmSection() {
   const [timeLimit, setTimeLimit] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [test, setTest] = useState<"testing" | SlurmPreflight | null>(null);
-  const preflight = test !== null && test !== "testing" ? test : null;
+  const [test, setTest] = useState<SlurmPreflight | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
   const apply = (s: SlurmSettings) => {
     setSettings(s);
@@ -795,21 +805,6 @@ function SlurmSection() {
     }
   }
 
-  async function runPreflight(target: string) {
-    setTest("testing");
-    try {
-      setTest(await slurmPreflight(target));
-    } catch (err) {
-      setTest({
-        reachable: false,
-        slurmFound: false,
-        toolsFound: false,
-        partitions: [],
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
   return (
     <>
       {loadError ? (
@@ -820,11 +815,11 @@ function SlurmSection() {
         </LoadingRow>
       ) : (
         <>
-          {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
-          {preflight && preflight.partitions.length > 0 && (
+          {test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
+          {test && test.partitions.length > 0 && (
             <div className={COMPUTE_DETAILS_CLASS_NAME}>
               <span className="k">{m.settings_page_partitions()}</span>
-              <span className="v">{preflight.partitions.join(", ")}</span>
+              <span className="v">{test.partitions.join(", ")}</span>
             </div>
           )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
@@ -842,10 +837,11 @@ function SlurmSection() {
                   value={host}
                   variant="field"
                   dropDown
-                  disabled={saving}
+                  disabled={saving || connecting}
                   onSelect={(id) => {
                     setHost(id);
                     setTest(null); // a badge earned by cluster A must not vouch for cluster B
+                    setConnecting(false);
                   }}
                />
               </label>
@@ -861,7 +857,7 @@ function SlurmSection() {
                   spellCheck={false}
                />
                 <datalist id="slurm-partitions">
-                  {preflight?.partitions.map((p) => <option key={p} value={p} />)}
+                  {test?.partitions.map((p) => <option key={p} value={p} />)}
                 </datalist>
               </label>
             </div>
@@ -891,21 +887,41 @@ function SlurmSection() {
             </div>
             {error && <div className="error">{error}</div>}
             <div className="actions">
-              <Button variant="primary" type="submit" disabled={saving || unchanged}>
+              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
                 {saving ? m.common_saving() : m.common_save()}
               </Button>
               <Button
                 type="button"
-
-                onClick={() => void runPreflight(host)}
-                disabled={!host || test === "testing"}
+                onClick={() => setConnecting(true)}
+                disabled={!host || connecting}
                 title={host ? undefined : m.settings_pick_login_node()}
               >
-                {m.settings_page_test_connection()}
+                {connecting ? m.settings_connecting() : test ? m.settings_reconnect() : m.settings_connect()}
               </Button>
               <SlurmTestBadge test={test} />
             </div>
           </form>
+          {connecting && (
+            <SshConnectTerminal
+              host={host}
+              backend="slurm"
+              onComplete={(complete) => {
+                if (complete.backend !== "slurm") return;
+                setTest(complete.result);
+                setConnecting(false);
+              }}
+              onError={(error) => {
+                setTest({
+                  reachable: false,
+                  slurmFound: false,
+                  toolsFound: false,
+                  partitions: [],
+                  error,
+                });
+              }}
+              onCancel={() => setConnecting(false)}
+            />
+          )}
         </>
       )}
     </>

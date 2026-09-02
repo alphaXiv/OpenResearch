@@ -749,10 +749,6 @@ export interface SshPreflight {
   testedAt: number;
 }
 
-/** Live-test a host: reachable over ssh and has bash + tar for snapshots. */
-export const sshPreflight = (host: string) =>
-  post<SshPreflight>("/api/settings/ssh/preflight", { host });
-
 // --- settings: slurm ----------------------------------------------------------
 
 export interface SlurmSettings {
@@ -783,10 +779,6 @@ export interface SlurmPreflight {
   partitions: string[];
   error: string | null;
 }
-
-/** Live-test a login node: reachable, Slurm CLI + snapshot tools present. */
-export const slurmPreflight = (host: string) =>
-  post<SlurmPreflight>("/api/settings/slurm/preflight", { host });
 
 // --- settings: ray ------------------------------------------------------------
 
