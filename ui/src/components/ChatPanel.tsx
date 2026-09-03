@@ -111,12 +111,22 @@ import {
   shellWrapperBody,
   unwrapShellBody,
 } from "../orxCommand";
-import { activeTurnTaskList, isTaskListTool, lastTaskList, parseTaskList, toolBaseName, toolSegments } from "../taskProgress";
+import {
+  activeTurnTaskList,
+  isTaskListTool,
+  lastTaskList,
+  parseTaskList,
+  priorTaskLists,
+  type TaskList,
+  toolBaseName,
+  toolSegments,
+} from "../taskProgress";
+import { type OutlineStep, turnOutline } from "../turnOutline";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
-import { TaskListCard, TaskStrip } from "./TaskList";
+import { ProgressStrip, TaskListCard, TaskStrip } from "./TaskList";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
@@ -3083,6 +3093,7 @@ const Message = memo(function Message({
   onRecover,
   skills,
   predictTextTail = false,
+  priorTasks = null,
   forkCount,
   forkIndex = 0,
   forkPrevId,
@@ -3112,6 +3123,8 @@ const Message = memo(function Message({
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
+  /** The task list as it stood before this message; incremental calls build on it. */
+  priorTasks?: TaskList | null;
   /** Set only on a user message, the one bearer of the fork controls. */
   forkCount?: number;
   forkIndex?: number;
@@ -3255,6 +3268,7 @@ const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
+        priorTasks,
       })}
       {turnStatus && (
         <TurnStatusRow
@@ -3289,6 +3303,7 @@ function renderParts(
     onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
     onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
+    priorTasks?: TaskList | null;
   },
 ): React.ReactNode[] {
   const {
@@ -3304,6 +3319,7 @@ function renderParts(
     onOpenPlan,
     onOpenSubagent,
     predictTextTail = false,
+    priorTasks = null,
   } = opts;
   // A steer never becomes the tail — the streaming caret belongs on the
   // assistant text it interrupted.
@@ -3314,7 +3330,7 @@ function renderParts(
   // Only the newest task-list update renders (as the checklist card); earlier
   // ones are superseded bookkeeping and paint nothing. A failed write stays
   // an ordinary error row.
-  const taskCard = lastTaskList(parts);
+  const taskCard = lastTaskList(parts, priorTasks);
   let toolRun: ChatPart[] = [];
   const flushTools = () => {
     if (toolRun.length === 0) return;
@@ -3773,6 +3789,7 @@ const Transcript = memo(function Transcript({
     return forkPositions(allMessages, messages, bearers, (id) => id.startsWith(LOCAL_PREFIX));
   }, [messages, visibleMessages, allMessages]);
   const activeMessage = visibleMessages.at(-1);
+  const priorTasks = useMemo(() => priorTaskLists(messages), [messages]);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
   return (
@@ -3814,6 +3831,7 @@ const Transcript = memo(function Transcript({
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
+            priorTasks={priorTasks.get(m.id) ?? null}
          />
         );
       })}
@@ -4964,6 +4982,17 @@ export function ChatPanel({
   // The running turn's task list, docked so the current step stays in view
   // as the transcript scrolls.
   const liveTasks = useMemo(() => (busy ? activeTurnTaskList(messages) : null), [messages, busy]);
+  // Without a task list, the turn's own phases stand in for it.
+  const liveOutline = useMemo(() => {
+    const tail = messages.at(-1);
+    if (!busy || liveTasks || tail?.role !== "assistant") return null;
+    const steps = turnOutline(tail.parts);
+    return steps.length > 0 ? steps : null;
+  }, [messages, busy, liveTasks]);
+  const describeOutlineStep = useCallback(
+    (step: OutlineStep) => (step.toolParts.length > 0 ? toolGroupSummary(squashToolParts(step.toolParts)) : ""),
+    [],
+  );
 
   // The newest ANSWERABLE unresolved question card's part id: typed composer
   // text answers IT as a custom answer, instead of racing the held turn with
@@ -6032,6 +6061,7 @@ export function ChatPanel({
             the interim ("Waiting for your input…" for a beat until the old
             card's resolve broadcast lands, then Working…). */}
         {liveTasks && !pendingPlan && <TaskStrip list={liveTasks} />}
+        {liveOutline && !pendingPlan && <ProgressStrip steps={liveOutline} describe={describeOutlineStep} />}
         {pendingPlan && !(revisingPlan && pendingPlan.promptId === revisingPlan.promptId) && (
           <PlanStrip
             synthesized={pendingPlan.synthesized}

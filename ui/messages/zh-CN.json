@@ -1043,6 +1043,7 @@
   "tasks_all_done": "所有任务已完成",
   "tasks_show_list": "显示任务列表",
   "tasks_hide_list": "隐藏任务列表",
+  "progress_step": "第 {count} 步",
   "activity_updated_tasks": "已更新任务（已完成 {done}/{total}）",
   "activity_updating_tasks": "正在更新任务",
   "activity_update_tasks": "更新任务",

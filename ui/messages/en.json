@@ -1043,6 +1043,7 @@
   "tasks_all_done": "All tasks done",
   "tasks_show_list": "Show task list",
   "tasks_hide_list": "Hide task list",
+  "progress_step": "Step {count}",
   "activity_updated_tasks": "Updated tasks ({done} of {total} done)",
   "activity_updating_tasks": "Updating tasks",
   "activity_update_tasks": "Update tasks",

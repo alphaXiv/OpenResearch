@@ -1043,6 +1043,7 @@
   "tasks_all_done": "همهٔ کارها انجام شد",
   "tasks_show_list": "نمایش فهرست کارها",
   "tasks_hide_list": "پنهان کردن فهرست کارها",
+  "progress_step": "گام {count}",
   "activity_updated_tasks": "کارها به‌روز شد ({done} از {total} انجام شد)",
   "activity_updating_tasks": "در حال به‌روزرسانی کارها",
   "activity_update_tasks": "به‌روزرسانی کارها",
