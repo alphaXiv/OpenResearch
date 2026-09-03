@@ -6,7 +6,7 @@ signs, notarizes, and packages it into a DMG. CI
 trigger caveat below) and attaches `OpenResearch.dmg`:
 
 ```
-https://github.com/alphaXiv/openresearch-cli/releases/latest/download/OpenResearch.dmg
+https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg
 ```
 
 The release job is a no-op until the **repository** variable
