@@ -776,24 +776,76 @@ export interface SshHost {
 export const getSshHosts = () =>
   get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
 
+export interface SshConfigFile {
+  path: string;
+  content: string;
+}
+
+export const getSshConfig = () => get<SshConfigFile>("/api/settings/ssh/config");
+
+export const saveSshConfig = (content: string, previousContent: string) =>
+  put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
+
 export const getSshMasterStatus = (host: string) =>
   get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
 
-export interface RemoteDashboardSession {
-  host: string;
-  url: string;
-  orxPath: string;
-  version: string;
+export type RemoteSessionStatus =
+  | "checking"
+  | "needsInstall"
+  | "needsUpdate"
+  | "installing"
+  | "updating"
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "disconnected"
+  | "failed";
+
+export interface RemoteInstallPaths {
+  binary: string;
+  database: string;
+  cache: string;
 }
 
-export const getRemoteDashboard = () =>
-  get<{ session: RemoteDashboardSession | null }>("/api/remote").then((r) => r.session);
+export interface RemoteSessionInfo {
+  id: string;
+  host: string;
+  user: string | null;
+  status: RemoteSessionStatus;
+  version: string | null;
+  dashboardProtocol: number | null;
+  gatewayUrl: string;
+  error: string | null;
+  installPaths: RemoteInstallPaths | null;
+  uiPreferences: { theme: string | null; locale: string | null };
+}
 
-export const openRemoteDashboard = (host: string) =>
-  post<RemoteDashboardSession>("/api/remote", { host });
+export type RuntimeInfo =
+  | { kind: "local"; version: string }
+  | { kind: "ssh"; version: string; session: RemoteSessionInfo };
 
-export const closeRemoteDashboard = () =>
-  fetch("/api/remote", { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));
+export const getRuntime = () => get<RuntimeInfo>("/_orx/runtime");
+
+export const listRemoteSessions = () =>
+  get<{ sessions: RemoteSessionInfo[] }>("/api/remote/sessions").then((r) => r.sessions);
+
+export const createRemoteSession = (
+  host: string,
+  uiPreferences: { theme: string | null; locale: string | null },
+) => post<RemoteSessionInfo>("/api/remote/sessions", { host, uiPreferences });
+
+export const reconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/reconnect`);
+
+export const disconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/disconnect`);
+
+export const installRemoteSession = (paths: RemoteInstallPaths) =>
+  post<RemoteSessionInfo>("/_orx/install", paths);
+
+export const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
+
+export const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
 
 export interface SshPreflight {
   reachable: boolean;

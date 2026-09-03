@@ -330,7 +330,7 @@ pub fn auto_update_eligible() -> bool {
 }
 
 /// The one-liner that reinstalls orx through the release installer.
-const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
+pub(crate) const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
 https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh";
 
 /// Confirm a directory can be written before an update commits to it — root-owned

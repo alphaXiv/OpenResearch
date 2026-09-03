@@ -105,6 +105,7 @@ import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
 import { SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SshConfigDialog } from "./SshConfigDialog";
 import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
@@ -656,16 +657,16 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
   );
 }
 
-function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<void> }) {
+function SshSection({ remote = false }: { remote?: boolean }) {
   const [hosts, setHosts] = useState<SshHost[] | null>(null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [configVersion, setConfigVersion] = useState(0);
   const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const [openingHost, setOpeningHost] = useState<string | null>(null);
-  const [remoteErrors, setRemoteErrors] = useState<Record<string, string>>({});
-  const checkedHosts = hosts
+  const checkedHosts = remote ? [] : hosts
     ?.filter((host) => {
       const test = tests[host.host] ?? host.lastTest;
       return test?.reachable && test.toolsFound;
@@ -677,7 +678,7 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
     getSshHosts()
       .then(setHosts)
       .catch(() => setHosts([]));
-  }, []);
+  }, [configVersion]);
 
   function connect(host: string) {
     setConnectionFailed(false);
@@ -695,23 +696,13 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
     setExpandedHosts((expanded) => ({ ...expanded, [host]: !open }));
   }
 
-  async function openRemote(host: string) {
-    setOpeningHost(host);
-    try {
-      await onOpenRemote(host);
-    } catch (error) {
-      setRemoteErrors((errors) => ({
-        ...errors,
-        [host]: error instanceof Error ? error.message : String(error),
-      }));
-      setExpandedHosts((expanded) => ({ ...expanded, [host]: true }));
-    } finally {
-      setOpeningHost(null);
-    }
-  }
-
   return (
     <>
+      <div className="mb-3 flex justify-end">
+        <Button variant="ghost" onClick={() => setConfigOpen(true)}>
+          <Settings size={14} /> {m.ssh_configure_hosts()}
+        </Button>
+      </div>
       {hosts === null ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_reading_ssh_config()}
@@ -724,10 +715,8 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
             // Session-local result wins; the persisted one covers restarts.
             const hostTest = tests[h.host] ?? h.lastTest;
             const connecting = connectingHost === h.host;
-            const opening = openingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
-            const remoteReady = hostTest?.reachable && hostTest.toolsFound && masterRunning[h.host] === true;
-            const hasTerminal = connecting || hostTest?.reachable === false || Boolean(remoteErrors[h.host]);
+            const hasTerminal = !remote && (connecting || hostTest?.reachable === false);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
@@ -760,7 +749,7 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
                       <div className="mt-1 truncate text-sm text-subtext" title={address}>{address}</div>
                     </div>
                   </div>
-                  <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
+                  {!remote && <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="text-start">
                       <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} />
                     </div>
@@ -769,17 +758,12 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
                       className="justify-self-end"
                       onClick={(event) => {
                         event.stopPropagation();
-                        if (remoteReady) void openRemote(h.host);
-                        else if (connecting && !connectionFailed) cancelConnect();
+                        if (connecting && !connectionFailed) cancelConnect();
                         else connect(h.host);
                       }}
-                      disabled={openingHost !== null || (!connecting && connectingHost !== null && !connectionFailed)}
+                      disabled={!connecting && connectingHost !== null && !connectionFailed}
                     >
-                      {opening
-                        ? m.settings_opening()
-                        : remoteReady
-                        ? m.settings_open()
-                        : connecting
+                      {connecting
                         ? connectionFailed
                           ? m.app_retry()
                           : m.settings_page_cancel()
@@ -789,15 +773,12 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
                           ? m.settings_reconnect()
                           : m.settings_connect()}
                     </Button>
-                  </div>
+                  </div>}
                 </div>
                 {hasTerminal && (open || connecting) && (
                   <div className={`border-t border-t-border-variant py-3 pe-2 ps-10${open ? "" : " hidden"}`}>
                     {!connecting && hostTest?.error && (
                       <SshTerminalTranscript host={h.host} transcript={hostTest.error} />
-                    )}
-                    {remoteErrors[h.host] && (
-                      <p className="m-0 whitespace-pre-wrap text-sm text-accent-red">{remoteErrors[h.host]}</p>
                     )}
                     {connecting && (
                       <SshConnectTerminal
@@ -833,6 +814,12 @@ function SshSection({ onOpenRemote }: { onOpenRemote: (host: string) => Promise<
             );
           })}
         </div>
+      )}
+      {configOpen && (
+        <SshConfigDialog
+          onClose={() => setConfigOpen(false)}
+          onSaved={() => setConfigVersion((version) => version + 1)}
+        />
       )}
     </>
   );
@@ -1640,12 +1627,12 @@ function BackendDetailPage({
   target,
   isDefault,
   onBack,
-  onOpenRemote,
+  remote,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   onBack: () => void;
-  onOpenRemote: (host: string) => Promise<void>;
+  remote: boolean;
 }) {
   return (
     <>
@@ -1676,7 +1663,7 @@ function BackendDetailPage({
           {target.id === "hf" && <HfSection />}
           {target.id === "modal" && <ModalSection />}
           {target.id === "k8s" && <K8sSection />}
-          {target.id === "ssh" && <SshSection onOpenRemote={onOpenRemote} />}
+          {target.id === "ssh" && <SshSection remote={remote} />}
           {target.id === "slurm" && <SlurmSection />}
           {target.id === "ray" && <RaySection />}
           {target.id === "openresearch" && <OpenResearchSection />}
@@ -1689,11 +1676,11 @@ function BackendDetailPage({
 function ComputeTab({
   project,
   onViewHistory,
-  onOpenRemote,
+  remote,
 }: {
   project: Project | null;
   onViewHistory: () => void;
-  onOpenRemote: (host: string) => Promise<void>;
+  remote: boolean;
 }) {
   const [settings, setSettings] = useState<ComputeSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1767,7 +1754,7 @@ function ComputeTab({
         target={selected}
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
-        onOpenRemote={onOpenRemote}
+        remote={remote}
      />
     );
   }
@@ -3346,14 +3333,14 @@ export function SettingsView({
   githubPublicationError,
   onProjectUpdate,
   onSelectTab,
-  onOpenRemote,
+  remote = false,
 }: {
   tab: Tab;
   project: Project | null;
   githubPublicationError: string | null;
   onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
-  onOpenRemote: (host: string) => Promise<void>;
+  remote?: boolean;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
 
@@ -3378,9 +3365,11 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <UpdatesTab />
-            </section>
+            {!remote && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <UpdatesTab />
+              </section>
+            )}
           </div>
         </>
       )}
@@ -3388,7 +3377,7 @@ export function SettingsView({
         <ComputeTab
           project={project}
           onViewHistory={() => onSelectTab("instances")}
-          onOpenRemote={onOpenRemote}
+          remote={remote}
        />
       )}
       {tab === "instances" && (

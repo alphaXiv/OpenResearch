@@ -185,6 +185,10 @@ pub fn settings_data_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_data_dir().map(PathBuf::from)
 }
 
+pub fn settings_cache_dir() -> Option<PathBuf> {
+    crate::telemetry::persisted_cache_dir().map(PathBuf::from)
+}
+
 /// Set or clear the persisted data dir, preserving every other settings field.
 /// Delegates to `telemetry::set_persisted_data_dir` (the locked, atomic RMW).
 /// `None` clears it (revert to the env/XDG/default chain).

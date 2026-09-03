@@ -621,6 +621,7 @@ async function startUnlocked(info, dbMode, openBrowser) {
       env: {
         ...process.env,
         ...slotEnvironment(slotPaths),
+        ORX_UI_DEV_ORIGIN: `http://localhost:${slotPaths.uiPort}`,
       },
     }, state.backendLog)
     saveState(slotPaths, state)

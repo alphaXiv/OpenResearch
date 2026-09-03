@@ -4,12 +4,11 @@
 //!   /            embedded SPA (rust-embed over ui/dist, index.html fallback)
 //!   /api/*       JSON over the local SQLite store + run-log files
 //!   /api/events  SSE: 500ms store + log-file diff loop (serve.rs idiom)
-//!   /opencode/*  streaming reverse proxy to the locally spawned `opencode serve`
 //!
 //! Fully local: no OpenResearch api anywhere on these paths (the /api/papers
 //! routes proxy alphaXiv's public, token-free endpoints — needed because the
-//! browser can't call api.alphaxiv.org cross-origin). No auth — the bind is
-//! loopback-only.
+//! browser can't call api.alphaxiv.org cross-origin). The normal dashboard is
+//! loopback-only; the hidden remote-session mode also requires a session bearer.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -20,6 +19,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, Method, StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -29,6 +29,8 @@ use futures::Stream;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest as _, Sha256};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc;
 
 use crate::error::{anyhow, Result};
@@ -43,6 +45,44 @@ use crate::{browser, UpArgs};
 
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
+    let mut remote_input = if args.remote_session_stdin {
+        let mut input = BufReader::new(tokio::io::stdin());
+        let mut token = String::new();
+        tokio::time::timeout(Duration::from_secs(10), input.read_line(&mut token))
+            .await
+            .map_err(|_| anyhow!("Timed out waiting for the remote session credential."))??;
+        let token = token.trim_end_matches(['\r', '\n']);
+        if token.len() < 32
+            || token.len() > 256
+            || !token.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(anyhow!("Invalid remote session credential."));
+        }
+        let callback = derive_callback_token(token);
+        local::chat::set_up_auth_token(callback.clone());
+        Some((RemoteAuth::new(token, &callback), input))
+    } else {
+        None
+    };
+    let mut remote_session_lock = if remote_input.is_some() {
+        let data_dir = crate::store::data_dir();
+        std::fs::create_dir_all(&data_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(data_dir.join("remote-session.lock"))?;
+        Some(fd_lock::RwLock::new(file))
+    } else {
+        None
+    };
+    let _remote_session_guard = remote_session_lock
+        .as_mut()
+        .map(fd_lock::RwLock::try_write)
+        .transpose()
+        .map_err(|_| {
+            anyhow!("Another remote OpenResearch session is already using this database.")
+        })?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
@@ -75,7 +115,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
-        remote_dashboard: Arc::new(tokio::sync::Mutex::new(None)),
+        remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(port);
@@ -111,14 +151,20 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
-    spawn_background_tasks();
+    spawn_background_tasks(remote_input.is_none());
 
-    let app = router(state.clone());
+    let app = router(
+        state.clone(),
+        remote_input.as_ref().map(|(auth, _)| auth.clone()),
+    );
     let url = format!("http://127.0.0.1:{port}");
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
     // URL, and skip the (futile) browser-open. Otherwise, today's local flow.
-    if let Some(session) = crate::remote::detect_ssh_session() {
+    if remote_input.is_some() {
+        println!("{}", crate::commands::up_remote::REMOTE_READY_MARKER);
+        let _ = tokio::io::stdout().flush().await;
+    } else if let Some(session) = crate::remote::detect_ssh_session() {
         eprint!("{}", session.instructions(port));
     } else {
         eprintln!("orx up: dashboard on {url}");
@@ -134,11 +180,19 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
-    tokio::select! {
-        r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
-        _ = shutdown_signal() => eprintln!("orx up: shutting down"),
+    if let Some((_, input)) = remote_input.take() {
+        tokio::select! {
+            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
+            _ = remote_heartbeat(input) => eprintln!("orx up: remote session ended"),
+            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
+        }
+    } else {
+        tokio::select! {
+            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
+            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
+        }
     }
-    stop_remote_dashboard(&state).await;
+    state.remote_sessions.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
@@ -193,29 +247,39 @@ struct AppState {
     data_dir_move_in_progress: Arc<std::sync::atomic::AtomicBool>,
     /// Serializes wake-up store writes with a live data-directory move.
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
-    remote_dashboard: Arc<tokio::sync::Mutex<Option<RemoteDashboardState>>>,
+    remote_sessions: crate::commands::up_remote::RemoteSessionManager,
 }
 
-enum RemoteDashboardState {
-    Opening {
-        cancel: tokio::sync::oneshot::Sender<()>,
-        token: Arc<()>,
-    },
-    Open(Box<RemoteDashboard>),
+#[derive(Clone)]
+struct RemoteAuth {
+    session: [u8; 32],
+    callback: [u8; 32],
 }
 
-struct RemoteDashboard {
-    info: RemoteDashboardInfo,
-    child: tokio::process::Child,
+impl RemoteAuth {
+    fn new(session: &str, callback: &str) -> Self {
+        Self {
+            session: Sha256::digest(session.as_bytes()).into(),
+            callback: Sha256::digest(callback.as_bytes()).into(),
+        }
+    }
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteDashboardInfo {
-    host: String,
-    url: String,
-    orx_path: String,
-    version: String,
+fn derive_callback_token(session: &str) -> String {
+    Sha256::digest(format!("orx-callback:{session}").as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+async fn remote_heartbeat(mut input: BufReader<tokio::io::Stdin>) {
+    loop {
+        let mut line = String::new();
+        match tokio::time::timeout(Duration::from_secs(20), input.read_line(&mut line)).await {
+            Ok(Ok(read)) if read > 0 && line.trim() == "ping" => {}
+            _ => return,
+        }
+    }
 }
 
 async fn project_publication_lock(
@@ -315,8 +379,8 @@ impl ProjectLifecycle {
     }
 }
 
-fn router(state: AppState) -> Router {
-    Router::new()
+fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
+    let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
@@ -403,6 +467,10 @@ fn router(state: AppState) -> Router {
         .route("/api/files/abs", get(absolute_file))
         .route("/api/files/abs/raw", get(absolute_raw_file))
         .route(
+            "/api/settings/ssh/config",
+            get(ssh_config).put(save_ssh_config),
+        )
+        .route(
             "/api/projects/{id}/files",
             get(list_artifacts).delete(delete_artifact),
         )
@@ -452,11 +520,19 @@ fn router(state: AppState) -> Router {
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
         .route(
-            "/api/remote",
-            get(remote_dashboard_status)
-                .post(open_remote_dashboard)
-                .delete(close_remote_dashboard),
+            "/api/remote/sessions",
+            get(remote_sessions).post(create_remote_session),
         )
+        .route("/api/remote/sessions/{id}", get(remote_session))
+        .route(
+            "/api/remote/sessions/{id}/reconnect",
+            post(reconnect_remote_session),
+        )
+        .route(
+            "/api/remote/sessions/{id}/disconnect",
+            post(disconnect_remote_session),
+        )
+        .route("/_orx/runtime", get(local_runtime))
         .route(
             "/api/settings/slurm",
             get(slurm_settings).post(set_slurm_settings),
@@ -524,7 +600,91 @@ fn router(state: AppState) -> Router {
         // JSON body; the 2 MB axum default rejects any real paper. Cap it well
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        .with_state(state)
+        .with_state(state);
+    let app = app.layer(middleware::from_fn(
+        crate::commands::up_remote::loopback_guard,
+    ));
+    match remote_auth {
+        Some(auth) => app.layer(middleware::from_fn_with_state(auth, require_remote_auth)),
+        None => app,
+    }
+}
+
+async fn require_remote_auth(
+    State(auth): State<RemoteAuth>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if remote_route_forbidden(path) {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            "This action is unavailable in an SSH workspace.".into(),
+        )
+        .into_response();
+    }
+    if path == "/api/internal/permissions" {
+        return next.run(request).await;
+    }
+    let provided = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|value| Sha256::digest(value.as_bytes()));
+    let session = provided
+        .as_ref()
+        .is_some_and(|digest| constant_time_eq(digest, &auth.session));
+    let callback = is_remote_callback_route(request.method(), path)
+        && provided
+            .as_ref()
+            .is_some_and(|digest| constant_time_eq(digest, &auth.callback));
+    if session || callback {
+        next.run(request).await
+    } else {
+        ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Remote session authentication required.".into(),
+        )
+        .into_response()
+    }
+}
+
+fn remote_route_forbidden(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/project-path/pick"
+            | "/api/update"
+            | "/api/update/apply"
+            | "/api/update/auto"
+            | "/api/update/install-cli"
+            | "/api/settings/ssh/master"
+            | "/api/settings/ssh/preflight"
+            | "/api/settings/ssh/connect"
+    ) || path.starts_with("/api/remote/")
+        || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
+}
+
+fn is_remote_callback_route(method: &Method, path: &str) -> bool {
+    if method != Method::POST {
+        return false;
+    }
+    path == "/api/runs"
+        || path
+            .strip_prefix("/api/runs/")
+            .and_then(|path| path.strip_suffix("/cancel"))
+            .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .fold(0_u8, |difference, (left, right)| {
+                difference | (left ^ right)
+            })
+            == 0
 }
 
 // --- error plumbing -------------------------------------------------------
@@ -605,7 +765,11 @@ impl From<&StoredRun> for ApiRun {
 // --- basic routes ---------------------------------------------------------
 
 async fn health() -> Json<Value> {
-    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
+    Json(json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1694,6 +1858,17 @@ fn local_client() -> Result<reqwest::Client> {
         .map_err(|error| anyhow!("Could not create the orx up client: {error}"))
 }
 
+fn authenticate_up_request(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match std::env::var(local::chat::UP_AUTH_TOKEN_ENV)
+        .ok()
+        .filter(|token| !token.is_empty())
+        .or_else(|| local::chat::up_auth_token().map(str::to_string))
+    {
+        Some(token) => builder.bearer_auth(token),
+        None => builder,
+    }
+}
+
 pub(crate) async fn submit_run_via_up(
     port: u16,
     args: &crate::ExpRunArgs,
@@ -1712,12 +1887,12 @@ pub(crate) async fn submit_run_via_up(
         force: args.force,
         chat_session_id: args.launching_chat_session(),
     };
-    let response = local_client()?
-        .post(format!("http://127.0.0.1:{port}/api/runs"))
-        .json(&request)
-        .send()
-        .await
-        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let response =
+        authenticate_up_request(local_client()?.post(format!("http://127.0.0.1:{port}/api/runs")))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
     let response: CreateRunResponse = decode_local_response(response, "start the run").await?;
     let job_id = response
         .run
@@ -1734,11 +1909,12 @@ pub(crate) async fn submit_run_via_up(
 }
 
 pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
-    let response = local_client()?
-        .post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel"))
-        .send()
-        .await
-        .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
+    let response = authenticate_up_request(
+        local_client()?.post(format!("http://127.0.0.1:{port}/api/runs/{run_id}/cancel")),
+    )
+    .send()
+    .await
+    .map_err(|error| anyhow!("Could not reach the trusted orx up process: {error}"))?;
     let _: Value = decode_local_response(response, "cancel the run").await?;
     Ok(())
 }
@@ -3419,13 +3595,15 @@ async fn set_hf_token(Json(req): Json<SetHfTokenReq>) -> ApiResult {
 }
 
 /// Keep update checks and telemetry delivery running for long-lived dashboards.
-fn spawn_background_tasks() {
-    tokio::spawn(async {
-        loop {
-            updates::periodic_update_pass().await;
-            tokio::time::sleep(updates::PERIODIC_CHECK_INTERVAL).await;
-        }
-    });
+fn spawn_background_tasks(check_updates: bool) {
+    if check_updates {
+        tokio::spawn(async {
+            loop {
+                updates::periodic_update_pass().await;
+                tokio::time::sleep(updates::PERIODIC_CHECK_INTERVAL).await;
+            }
+        });
+    }
     tokio::spawn(async {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -4749,6 +4927,81 @@ async fn ssh_settings() -> ApiResult {
     .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?
 }
 
+fn ssh_config_path() -> Result<std::path::PathBuf> {
+    Ok(dirs::home_dir()
+        .ok_or_else(|| anyhow!("no home directory"))?
+        .join(".ssh")
+        .join("config"))
+}
+
+async fn ssh_config() -> ApiResult {
+    blocking_api(move || {
+        let path = ssh_config_path()?;
+        let content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ApiError::from(anyhow!(
+                    "could not read SSH config: {error}"
+                )))
+            }
+        };
+        Ok(Json(json!({ "path": "~/.ssh/config", "content": content })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveSshConfigReq {
+    content: String,
+    previous_content: String,
+}
+
+async fn save_ssh_config(Json(req): Json<SaveSshConfigReq>) -> ApiResult {
+    blocking_api(move || {
+        if req.content.len() as u64 > FILE_WRITE_LIMIT {
+            return Err(bad_request("SSH config is too large to save"));
+        }
+        let path = ssh_config_path()?;
+        let current = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => {
+                return Err(ApiError::from(anyhow!(
+                    "could not read SSH config: {error}"
+                )))
+            }
+        };
+        if current != req.previous_content {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "SSH config changed on disk. Reload it before saving.".into(),
+            ));
+        }
+
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("SSH config has no parent directory"))?;
+        #[cfg(unix)]
+        let parent_existed = parent.exists();
+        std::fs::create_dir_all(parent)
+            .map_err(|error| ApiError::from(anyhow!("could not create ~/.ssh: {error}")))?;
+        #[cfg(unix)]
+        {
+            if !parent_existed {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    .map_err(|error| ApiError::from(anyhow!("could not secure ~/.ssh: {error}")))?;
+            }
+        }
+        crate::local::git::atomic_write_with_mode(&path, req.content.as_bytes(), Some(0o600))
+            .map_err(|error| ApiError::from(anyhow!("could not save SSH config: {error}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
 #[derive(Deserialize)]
 struct SshPreflightReq {
     host: String,
@@ -4773,147 +5026,78 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
     Ok(Json(json!(run_ssh_host_preflight(host).await)))
 }
 
-async fn remote_dashboard_status(State(state): State<AppState>) -> ApiResult {
-    let mut dashboard = state.remote_dashboard.lock().await;
-    reap_remote_dashboard(&mut dashboard)?;
-    Ok(Json(json!({
-        "session": match dashboard.as_ref() {
-            Some(RemoteDashboardState::Open(dashboard)) => Some(&dashboard.info),
-            _ => None,
-        },
-    })))
+fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
+    if list_ssh_hosts()
+        .iter()
+        .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(host))
+    {
+        Ok(())
+    } else {
+        Err(bad_request("Choose a host from ~/.ssh/config."))
+    }
 }
 
-async fn open_remote_dashboard(
+async fn remote_sessions(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "sessions": state.remote_sessions.list().await }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateRemoteSessionReq {
+    host: String,
+    #[serde(default)]
+    ui_preferences: crate::commands::up_remote::RemoteUiPreferences,
+}
+
+async fn create_remote_session(
     State(state): State<AppState>,
-    Json(req): Json<SshPreflightReq>,
-) -> ApiResult {
+    Json(req): Json<CreateRemoteSessionReq>,
+) -> std::result::Result<Response, ApiError> {
     let host = req.host.trim().to_string();
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-
-    if !list_ssh_hosts()
-        .iter()
-        .any(|candidate| candidate.get("host").and_then(Value::as_str) == Some(host.as_str()))
-    {
-        return Err(bad_request("Choose a host from ~/.ssh/config."));
-    }
-
-    let (cancel, cancelled) = tokio::sync::oneshot::channel();
-    let token = Arc::new(());
-    {
-        let mut dashboard = state.remote_dashboard.lock().await;
-        reap_remote_dashboard(&mut dashboard)?;
-        if dashboard.is_some() {
-            return Err(ApiError(
-                StatusCode::CONFLICT,
-                "Close the current remote connection before opening another.".into(),
-            ));
-        }
-        *dashboard = Some(RemoteDashboardState::Opening {
-            cancel,
-            token: token.clone(),
-        });
-    }
-
-    let result = tokio::select! {
-        result = launch_remote_dashboard(host) => result.map_err(ApiError::from),
-        _ = cancelled => Err(ApiError(StatusCode::CONFLICT, "Remote connection cancelled.".into())),
-    };
-    let mut dashboard = state.remote_dashboard.lock().await;
-    match result {
-        Ok(opened) if matches!(dashboard.as_ref(), Some(RemoteDashboardState::Opening { token: active, .. }) if Arc::ptr_eq(active, &token)) =>
-        {
-            let info = opened.info.clone();
-            *dashboard = Some(RemoteDashboardState::Open(Box::new(opened)));
-            Ok(Json(json!(info)))
-        }
-        Ok(mut opened) => {
-            drop(dashboard);
-            let _ = opened.child.start_kill();
-            let _ = opened.child.wait().await;
-            Err(ApiError(
-                StatusCode::CONFLICT,
-                "Remote connection cancelled.".into(),
-            ))
-        }
-        Err(error) => {
-            if matches!(dashboard.as_ref(), Some(RemoteDashboardState::Opening { token: active, .. }) if Arc::ptr_eq(active, &token))
-            {
-                *dashboard = None;
-            }
-            Err(error)
-        }
-    }
+    require_configured_ssh_host(&host)?;
+    let (created, session) = state
+        .remote_sessions
+        .create(host, req.ui_preferences, None)
+        .await?;
+    Ok((
+        if created {
+            StatusCode::ACCEPTED
+        } else {
+            StatusCode::OK
+        },
+        Json(json!(session)),
+    )
+        .into_response())
 }
 
-async fn launch_remote_dashboard(host: String) -> Result<RemoteDashboard> {
-    let target = crate::jobs::ssh::SshTarget::alias(&host);
-    let remote_orx = crate::commands::up_remote::resolve_remote_orx(&target, &host).await?;
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|e| anyhow!("Could not allocate a local port: {e}"))?;
-    let port = listener.local_addr()?.port();
-    // A remote collision makes this exact child exit; wait_healthy checks it
-    // before and after the version-matched response, so another user's orx cannot win.
-    let forward = crate::commands::up_remote::forward_spec(port, port);
-    let remote_cmd = crate::commands::up_remote::remote_up_cmd(&remote_orx.path, port);
-    let mut command =
-        crate::commands::up_remote::ssh_forward_command(&target, &forward, &remote_cmd)?;
-    command
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit());
-    drop(listener);
-    let mut child = command
-        .spawn()
-        .map_err(|e| crate::commands::up_remote::ssh_spawn_error(e, "remote access"))?;
-
-    if let Err(error) =
-        crate::commands::up_remote::wait_healthy(&mut child, port, &remote_orx.version).await
-    {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-        return Err(error);
-    }
-
-    let info = RemoteDashboardInfo {
-        host,
-        url: format!("http://127.0.0.1:{port}"),
-        orx_path: remote_orx.path,
-        version: remote_orx.version,
-    };
-    Ok(RemoteDashboard { info, child })
+async fn remote_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let session = state
+        .remote_sessions
+        .get(&id)
+        .await
+        .ok_or_else(|| not_found("remote session"))?;
+    Ok(Json(json!(session)))
 }
 
-async fn close_remote_dashboard(State(state): State<AppState>) -> ApiResult {
-    stop_remote_dashboard(&state).await;
-    Ok(Json(json!({ "ok": true })))
+async fn reconnect_remote_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    Ok(Json(json!(state.remote_sessions.reconnect(&id).await?)))
 }
 
-async fn stop_remote_dashboard(state: &AppState) {
-    let dashboard = state.remote_dashboard.lock().await.take();
-    match dashboard {
-        Some(RemoteDashboardState::Opening { cancel, .. }) => {
-            let _ = cancel.send(());
-        }
-        Some(RemoteDashboardState::Open(mut dashboard)) => {
-            let _ = dashboard.child.start_kill();
-            let _ = tokio::time::timeout(Duration::from_secs(2), dashboard.child.wait()).await;
-        }
-        None => {}
-    }
+async fn disconnect_remote_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> ApiResult {
+    Ok(Json(json!(state.remote_sessions.disconnect(&id).await?)))
 }
 
-fn reap_remote_dashboard(dashboard: &mut Option<RemoteDashboardState>) -> Result<()> {
-    let ended = match dashboard.as_mut() {
-        Some(RemoteDashboardState::Opening { token, .. }) => Arc::strong_count(token) == 1,
-        Some(RemoteDashboardState::Open(dashboard)) => dashboard.child.try_wait()?.is_some(),
-        _ => false,
-    };
-    if ended {
-        *dashboard = None;
-    }
-    Ok(())
+async fn local_runtime() -> Json<Value> {
+    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
 }
 
 async fn run_ssh_host_preflight(host: String) -> SshHostTest {
@@ -6498,9 +6682,9 @@ fn asset_response(path: &str, file: rust_embed::EmbeddedFile) -> Response {
         .into_response()
 }
 
-/// Every non-/api non-/opencode path: exact asset if it exists, index.html
+/// Every non-/api path: exact asset if it exists, index.html
 /// otherwise (SPA client routing), friendly page when the UI isn't built.
-async fn spa(uri: Uri) -> Response {
+pub(crate) async fn spa(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     if path.starts_with("api/") || path == "api" {
         return not_found("route").into_response();
@@ -6518,6 +6702,42 @@ async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_workspace_blocks_local_machine_actions_but_keeps_config_editing() {
+        for path in [
+            "/api/project-path/pick",
+            "/api/update",
+            "/api/update/apply",
+            "/api/settings/ssh/master",
+            "/api/settings/ssh/preflight",
+            "/api/settings/ssh/connect",
+            "/api/remote/sessions",
+            "/api/projects/p1/file/open",
+        ] {
+            assert!(remote_route_forbidden(path), "{path}");
+        }
+        assert!(!remote_route_forbidden("/api/settings/ssh/config"));
+        assert!(!remote_route_forbidden("/api/projects/p1/file"));
+    }
+
+    #[test]
+    fn remote_callback_token_is_limited_to_run_submission_and_cancellation() {
+        assert!(is_remote_callback_route(&Method::POST, "/api/runs"));
+        assert!(is_remote_callback_route(
+            &Method::POST,
+            "/api/runs/run-1/cancel"
+        ));
+        assert!(!is_remote_callback_route(&Method::GET, "/api/runs"));
+        assert!(!is_remote_callback_route(
+            &Method::POST,
+            "/api/runs/run-1/extra/cancel"
+        ));
+        assert!(!is_remote_callback_route(
+            &Method::POST,
+            "/api/chat/sessions/s1/message"
+        ));
+    }
 
     #[test]
     fn ssh_terminal_requires_the_dashboard_origin() {

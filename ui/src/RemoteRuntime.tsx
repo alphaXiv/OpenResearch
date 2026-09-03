@@ -1,0 +1,227 @@
+import { useEffect, useRef, useState } from "react";
+import App from "./App";
+import {
+  getRuntime,
+  installRemoteSession,
+  reconnectCurrentRemote,
+  type RemoteInstallPaths,
+  type RuntimeInfo,
+} from "./api";
+import { ltr } from "./i18n";
+import { setLocale } from "./locale";
+import { m } from "./paraglide/messages.js";
+import { isLocale } from "./paraglide/runtime.js";
+import { setThemePreference } from "./theme";
+import { Button, Input, showAlert, Spinner } from "./components/ui";
+
+const REMOTE_FAVICON =
+  "data:image/svg+xml," +
+  encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#3b82f6"/><path d="M7 11l5 5-5 5M25 11l-5 5 5 5" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+
+function setFavicon(remote: boolean) {
+  const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+  if (link) link.href = remote ? REMOTE_FAVICON : "/favicon.svg";
+}
+
+function applyRemotePreferences(runtime: RuntimeInfo) {
+  if (runtime.kind !== "ssh") return;
+  const { theme, locale } = runtime.session.uiPreferences;
+  if (theme === "light" || theme === "dark" || theme === "system") {
+    setThemePreference(theme);
+  }
+  if (locale && isLocale(locale)) setLocale(locale);
+}
+
+function RemoteSetup({
+  runtime,
+  overlay = false,
+}: {
+  runtime: Extract<RuntimeInfo, { kind: "ssh" }>;
+  overlay?: boolean;
+}) {
+  const { session } = runtime;
+  const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => setPaths(session.installPaths), [session.installPaths]);
+
+  async function install() {
+    if (!paths) return;
+    setBusy(true);
+    try {
+      await installRemoteSession(paths);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reconnect() {
+    setBusy(true);
+    try {
+      await reconnectCurrentRemote();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const installing = session.status === "installing" || session.status === "updating" || busy;
+  const needsInstall = session.status === "needsInstall";
+  const needsUpdate = session.status === "needsUpdate";
+  const showPaths = paths && (needsInstall || (needsUpdate && !session.error));
+  const working = ["checking", "connecting", "installing", "updating", "reconnecting"].includes(
+    session.status,
+  );
+
+  return (
+    <main className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
+      <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
+        <div className="flex items-start gap-3">
+          {working && <Spinner />}
+          <div className="min-w-0 flex-1">
+            <h1 className="m-0 text-2xl font-semibold text-text">
+              {needsInstall
+                ? m.remote_install_title()
+                : needsUpdate
+                  ? m.remote_update_title()
+                  : session.status === "disconnected"
+                    ? m.remote_disconnected_title({ host: ltr(session.host) })
+                    : session.status === "failed"
+                      ? m.remote_failed_title({ host: ltr(session.host) })
+                      : m.remote_connecting_title({ host: ltr(session.host) })}
+            </h1>
+            <p className="mt-2 mb-0 text-base text-text">
+              {session.error ?? (needsInstall
+                ? m.remote_not_installed_description({
+                    user: ltr(session.user ?? ""),
+                    host: ltr(session.host),
+                  })
+                : needsUpdate
+                  ? m.remote_update_description({ host: ltr(session.host) })
+                  : m.remote_connecting_description())}
+            </p>
+          </div>
+        </div>
+
+        {showPaths && (
+          <div className="mt-6 grid gap-4 border-t border-border-variant pt-5">
+            <p className="m-0 text-sm text-subtext">{m.remote_install_location()}</p>
+            {([
+              ["binary", m.remote_install_binary()],
+              ["database", m.remote_install_database()],
+              ["cache", m.remote_install_cache()],
+            ] as const).map(([key, label]) => (
+              <label key={key} className="grid gap-1 text-sm font-medium text-subtext">
+                {label}
+                <Input
+                  value={paths[key]}
+                  onChange={(event) => setPaths({ ...paths, [key]: event.target.value })}
+                  disabled={installing}
+                  dir="ltr"
+                />
+              </label>
+            ))}
+            {!session.error && (
+              <div className="flex justify-end pt-1">
+                <Button variant="primary" disabled={installing} onClick={() => void install()}>
+                  {installing ? <><Spinner /> {m.remote_installing()}</> : needsUpdate ? m.remote_update() : m.settings_page_install()}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {(session.status === "disconnected" || session.status === "failed") && (
+          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+            <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+              {busy ? <Spinner /> : null}
+              {m.remote_reconnect()}
+            </Button>
+          </div>
+        )}
+      </section>
+    </main>
+  );
+}
+
+export function RuntimeRoot() {
+  const launchPlaceholder = location.pathname === "/remote-launch";
+  const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const everConnected = useRef(false);
+  const preferencesApplied = useRef(false);
+
+  useEffect(() => {
+    if (launchPlaceholder) return;
+    let active = true;
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const next = await getRuntime();
+        if (!active) return;
+        if (next.kind === "ssh") {
+          if (!preferencesApplied.current) {
+            preferencesApplied.current = true;
+            applyRemotePreferences(next);
+          }
+          if (next.session.status === "connected") everConnected.current = true;
+        }
+        setRuntime(next);
+        setError(null);
+        if (next.kind === "ssh") timer = window.setTimeout(() => void refresh(), 2_000);
+      } catch (cause) {
+        if (active) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+          timer = window.setTimeout(() => void refresh(), 2_000);
+        }
+      }
+    };
+    void refresh();
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [launchPlaceholder]);
+
+  useEffect(() => {
+    const remote = runtime?.kind === "ssh";
+    setFavicon(remote);
+    if (remote && (!everConnected.current || runtime.session.status === "disconnected")) {
+      document.title = `SSH: ${runtime.session.host} — OpenResearch`;
+    }
+  }, [runtime]);
+
+  if (launchPlaceholder) {
+    return (
+      <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">
+        <Spinner /> {m.remote_preparing()}
+      </main>
+    );
+  }
+  if (!runtime) {
+    return (
+      <main className="app flex h-full items-center justify-center gap-3 bg-background text-base text-text">
+        {error ? <><span>{error}</span><Button onClick={() => location.reload()}>{m.app_retry()}</Button></> : <Spinner />}
+      </main>
+    );
+  }
+  if (runtime.kind === "local") return <App runtime={runtime} />;
+  const keepWorkspace =
+    everConnected.current && runtime.session.status !== "disconnected";
+  if (!keepWorkspace && runtime.session.status !== "connected") {
+    return <RemoteSetup runtime={runtime} />;
+  }
+  return (
+    <div className="relative h-full">
+      <App runtime={runtime} />
+      {runtime.session.status !== "connected" && (
+        <div className="absolute inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-6">
+          <RemoteSetup runtime={runtime} overlay />
+        </div>
+      )}
+    </div>
+  );
+}

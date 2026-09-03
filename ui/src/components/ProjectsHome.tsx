@@ -18,9 +18,11 @@ import { Button } from "./ui";
 export function NewProjectDialog({
   onClose,
   onCreated,
+  remote = false,
 }: {
   onClose: () => void;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
+  remote?: boolean;
 }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -94,7 +96,7 @@ export function NewProjectDialog({
         tabIndex={-1}
       >
         <h2 id="new-project-dialog-title">{m.projects_home_new_project()}</h2>
-        <NewProjectForm onCancel={onClose} onCreated={onCreated} />
+        <NewProjectForm onCancel={onClose} onCreated={onCreated} remote={remote} />
       </div>
     </div>
   );
@@ -210,11 +212,13 @@ export function ProjectsHome({
   onOpen,
   onCreated,
   onDeleted,
+  remote = false,
 }: {
   projects: Project[];
   onOpen: (id: string) => void;
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   onDeleted: (id: string) => void;
+  remote?: boolean;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
@@ -408,6 +412,7 @@ export function ProjectsHome({
 
       {modalOpen && (
         <NewProjectDialog
+          remote={remote}
           onClose={() => setModalOpen(false)}
           onCreated={(project, githubPublicationError) => {
             setModalOpen(false);

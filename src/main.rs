@@ -534,16 +534,15 @@ pub struct SuperviseArgs {
 
 #[derive(Args, Debug)]
 pub struct UpArgs {
-    /// Port to bind on 127.0.0.1. With `--remote`, the local port to forward.
+    /// Port to bind on 127.0.0.1. With `--remote`, the local presentation port.
     #[arg(long, default_value_t = 4791)]
     pub port: u16,
     /// Run `orx up` on a remote box over SSH and forward it here. The value is
     /// an `~/.ssh/config` host alias, or `user@host` (append `:PORT` for a
     /// non-standard SSH port, e.g. `root@1.2.3.4:38455`). Only user@host + port
     /// are reconstructed; a custom key or jump host must come from `~/.ssh/config`.
-    /// Starts the server there, tunnels `--port` to your laptop, and opens your
-    /// browser. Note: the remote dashboard is unauthenticated and bound to that
-    /// host's loopback, so anyone else with an account on that host can reach it.
+    /// Starts an authenticated server there, tunnels it through a hidden local
+    /// port, and opens a dedicated local presentation gateway in your browser.
     #[arg(long, value_name = "HOST")]
     pub remote: Option<String>,
     /// Don't open the dashboard in the browser on startup.
@@ -555,6 +554,9 @@ pub struct UpArgs {
     /// opencode model override, e.g. `anthropic/claude-sonnet-4-5`.
     #[arg(long)]
     pub model: Option<String>,
+    /// Internal authenticated dashboard mode used behind a local SSH gateway.
+    #[arg(long, hide = true)]
+    pub remote_session_stdin: bool,
 }
 
 #[derive(Args, Debug)]
@@ -695,6 +697,9 @@ pub struct VersionArgs {
     /// Emit a JSON object instead of text (implies --check).
     #[arg(long)]
     pub json: bool,
+    /// Print the dashboard protocol understood by this binary.
+    #[arg(long, hide = true, conflicts_with_all = ["check", "json", "build_channel"])]
+    pub dashboard_protocol: bool,
 }
 
 #[derive(Args, Debug)]

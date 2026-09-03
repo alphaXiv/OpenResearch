@@ -11,6 +11,13 @@ use crate::error::Result;
 use crate::updates;
 
 pub async fn run(args: crate::VersionArgs) -> Result<()> {
+    if args.dashboard_protocol {
+        println!(
+            "ORX_DASHBOARD_PROTOCOL={}",
+            crate::commands::up_remote::DASHBOARD_PROTOCOL
+        );
+        return Ok(());
+    }
     if args.build_channel {
         println!("{}", crate::telemetry::build_channel());
         return Ok(());

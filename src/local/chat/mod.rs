@@ -7178,6 +7178,19 @@ pub const LOCAL_SESSION_ENV: &str = "ORX_LOCAL_SESSION";
 /// Loopback port of the trusted `orx up` process that owns local agent runs.
 pub const UP_PORT_ENV: &str = "ORX_UP_PORT";
 
+/// Route-scoped bearer for agent subprocesses calling their owning `orx up`.
+pub const UP_AUTH_TOKEN_ENV: &str = "ORX_UP_AUTH_TOKEN";
+
+static UP_AUTH_TOKEN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub(crate) fn set_up_auth_token(token: String) {
+    let _ = UP_AUTH_TOKEN.set(token);
+}
+
+pub(crate) fn up_auth_token() -> Option<&'static str> {
+    UP_AUTH_TOKEN.get().map(String::as_str)
+}
+
 /// Directory of the `orx` running this session, for the shell hooks to restore
 /// to the front of `PATH`.
 const BIN_DIR_ENV: &str = "ORX_BIN_DIR";
@@ -7290,6 +7303,14 @@ pub fn set_chat_session_env(
         }
         None => {
             cmd.env_remove(UP_PORT_ENV);
+        }
+    }
+    match up_auth_token() {
+        Some(token) => {
+            cmd.env(UP_AUTH_TOKEN_ENV, token);
+        }
+        None => {
+            cmd.env_remove(UP_AUTH_TOKEN_ENV);
         }
     }
     match orx_bin_dir() {

@@ -881,17 +881,33 @@ pub(crate) fn write_mcp_config(
 ) -> Result<PathBuf> {
     let orx = std::env::current_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
+    let mut env = serde_json::Map::from_iter([
+        (
+            "ORX_UP_PORT".to_string(),
+            serde_json::Value::String(up_port.to_string()),
+        ),
+        (
+            "ORX_SESSION_ID".to_string(),
+            serde_json::Value::String(session_id.to_string()),
+        ),
+        (
+            "ORX_GATE_TOKEN".to_string(),
+            serde_json::Value::String(token.to_string()),
+        ),
+    ]);
+    if let Some(token) = crate::local::chat::up_auth_token() {
+        env.insert(
+            "ORX_UP_AUTH_TOKEN".to_string(),
+            serde_json::Value::String(token.to_string()),
+        );
+    }
     let config = serde_json::json!({
         "mcpServers": {
             "orx": {
                 "type": "stdio",
                 "command": orx.to_string_lossy(),
                 "args": ["mcp-gate"],
-                "env": {
-                    "ORX_UP_PORT": up_port.to_string(),
-                    "ORX_SESSION_ID": session_id,
-                    "ORX_GATE_TOKEN": token,
-                },
+                "env": env,
             },
         }
     });
@@ -902,6 +918,9 @@ pub(crate) fn write_mcp_config(
     }
     std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap())
         .map_err(|e| anyhow!("cannot write {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .map_err(|e| anyhow!("cannot protect {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -2108,6 +2127,18 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    #[test]
+    fn local_mcp_config_contains_only_string_environment_values() {
+        let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
+        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
+        assert!(env.values().all(serde_json::Value::is_string));
+        assert!(!env.contains_key("ORX_UP_AUTH_TOKEN"));
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 
     /// Plugins live in the version cache or a marketplace checkout, and a
     /// marketplace holds plugins that are merely on offer — so only the

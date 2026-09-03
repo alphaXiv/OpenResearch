@@ -1224,7 +1224,8 @@ fn ensure_follow_up_branches(repo: &Path) -> Result<()> {
 fn build_worktree(root: &Path) -> Result<()> {
     write_assets::<BaseAssets>(root)?;
     set_executable(root.join("runs/runcpu.sh"))?;
-    git(root, &["init", "--object-format=sha1", "-b", "main"])?;
+    git(root, &["-c", "init.defaultObjectFormat=sha1", "init"])?;
+    git(root, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     git(root, &["config", "core.autocrlf", "false"])?;
     git(root, &["config", "core.filemode", "true"])?;
     git(root, &["add", "-A"])?;
@@ -1248,7 +1249,10 @@ fn ensure_local_origin(repo: &Path, bare: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)?;
         let tmp = parent.join(format!(".nanochat-demo-origin-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp)?;
-        git(&tmp, &["init", "--bare", "--object-format=sha1"])?;
+        git(
+            &tmp,
+            &["-c", "init.defaultObjectFormat=sha1", "init", "--bare"],
+        )?;
         git(
             repo,
             &[

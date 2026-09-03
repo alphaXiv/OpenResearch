@@ -178,8 +178,9 @@ pub(crate) fn forward_args(
         args.extend(["-o".into(), option.into()]);
     }
     args.extend([
-        // The remote tty delivers SIGHUP to `orx up` when this channel closes.
-        "-tt".into(),
+        // No PTY: the remote session bearer is delivered over stdin and must
+        // never be echoed by terminal line discipline.
+        "-T".into(),
         "-L".into(),
         forward.into(),
         "--".into(),

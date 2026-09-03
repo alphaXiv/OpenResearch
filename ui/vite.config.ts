@@ -24,6 +24,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": { target: backend, ws: true },
+      "/_orx": { target: backend, ws: true },
       "/opencode": backend,
     },
   },
