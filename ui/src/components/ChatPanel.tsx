@@ -4058,6 +4058,7 @@ export function ChatPanel({
   onOpenSubagent,
   onOpenWorktree,
   onOpenDemoWelcome,
+  composerPrefill = null,
   onActiveSessionChange,
   preferredAgent,
   onPreferredAgentChange,
@@ -4118,6 +4119,7 @@ export function ChatPanel({
   onOpenWorktree: () => void;
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
+  composerPrefill?: string | null;
   /** The open chat session, surfaced so the shell can scope panes to it. */
   onActiveSessionChange?: (sessionId: string | null) => void;
   /** Database-backed selection used to seed new chat sessions. */
@@ -5038,6 +5040,14 @@ export function ChatPanel({
       setComposerCursor(prompt.length);
     });
   };
+  // Seeds the draft while a prefill is offered without taking focus, which may
+  // belong to the demo welcome dialog; clearing the prefill later leaves the draft.
+  useEffect(() => {
+    if (!composerPrefill) return;
+    setDraft(composerPrefill);
+    setSkillMenuDismissed(false);
+    setComposerCursor(composerPrefill.length);
+  }, [composerPrefill]);
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = atBottom;

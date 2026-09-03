@@ -25,6 +25,7 @@ import {
   DEMO_LITERATURE_SESSION_ID,
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
+  DEMO_RUN_EXPERIMENT_PROMPT,
   getArtifacts,
   getChatMessages,
   getUiState,
@@ -258,10 +259,14 @@ function initialRightPaneSessionState(
       path: DEMO_OVERVIEW_ARTIFACT,
       source: "artifacts",
     };
+    // First demo open leads with the experiments tab so the idle follow-ups
+    // are visible next to the prefilled prompt that runs one of them.
+    const experimentsTab: RightTab = "experiments";
     return {
       ...initial,
-      rightTab: demoOverviewTab,
-      tabHistory: [demoOverviewTab],
+      rightTab: experimentsTab,
+      tabHistory: [demoOverviewTab, experimentsTab],
+      experimentsTabOpen: true,
       fileTabs: [demoOverviewTab],
       contentTabOrder: [rightTabKey(demoOverviewTab)],
       panelOpen: true,
@@ -1756,6 +1761,13 @@ export default function App() {
             onOpenPlan={openPlanTab}
             onOpenSubagent={openSubagentTab}
             onOpenWorktree={openWorktreeTab}
+            composerPrefill={
+              activeProject &&
+              isDemoProjectId(activeProject.id) &&
+              uiState?.tourCompleted === false
+                ? DEMO_RUN_EXPERIMENT_PROMPT
+                : null
+            }
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
             }
