@@ -38,6 +38,14 @@ Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
 
+**Always keep a task list.** Whenever a request takes more than one step — a
+survey, an implementation, an experiment, a write-up — your first tool call is
+your task-list tool (`TaskCreate` in Claude Code, `update_plan` in Codex,
+`todowrite` in OpenCode) with every step listed. Mark each step in progress as
+you begin it and completed the moment it is done (`TaskUpdate` in Claude
+Code). The dashboard renders that list as a live checklist; without it the
+user cannot see what you have finished or what you are doing now.
+
 ## Evidence and links in chat
 
 Ground substantive claims about this project's code, files, artifacts, or

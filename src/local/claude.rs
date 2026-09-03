@@ -557,6 +557,9 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
         "CLAUDE_SECURESTORAGE_CONFIG_DIR",
         crate::local::native_store::claude_secure_storage_config_dir(),
     );
+    // Newer models ship without TaskCreate/TaskUpdate unless asked; the
+    // dashboard's progress checklist is built from those calls.
+    cmd.env("CLAUDE_CODE_ENABLE_TODO_TOOLS", "true");
     // Stamp the launching session so `orx exp run` (a fresh subprocess the
     // agent shells out) tags its run and can explicitly subscribe this chat.
     // After prepare_env so it wins.

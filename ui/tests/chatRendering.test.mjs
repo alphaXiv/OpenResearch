@@ -43,3 +43,12 @@ test("thinking replaces a text tail while steer and status parts do not", () => 
   assert.equal(streamTailIsText([message(text, { id: "steer", type: "steer" })]), true);
   assert.equal(streamTailIsText([message(text, { id: "turn-retry", type: "tool" })]), true);
 });
+
+test("a task-list write never becomes the shimmering tool tail", () => {
+  const todo = { id: "todo", type: "tool", tool: "TodoWrite", state: { status: "completed", input: { todos: [] } } };
+  const bash = { id: "bash", type: "tool", tool: "Bash", state: { status: "running" } };
+
+  assert.equal(partsTailToolId([bash, todo]), null);
+  assert.equal(partsTailToolId([todo, bash]), "bash");
+  assert.equal(streamTailTool([message(todo)]), null);
+});
