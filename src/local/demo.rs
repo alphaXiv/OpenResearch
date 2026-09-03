@@ -31,6 +31,15 @@ const LITERATURE_ASSISTANT_MESSAGE_ID: &str = "msg_demo_nanochat_literature_assi
 const OWNER: &str = "openresearch-demo";
 const REPO: &str = "nanochat";
 const BRANCH: &str = "orx/cpu-apple-silicon-end-to-end-baseline";
+const LR_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_lr_probe_v1";
+const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
+const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
+const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
+// Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
+const PROBE_SETUP: &str = "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" && (command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && ([ -d .venv ] || uv venv) && uv sync --extra cpu && source .venv/bin/activate && python -m nanochat.dataset -n 8";
+// --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
+const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
+const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
 const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
 
@@ -65,6 +74,10 @@ The user asked you to run nanochat's CPU/Apple-Silicon pipeline end to end, surf
 You inspected the repository and prepared the CPU pipeline before launching it: caches were made checkout-local, SFT conversations longer than a row were excluded, all-masked SFT batches were guarded, periodic ChatCORE was disabled for Apple-Silicon memory safety, and the chat CLI was made to re-enter the project environment. You created the CPU baseline experiment and completed one successful run.
 
 Recorded results: a 6-layer 73.5M-parameter model trained for 5,000 base steps over 81.92M tokens; final training validation BPB 1.165758; base-eval train/validation BPB 1.152185/1.119301; SFT completed 1,500 steps with final validation BPB 0.7389. The final CLI loaded the SFT checkpoint and answered that the capital of France is Paris. The results are saved in cpu-apple-silicon-pipeline-results.md.
+
+Two idle follow-up experiments already branch from that baseline, each with a complete run command and no code changes needed: demo_nanochat_lr_probe_v1 (Muon matrix LR 2× probe) and demo_nanochat_vocab_probe_v1 (8,192-token vocabulary probe). Both are short 200-step base-training probes on the local backend whose learning-rate schedule matches the baseline's first 200 steps, so their validation BPB compares directly with the baseline's 1.940739 at step 100 and 1.762539 at step 200.
+
+Operational note: when the user asks to run one of them, launch it immediately with `orx exp run <expId>`. Do not load skills, read compute references, or re-inspect the experiment tree first; follow the run's logs and report the comparison.
 
 Continue naturally from this completed state. Do not claim you are rerunning the historical training unless the user asks you to."#;
 
@@ -276,6 +289,44 @@ fn seed_at(
         updated_at: 1_785_879_252_272,
         chat_session_id: Some(SESSION_ID.into()),
     };
+    let lr_probe = LocalExperiment {
+            id: LR_PROBE_EXPERIMENT_ID.into(),
+            project_id: PROJECT_ID.into(),
+            parent_experiment_id: Some(EXPERIMENT_ID.into()),
+            slug: "matrix-lr-2x-probe".into(),
+            branch_name: LR_PROBE_BRANCH.into(),
+            title: Some("Muon matrix LR 2× probe (200 steps)".into()),
+            description: Some(
+                "A lightweight early-training probe: the baseline d6 recipe with --matrix-lr raised from 0.02 to 0.04, trained for 200 steps with validation every 50 and no learning-rate warmdown, so the learning-rate schedule matches the baseline's first 200 steps. Compare against the baseline curve, which reached val_bpb 1.940739 at step 100 and 1.762539 at step 200. Skips base_eval and SFT: a few minutes on Apple Silicon, longer on plain CPU."
+                    .into(),
+            ),
+            run_command: format!(
+                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04"
+            ),
+            agent_status: "idle".into(),
+            created_at: 1_785_879_300_000,
+            updated_at: 1_785_879_300_000,
+            chat_session_id: None,
+        };
+    let vocab_probe = LocalExperiment {
+            id: VOCAB_PROBE_EXPERIMENT_ID.into(),
+            project_id: PROJECT_ID.into(),
+            parent_experiment_id: Some(EXPERIMENT_ID.into()),
+            slug: "vocab-8192-probe".into(),
+            branch_name: VOCAB_PROBE_BRANCH.into(),
+            title: Some("8,192-token vocabulary probe (200 steps)".into()),
+            description: Some(
+                "A lightweight tokenizer probe: retrain the BPE tokenizer with an 8,192-token vocabulary instead of 32,768, then run the baseline d6 recipe for 200 steps with validation every 50 and no learning-rate warmdown, so the learning-rate schedule matches the baseline's first 200 steps. Bits per byte stays comparable across vocabularies, so compare directly against the baseline's 1.940739 at step 100 and 1.762539 at step 200. Skips base_eval and SFT: a few minutes on Apple Silicon, longer on plain CPU."
+                    .into(),
+            ),
+            run_command: format!(
+                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}"
+            ),
+            agent_status: "idle".into(),
+            created_at: 1_785_879_360_000,
+            updated_at: 1_785_879_360_000,
+            chat_session_id: None,
+        };
     let run = StoredRun {
         id: RUN_ID.into(),
         experiment_id: EXPERIMENT_ID.into(),
@@ -443,7 +494,7 @@ fn seed_at(
     super::git::ensure_worktree_at(repo, &literature_worktree, &commit_sha)?;
     let newly_created = store.create_demo_snapshot(
         &project,
-        &experiment,
+        &[experiment, lr_probe, vocab_probe],
         &run,
         &[session, figure_session, literature_session],
         &[
@@ -490,9 +541,17 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
     let experiments = store.list_experiments_by_project(PROJECT_ID)?;
     let runs = store.list_runs_by_project(PROJECT_ID)?;
     let sessions = store.list_chat_sessions_by_project(PROJECT_ID)?;
-    if experiments.len() != 1
-        || experiments[0].id != EXPERIMENT_ID
-        || experiments[0].branch_name != BRANCH
+    let expected_experiments = [
+        (EXPERIMENT_ID, BRANCH),
+        (LR_PROBE_EXPERIMENT_ID, LR_PROBE_BRANCH),
+        (VOCAB_PROBE_EXPERIMENT_ID, VOCAB_PROBE_BRANCH),
+    ];
+    let experiments_match = experiments.len() == expected_experiments.len()
+        && experiments
+            .iter()
+            .zip(expected_experiments)
+            .all(|(actual, (id, branch))| actual.id == id && actual.branch_name == branch);
+    if !experiments_match
         || runs.len() != 1
         || runs[0].id != RUN_ID
         || runs[0].status != "done"
@@ -556,69 +615,15 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
     })
 }
 
-const BASE_VALIDATION: &[(u16, &str)] = &[
-    (0, "3.195800"),
-    (100, "1.940739"),
-    (200, "1.762539"),
-    (300, "1.656100"),
-    (400, "1.589013"),
-    (500, "1.530241"),
-    (600, "1.478824"),
-    (700, "1.438952"),
-    (800, "1.411252"),
-    (900, "1.389210"),
-    (1_000, "1.371813"),
-    (1_100, "1.357232"),
-    (1_200, "1.345296"),
-    (1_300, "1.332653"),
-    (1_400, "1.323681"),
-    (1_500, "1.315164"),
-    (1_600, "1.307505"),
-    (1_700, "1.302495"),
-    (1_800, "1.294347"),
-    (1_900, "1.287435"),
-    (2_000, "1.279230"),
-    (2_100, "1.272744"),
-    (2_200, "1.266337"),
-    (2_300, "1.259622"),
-    (2_400, "1.253774"),
-    (2_500, "1.248040"),
-    (2_600, "1.243302"),
-    (2_700, "1.237713"),
-    (2_800, "1.233837"),
-    (2_900, "1.228945"),
-    (3_000, "1.224042"),
-    (3_100, "1.220255"),
-    (3_200, "1.216421"),
-    (3_300, "1.211869"),
-    (3_400, "1.208286"),
-    (3_500, "1.204212"),
-    (3_600, "1.200893"),
-    (3_700, "1.197689"),
-    (3_800, "1.194168"),
-    (3_900, "1.191109"),
-    (4_000, "1.187774"),
-    (4_100, "1.185122"),
-    (4_200, "1.182477"),
-    (4_300, "1.179723"),
-    (4_400, "1.176897"),
-    (4_500, "1.174323"),
-    (4_600, "1.172274"),
-    (4_700, "1.170340"),
-    (4_800, "1.168470"),
-    (4_900, "1.167120"),
-    (5_000, "1.165758"),
+const BASE_PROGRESS: &[&str] = &[
+    "Base training is under way. Initial validation BPB was **3.195800**; by step 100 it had already dropped to **1.940739**, and MPS throughput is steady at roughly 10–11k tokens/s.",
+    "Halfway through base training: **step 2,500 `val_bpb = 1.248040`**. Every one of the 25 validation points so far has improved on the last, and the remaining base ETA is about 67 minutes.",
+    "Base training finished: **final step 5,000 `val_bpb = 1.165758`**, down from 3.195800 at initialization with no regressions across all 50 validation points. The base phase took 131.55 minutes on this Mac and the pipeline is moving into `base_eval`.",
 ];
 
 const SFT_PROGRESS: &[&str] = &[
-    "The memory-safe SFT run is healthy: step 100 loss is **3.2589**, down from 6.17 during initialization, with no skipped-loop or `NaN` recurrence.",
-    "The run passed step 200 without invoking the memory-heavy ChatCORE path. SFT validation BPB is **1.0580**, and training has continued to step 214 with finite loss.",
-    "SFT validation improved at step 400 to **0.9914** (from 1.0580 at step 200 and 1.0174 initially). Training is at step 427/1,500 with finite loss, so the repaired strategy is now improving held-out BPB.",
-    "Step 600 SFT validation BPB improved further to **0.9513**. The sequence is now 1.0174 → 1.0580 → 0.9914 → 0.9513, and training has reached step 607/1,500.",
-    "Step 800 SFT validation BPB is **0.9141**, continuing the improvement from 0.9513 at step 600. Training is now past halfway at step 814/1,500.",
-    "SFT reached step 1,000/1,500 cleanly. Validation BPB improved to **0.8483** (from 1.0174 at step 0 and 0.9141 at step 800), so the resumed training is converging normally.",
-    "Step 1,200 validation BPB is **0.7950**, another clear improvement from 0.8483 at step 1,000. No NaNs or empty-target batches have occurred.",
-    "Step 1,400 validation BPB is **0.7486**. The full validation trajectory is monotonic after the early step-200 bump: 1.0174 → 1.0580 → 0.9914 → 0.9513 → 0.9141 → 0.8483 → 0.7950 → 0.7486. About 100 training steps plus final save/chat remain.",
+    "The memory-safe SFT run is healthy: step 100 loss is **3.2589**, down from 6.17 during initialization, with no skipped-loop or `NaN` recurrence, and the run is past step 200 without invoking the memory-heavy ChatCORE path.",
+    "SFT is converging cleanly. Validation BPB after an early step-200 bump has fallen monotonically: 1.0174 → 1.0580 → 0.9914 → 0.9513 → 0.9141 → 0.8483 → 0.7950 → **0.7486** at step 1,400, with about 100 steps plus the final save and chat check remaining.",
 ];
 
 fn assistant_parts(harness: &str) -> Vec<WirePart> {
@@ -744,19 +749,8 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         Some("Autodetected device type: mps\nCOMPUTE_DTYPE: torch.float32 (auto-detected: no CUDA (CPU/MPS))\nWARNING: Flash Attention 3 not available, using PyTorch SDPA fallback\nVocab size: 32,768\nNumber of parameters: 73,454,976\nTraining for 5,000 steps / 81,920,000 tokens"),
         Some("Stream base training"),
     ));
-    for (index, (step, bpb)) in BASE_VALIDATION.iter().enumerate() {
-        let text = if *step == 0 {
-            format!("Base-model initialization is complete. Initial validation BPB is **{bpb}** and the first MPS optimizer steps are advancing normally.")
-        } else if *step == 100 {
-            format!("First trained validation point: **step {step} `val_bpb = {bpb}`**, down from 3.195800 at initialization. Training is stable at roughly 10–11k tokens/s.")
-        } else if *step == 2_500 {
-            format!("Halfway through base training: **step 2,500 `val_bpb = {bpb}`**. The validation curve has improved at every checkpoint and the measured remaining base ETA is about 67 minutes.")
-        } else if *step == 5_000 {
-            format!("Base training finished: **final step 5,000 `val_bpb = {bpb}`**, down from 3.195800 at initialization. The base phase took 131.55 minutes on this Mac and the pipeline is moving into `base_eval`.")
-        } else {
-            format!("New validation: **step {step} `val_bpb = {bpb}`**. The base run remains stable and the validation curve continues improving.")
-        };
-        parts.push(WirePart::text(format!("base-progress-{index}"), text));
+    for (index, text) in BASE_PROGRESS.iter().enumerate() {
+        parts.push(WirePart::text(format!("base-progress-{index}"), *text));
     }
     parts.push(tool_part(
         "base-eval-log",
@@ -1206,8 +1200,25 @@ fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
         }
         result?;
     }
+    ensure_follow_up_branches(repo)?;
     ensure_local_origin(repo, bare)?;
     git(repo, &["rev-parse", BRANCH])
+}
+
+// Idle follow-up experiments start at the completed baseline commit. Also covers a
+// cached demo clone that predates them when the project is seeded again after a DB reset.
+fn ensure_follow_up_branches(repo: &Path) -> Result<()> {
+    for branch in [LR_PROBE_BRANCH, VOCAB_PROBE_BRANCH] {
+        if git(
+            repo,
+            &["rev-parse", "--verify", &format!("refs/heads/{branch}")],
+        )
+        .is_err()
+        {
+            git(repo, &["branch", branch, BRANCH])?;
+        }
+    }
+    Ok(())
 }
 
 fn build_worktree(root: &Path) -> Result<()> {
@@ -1246,6 +1257,8 @@ fn ensure_local_origin(repo: &Path, bare: &Path) -> Result<()> {
                 tmp.to_string_lossy().as_ref(),
                 "main",
                 BRANCH,
+                LR_PROBE_BRANCH,
+                VOCAB_PROBE_BRANCH,
             ],
         )?;
         git(&tmp, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
@@ -1265,7 +1278,16 @@ fn ensure_local_origin(repo: &Path, bare: &Path) -> Result<()> {
     }
     git(
         repo,
-        &["push", "--no-verify", "-u", "origin", "main", BRANCH],
+        &[
+            "push",
+            "--no-verify",
+            "-u",
+            "origin",
+            "main",
+            BRANCH,
+            LR_PROBE_BRANCH,
+            VOCAB_PROBE_BRANCH,
+        ],
     )?;
     validate_bare_origin(bare)?;
     Ok(())
@@ -1421,13 +1443,23 @@ mod tests {
             let encoded = serde_json::to_string(&parts).unwrap();
             let decoded: Vec<WirePart> = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded.len(), parts.len());
-            assert!(parts.len() > 70, "{harness} transcript was compressed");
+            assert!(
+                parts.len() < 40,
+                "{harness} transcript regressed to per-checkpoint spam"
+            );
             assert_eq!(
                 parts
                     .iter()
                     .filter(|part| part.id.starts_with("base-progress-"))
                     .count(),
-                BASE_VALIDATION.len()
+                BASE_PROGRESS.len()
+            );
+            assert_eq!(
+                parts
+                    .iter()
+                    .filter(|part| part.id.starts_with("sft-progress-"))
+                    .count(),
+                SFT_PROGRESS.len()
             );
             let names: Vec<&str> = parts
                 .iter()
@@ -1539,10 +1571,30 @@ mod tests {
             store.get_local_project(PROJECT_ID).unwrap().unwrap().name,
             "nanochat (demo)"
         );
-        assert_eq!(
-            store.list_experiments_by_project(PROJECT_ID).unwrap().len(),
-            1
-        );
+        let experiments = store.list_experiments_by_project(PROJECT_ID).unwrap();
+        assert_eq!(experiments.len(), 3);
+        for follow_up in &experiments[1..] {
+            assert_eq!(
+                follow_up.parent_experiment_id.as_deref(),
+                Some(EXPERIMENT_ID)
+            );
+            assert_eq!(follow_up.agent_status, "idle");
+            assert_eq!(
+                git(&repo, &["rev-parse", &follow_up.branch_name]).unwrap(),
+                EXPERIMENT_SHA
+            );
+            assert_eq!(
+                git(
+                    &data.join("demo-repos/nanochat.git"),
+                    &[
+                        "rev-parse",
+                        &format!("refs/heads/{}", follow_up.branch_name)
+                    ]
+                )
+                .unwrap(),
+                EXPERIMENT_SHA
+            );
+        }
         assert_eq!(store.list_runs_by_project(PROJECT_ID).unwrap().len(), 1);
         assert_eq!(
             store

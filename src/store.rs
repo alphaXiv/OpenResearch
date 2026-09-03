@@ -1342,7 +1342,7 @@ impl Store {
     pub fn create_demo_snapshot(
         &self,
         project: &LocalProject,
-        experiment: &crate::local::model::LocalExperiment,
+        experiments: &[crate::local::model::LocalExperiment],
         run: &StoredRun,
         sessions: &[StoredChatSession],
         messages: &[StoredChatMessage],
@@ -1369,23 +1369,25 @@ impl Store {
             tx.commit()?;
             return Ok(false);
         }
-        tx.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-            params![
-                experiment.id,
-                experiment.project_id,
-                experiment.parent_experiment_id,
-                experiment.slug,
-                experiment.branch_name,
-                experiment.title,
-                experiment.description,
-                experiment.run_command,
-                experiment.agent_status,
-                experiment.created_at,
-                experiment.updated_at,
-                experiment.chat_session_id,
-            ],
-        )?;
+        for experiment in experiments {
+            tx.execute(
+                &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+                params![
+                    experiment.id,
+                    experiment.project_id,
+                    experiment.parent_experiment_id,
+                    experiment.slug,
+                    experiment.branch_name,
+                    experiment.title,
+                    experiment.description,
+                    experiment.run_command,
+                    experiment.agent_status,
+                    experiment.created_at,
+                    experiment.updated_at,
+                    experiment.chat_session_id,
+                ],
+            )?;
+        }
         tx.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code, commit_sha,
