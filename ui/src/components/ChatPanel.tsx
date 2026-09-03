@@ -18,6 +18,7 @@ import {
   Globe,
   HelpCircle,
   Lightbulb,
+  ListChecks,
   MessageSquareQuote,
   MoreHorizontal,
   PanelLeft,
@@ -110,10 +111,12 @@ import {
   shellWrapperBody,
   unwrapShellBody,
 } from "../orxCommand";
+import { activeTurnTaskList, isTaskListTool, lastTaskList, parseTaskList, toolBaseName, toolSegments } from "../taskProgress";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
 import { Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
+import { TaskListCard, TaskStrip } from "./TaskList";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
@@ -943,7 +946,7 @@ function nativeOrxSkillPath(tool: string, skillName: string): string | null {
   return null;
 }
 
-type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command";
+type ToolActivityKind = "skill" | "read" | "search" | "edit" | "web" | "agent" | "project" | "command" | "task";
 
 interface ToolActivity {
   kind: ToolActivityKind;
@@ -1593,9 +1596,17 @@ function toolActivity(part: ChatPart): ToolActivity {
   const resourceExperimentIds = normalizedTargetIds(inputStringArray(normalizedInput, "experimentTargetIds"));
   const filePath = inputString(normalizedInput, "filePath", "file_path", "notebookPath", "notebook_path", "path");
   const description = inputString(normalizedInput, "description");
-  const toolSegments = tool.toLowerCase().split(/(?::|\.|__)+/);
-  const baseTool = toolSegments.at(-1) ?? tool.toLowerCase();
-  if (baseTool === "run" && toolSegments.includes("web")) {
+  const baseTool = toolBaseName(tool);
+  if (isTaskListTool(tool)) {
+    const list = parseTaskList(part);
+    return {
+      kind: "task",
+      label: list
+        ? m.activity_updated_tasks({ done: fmtNumber(list.done), total: fmtNumber(list.total) })
+        : m.activity_updating_tasks(),
+    };
+  }
+  if (baseTool === "run" && toolSegments(tool).includes("web")) {
     const query = arrayInputString(normalizedInput, "search_query", "q");
     const imageQuery = arrayInputString(normalizedInput, "image_query", "q");
     const pattern = arrayInputString(normalizedInput, "find", "pattern");
@@ -1986,6 +1997,9 @@ function ToolActivityIcon({ activity, className = "" }: { activity: ToolActivity
       case "agent":
         icon = <Users {...props} />;
         break;
+      case "task":
+        icon = <ListChecks {...props} />;
+        break;
       case "command":
         break;
     }
@@ -2242,6 +2256,7 @@ function activityInProgress(activity: ToolActivity): ToolActivity {
     web: m.activity_browsing(),
     agent: m.activity_delegating(),
     command: m.activity_running(),
+    task: m.activity_updating_tasks(),
   }[activity.kind];
   return { ...activity, label };
 }
@@ -2262,6 +2277,7 @@ function permissionActivityLabel(tool: string | undefined, input: Record<string,
     web: m.activity_browse(),
     agent: m.activity_delegate(),
     command: m.activity_run(),
+    task: m.activity_update_tasks(),
   }[activity.kind];
 }
 
@@ -2339,6 +2355,54 @@ function groupIconActivity(activities: ToolActivity[]): ToolActivity {
     if (activity) return activity;
   }
   return activities[0] ?? { kind: "command", label: m.chat_panel_used_tools() };
+}
+
+/** Collapsed-group headline: what the run did, counted per activity kind
+ * ("Read 3 files · Edited 2 files · Ran 4 commands"). Reads, edits and page
+ * visits count distinct targets, so re-touching one file is still one file. */
+function toolGroupSummary(parts: SquashedToolPart[]): string {
+  const counts = new Map<ToolActivityKind, number>();
+  const seen = new Set<string>();
+  for (const { activity, count } of parts) {
+    const distinct = activity.kind === "read" || activity.kind === "edit" || activity.kind === "web";
+    const target = distinct ? `${activity.kind}:${activity.filePath ?? activity.fileRef ?? activity.label}` : null;
+    if (target) {
+      if (seen.has(target)) continue;
+      seen.add(target);
+    }
+    counts.set(activity.kind, (counts.get(activity.kind) ?? 0) + (target ? 1 : count));
+  }
+  const order: ToolActivityKind[] = ["read", "search", "edit", "command", "web", "project", "skill", "agent"];
+  const segments = order.flatMap((kind) => {
+    const count = counts.get(kind);
+    return count ? [toolKindSummary(kind, count)] : [];
+  });
+  return segments.length > 0 ? segments.join(" · ") : m.chat_panel_used_tools();
+}
+
+function toolKindSummary(kind: ToolActivityKind, count: number): string {
+  const single = count === 1;
+  const n = fmtNumber(count);
+  switch (kind) {
+    case "read":
+      return single ? m.tool_summary_read_one() : m.tool_summary_read_other({ count: n });
+    case "search":
+      return single ? m.tool_summary_search_one() : m.tool_summary_search_other({ count: n });
+    case "edit":
+      return single ? m.tool_summary_edit_one() : m.tool_summary_edit_other({ count: n });
+    case "web":
+      return single ? m.tool_summary_web_one() : m.tool_summary_web_other({ count: n });
+    case "project":
+      return single ? m.tool_summary_project_one() : m.tool_summary_project_other({ count: n });
+    case "skill":
+      return single ? m.tool_summary_skill_one() : m.tool_summary_skill_other({ count: n });
+    case "agent":
+      return single ? m.tool_summary_agent_one() : m.tool_summary_agent_other({ count: n });
+    case "command":
+      return single ? m.tool_summary_command_one() : m.tool_summary_command_other({ count: n });
+    case "task":
+      return m.tasks_title();
+  }
 }
 
 interface SquashedToolPart {
@@ -2561,7 +2625,7 @@ function ToolGroup({
   const iconActivity = pendingActivity ?? groupIconActivity(activities);
   const summaryLabel = pendingActivity
     ? pendingActivity.label
-    : m.chat_panel_used_tools();
+    : toolGroupSummary(displayParts);
   if (parts.length === 1) {
     if (pendingActivity) {
       return (
@@ -3247,6 +3311,10 @@ function renderParts(
     .filter((part) => part.type !== "steer" && partIsVisible(part, activePermissionId))
     .at(-1);
   const rendered: React.ReactNode[] = [];
+  // Only the newest task-list update renders (as the checklist card); earlier
+  // ones are superseded bookkeeping and paint nothing. A failed write stays
+  // an ordinary error row.
+  const taskCard = lastTaskList(parts);
   let toolRun: ChatPart[] = [];
   const flushTools = () => {
     if (toolRun.length === 0) return;
@@ -3294,6 +3362,13 @@ function renderParts(
           onOpenSubagent={onOpenSubagent}
        />,
       );
+      continue;
+    }
+    if (part.type === "tool" && isTaskListTool(part.tool) && part.state?.status !== "error") {
+      if (part.id === taskCard?.id) {
+        flushTools();
+        rendered.push(<TaskListCard key={part.id} list={taskCard.list} live={predictTextTail} />);
+      }
       continue;
     }
     if (part.type === "tool") {
@@ -4886,6 +4961,10 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
+  // The running turn's task list, docked so the current step stays in view
+  // as the transcript scrolls.
+  const liveTasks = useMemo(() => (busy ? activeTurnTaskList(messages) : null), [messages, busy]);
+
   // The newest ANSWERABLE unresolved question card's part id: typed composer
   // text answers IT as a custom answer, instead of racing the held turn with
   // a new message (which the busy guard would reject/drop). Plan cards have
@@ -5952,6 +6031,7 @@ export function ChatPanel({
             in when it arrives (effect above). The transcript status covers
             the interim ("Waiting for your input…" for a beat until the old
             card's resolve broadcast lands, then Working…). */}
+        {liveTasks && !pendingPlan && <TaskStrip list={liveTasks} />}
         {pendingPlan && !(revisingPlan && pendingPlan.promptId === revisingPlan.promptId) && (
           <PlanStrip
             synthesized={pendingPlan.synthesized}

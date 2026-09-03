@@ -1,4 +1,6 @@
 import type { ChatMessage, ChatPart } from "./api";
+// Extension spelled out: Node's test runner resolves this without a bundler.
+import { isTaskListTool } from "./taskProgress.ts";
 
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
@@ -23,12 +25,14 @@ export function isTurnStatusPart(part: ChatPart): boolean {
   return part.id === "turn-retry" || part.id === "turn-recovery";
 }
 
-/** The last visible part, when it is a non-errored tool. */
+/** The last visible part, when it is a non-errored tool. A task-list write
+ * renders as a checklist, not an activity row, so it never carries the
+ * in-progress shimmer — the Thinking status covers that gap instead. */
 export function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {
     const part = parts[index];
     if (part.type === "steer" || isTurnStatusPart(part) || !partIsVisible(part)) continue;
-    if (part.type !== "tool" || part.state?.status === "error") return null;
+    if (part.type !== "tool" || part.state?.status === "error" || isTaskListTool(part.tool)) return null;
     return part.id;
   }
   return null;

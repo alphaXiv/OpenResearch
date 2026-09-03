@@ -1014,6 +1014,11 @@ fn apply_notification(ctx: &mut TurnCtx, method: &str, params: &Value) -> Option
                 }
             }
         }
+        "turn/plan/updated" => {
+            if let Some(part) = plan_update_part(&ctx.assistant.parts, None, params) {
+                ctx.upsert_part(part);
+            }
+        }
         "item/commandExecution/outputDelta" => {
             let (Some(item_id), Some(delta)) = (
                 params.get("itemId").and_then(Value::as_str),
@@ -1129,6 +1134,40 @@ fn append_delta(ctx: &mut TurnCtx, params: &Value, make: impl FnOnce(String) -> 
         ctx.upsert_part(make(item_id.to_string()));
     }
     ctx.append_part_text(item_id, delta);
+}
+
+/// Codex's `update_plan` tool reaches the client only as `turn/plan/updated`;
+/// each update becomes its own completed task-list tool part, ordinal-numbered
+/// within its turn. Empty plans and turn-less notifications render nothing.
+fn plan_update_part(
+    existing: &[WirePart],
+    thread: Option<&str>,
+    params: &Value,
+) -> Option<WirePart> {
+    let plan = params
+        .get("plan")
+        .filter(|plan| plan.as_array().is_some_and(|steps| !steps.is_empty()))?;
+    let turn_id = params.get("turnId").and_then(Value::as_str)?;
+    let prefix = match thread {
+        Some(tid) => namespaced_part_id(tid, &format!("{turn_id}-plan-")),
+        None => format!("{turn_id}-plan-"),
+    };
+    let ordinal = existing
+        .iter()
+        .filter(|part| part.id.starts_with(&prefix))
+        .count();
+    let mut input = serde_json::Map::new();
+    input.insert("plan".into(), plan.clone());
+    if let Some(explanation) = params.get("explanation").filter(|v| v.is_string()) {
+        input.insert("explanation".into(), explanation.clone());
+    }
+    Some(tool_part(
+        format!("{prefix}{ordinal}"),
+        "update_plan",
+        "completed",
+        Some(Value::Object(input)),
+        None,
+    ))
 }
 
 /// Whether the assistant message already carries a part with this id.
@@ -1769,6 +1808,11 @@ fn apply_sub_notification(
         // add transcript parts here (`route_sub_event` handles the thread's
         // terminal turn notifications and mirrors liveness onto the spawn
         // part), and crucially never end the parent turn.
+        "turn/plan/updated" => {
+            if let Some(part) = plan_update_part(bucket, Some(tid), params) {
+                upsert_preserving_children(bucket, part);
+            }
+        }
         _ => {}
     }
     discovered
@@ -3900,6 +3944,56 @@ requires_openai_auth = false
             parts[2].text.as_deref(),
             Some("Command was not run because the required escalation was rejected.")
         );
+    }
+
+    #[test]
+    fn plan_updates_become_task_list_tool_parts() {
+        let mut ctx = TurnCtx::test_stub();
+        let first = serde_json::json!({
+            "threadId": "t1", "turnId": "turn1", "explanation": "Starting",
+            "plan": [
+                { "step": "Inspect the loader", "status": "inProgress" },
+                { "step": "Patch it", "status": "pending" }
+            ]
+        });
+        let second = serde_json::json!({
+            "threadId": "t1", "turnId": "turn1",
+            "plan": [
+                { "step": "Inspect the loader", "status": "completed" },
+                { "step": "Patch it", "status": "inProgress" }
+            ]
+        });
+        let empty = serde_json::json!({ "threadId": "t1", "turnId": "turn1", "plan": [] });
+        let turnless =
+            serde_json::json!({ "threadId": "t1", "plan": [{ "step": "x", "status": "pending" }] });
+        assert!(apply_notification(&mut ctx, "turn/plan/updated", &first).is_none());
+        assert!(apply_notification(&mut ctx, "turn/plan/updated", &empty).is_none());
+        assert!(apply_notification(&mut ctx, "turn/plan/updated", &turnless).is_none());
+        assert!(apply_notification(&mut ctx, "turn/plan/updated", &second).is_none());
+
+        let parts = &ctx.assistant.parts;
+        assert_eq!(parts.len(), 2, "one part per non-empty update: {parts:?}");
+        assert_eq!(parts[0].id, "turn1-plan-0");
+        assert_eq!(parts[1].id, "turn1-plan-1");
+        for part in parts {
+            assert_eq!(part.kind, "tool");
+            assert_eq!(part.tool.as_deref(), Some("update_plan"));
+            assert_eq!(part.state.as_ref().unwrap().status, "completed");
+        }
+        let first_input = parts[0].state.as_ref().unwrap().input.as_ref().unwrap();
+        assert_eq!(first_input["explanation"], "Starting");
+        assert_eq!(first_input["plan"][0]["status"], "inProgress");
+        let second_input = parts[1].state.as_ref().unwrap().input.as_ref().unwrap();
+        assert!(second_input.get("explanation").is_none());
+        assert_eq!(second_input["plan"][1]["status"], "inProgress");
+
+        // A sub-agent's plan lands in its own bucket under a thread-scoped id.
+        let mut bucket = Vec::new();
+        let discovered = apply_sub_notification(&mut bucket, "sub1", "turn/plan/updated", &first);
+        assert!(discovered.is_empty());
+        assert_eq!(bucket.len(), 1);
+        assert_eq!(bucket[0].id, "sub1:turn1-plan-0");
+        assert_eq!(bucket[0].tool.as_deref(), Some("update_plan"));
     }
 
     #[test]

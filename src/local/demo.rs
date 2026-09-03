@@ -631,19 +631,16 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "intro",
         "I’ll keep this attached to one CPU / Apple-Silicon baseline, inspect the exact local pipeline, make the portability and SFT safeguards part of the experiment before launch, then stay on the streamed output through tokenizer training, base training and evaluation, SFT, and the final chat check.",
     )];
-    if harness == "opencode" {
-        parts.push(tool_part(
-            "todo",
-            "todowrite",
-            json!({ "todos": [
-                { "content": "Inspect and harden the CPU pipeline", "status": "completed", "priority": "high" },
-                { "content": "Run base training, evaluation, and SFT", "status": "completed", "priority": "high" },
-                { "content": "Confirm chat output and save results", "status": "completed", "priority": "medium" }
-            ]}),
-            None,
-            Some("Track the nanochat pipeline"),
-        ));
-    }
+    parts.push(task_list_part(
+        harness,
+        "todo",
+        "Track the nanochat pipeline",
+        &[
+            ("Inspect and harden the CPU pipeline", "completed"),
+            ("Run base training, evaluation, and SFT", "completed"),
+            ("Confirm chat output and save results", "completed"),
+        ],
+    ));
     let (read_name, read_input, edit_name, edit_input, shell_name) = match harness {
         "claude-code" => (
             "Read",
@@ -866,19 +863,16 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
         "figure-intro",
         "I’ll treat the recorded logs as the source of truth, keep base and SFT validation separate, and produce only the four quantitative SVGs requested. I’m first checking the report, complete per-step logs, and exact benchmark labels, then I’ll build the plots with one consistent Helvetica Neue academic style and visually inspect the rendered output.",
     )];
-    if harness == "opencode" {
-        parts.push(tool_part(
-            "figure-todos",
-            "todowrite",
-            json!({ "todos": [
-                { "content": "Parse base and SFT logs", "status": "completed", "priority": "high" },
-                { "content": "Generate four SVG-only figures", "status": "completed", "priority": "high" },
-                { "content": "Inspect and validate final artifacts", "status": "completed", "priority": "high" }
-            ]}),
-            None,
-            Some("Track figure generation"),
-        ));
-    }
+    parts.push(task_list_part(
+        harness,
+        "figure-todos",
+        "Track figure generation",
+        &[
+            ("Parse base and SFT logs", "completed"),
+            ("Generate four SVG-only figures", "completed"),
+            ("Inspect and validate final artifacts", "completed"),
+        ],
+    ));
     parts.push(tool_part(
         "figure-read-report",
         read_tool,
@@ -958,19 +952,16 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         "literature-intro",
         "I’m using the literature-search workflow first, then I’ll inspect the nanochat experiment history so the recommendation is grounded in both scaling literature and the actual recorded runs.",
     )];
-    if harness == "opencode" {
-        parts.push(tool_part(
-            "literature-todos",
-            "todowrite",
-            json!({ "todos": [
-                { "content": "Inspect the recorded nanochat evidence", "status": "completed", "priority": "high" },
-                { "content": "Review scaling and alignment literature", "status": "completed", "priority": "high" },
-                { "content": "Recommend one controlled next experiment", "status": "completed", "priority": "high" }
-            ]}),
-            None,
-            Some("Track the bottleneck diagnosis"),
-        ));
-    }
+    parts.push(task_list_part(
+        harness,
+        "literature-todos",
+        "Track the bottleneck diagnosis",
+        &[
+            ("Inspect the recorded nanochat evidence", "completed"),
+            ("Review scaling and alignment literature", "completed"),
+            ("Recommend one controlled next experiment", "completed"),
+        ],
+    ));
     for (id, path, title) in [
         (
             "literature-skill",
@@ -1150,6 +1141,32 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         ),
     ));
     parts
+}
+
+/// The harness's own task-list tool call, in that harness's wire shape, so the
+/// demo transcript shows the same step checklist a live session would.
+fn task_list_part(harness: &str, id: &str, title: &str, steps: &[(&str, &str)]) -> WirePart {
+    let (tool, input) = match harness {
+        "claude-code" => (
+            "TodoWrite",
+            json!({ "todos": steps.iter().map(|(content, status)| {
+                json!({ "content": content, "status": status, "activeForm": content })
+            }).collect::<Vec<_>>() }),
+        ),
+        "opencode" => (
+            "todowrite",
+            json!({ "todos": steps.iter().map(|(content, status)| {
+                json!({ "content": content, "status": status, "priority": "high" })
+            }).collect::<Vec<_>>() }),
+        ),
+        _ => (
+            "update_plan",
+            json!({ "plan": steps.iter().map(|(step, status)| {
+                json!({ "step": step, "status": status })
+            }).collect::<Vec<_>>() }),
+        ),
+    };
+    tool_part(id, tool, input, None, Some(title))
 }
 
 fn tool_part(
@@ -1434,11 +1451,12 @@ mod tests {
 
     #[test]
     fn transcript_variants_are_one_turn_and_use_native_tool_names() {
-        for (harness, expected) in [
-            ("claude-code", ["Read", "Edit", "Bash"]),
-            ("codex", ["bash", "edit", "bash"]),
-            ("opencode", ["read", "bash", "todowrite"]),
-        ] {
+        let cases: [(&str, &[&str]); 3] = [
+            ("claude-code", &["Read", "Edit", "Bash", "TodoWrite"]),
+            ("codex", &["bash", "edit", "update_plan"]),
+            ("opencode", &["read", "bash", "todowrite"]),
+        ];
+        for (harness, expected) in cases {
             let parts = assistant_parts(harness);
             let encoded = serde_json::to_string(&parts).unwrap();
             let decoded: Vec<WirePart> = serde_json::from_str(&encoded).unwrap();
@@ -1466,12 +1484,12 @@ mod tests {
                 .filter_map(|part| part.tool.as_deref())
                 .collect();
             for tool in expected {
-                assert!(names.contains(&tool), "{harness} missing {tool}: {names:?}");
+                assert!(names.contains(tool), "{harness} missing {tool}: {names:?}");
             }
             let allowed: &[&str] = match harness {
-                "claude-code" => &["Read", "Edit", "Bash"],
+                "claude-code" => &["Read", "Edit", "Bash", "TodoWrite"],
                 "opencode" => &["read", "bash", "todowrite"],
-                _ => &["bash", "edit"],
+                _ => &["bash", "edit", "update_plan"],
             };
             assert!(names.iter().all(|name| allowed.contains(name)));
             assert_eq!(parts.iter().filter(|part| part.kind == "prompt").count(), 0);
