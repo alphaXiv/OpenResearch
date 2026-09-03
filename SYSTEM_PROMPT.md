@@ -38,6 +38,15 @@ Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
 
+## Show your progress
+
+For any task with more than one or two steps, keep your task list current with
+your native task-list tool (`TodoWrite` in Claude Code, `update_plan` in Codex,
+`todowrite` in OpenCode): write the full list before you start, mark each step
+in progress when you begin it, and mark it complete as soon as it is done. The
+dashboard renders that list as a live checklist, so it is how the user follows
+what you have finished and what you are doing now.
+
 ## Evidence and links in chat
 
 Ground substantive claims about this project's code, files, artifacts, or
