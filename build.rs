@@ -7,13 +7,12 @@ fn main() {
         Ok(value)
             if value == "1"
                 && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
-                && std::env::var("GITHUB_REPOSITORY").as_deref()
-                    == Ok("alphaXiv/openresearch-cli") =>
+                && std::env::var("GITHUB_REPOSITORY").as_deref() == Ok("alphaXiv/OpenResearch") =>
         {
             "production"
         }
         Ok(value) if value == "1" => panic!(
-            "ORX_OFFICIAL_RELEASE_BUILD=1 is only valid in alphaXiv/openresearch-cli GitHub Actions"
+            "ORX_OFFICIAL_RELEASE_BUILD=1 is only valid in alphaXiv/OpenResearch GitHub Actions"
         ),
         Ok(value) => {
             panic!("ORX_OFFICIAL_RELEASE_BUILD must be unset or exactly `1`, got `{value}`")
