@@ -13,6 +13,8 @@ export const DEMO_MAIN_SESSION_ID = "chat_demo_nanochat_v1";
 export const DEMO_FIGURE_SESSION_ID = "chat_demo_nanochat_figures_v1";
 export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
+export const DEMO_RUN_EXPERIMENT_PROMPT =
+  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
 
 export interface Project {
   id: string;
@@ -187,6 +189,8 @@ export interface NewProject {
   requireNewFolder?: boolean;
   initializeGit?: boolean;
   githubSyncEnabled?: boolean;
+  /** UI locale for the starter prompts the server warms up on creation. */
+  locale?: string;
 }
 
 export interface CreateProjectResult {
@@ -237,6 +241,38 @@ export const resolvePaper = (id: string) =>
 
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
+
+/** One suggested opening message for the empty chat, written by a model that
+ *  read the project. */
+export interface StarterPrompt {
+  title: string;
+  prompt: string;
+}
+
+export interface ProjectStarterPrompts {
+  /** Null when the project already has experiments or no harness could answer. */
+  prompts: StarterPrompt[] | null;
+}
+
+/** Start generating starter prompts for a project that is about to be created,
+ *  so they are cached by the time its chat opens. Fire-and-forget. */
+export const prewarmStarterPrompts = (body: {
+  name: string;
+  paperId?: string;
+  path?: string;
+  locale: string;
+}) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
+
+/** Slow on a cache miss (one headless model call over a brief of the project). */
+export const getProjectStarterPrompts = (
+  projectId: string,
+  harness: HarnessId,
+  model: string | null,
+  locale: string,
+) =>
+  get<ProjectStarterPrompts>(
+    `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
+  );
 
 /** Record a visit so the backend can persist project-level UI recency. */
 export const openProject = (projectId: string) =>

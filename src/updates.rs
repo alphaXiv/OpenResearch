@@ -28,7 +28,7 @@ use crate::error::{anyhow, Result};
 pub mod macos_app;
 
 /// GitHub repo the released binaries come from.
-pub const REPO_URL: &str = "https://github.com/alphaXiv/openresearch-cli";
+pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
 
 /// The cargo-dist app name (the *package* name, not the `orx` bin name) — used
 /// in release asset names and the receipt path.
@@ -331,7 +331,7 @@ pub fn auto_update_eligible() -> bool {
 
 /// The one-liner that reinstalls orx through the release installer.
 const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/openresearch-cli/releases/latest/download/openresearch-cli-installer.sh | sh";
+https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh";
 
 /// Confirm a directory can be written before an update commits to it — root-owned
 /// installs and read-only filesystems fail here rather than after a download.

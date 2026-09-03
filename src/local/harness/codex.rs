@@ -46,8 +46,8 @@ use super::options::{
     REASONING_DEFAULT_ID,
 };
 use super::{
-    should_synthesize_plan, synthesize_resume, Harness, ResumeAction, TurnFailure, TurnOutcome,
-    TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
+    should_synthesize_plan, synthesize_resume, Harness, OneShot, OneShotQuality, ResumeAction,
+    TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -390,37 +390,43 @@ pub(crate) fn find_codex_required() -> Result<PathBuf> {
     })
 }
 
-/// One-shot session title from the first user message: a throwaway
-/// `codex exec` child in a read-only sandbox, at `low` reasoning effort so the
-/// one-sentence answer stays cheap. Deliberately *not* the session's own thread
-/// — a title request there would pollute the real conversation history.
+/// One headless request on a throwaway `codex exec` thread. Deliberately
+/// *not* the session's own thread — a request there would pollute the real
+/// conversation history.
 ///
-/// No `-m`: the user's default model at `low` effort is the cheap pin, and the
-/// session's own (possibly expensive) model selection is irrelevant to naming a
-/// chat. `--ephemeral` keeps the throwaway thread out of every session store.
+/// Runs on `request.model` when given, else the user's default model;
+/// `Cheap` drops reasoning effort to `low`. `--ephemeral` keeps the throwaway thread out of
+/// every session store. Codex has no system-prompt flag, so `system` leads the
+/// message.
 ///
 /// Any failure — spawn, non-zero exit, timeout, garbage output — returns `None`
-/// and the caller keeps the placeholder title.
-async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String> {
+/// and the caller keeps its fallback.
+async fn codex_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
+    let effort = match request.quality {
+        OneShotQuality::Cheap => "low",
+        OneShotQuality::Standard => "medium",
+    };
+    let message = format!("{}\n\n{}", request.system, request.prompt);
     let fut = async {
         let mut cmd = Command::new(bin);
         cmd.args(["exec", "--ephemeral", "--json", "--skip-git-repo-check"])
             .args(["-c", "sandbox_mode=\"read-only\""])
             .args(["-c", "approval_policy=\"never\""])
-            .args(["-c", "model_reasoning_effort=\"low\""])
-            // Naming a chat needs no MCP: booting the user's servers for a
-            // one-line request would cost far more than the request itself.
+            .args(["-c", &format!("model_reasoning_effort=\"{effort}\"")])
+            .args(request.model.iter().flat_map(|model| ["-m", model]))
+            // A one-shot needs no MCP: booting the user's servers for a
+            // single request would cost far more than the request itself.
             .args(["-c", "mcp_servers={}"])
             // Nor skills: the plugin catalog alone injected ~6k prompt tokens
             // (24.3k → 18k input measured) into a request that ignores it.
             .args(["-c", "features.plugins=false"])
-            .arg(super::title::title_prompt(first_message))
+            .arg(&message)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             // Hermetic: run outside any repo so the child doesn't ingest the
-            // server cwd's AGENTS.md into a request that only needs a title.
+            // server cwd's AGENTS.md into a request that carries its own context.
             .current_dir(std::env::temp_dir());
         prepare_env(&mut cmd);
         cmd.env(
@@ -428,12 +434,12 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
             native_store::prepare_codex(NativeStore::Isolated).ok()?,
         );
         // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR)
-        // would otherwise write escape codes straight into the title column.
+        // would otherwise write escape codes straight into the reply.
         cmd.env("NO_COLOR", "1");
         let mut child = cmd.spawn().ok()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
         // Keep the last agent message: a chatty run may narrate before it
-        // answers, and the title is what it settled on.
+        // answers, and the reply is what it settled on.
         let mut last = None;
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(text) = exec_line_agent_message(&line) {
@@ -443,11 +449,9 @@ async fn codex_generate_title(bin: &Path, first_message: &str) -> Option<String>
         if !child.wait().await.ok()?.success() {
             return None;
         }
-        super::title::sanitize_title(&last?)
+        last
     };
-    tokio::time::timeout(super::title::TITLE_TIMEOUT, fut)
-        .await
-        .ok()?
+    tokio::time::timeout(request.timeout, fut).await.ok()?
 }
 
 /// One `codex exec --json` stdout line → its agent message text, if it carries
@@ -626,8 +630,8 @@ impl Harness for Codex {
             .map_err(|error| TurnFailure::adapter(error, ctx.delivery_state()))
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        codex_generate_title(&find_codex()?, first_message).await
+    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
+        codex_one_shot(&find_codex()?, request).await
     }
 
     fn options(&self) -> HarnessOptions {

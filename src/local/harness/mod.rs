@@ -295,13 +295,30 @@ pub trait Harness: Send + Sync {
     /// configuration. `None` = can't or failed — the caller keeps the
     /// first-line placeholder.
     ///
-    /// Default: no generation (e.g. Cursor has no chat capability). OpenCode
-    /// also still adopts a native `session.updated` title (minus its creation
+    /// Default: the shared title one-shot, sanitized; a harness without
+    /// `one_shot` (Cursor) gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.
-    async fn generate_title(&self, _first_message: &str) -> Option<String> {
+    async fn generate_title(&self, first_message: &str) -> Option<String> {
+        let prompt = title::title_prompt(first_message);
+        let raw = self.one_shot(title::title_request(&prompt)).await?;
+        title::sanitize_title(&raw)
+    }
+
+    /// Run one headless request on a throwaway child at the requested
+    /// [`OneShotQuality`] and return the model's reply verbatim. The child
+    /// cannot write or reach MCP servers (tools are disabled where the CLI
+    /// allows), and nothing is recorded in the harness's own session store.
+    /// `None` = can't or failed.
+    async fn one_shot(&self, _request: OneShot<'_>) -> Option<String> {
         None
+    }
+
+    /// Whether `one_shot` runs on `OneShot::model`; callers caching by model
+    /// should not vary the key for a harness that ignores it.
+    fn one_shot_honours_model(&self) -> bool {
+        true
     }
 
     /// Decide how an answered prompt flows back, and (for inline harnesses)
@@ -467,6 +484,31 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
     ]
+}
+
+/// A single self-contained request for [`Harness::one_shot`].
+#[derive(Debug, Clone, Copy)]
+pub struct OneShot<'a> {
+    /// Replaces the harness's agent system prompt where the CLI allows it;
+    /// otherwise it is folded into the message.
+    pub system: &'a str,
+    pub prompt: &'a str,
+    pub quality: OneShotQuality,
+    /// The model the user has picked for chat, in the harness's own id form.
+    /// Codex and OpenCode run on it (their configured default may point at a
+    /// provider with no working key); Claude keeps its per-quality alias.
+    pub model: Option<&'a str>,
+    pub timeout: Duration,
+}
+
+/// How much model to spend on a one-shot: `Cheap` is the smallest/fastest
+/// configuration (titles), `Standard` a mid-tier model at modest effort
+/// (anything that has to read and reason about a project). Each harness maps
+/// these onto its own flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneShotQuality {
+    Cheap,
+    Standard,
 }
 
 /// The chat-capable harness with this id, if any (used by chat dispatch).

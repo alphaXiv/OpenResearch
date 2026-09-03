@@ -19,7 +19,20 @@ const TITLE_MAX_CHARS: usize = 80;
 /// Wall-clock budget for a one-shot title child. Generous enough for a cold
 /// CLI start, short enough that a wedged child doesn't linger — the placeholder
 /// title is already on screen either way.
-pub(crate) const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
+const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The one-shot every harness runs for a title (the trait's default
+/// `generate_title`), around an already-built [`title_prompt`]: cheapest
+/// model, no tools, one short system line.
+pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
+    super::OneShot {
+        system: "You generate short chat titles.",
+        prompt,
+        quality: super::OneShotQuality::Cheap,
+        model: None,
+        timeout: TITLE_TIMEOUT,
+    }
+}
 
 pub(crate) fn title_prompt(first_message: &str) -> String {
     let input: String = first_message.chars().take(TITLE_INPUT_CAP).collect();

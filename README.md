@@ -11,7 +11,7 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 
 [Download the desktop app](https://openresearch.sh/download) ·
 [Documentation](https://openresearch.sh/docs) ·
-[Releases](https://github.com/alphaXiv/openresearch-cli/releases)
+[Releases](https://github.com/alphaXiv/OpenResearch/releases)
 
 </div>
 
