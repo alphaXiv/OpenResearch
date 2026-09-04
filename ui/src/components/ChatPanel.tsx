@@ -6064,7 +6064,7 @@ export function ChatPanel({
         <RemoteStatus runtime={runtime} />
       ) : (
         <div className="relative shrink-0 border-t border-border">
-          <div className="flex items-center gap-1.5 px-1 py-2">
+          <div className="flex items-center gap-1.5 py-2 ps-1 pe-2.5">
             <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
               <RemoteIcon size={14} className="shrink-0" />
             </IconButton>

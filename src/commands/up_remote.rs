@@ -18,7 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::extract::ws::WebSocketUpgrade;
+use axum::extract::{DefaultBodyLimit, Query, Request, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -45,16 +46,13 @@ pub(crate) const DASHBOARD_PROTOCOL: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum RemoteSessionStatus {
-    Checking,
+    Connecting,
     NeedsInstall,
     NeedsUpdate,
-    Installing,
-    Updating,
-    Connecting,
+    Applying,
     Connected,
     Reconnecting,
     Disconnected,
-    Failed,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -175,10 +173,7 @@ impl RemoteSessionManager {
                 let reconnect = {
                     let mut info = session.info.write().await;
                     info.ui_preferences = preferences;
-                    matches!(
-                        info.status,
-                        RemoteSessionStatus::Disconnected | RemoteSessionStatus::Failed
-                    )
+                    matches!(info.status, RemoteSessionStatus::Disconnected)
                 };
                 let info = if reconnect {
                     reconnect_session(session).await
@@ -204,7 +199,7 @@ impl RemoteSessionManager {
             id: id.clone(),
             host: host.clone(),
             user: None,
-            status: RemoteSessionStatus::Checking,
+            status: RemoteSessionStatus::Connecting,
             version: None,
             dashboard_protocol: None,
             gateway_url: format!("http://127.0.0.1:{port}"),
@@ -367,7 +362,7 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
         set_session_state_if_current(
             &session,
             generation,
-            RemoteSessionStatus::Failed,
+            RemoteSessionStatus::Disconnected,
             Some("Timed out preparing the remote OpenResearch host.".into()),
         )
         .await;
@@ -379,15 +374,10 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
     if session.generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    if !matches!(
-        session.info.read().await.status,
-        RemoteSessionStatus::Checking
-            | RemoteSessionStatus::Disconnected
-            | RemoteSessionStatus::Failed
-    ) {
+    if session.info.read().await.status != RemoteSessionStatus::Connecting {
         return;
     }
-    if !set_session_state_if_current(&session, generation, RemoteSessionStatus::Checking, None)
+    if !set_session_state_if_current(&session, generation, RemoteSessionStatus::Connecting, None)
         .await
     {
         return;
@@ -401,7 +391,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             set_session_state_if_current(
                 &session,
                 generation,
-                RemoteSessionStatus::Failed,
+                RemoteSessionStatus::Disconnected,
                 Some(error.to_string()),
             )
             .await;
@@ -438,7 +428,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             set_session_state_if_current(
                 &session,
                 generation,
-                RemoteSessionStatus::Failed,
+                RemoteSessionStatus::Disconnected,
                 Some(error.to_string()),
             )
             .await;
@@ -456,7 +446,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             set_session_state_if_current(
                 &session,
                 generation,
-                RemoteSessionStatus::Failed,
+                RemoteSessionStatus::Disconnected,
                 Some(error.to_string()),
             )
             .await;
@@ -468,15 +458,14 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             .as_deref()
             .is_some_and(|expected| expected != descriptor.instance_id)
         {
-            set_session_state_if_current(
-                &session,
-                generation,
-                RemoteSessionStatus::Failed,
-                Some(format!(
+            update_session_if_current(&session, generation, |info| {
+                info.status = RemoteSessionStatus::Disconnected;
+                info.can_start_new_host = true;
+                info.error = Some(format!(
                     "A different OpenResearch host is running on {}. Start a new connection explicitly.",
                     descriptor.hostname
-                )),
-            )
+                ));
+            })
             .await;
             return;
         }
@@ -489,7 +478,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
                     set_session_state_if_current(
                         &session,
                         generation,
-                        RemoteSessionStatus::Failed,
+                        RemoteSessionStatus::Disconnected,
                         Some(error.to_string()),
                     )
                     .await;
@@ -497,6 +486,8 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
                 }
             };
         if protocol != Some(DASHBOARD_PROTOCOL) {
+            let mut update_paths = paths.clone();
+            update_paths.binary = remote_orx.path.clone();
             let message = protocol
                 .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
                 .map(|_| "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect.".to_string())
@@ -509,7 +500,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
                 info.error = message;
                 info.version = Some(remote_orx.version.clone());
                 info.dashboard_protocol = protocol;
-                info.install_paths = Some((&paths).into());
+                info.install_paths = Some((&update_paths).into());
             })
             .await;
             return;
@@ -526,9 +517,9 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             Err(error) => {
                 let error = error.to_string();
                 update_session_if_current(&session, generation, |info| {
-                    info.status = RemoteSessionStatus::Failed;
-                    info.can_start_new_host = expected_instance.is_some()
-                        && error.contains("The expected OpenResearch host is no longer running.");
+                    info.status = RemoteSessionStatus::Disconnected;
+                    info.can_start_new_host =
+                        can_start_new_host(&error, expected_instance.is_some());
                     info.error = Some(error);
                 })
                 .await;
@@ -540,7 +531,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
         set_session_state_if_current(
             &session,
             generation,
-            RemoteSessionStatus::Failed,
+            RemoteSessionStatus::Disconnected,
             Some("The running OpenResearch host uses an incompatible control protocol.".into()),
         )
         .await;
@@ -592,9 +583,15 @@ async fn install_and_connect(
     requested: RemoteInstallPathsInfo,
 ) -> Result<RemoteSessionInfo> {
     let _operation = session.operation.lock().await;
-    let (previous, remote_protocol) = {
+    let (previous, remote_protocol, update_binary) = {
         let info = session.info.read().await;
-        (info.status, info.dashboard_protocol)
+        (
+            info.status,
+            info.dashboard_protocol,
+            info.install_paths
+                .as_ref()
+                .map(|paths| paths.binary.clone()),
+        )
     };
     if !matches!(
         previous,
@@ -607,6 +604,13 @@ async fn install_and_connect(
             "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect."
         ));
     }
+    let update_binary = if previous == RemoteSessionStatus::NeedsUpdate {
+        Some(update_binary.ok_or_else(|| {
+            anyhow!("Stop the running OpenResearch host before updating its binary.")
+        })?)
+    } else {
+        None
+    };
     if crate::telemetry::build_channel() != "production" {
         return Err(anyhow!(
             "This development build cannot install an unreleased remote protocol. Build this branch for the remote machine and place the binary at the selected path."
@@ -614,24 +618,14 @@ async fn install_and_connect(
     }
     let generation = advance_generation(&session, false);
     let host = session.info.read().await.host.clone();
-    if !set_session_state_if_current(
-        &session,
-        generation,
-        if previous == RemoteSessionStatus::NeedsUpdate {
-            RemoteSessionStatus::Updating
-        } else {
-            RemoteSessionStatus::Installing
-        },
-        None,
-    )
-    .await
+    if !set_session_state_if_current(&session, generation, RemoteSessionStatus::Applying, None)
+        .await
     {
         return Ok(session.info.read().await.clone());
     }
     let result = tokio::time::timeout(INSTALL_TIMEOUT, async {
-        let paths = remote_install_paths(&session.target, &host)
-            .await?
-            .with_requested(requested.binary, requested.database, requested.cache);
+        let current = remote_install_paths(&session.target, &host).await?;
+        let paths = install_paths_for_request(current, requested, update_binary);
         save_remote_install_paths(&session.target, &host, &paths).await?;
         let remote_orx = install_remote_orx(&session.target, &host, &paths).await?;
         let protocol = remote_dashboard_protocol(&session.target, &host, &remote_orx.path).await?;
@@ -646,7 +640,7 @@ async fn install_and_connect(
             set_session_state_if_current(
                 &session,
                 generation,
-                RemoteSessionStatus::Failed,
+                RemoteSessionStatus::Disconnected,
                 Some(error.to_string()),
             )
             .await;
@@ -660,7 +654,7 @@ async fn install_and_connect(
         set_session_state_if_current(
             &session,
             generation,
-            RemoteSessionStatus::Failed,
+            RemoteSessionStatus::Disconnected,
             Some("The installed remote binary does not support this dashboard protocol.".into()),
         )
         .await;
@@ -682,7 +676,7 @@ async fn install_and_connect(
             set_session_state_if_current(
                 &session,
                 generation,
-                RemoteSessionStatus::Failed,
+                RemoteSessionStatus::Disconnected,
                 Some(error.to_string()),
             )
             .await;
@@ -778,12 +772,12 @@ async fn reconnect_session_inner(
         if !matches!(
             info.status,
             RemoteSessionStatus::Disconnected
-                | RemoteSessionStatus::Failed
+                | RemoteSessionStatus::NeedsInstall
                 | RemoteSessionStatus::NeedsUpdate
         ) {
             return info.clone();
         }
-        info.status = RemoteSessionStatus::Checking;
+        info.status = RemoteSessionStatus::Connecting;
         info.error = None;
         advance_generation(&session, clear_expected_instance)
     };
@@ -844,12 +838,11 @@ async fn supervise_connection(
             ConnectionEnd::Cancelled => return,
             ConnectionEnd::Terminal(error) => {
                 *session.route.write().await = None;
-                set_session_state_if_current(
-                    &session,
-                    generation,
-                    RemoteSessionStatus::Failed,
-                    Some(error),
-                )
+                update_session_if_current(&session, generation, |info| {
+                    info.status = RemoteSessionStatus::Disconnected;
+                    info.can_start_new_host = can_start_new_host(&error, true);
+                    info.error = Some(error);
+                })
                 .await;
                 return;
             }
@@ -1073,6 +1066,12 @@ fn retryable_ssh_transport_error(error: &str) -> bool {
         .any(|terminal| error.contains(terminal))
 }
 
+fn can_start_new_host(error: &str, expected_instance: bool) -> bool {
+    expected_instance
+        && (error.contains("The expected OpenResearch host is no longer running.")
+            || error.contains("A different OpenResearch host is running"))
+}
+
 fn reserve_loopback_port() -> Result<u16> {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     Ok(listener.local_addr()?.port())
@@ -1114,6 +1113,7 @@ async fn authenticated_health(
 fn gateway_router(session: Arc<RemoteSession>) -> Router {
     Router::new()
         .route("/_orx/runtime", get(gateway_runtime))
+        .route("/_orx/ssh/connect", get(gateway_ssh_connect))
         .route("/_orx/install", post(gateway_install))
         .route("/_orx/reconnect", post(gateway_reconnect))
         .route("/_orx/start-host", post(gateway_start_new_host))
@@ -1126,6 +1126,22 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(middleware::from_fn(gateway_loopback_guard))
         .with_state(session)
+}
+
+async fn gateway_ssh_connect(
+    State(session): State<Arc<RemoteSession>>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Query(req): Query<super::up::SshConnectReq>,
+) -> Response {
+    let expected_host = session.info.read().await.host.clone();
+    if req.host.trim() != expected_host {
+        return gateway_error(
+            StatusCode::BAD_REQUEST,
+            "SSH host does not match this session.".into(),
+        );
+    }
+    super::up::ssh_connect_to_target(headers, ws, req, session.target.clone()).await
 }
 
 pub(crate) async fn loopback_guard(request: Request, next: Next) -> Response {
@@ -1199,11 +1215,17 @@ fn secure_response(mut response: Response) -> Response {
         "cross-origin-opener-policy",
         HeaderValue::from_static("same-origin"),
     );
-    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
-    headers.insert(
-        "content-security-policy",
-        HeaderValue::from_static("frame-ancestors 'none'"),
-    );
+    if headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"))
+    {
+        headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+        headers.insert(
+            "content-security-policy",
+            HeaderValue::from_static("frame-ancestors 'none'"),
+        );
+    }
     response
 }
 
@@ -1595,6 +1617,8 @@ async fn proxy_websocket(
     for name in [
         header::CONNECTION,
         header::UPGRADE,
+        header::SEC_WEBSOCKET_ACCEPT,
+        header::SEC_WEBSOCKET_EXTENSIONS,
         header::SEC_WEBSOCKET_PROTOCOL,
     ] {
         if let Some(value) = headers.get(&name) {
@@ -1634,7 +1658,7 @@ pub async fn run(host: &str, args: UpArgs) -> Result<()> {
                     "OpenResearch on {host} does not support dashboard protocol {DASHBOARD_PROTOCOL}. Update it from the local dashboard."
                 ));
             }
-            RemoteSessionStatus::Failed => {
+            RemoteSessionStatus::Disconnected => {
                 return Err(anyhow!(
                     "Could not open {host}: {}",
                     current
@@ -1690,6 +1714,19 @@ impl RemoteInstallPaths {
         self.database = database;
         self.cache = cache;
         self
+    }
+}
+
+fn install_paths_for_request(
+    mut current: RemoteInstallPaths,
+    requested: RemoteInstallPathsInfo,
+    update_binary: Option<String>,
+) -> RemoteInstallPaths {
+    if let Some(binary) = update_binary {
+        current.binary = binary;
+        current
+    } else {
+        current.with_requested(requested.binary, requested.database, requested.cache)
     }
 }
 
@@ -1892,7 +1929,7 @@ pub(crate) async fn find_remote_orx(target: &SshTarget, host: &str) -> Result<Op
          p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true); \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
-         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune -perm -022 -print 2>/dev/null); \
+         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
          printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi; fi",
@@ -1918,7 +1955,7 @@ async fn probe_remote_orx_path(
         "p={path}; p=$(readlink -f \"$p\" 2>/dev/null || realpath \"$p\" 2>/dev/null || true); \
          if [ -n \"$p\" ] && [ -x \"$p\" ]; then \
          owner=$(find \"$p\" -prune \\( -user \"$(id -u)\" -o -user 0 \\) -print 2>/dev/null); \
-         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune -perm -022 -print 2>/dev/null); \
+         unsafe=$(find \"$p\" \"$(dirname \"$p\")\" -prune \\( -perm -020 -o -perm -002 \\) -print 2>/dev/null); \
          if [ -n \"$owner\" ] && [ -z \"$unsafe\" ]; then \
          v=$(\"$p\" --version 2>/dev/null || true); \
          printf '{}%s\\n{}%s\\n' \"$p\" \"$v\"; fi; fi",
@@ -2242,7 +2279,7 @@ mod tests {
                 id: "session".into(),
                 host: "example".into(),
                 user: None,
-                status: RemoteSessionStatus::Checking,
+                status: RemoteSessionStatus::Connecting,
                 version: None,
                 dashboard_protocol: None,
                 gateway_url: "http://127.0.0.1:1".into(),
@@ -2299,6 +2336,42 @@ mod tests {
         assert!(!retryable_ssh_transport_error(
             "ssh ini failed (exit 1): expected host is no longer running"
         ));
+    }
+
+    #[test]
+    fn missing_or_replaced_expected_host_can_be_restarted() {
+        assert!(can_start_new_host(
+            "The expected OpenResearch host is no longer running.",
+            true
+        ));
+        assert!(can_start_new_host(
+            "A different OpenResearch host is running on node-2.",
+            true
+        ));
+        assert!(!can_start_new_host(
+            "A different OpenResearch host is running on node-2.",
+            false
+        ));
+    }
+
+    #[test]
+    fn framing_headers_do_not_block_same_origin_file_previews() {
+        let html = secure_response(
+            Response::builder()
+                .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        assert_eq!(html.headers()["x-frame-options"], "DENY");
+
+        let pdf = secure_response(
+            Response::builder()
+                .header(header::CONTENT_TYPE, "application/pdf")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        assert!(!pdf.headers().contains_key("x-frame-options"));
+        assert!(!pdf.headers().contains_key("content-security-policy"));
     }
 
     #[test]
@@ -2444,6 +2517,52 @@ mod tests {
             "/cache/repos".into(),
         ))
         .is_err());
+    }
+
+    #[test]
+    fn updates_keep_existing_storage_and_target_the_detected_binary() {
+        let current = sample_paths();
+        let updated = install_paths_for_request(
+            current.clone(),
+            RemoteInstallPathsInfo {
+                binary: "/ignored/bin/orx".into(),
+                database: "/ignored/orx.db".into(),
+                cache: "/ignored/repos".into(),
+            },
+            Some("/opt/openresearch/bin/orx".into()),
+        );
+        assert_eq!(updated.binary, "/opt/openresearch/bin/orx");
+        assert_eq!(updated.database, current.database);
+        assert_eq!(updated.cache, current.cache);
+    }
+
+    #[test]
+    fn remote_status_wire_model_has_seven_states() {
+        let statuses = [
+            RemoteSessionStatus::Connecting,
+            RemoteSessionStatus::NeedsInstall,
+            RemoteSessionStatus::NeedsUpdate,
+            RemoteSessionStatus::Applying,
+            RemoteSessionStatus::Connected,
+            RemoteSessionStatus::Reconnecting,
+            RemoteSessionStatus::Disconnected,
+        ];
+        let names = statuses
+            .into_iter()
+            .map(|status| serde_json::to_value(status).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "connecting",
+                "needsInstall",
+                "needsUpdate",
+                "applying",
+                "connected",
+                "reconnecting",
+                "disconnected",
+            ]
+        );
     }
 
     #[test]

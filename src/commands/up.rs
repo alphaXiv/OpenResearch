@@ -196,6 +196,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
         }
         false
     };
+    if persistent_host {
+        stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
     if explicit_stop {
         state.chat.interrupt_all().await;
     }
@@ -206,6 +209,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     if let Some(server) = control_server {
         server.shutdown().await;
     }
+    state.dashboard_lock.lock().unwrap().take();
     Ok(())
 }
 
@@ -4584,15 +4588,15 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum SshConnectBackend {
+pub(crate) enum SshConnectBackend {
     Ssh,
     Slurm,
 }
 
 #[derive(Deserialize)]
-struct SshConnectReq {
-    host: String,
-    backend: SshConnectBackend,
+pub(crate) struct SshConnectReq {
+    pub(crate) host: String,
+    pub(crate) backend: SshConnectBackend,
 }
 
 #[derive(Deserialize)]
@@ -4672,10 +4676,20 @@ async fn send_ssh_connect_error(
         .await;
 }
 
-async fn ssh_connect(
+pub(crate) async fn ssh_connect(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
     Query(req): Query<SshConnectReq>,
+) -> Response {
+    let target = crate::jobs::ssh::SshTarget::alias(req.host.trim());
+    ssh_connect_to_target(headers, ws, req, target).await
+}
+
+pub(crate) async fn ssh_connect_to_target(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    req: SshConnectReq,
+    target: crate::jobs::ssh::SshTarget,
 ) -> Response {
     if !same_origin(&headers) {
         return ApiError(StatusCode::FORBIDDEN, "SSH terminal origin rejected".into())
@@ -4685,7 +4699,7 @@ async fn ssh_connect(
     if host.is_empty() {
         return bad_request("host is required").into_response();
     }
-    ws.on_upgrade(move |socket| ssh_connect_socket(socket, host, req.backend))
+    ws.on_upgrade(move |socket| ssh_connect_socket(socket, host, req.backend, target))
 }
 
 fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
@@ -4771,8 +4785,12 @@ fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
     })
 }
 
-async fn ssh_connect_socket(mut socket: WebSocket, host: String, backend: SshConnectBackend) {
-    let target = crate::jobs::ssh::SshTarget::alias(&host);
+async fn ssh_connect_socket(
+    mut socket: WebSocket,
+    host: String,
+    backend: SshConnectBackend,
+    target: crate::jobs::ssh::SshTarget,
+) {
     let args = match crate::jobs::ssh::interactive_args(&target) {
         Ok(args) => args,
         Err(error) => {

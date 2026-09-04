@@ -82,7 +82,7 @@ export function SshConfigDialog({
         </div>
         <IconButton
           className="absolute end-3.5 top-3.5"
-          aria-label={m.remote_dialog_close()}
+          aria-label={m.ssh_config_close()}
           onClick={close}
           disabled={saving}
         >

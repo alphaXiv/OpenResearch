@@ -791,16 +791,13 @@ export const getSshMasterStatus = (host: string) =>
   get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
 
 export type RemoteSessionStatus =
-  | "checking"
+  | "connecting"
   | "needsInstall"
   | "needsUpdate"
-  | "installing"
-  | "updating"
-  | "connecting"
+  | "applying"
   | "connected"
   | "reconnecting"
-  | "disconnected"
-  | "failed";
+  | "disconnected";
 
 export interface RemoteInstallPaths {
   binary: string;

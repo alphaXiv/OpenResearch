@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
@@ -170,22 +170,32 @@ impl DashboardLock {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let thread = std::thread::spawn(move || {
             let result = (|| -> Result<()> {
-                let mut lock = open_lock(&path)?;
+                let mut lock = open_lock(&path).map_err(|error| {
+                    anyhow!("Could not open dashboard lock {}: {error}", path.display())
+                })?;
                 match mode {
                     DashboardLockMode::Shared => {
-                        let _guard = lock.try_read().map_err(|_| {
-                            anyhow!(
-                                "A persistent OpenResearch host is already using this database."
-                            )
+                        let _guard = lock.try_read().map_err(|error| {
+                            if is_lock_conflict(&error) {
+                                anyhow!(
+                                    "A persistent OpenResearch host is already using this database."
+                                )
+                            } else {
+                                lock_error(&path, error)
+                            }
                         })?;
                         ready_tx.send(Ok(())).ok();
                         let _ = release_rx.recv();
                     }
                     DashboardLockMode::Exclusive => {
-                        let _guard = lock.try_write().map_err(|_| {
-                            anyhow!(
-                                "Another OpenResearch dashboard is already using this database."
-                            )
+                        let _guard = lock.try_write().map_err(|error| {
+                            if is_lock_conflict(&error) {
+                                anyhow!(
+                                    "Another OpenResearch dashboard is already using this database."
+                                )
+                            } else {
+                                lock_error(&path, error)
+                            }
                         })?;
                         ready_tx.send(Ok(())).ok();
                         let _ = release_rx.recv();
@@ -358,8 +368,13 @@ async fn handle_control(
                 return Ok(());
             }
             validate_token(&token)?;
-            write_response(reader.get_mut(), &ControlResponse::Attached { descriptor }).await?;
             auth.register(&token);
+            if let Err(error) =
+                write_response(reader.get_mut(), &ControlResponse::Attached { descriptor }).await
+            {
+                auth.unregister(&token);
+                return Err(error);
+            }
             drop(_control);
             let result = async {
                 loop {
@@ -381,10 +396,7 @@ async fn handle_control(
             expected_preview,
         } => {
             let _control = control_gate.lock().await;
-            if stopping
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
+            if stopping.load(Ordering::SeqCst) {
                 write_response(
                     reader.get_mut(),
                     &ControlResponse::Error {
@@ -396,7 +408,6 @@ async fn handle_control(
             }
             let preview = stop_preview(&chat, &auth).await;
             if expected_instance_id != descriptor.instance_id || expected_preview != preview {
-                stopping.store(false, Ordering::SeqCst);
                 write_response(
                     reader.get_mut(),
                     &ControlResponse::Conflict {
@@ -404,6 +415,19 @@ async fn handle_control(
                             .into(),
                         descriptor,
                         preview,
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            if stopping
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                write_response(
+                    reader.get_mut(),
+                    &ControlResponse::Error {
+                        error: "The remote OpenResearch host is already stopping.".into(),
                     },
                 )
                 .await?;
@@ -467,17 +491,28 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
         LiveHost::Stopping(_) => wait_for_server_lock_free(&data_dir).await?,
         LiveHost::Missing => ensure_server_lock_free(&data_dir)?,
     }
-    spawn_detached_host()?;
+    let (mut child, log_path) = spawn_detached_host(&data_dir)?;
     let started = tokio::time::timeout(START_TIMEOUT, async {
         loop {
             if let LiveHost::Running(descriptor) = live_descriptor(&data_dir).await {
-                return descriptor;
+                return Ok(descriptor);
+            }
+            if let Some(status) = child.try_wait()? {
+                return Err(anyhow!(
+                    "The persistent OpenResearch host exited ({status}). See {}.",
+                    log_path.display()
+                ));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .map_err(|_| anyhow!("Timed out starting the persistent OpenResearch host."))?;
+    .map_err(|_| {
+        anyhow!(
+            "Timed out starting the persistent OpenResearch host. See {}.",
+            log_path.display()
+        )
+    })??;
     print_descriptor(&started)
 }
 
@@ -570,9 +605,14 @@ async fn live_descriptor(data_dir: &Path) -> LiveHost {
 }
 
 fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
-    let mut lock = open_lock(&shared_path(data_dir, "lock")?)?;
-    let held = lock.try_write().is_err();
-    Ok(held)
+    let path = shared_path(data_dir, "lock")?;
+    let lock = open_lock(&path)?;
+    let result = match lock.try_read() {
+        Ok(_) => Ok(false),
+        Err(error) if is_lock_conflict(&error) => Ok(true),
+        Err(error) => Err(lock_error(&path, error)),
+    };
+    result
 }
 
 async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
@@ -620,9 +660,15 @@ async fn write_response(stream: &mut UnixStream, response: &ControlResponse) -> 
 
 async fn read_bounded_line<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Result<String> {
     let mut line = String::new();
-    let read = reader.read_line(&mut line).await?;
-    if read == 0 || read > MAX_CONTROL_LINE {
-        return Err(anyhow!("Invalid remote-host control message."));
+    let read = (&mut *reader)
+        .take((MAX_CONTROL_LINE + 1) as u64)
+        .read_line(&mut line)
+        .await?;
+    if read == 0 {
+        return Err(anyhow!("Remote-host control message was empty."));
+    }
+    if read > MAX_CONTROL_LINE {
+        return Err(anyhow!("Remote-host control message was too large."));
     }
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
 }
@@ -649,15 +695,17 @@ fn print_descriptor(descriptor: &HostDescriptor) -> Result<()> {
     Ok(())
 }
 
-fn spawn_detached_host() -> Result<()> {
+fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)> {
     let executable = std::env::current_exe()?;
     let args = ["up", "--no-browser", "--remote-host", "--port", "0"];
+    let log_path = runtime_path(data_dir, "log")?;
+    let log = open_runtime_log(&log_path)?;
     let mut command = std::process::Command::new(&executable);
     command
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log));
     #[cfg(unix)]
     unsafe {
         use std::os::unix::process::CommandExt as _;
@@ -669,23 +717,41 @@ fn spawn_detached_host() -> Result<()> {
             }
         });
     }
-    if command.spawn().is_ok() {
-        return Ok(());
+    if let Ok(child) = command.spawn() {
+        return Ok((child, log_path));
     }
-    std::process::Command::new("nohup")
-        .arg(executable)
+    let log = open_runtime_log(&log_path)?;
+    let child = std::process::Command::new("nohup")
+        .arg(&executable)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
         .spawn()
-        .map(|_| ())
-        .map_err(|error| anyhow!("Could not start the persistent OpenResearch host: {error}"))
+        .map_err(|error| anyhow!("Could not start the persistent OpenResearch host: {error}"))?;
+    Ok((child, log_path))
+}
+
+fn open_runtime_log(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path)?;
+    set_mode(path, 0o600)?;
+    Ok(file)
 }
 
 fn ensure_server_lock_free(data_dir: &Path) -> Result<()> {
-    let mut lock = open_lock(&shared_path(data_dir, "lock")?)?;
-    lock.try_write().map(|_| ()).map_err(|_| {
+    let path = shared_path(data_dir, "lock")?;
+    let mut lock = open_lock(&path)?;
+    lock.try_write().map(|_| ()).map_err(|error| {
+        if !is_lock_conflict(&error) {
+            return lock_error(&path, error);
+        }
         let host = descriptor_path(data_dir)
             .ok()
             .and_then(|path| read_descriptor(&path))
@@ -695,6 +761,14 @@ fn ensure_server_lock_free(data_dir: &Path) -> Result<()> {
             "Another OpenResearch dashboard is using this database on {host}. Stop it before starting a persistent host."
         )
     })
+}
+
+fn is_lock_conflict(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+}
+
+fn lock_error(path: &Path, error: std::io::Error) -> anyhow::Error {
+    anyhow!("Could not lock dashboard lock {}: {error}", path.display())
 }
 
 fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
@@ -769,7 +843,31 @@ fn shared_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
         .take(16)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    Ok(parent.join(format!(".orx-remote-{name}.{extension}")))
+    let prefix = format!(".orx-remote-{name}");
+    let inside = normalized.join(format!("{prefix}.{extension}"));
+    let sibling_lock = parent.join(format!("{prefix}.lock"));
+    let use_inside = !sibling_lock.exists()
+        && (normalized.join(format!("{prefix}.lock")).exists()
+            || normalized.join(format!("{prefix}.start.lock")).exists()
+            || !directory_writable(parent));
+    Ok(if use_inside {
+        inside
+    } else {
+        parent.join(format!("{prefix}.{extension}"))
+    })
+}
+
+#[cfg(unix)]
+fn directory_writable(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    std::ffi::CString::new(path.as_os_str().as_bytes())
+        .is_ok_and(|path| unsafe { libc::access(path.as_ptr(), libc::W_OK | libc::X_OK) == 0 })
+}
+
+#[cfg(not(unix))]
+fn directory_writable(_path: &Path) -> bool {
+    true
 }
 
 fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
@@ -877,5 +975,29 @@ mod tests {
         assert!(control_socket_path(&data_dir)
             .unwrap()
             .starts_with(format!("/tmp/orx-{}", effective_uid())));
+    }
+
+    #[test]
+    fn only_would_block_is_lock_contention() {
+        assert!(is_lock_conflict(&std::io::ErrorKind::WouldBlock.into()));
+        assert!(!is_lock_conflict(&std::io::ErrorKind::Unsupported.into()));
+    }
+
+    #[tokio::test]
+    async fn empty_control_message_has_a_specific_error() {
+        let mut reader = BufReader::new(tokio::io::empty());
+        let error = read_bounded_line(&mut reader).await.unwrap_err();
+        assert_eq!(error.to_string(), "Remote-host control message was empty.");
+    }
+
+    #[tokio::test]
+    async fn oversized_control_message_is_rejected() {
+        let input = vec![b'x'; MAX_CONTROL_LINE + 1];
+        let mut reader = BufReader::new(input.as_slice());
+        let error = read_bounded_line(&mut reader).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Remote-host control message was too large."
+        );
     }
 }

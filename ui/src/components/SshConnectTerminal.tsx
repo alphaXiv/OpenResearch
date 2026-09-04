@@ -60,15 +60,17 @@ function serverError(value: unknown): string | null {
 export function SshConnectTerminal({
   host,
   backend,
+  path = "/api/settings/ssh/connect",
   active = true,
   onComplete,
   onError,
 }: {
   host: string;
   backend: "ssh" | "slurm";
+  path?: string;
   active?: boolean;
   onComplete: (result: SshConnectResult) => void;
-  onError: (error: string) => void;
+  onError?: (error: string) => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
@@ -85,7 +87,7 @@ export function SshConnectTerminal({
     terminalRef.current = terminal;
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = new URL("/api/settings/ssh/connect", `${protocol}//${location.host}`);
+    const url = new URL(path, `${protocol}//${location.host}`);
     url.searchParams.set("host", host);
     url.searchParams.set("backend", backend);
     const socket = new WebSocket(url);
@@ -100,7 +102,7 @@ export function SshConnectTerminal({
       terminal.options.disableStdin = true;
       terminal.blur();
       setError(message);
-      errorRef.current(message);
+      errorRef.current?.(message);
     };
 
     const input = terminal.onData((data) => {
@@ -153,7 +155,7 @@ export function SshConnectTerminal({
       terminalRef.current = null;
       dispose();
     };
-  }, [backend, host]);
+  }, [backend, host, path]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
