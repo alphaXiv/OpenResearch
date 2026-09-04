@@ -75,6 +75,7 @@ import {
   retryQueuedMessage,
   respondChat,
   selectChatBranch,
+  runShellCommand,
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
@@ -145,6 +146,7 @@ import {
   slashCommandContext,
   type SlashCommandContext,
 } from "../planCommand";
+import { bashCommand, withoutBashPrefix } from "../bashCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import {
@@ -163,6 +165,7 @@ import { useDialogFocus } from "./useDialogFocus";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
+const TOOL_OUTPUT_CLASS_NAME = "tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm";
 const TOOL_TARGET_LIMIT = 256;
 const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
@@ -751,6 +754,9 @@ type Action =
   // Local-only; swept by upsertMessage's LOCAL_PREFIX filter when the next
   // server message lands, and gone on reload.
   | { type: "localError"; sessionId: string; text: string }
+  // A `!` command just sent, shown running until the server's copy lands —
+  // or, with `error`, the same card marked as never run.
+  | { type: "localShell"; sessionId: string; id: string; command: string; error?: string }
   | { type: "upsertMessage"; sessionId: string; message: ChatMessage }
   | {
       type: "optimisticUser";
@@ -767,6 +773,8 @@ type Action =
   | { type: "forget"; sessionId: string };
 
 const LOCAL_PREFIX = "local-";
+/** Server-side `USER_SHELL_TOOL`: a composer `!` command on a user message. */
+const SHELL_TOOL = "bash";
 const NO_MESSAGES: ChatMessage[] = [];
 
 function upsertMessage(list: ChatMessage[], message: ChatMessage): ChatMessage[] {
@@ -849,6 +857,40 @@ function reducer(state: ChatState, action: Action): ChatState {
         ...state,
         messagesBySession: { ...state.messagesBySession, [action.sessionId]: [...list, msg] },
         activeLeafBySession: { ...state.activeLeafBySession, [action.sessionId]: msg.id },
+      };
+    }
+    case "localShell": {
+      const list = state.messagesBySession[action.sessionId] ?? [];
+      // An error re-dispatch replaces the card in place; a new card appends without
+      // the local sweep (its parent may be a local card; the server copy sweeps all).
+      const known = list.find((m) => m.id === action.id);
+      const msg: ChatMessage = {
+        id: action.id,
+        role: "user",
+        parts: [
+          {
+            id: "p0",
+            type: "tool",
+            tool: SHELL_TOOL,
+            state: {
+              status: action.error === undefined ? "running" : "error",
+              input: { command: action.command },
+              error: action.error,
+            },
+          },
+        ],
+        createdAt: known?.createdAt ?? Date.now(),
+        parentId: known ? known.parentId : state.activeLeafBySession[action.sessionId] ?? null,
+      };
+      return {
+        ...state,
+        messagesBySession: {
+          ...state.messagesBySession,
+          [action.sessionId]: known ? upsertMessage(list, msg) : [...list, msg],
+        },
+        activeLeafBySession: known
+          ? state.activeLeafBySession
+          : { ...state.activeLeafBySession, [action.sessionId]: msg.id },
       };
     }
     case "activeLeaf":
@@ -2523,7 +2565,7 @@ function ToolRow({
       </div>
       {detailOpen && (
         <div className="tool-detail mt-1 me-0 mb-1 ms-6" id={detailId}>
-          <div className="tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">
+          <div className={TOOL_OUTPUT_CLASS_NAME}>
             {errorMessage.slice(0, 20000)}
           </div>
         </div>
@@ -3075,6 +3117,8 @@ const Message = memo(function Message({
   // Editing re-asks as a new fork rather than rewriting history, so the original
   // stays reachable through the pager.
   const [editDraft, setEditDraft] = useState<string | null>(null);
+  const shell = shellExchangePart(message);
+  if (shell) return <ShellExchangeCard part={shell} />;
   if (message.role === "user") {
     const text = message.parts
       .filter((p) => p.type === "text")
@@ -3214,6 +3258,51 @@ const Message = memo(function Message({
     </div>
   );
 });
+
+function shellExchangePart(message: ChatMessage): ChatPart | null {
+  const part = message.parts.length === 1 ? message.parts[0] : undefined;
+  return message.role === "user" && part?.type === "tool" && part.tool === SHELL_TOOL ? part : null;
+}
+
+/** A composer `!` command and what it printed: the user's own shell run, shown
+ * where it happened on the branch. */
+function ShellExchangeCard({ part }: { part: ChatPart }) {
+  const state = part.state;
+  const command = inputString(state?.input ?? {}, "command") ?? "";
+  const running = state?.status === "running";
+  const failed = state?.status === "error";
+  const exitCode = typeof state?.input?.exitCode === "number" ? state.input.exitCode : null;
+  const output = [state?.output, state?.error].filter(Boolean).join("\n");
+  const footer = running
+    ? m.activity_running()
+    : failed && exitCode !== null
+      ? m.chat_bash_exit_code({ code: fmtNumber(exitCode) })
+      : null;
+  return (
+    <div className="msg-shell self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
+      <div dir="ltr" className="max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base">
+        <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
+          <span className="sr-only">{m.chat_panel_bash()} </span>
+          <SquareTerminal
+            size={16}
+            strokeWidth={1.6}
+            className={`mt-0.5 shrink-0 ${failed ? "text-accent-red" : "text-muted"}`}
+            aria-hidden="true"
+          />
+          <span>{command}</span>
+        </div>
+        {output && (
+          <div className={`${TOOL_OUTPUT_CLASS_NAME} mt-2`}>
+            {output.slice(0, 20000)}
+          </div>
+        )}
+        {footer && (
+          <div className={`mt-1.5 text-xs ${failed ? "text-accent-red" : "text-muted"}`}>{footer}</div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /** Shared assistant-parts renderer, reused for a message body and (recursively)
  * for a sub-agent's nested transcript. Coalesces consecutive tool parts into one
@@ -3434,7 +3523,7 @@ export function SubagentTranscript({
     <div className="msg-assistant text-base leading-[1.62] text-text min-w-0">
       {errored && <span className="sr-only">{m.chat_panel_failed()} </span>}
       {errorMessage && (
-        <div className="tool-output py-1.5 px-2.5 font-mono text-xs text-subtext whitespace-pre-wrap wrap-anywhere max-h-65 overflow-y-auto bg-background border border-border-variant rounded-sm">
+        <div className={TOOL_OUTPUT_CLASS_NAME}>
           {errorMessage.slice(0, 20000)}
         </div>
       )}
@@ -4481,6 +4570,10 @@ export function ChatPanel({
     () => commandsForHarness(skills, opts?.planActivation),
     [skills, opts?.planActivation],
   );
+  // `!` at the start of the draft is a shell command, not a message (Claude
+  // Code's bash mode); the slash menu stays shut over paths like `!ls /tmp`.
+  const shellCommand = bashCommand(draft);
+  const bashMode = shellCommand !== null;
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
   // Commands now live in the draft as text, so the menu also has to stay shut
@@ -4489,6 +4582,7 @@ export function ChatPanel({
   const completions =
     slashToken === null ? [] : commands.filter((command) => command.name.startsWith(slashToken));
   const typingCommand =
+    !bashMode &&
     slashToken !== null &&
     slashContext?.end === composerCursor &&
     completions.some((command) => command.name !== slashToken);
@@ -5048,11 +5142,13 @@ export function ChatPanel({
     }
     return null;
   }, [messages, activeSession?.harness, activeId, state.busySessions]);
+  // A pending question card owns typed text, so `!` is just an answer there.
+  const bashActive = bashMode && !pendingQuestion;
 
   // A pending question card owns the composer's text as a plain answer — no
   // command in it is ever expanded, so none of it is chipped either.
   const knownCommand = (name: string) =>
-    !pendingQuestion && commands.some((command) => command.name === name);
+    !pendingQuestion && !bashMode && commands.some((command) => command.name === name);
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -5423,19 +5519,9 @@ export function ChatPanel({
     let sid = activeId;
     try {
       if (!sid) {
-        const session = await createChatSession(projectId, effective.harness, {
-          model: effective.model,
-          serviceTier: effective.serviceTier,
-          permissionMode: effective.permissionMode,
-          planMode: independentPlanMode,
-          reasoningLevel: effective.reasoningLevel,
-        });
-        loadedSessions.current.add(session.id);
-        setSessions((cur) => [session, ...cur]);
-        setActiveId(session.id);
+        const session = await openNewSession(effective, independentPlanMode);
         sid = session.id;
         sourceSessionId = session.id;
-        composerScopeRef.current = { projectId, activeId: session.id };
       }
       dispatch({
         type: "optimisticUser",
@@ -5512,6 +5598,92 @@ export function ChatPanel({
       }
       dispatch({ type: "busy", sessionId: sid, busy: false });
       dispatch({ type: "localError", sessionId: sid, text: m.chat_message_not_sent({ error: ltr(msg) }) });
+    }
+  }
+
+  /** Create the session a first message (or `!` command) lands in and open it. */
+  async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
+    const session = await createChatSession(projectId, selection.harness, {
+      model: selection.model,
+      serviceTier: selection.serviceTier,
+      permissionMode: selection.permissionMode,
+      planMode,
+      reasoningLevel: selection.reasoningLevel,
+    });
+    loadedSessions.current.add(session.id);
+    setSessions((cur) => [session, ...cur]);
+    setActiveId(session.id);
+    composerScopeRef.current = { projectId, activeId: session.id };
+    return session;
+  }
+
+  function exitBashMode() {
+    const next = withoutBashPrefix(draft);
+    setDraft(next);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(next.length, next.length);
+      setComposerCursor(next.length);
+    });
+  }
+
+  /** Enter in bash mode: run the command where the agent works and show the
+   * exchange on the branch. A new chat gets its session first, as send() does. */
+  async function runShell() {
+    const command = shellCommand;
+    if (!command) return;
+    setSettingsError(null);
+    if (busy) {
+      setSettingsError(m.chat_bash_busy());
+      return;
+    }
+    const originalDraft = draft;
+    const sourceScope = composerScopeRef.current;
+    const restoreDraft = () => {
+      const current = composerScopeRef.current;
+      if (current.projectId !== sourceScope.projectId || current.activeId !== sourceScope.activeId) return;
+      setDraft((value) => value || originalDraft);
+    };
+    setDraft("");
+    setSkillMenuDismissed(false);
+    let sid = activeId;
+    if (!sid) {
+      if (!activeHarness?.agentReady || !composerSelection) {
+        restoreDraft();
+        setSettingsError(m.chat_selected_harness_unavailable());
+        return;
+      }
+      try {
+        const planMode = effectiveCommandPlanMode(
+          opts?.planActivation,
+          undefined,
+          planModeOverrideRef.current,
+        );
+        sid = (await openNewSession(composerSelection, planMode)).id;
+        setSessionOverride({});
+      } catch (err) {
+        restoreDraft();
+        const detail = err instanceof Error ? err.message : String(err);
+        setSettingsError(m.chat_bash_failed({ error: ltr(detail) }));
+        return;
+      }
+    }
+    if (sessionFilter === "archived") setSessionFilter("active");
+    const localId = `${LOCAL_PREFIX}shell-${Date.now()}`;
+    dispatch({ type: "localShell", sessionId: sid, id: localId, command });
+    pinTranscriptToBottom();
+    try {
+      const { message } = await runShellCommand(sid, command);
+      dispatch({ type: "upsertMessage", sessionId: sid, message });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      dispatch({
+        type: "localShell",
+        sessionId: sid,
+        id: localId,
+        command,
+        error: m.chat_bash_failed({ error: ltr(detail) }),
+      });
     }
   }
 
@@ -6207,7 +6379,7 @@ export function ChatPanel({
             ))}
           </div>
         )}
-        <div className="composer-box relative flex flex-col border border-border rounded-lg bg-background shadow-elevated" data-onboarding="composer">
+        <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
           {activeHarness && !activeHarness.agentReady && (
             <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
               <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
@@ -6272,7 +6444,7 @@ export function ChatPanel({
               {settingsError}
             </div>
           )}
-          <div className="composer-input relative flex overflow-hidden [&_textarea]:flex-1">
+          <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
             <textarea
               dir="auto"
               ref={composerRef}
@@ -6316,7 +6488,7 @@ export function ChatPanel({
                 // a command) and not mid-IME-composition, where the text can
                 // transiently look complete.
                 const completedCommand =
-                  cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current
+                  cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
                     ? slashCommandContext(v, cursor - 1)
                     : null;
                 if (completedCommand?.query === "plan" && opts?.planActivation) {
@@ -6379,6 +6551,10 @@ export function ChatPanel({
                 }
                 if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                   e.preventDefault();
+                  if (bashActive) {
+                    void runShell();
+                    return;
+                  }
                   void send({ queue: e.metaKey || e.ctrlKey });
                 }
               }}
@@ -6450,6 +6626,23 @@ export function ChatPanel({
                 <span>{m.chat_panel_plan()}</span>
               </Button>
             )}
+            {bashActive && (
+              <Button
+                type="button"
+                variant="ghost"
+                active
+                className="group"
+                title={m.chat_panel_exit_bash_mode()}
+                aria-label={m.chat_panel_exit_bash_mode()}
+                onClick={exitBashMode}
+              >
+                <span className="relative size-4" aria-hidden="true">
+                  <SquareTerminal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
+                  <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                </span>
+                <span>{m.chat_panel_bash()}</span>
+              </Button>
+            )}
             <div className="min-w-0 flex-1" />
             {/* The model picker reflects the open session (harness locked once it
                 exists); the global default only applies before the first
@@ -6482,12 +6675,14 @@ export function ChatPanel({
               <IconButton
                 className="send-btn"
                 variant="primary"
-                title={m.chat_panel_send()}
-                aria-label={m.chat_panel_send()}
-                onClick={() => void send()}
+                title={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
+                aria-label={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
+                onClick={() => void (bashActive ? runShell() : send())}
                 disabled={
-                  !activeHarness?.agentReady ||
-                  (!draft.trim() && attachments.length === 0 && annotations.length === 0)
+                  bashActive
+                    ? !shellCommand || (!activeId && !activeHarness?.agentReady)
+                    : !activeHarness?.agentReady ||
+                      (!draft.trim() && attachments.length === 0 && annotations.length === 0)
                 }
               >
                 <CornerDownLeft size={16} />

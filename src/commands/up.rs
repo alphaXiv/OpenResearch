@@ -629,6 +629,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
+        .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
@@ -6087,6 +6088,57 @@ struct SendChatReq {
 #[serde(rename_all = "lowercase")]
 enum SendMode {
     Steer,
+}
+
+#[derive(Deserialize)]
+struct ShellCommandReq {
+    command: String,
+}
+
+/// Runs a composer `!` command where the agent works and records it as a
+/// user-side message. Refused while a turn runs: a message landing mid-stream
+/// would sit between the turn's own messages and never reach the agent. (A
+/// turn started during the command itself is not caught; the card still shows.)
+async fn run_shell_command(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ShellCommandReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let command = req.command.trim().to_string();
+    if command.is_empty() {
+        return Err(bad_request("command is required"));
+    }
+    if state.chat.is_busy(&id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "session is busy".into()));
+    }
+    let session_id = id.clone();
+    let root = tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        let session = store
+            .get_chat_session(&session_id)?
+            .ok_or_else(|| not_found("chat session"))?;
+        let project = store
+            .get_local_project(&session.project_id)?
+            .ok_or_else(|| not_found("project"))?;
+        // The worktree the harness will create on its first turn, so a command
+        // run before any message acts on the same checkout the agent sees.
+        match local::git::ensure_session_worktree(&project, &session.id) {
+            Ok(dir) => Ok(std::fs::canonicalize(&dir).unwrap_or(dir)),
+            Err(error) => {
+                eprintln!("orx up: session worktree unavailable, using the clone: {error}");
+                resolve_checkout_root(&store, &project, Some(&session_id)).map(|(root, _)| root)
+            }
+        }
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("shell task failed: {e}")))??;
+    let message = state
+        .chat
+        .run_shell_command(&id, command, root)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({ "message": message })))
 }
 
 async fn send_chat_message(

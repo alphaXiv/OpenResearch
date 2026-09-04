@@ -1740,6 +1740,11 @@ export const sendChatMessage = (
     },
   );
 
+/** A composer `!` command, run in the session's checkout and recorded on its
+ * transcript as a user-side exchange the next turn is told about. */
+export const runShellCommand = (sessionId: string, command: string) =>
+  post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/shell`, { command });
+
 export interface ChatTurnResult {
   turnId: string;
   queued: boolean;
