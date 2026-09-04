@@ -250,7 +250,8 @@ export interface StarterPrompt {
 }
 
 export interface ProjectStarterPrompts {
-  /** Null when the project already has experiments or no harness could answer. */
+  /** Empty when the project already has experiments; null when the harness
+   *  could not answer. */
   prompts: StarterPrompt[] | null;
 }
 

@@ -2057,7 +2057,8 @@ async fn project_starter_prompts(
         .as_deref()
         .map(str::trim)
         .filter(|h| local::harness::is_chat_harness(h));
-    // A project with experiments is past "getting started"; skip the model call.
+    // Past "getting started" or no chat harness named: nothing to offer
+    // (empty), as opposed to a harness that could not answer (null).
     let prompts = match harness {
         Some(harness) if experiment_count == 0 => {
             let locale = q.locale.as_deref().unwrap_or("en");
@@ -2072,7 +2073,7 @@ async fn project_starter_prompts(
             };
             local::starter::prompts(&project, &agent, locale).await
         }
-        _ => None,
+        _ => Some(Vec::new()),
     };
     Ok(Json(json!({ "prompts": prompts })))
 }
