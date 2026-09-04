@@ -1689,6 +1689,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     return (
       <div className="app flex flex-col h-full">
         {runtime.kind === "local" && <OfflineBanner />}
+        {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
         {onboarded ? (
           <ProjectsHome
             remote={runtime.kind === "ssh"}

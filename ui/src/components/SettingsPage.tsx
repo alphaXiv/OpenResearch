@@ -92,7 +92,7 @@ import {
   type InstalledCli,
 } from "../api";
 import { onDataDirMove, onHarnessAuth } from "../events";
-import { useUpdateStatus } from "./UpdateBanner";
+import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -2308,9 +2308,11 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 function UpdatesTab() {
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
-  // all three, since they mutate overlapping state.
+  // all of them, since they mutate overlapping state.
   const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const restart = useRestartApp(status);
+  const locked = busy !== null || restart.restarting;
 
   if (!status) {
     return (
@@ -2363,9 +2365,21 @@ function UpdatesTab() {
                 {m.settings_page_restart_to_finish_updating()}
               </div>
               <p>
-                {m.settings_restart_version({ installed: ltr(status.installedVersion ?? "—"), current: ltr(status.current ?? status.installedVersion ?? "—") })}
+                {restart.error
+                  ? m.update_banner_restart_failed({ error: restart.error })
+                  : m.settings_restart_version({ installed: ltr(status.installedVersion ?? "—"), current: ltr(status.current ?? status.installedVersion ?? "—") })}
               </p>
             </div>
+            {status.canRestart && (
+              <Button
+                size="small"
+                type="button"
+                disabled={locked}
+                onClick={restart.restart}
+              >
+                {restart.restarting ? m.update_banner_restarting() : m.update_banner_restart()}
+              </Button>
+            )}
           </div>
         )}
 
@@ -2386,7 +2400,7 @@ function UpdatesTab() {
                 type="button"
                 checked={status.autoUpdate}
                 aria-label={m.settings_page_install_updates_automatically()}
-                disabled={busy !== null}
+                disabled={locked}
                 onClick={() =>
                   void run("auto", () => setAutoUpdateApi(!status.autoUpdate).then(apply))
                 }
@@ -2406,7 +2420,7 @@ function UpdatesTab() {
               <Button size="small"
                 type="button"
 
-                disabled={busy !== null}
+                disabled={locked}
                 onClick={() => void run("apply", () => applyUpdate().then(apply))}
               >
                 {busy === "apply"
@@ -2431,7 +2445,9 @@ function UpdatesTab() {
           </div>
         )}
 
-        {status.channel === "app-bundle" && <InstallCliRow busy={busy} run={run} />}
+        {status.channel === "app-bundle" && (
+          <InstallCliRow busy={busy} disabled={locked} run={run} />
+        )}
         {error && <div className="error">{error}</div>}
       </div>
     </>
@@ -2500,9 +2516,11 @@ function TelemetryTab() {
  *  terminal can't see until it's linked onto PATH. */
 function InstallCliRow({
   busy,
+  disabled,
   run,
 }: {
   busy: "auto" | "apply" | "cli" | null;
+  disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
   const [result, setResult] = useState<InstalledCli | null>(null);
@@ -2547,7 +2565,7 @@ function InstallCliRow({
       <Button size="small"
         type="button"
 
-        disabled={busy !== null}
+        disabled={disabled}
         onClick={() => install(needsForce)}
       >
         {busy === "cli" ? m.chat_working() : needsForce ? m.settings_replace_anyway() : result ? m.settings_relink() : m.settings_install()}
