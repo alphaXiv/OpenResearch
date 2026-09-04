@@ -61,13 +61,25 @@ pub async fn run() {
             })
             .ok()
     });
-    // Ephemeral loopback port so the app never collides with a terminal
-    // `orx up`. Bind-then-drop to reserve it; the tiny race is harmless locally.
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .unwrap_or(4791);
-    imp::run_event_loop(format!("http://127.0.0.1:{port}/"), port);
+    // After an update relaunch, keep the previous port so the open dashboard
+    // tab reconnects; it is reloading itself, so no new tab either. Otherwise an
+    // ephemeral loopback port so the app never collides with a terminal `orx
+    // up`. Bind-then-drop to reserve it; the tiny race is harmless locally.
+    let relaunch_port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
+        .ok()
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok());
+    let port = relaunch_port.unwrap_or_else(|| {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .and_then(|l| l.local_addr())
+            .map(|a| a.port())
+            .unwrap_or(4791)
+    });
+    imp::run_event_loop(
+        format!("http://127.0.0.1:{port}/"),
+        port,
+        relaunch_port.is_some(),
+    );
 }
 
 /// Adopt the user's shell environment in place of the one launchd handed us
@@ -353,7 +365,7 @@ mod imp {
         }
     }
 
-    pub(super) fn run_event_loop(url: String, port: u16) {
+    pub(super) fn run_event_loop(url: String, port: u16, no_browser: bool) {
         let mtm = MainThreadMarker::new().expect("app mode runs on the main thread");
 
         // Dashboard server on background workers (we're inside main's runtime).
@@ -373,18 +385,20 @@ mod imp {
 
         // Open the browser once the server accepts connections.
         let ready_url = url.clone();
-        tokio::spawn(async move {
-            for _ in 0..100 {
-                if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                    .await
-                    .is_ok()
-                {
-                    crate::browser::open_browser(&ready_url);
-                    return;
+        if !no_browser {
+            tokio::spawn(async move {
+                for _ in 0..100 {
+                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                        .await
+                        .is_ok()
+                    {
+                        crate::browser::open_browser(&ready_url);
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        });
+            });
+        }
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);

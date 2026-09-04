@@ -16,6 +16,8 @@
 //! refuses to touch the binary unless the receipt matches it.
 
 use std::io::{IsTerminal, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -661,6 +663,13 @@ pub struct UpdateStatus {
     /// because a release can land between the install and the restart.
     pub installed_version: Option<String>,
     pub restart_required: bool,
+    /// Whether this platform supports `POST /api/update/restart` (see
+    /// [`relaunch`]); pair with `restart_required`. Reported so the dashboard
+    /// only offers a button the server will honor.
+    pub can_restart: bool,
+    /// Identifies this server process, so a client can tell a relaunched server
+    /// from the one it was talking to even when both report the same version.
+    pub instance: &'static str,
 }
 
 pub fn status() -> UpdateStatus {
@@ -677,6 +686,8 @@ pub fn status() -> UpdateStatus {
             .as_ref()
             .is_some_and(|latest| is_outdated(&current, latest)),
         restart_required: installed.is_some(),
+        can_restart: cfg!(unix),
+        instance: instance_id(),
         installed_version: installed.map(|v| v.to_string()),
         latest: latest.map(|v| v.to_string()),
         channel: channel.map(InstallChannel::as_str).unwrap_or("unknown"),
@@ -684,6 +695,93 @@ pub fn status() -> UpdateStatus {
         auto_update: !opted_out() && crate::config::auto_update_enabled(),
         env_disabled: opted_out(),
         current: current.to_string(),
+    }
+}
+
+fn instance_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
+
+/// Environment the app-bundle relaunch hands to the new app: the port the old
+/// one served on, so the dashboard tab that asked for the restart reconnects to
+/// the same origin instead of timing out against a fresh ephemeral port.
+pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
+
+/// Relaunch this process into the copy on disk. Returns only on failure.
+///
+/// A terminal `orx up` execs itself: same PID, same terminal, same arguments
+/// (plus `--no-browser`), so whatever started it (a shell, a supervisor, an SSH launcher's tunnel)
+/// sees an uninterrupted process. The macOS app cannot be exec'd — AppKit and
+/// LaunchServices track the launch, not the image — so it exits and leaves a
+/// detached shell to `open` the bundle once the old process is gone.
+///
+/// `port` is what the dashboard is served on; the relaunch keeps it, and skips
+/// opening a browser, because the tab that asked is reloading itself.
+#[cfg(unix)]
+pub fn relaunch(port: u16) -> std::io::Error {
+    // Same test as `main`: the bundle exe run from a terminal with arguments is
+    // a CLI and execs like one.
+    #[cfg(target_os = "macos")]
+    if crate::commands::app::launched_as_app_bundle() && std::env::args_os().len() == 1 {
+        match current_exe().ok().and_then(|exe| app_bundle_root(&exe)) {
+            Some(root) => return relaunch_app_bundle(&root, port),
+            None => return std::io::Error::other("could not locate the app bundle to relaunch"),
+        }
+    }
+
+    // Not the canonical helper: the launch path is what the installer swapped
+    // under, and canonicalizing a replaced binary would pin the old inode.
+    let Ok(exe) = std::env::current_exe() else {
+        return std::io::Error::other("could not resolve the running executable");
+    };
+    std::process::Command::new(relaunch_target(exe))
+        .args(relaunch_args(std::env::args_os().skip(1)))
+        .exec()
+}
+
+#[cfg(not(unix))]
+pub fn relaunch(_port: u16) -> std::io::Error {
+    std::io::Error::from(std::io::ErrorKind::Unsupported)
+}
+
+/// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
+/// new file at `<path>`, which is what to exec.
+fn relaunch_target(exe: PathBuf) -> PathBuf {
+    exe.to_str()
+        .and_then(|exe| exe.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .unwrap_or(exe)
+}
+
+/// The original arguments plus `--no-browser`: the tab that asked for the
+/// restart reloads itself, so a second tab would only be clutter.
+fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = args.collect();
+    if !args.iter().any(|arg| arg == "--no-browser") {
+        args.push("--no-browser".into());
+    }
+    args
+}
+
+#[cfg(target_os = "macos")]
+fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
+    let spawned = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(r#"while kill -0 "$1" 2>/dev/null; do sleep 0.1; done; exec open -n --env "$3" "$2""#)
+        .arg("sh")
+        .arg(std::process::id().to_string())
+        .arg(root)
+        .arg(format!("{APP_RELAUNCH_PORT_ENV}={port}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // Its own group, so it outlives this process and whatever signals it.
+        .process_group(0)
+        .spawn();
+    match spawned {
+        Ok(_) => std::process::exit(0),
+        Err(err) => err,
     }
 }
 
@@ -999,10 +1097,11 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, parse_manifest, precedence, render, warning_for, CheckCache, InstallChannel,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        now_unix, parse_manifest, precedence, relaunch_args, relaunch_target, render, warning_for,
+        CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
+    use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
 
@@ -1177,6 +1276,28 @@ mod tests {
         // Anything not laid out as a bundle executable.
         assert_eq!(app_bundle_root(Path::new("/usr/local/bin/orx")), None);
         assert_eq!(app_bundle_root(Path::new("/a/Contents/orx")), None);
+    }
+
+    #[test]
+    fn relaunch_target_strips_the_deleted_marker() {
+        assert_eq!(
+            relaunch_target(PathBuf::from("/x/orx (deleted)")),
+            PathBuf::from("/x/orx")
+        );
+        assert_eq!(
+            relaunch_target(PathBuf::from("/x/orx")),
+            PathBuf::from("/x/orx")
+        );
+    }
+
+    #[test]
+    fn relaunch_args_add_no_browser_once() {
+        let args = |list: &[&str]| relaunch_args(list.iter().map(OsString::from));
+        assert_eq!(
+            args(&["up", "--port", "1"]),
+            ["up", "--port", "1", "--no-browser"]
+        );
+        assert_eq!(args(&["up", "--no-browser"]), ["up", "--no-browser"]);
     }
 
     #[test]
