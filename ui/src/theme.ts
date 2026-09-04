@@ -41,6 +41,10 @@ export function setThemePreference(next: ThemePreference): void {
   for (const listener of listeners) listener();
 }
 
+export function getThemePreference(): ThemePreference {
+  return preference;
+}
+
 // Keep "system" mode in sync when the OS theme flips while the app is open,
 // regardless of which view is mounted.
 window

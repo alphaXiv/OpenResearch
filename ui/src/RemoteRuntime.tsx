@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import App from "./App";
 import {
+  disconnectCurrentRemote,
   getRuntime,
   getRemoteStopPreview,
   installRemoteSession,
@@ -35,6 +36,20 @@ function applyRemotePreferences(runtime: RuntimeInfo) {
   if (locale && isLocale(locale)) setLocale(locale);
 }
 
+function GatewayUnavailable({ host, overlay = false }: { host: string; overlay?: boolean }) {
+  return (
+    <div className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
+      <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
+        <h1 className="m-0 text-2xl font-semibold text-text">
+          {m.remote_disconnected_title({ host: ltr(host) })}
+        </h1>
+        <p className="mt-2 mb-0 text-base text-text">{m.offline_banner_disconnected()}</p>
+        <p className="mt-2 mb-0 text-sm text-subtext">{m.remote_gateway_unavailable()}</p>
+      </section>
+    </div>
+  );
+}
+
 function RemoteSetup({
   runtime,
   overlay = false,
@@ -46,7 +61,11 @@ function RemoteSetup({
   const [paths, setPaths] = useState<RemoteInstallPaths | null>(session.installPaths);
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => setPaths(session.installPaths), [session.installPaths]);
+  useEffect(() => setPaths(session.installPaths), [
+    session.installPaths?.binary,
+    session.installPaths?.database,
+    session.installPaths?.cache,
+  ]);
 
   async function install() {
     if (!paths) return;
@@ -64,6 +83,17 @@ function RemoteSetup({
     setBusy(true);
     try {
       await reconnectCurrentRemote();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function disconnect() {
+    setBusy(true);
+    try {
+      await disconnectCurrentRemote();
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     } finally {
@@ -182,12 +212,17 @@ function RemoteSetup({
             )}
           </div>
         )}
-        {needsUpdate && session.error && session.dashboardProtocol !== null && session.dashboardProtocol < 1 && (
-          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
-            <Button variant="danger" disabled={busy} onClick={() => void stopHost()}>
-              {busy ? <Spinner /> : null}
-              {m.remote_stop_host()}
+        {needsUpdate && session.error && (
+          <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
+            <Button disabled={busy} onClick={() => void disconnect()}>
+              {m.remote_disconnect()}
             </Button>
+            {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
+              <Button variant="danger" disabled={busy} onClick={() => void stopHost()}>
+                {busy ? <Spinner /> : null}
+                {m.remote_stop_host()}
+              </Button>
+            )}
           </div>
         )}
       </section>
@@ -260,14 +295,20 @@ export function RuntimeRoot() {
   const keepWorkspace =
     everConnected.current && runtime.session.status !== "disconnected";
   if (!keepWorkspace && runtime.session.status !== "connected") {
-    return <RemoteSetup runtime={runtime} />;
+    return error
+      ? <GatewayUnavailable host={runtime.session.host} />
+      : <RemoteSetup runtime={runtime} />;
   }
   return (
     <div className="relative h-full">
       <App runtime={runtime} />
-      {runtime.session.status !== "connected" && (
+      {(runtime.session.status !== "connected" || error) && (
         <div className="absolute inset-0 z-100 flex items-center justify-center bg-modal-backdrop p-6">
-          <RemoteSetup runtime={runtime} overlay />
+          {error ? (
+            <GatewayUnavailable host={runtime.session.host} overlay />
+          ) : (
+            <RemoteSetup runtime={runtime} overlay />
+          )}
         </div>
       )}
     </div>

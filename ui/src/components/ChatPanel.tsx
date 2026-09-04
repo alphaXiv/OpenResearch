@@ -1,6 +1,7 @@
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
+import { getThemePreference } from "../theme";
 import {
   ArrowDown,
   ArrowUpRight,
@@ -4170,7 +4171,7 @@ function RemoteHostDialog({
     setOpeningHost(host);
     try {
       const session = await createRemoteSession(host, {
-        theme: localStorage.getItem("orx:theme"),
+        theme: getThemePreference(),
         locale: getLocale(),
       });
       remoteWindow.location.replace(session.gatewayUrl);

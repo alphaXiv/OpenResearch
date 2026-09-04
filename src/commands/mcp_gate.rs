@@ -32,7 +32,6 @@ struct GateEnv {
     up_port: u16,
     session_id: String,
     token: String,
-    up_auth_token: Option<String>,
 }
 
 impl GateEnv {
@@ -45,12 +44,10 @@ impl GateEnv {
             std::env::var("ORX_SESSION_ID").map_err(|_| anyhow!("ORX_SESSION_ID missing"))?;
         let token =
             std::env::var("ORX_GATE_TOKEN").map_err(|_| anyhow!("ORX_GATE_TOKEN missing"))?;
-        let up_auth_token = std::env::var(crate::local::chat::UP_AUTH_TOKEN_ENV).ok();
         Ok(Self {
             up_port,
             session_id,
             token,
-            up_auth_token,
         })
     }
 }
@@ -132,17 +129,14 @@ pub async fn run() -> Result<()> {
                     "toolUseId": args.get("tool_use_id").and_then(Value::as_str),
                 });
                 let http = http.clone();
-                let up_auth_token = env.up_auth_token.clone();
                 let out = out_tx.clone();
                 tokio::spawn(async move {
-                    let decision = relay(&http, &url, body, up_auth_token.as_deref())
-                        .await
-                        .unwrap_or_else(|e| {
-                            json!({
-                                "behavior": "deny",
-                                "message": format!("orx approval bridge unavailable: {e}"),
-                            })
-                        });
+                    let decision = relay(&http, &url, body).await.unwrap_or_else(|e| {
+                        json!({
+                            "behavior": "deny",
+                            "message": format!("orx approval bridge unavailable: {e}"),
+                        })
+                    });
                     // The permission-prompt-tool contract: the decision rides
                     // JSON-*stringified* inside an MCP text content block.
                     let _ = out.send(reply(
@@ -176,17 +170,9 @@ fn reply(id: Option<Value>, result: Value) -> Value {
 
 /// POST the permission request to `orx up` and return its decision JSON.
 /// The response body is the decision verbatim (`{"behavior": ...}`).
-async fn relay(
-    http: &reqwest::Client,
-    url: &str,
-    body: Value,
-    auth_token: Option<&str>,
-) -> Result<Value> {
-    let mut request = http.post(url);
-    if let Some(token) = auth_token {
-        request = request.bearer_auth(token);
-    }
-    let resp = request
+async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> {
+    let resp = http
+        .post(url)
         .json(&body)
         .send()
         .await

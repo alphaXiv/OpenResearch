@@ -881,27 +881,17 @@ pub(crate) fn write_mcp_config(
 ) -> Result<PathBuf> {
     let orx = std::env::current_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let env = serde_json::Map::from_iter([
-        (
-            "ORX_UP_PORT".to_string(),
-            serde_json::Value::String(up_port.to_string()),
-        ),
-        (
-            "ORX_SESSION_ID".to_string(),
-            serde_json::Value::String(session_id.to_string()),
-        ),
-        (
-            "ORX_GATE_TOKEN".to_string(),
-            serde_json::Value::String(token.to_string()),
-        ),
-    ]);
     let config = serde_json::json!({
         "mcpServers": {
             "orx": {
                 "type": "stdio",
                 "command": orx.to_string_lossy(),
                 "args": ["mcp-gate"],
-                "env": env,
+                "env": {
+                    "ORX_UP_PORT": up_port.to_string(),
+                    "ORX_SESSION_ID": session_id,
+                    "ORX_GATE_TOKEN": token,
+                },
             },
         }
     });

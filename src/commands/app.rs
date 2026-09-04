@@ -364,7 +364,6 @@ mod imp {
                 no_browser: true,
                 no_agent: false,
                 model: None,
-                remote_session_stdin: false,
                 remote_host: false,
             };
             if let Err(err) = crate::commands::up::run(args).await {

@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
@@ -77,6 +77,9 @@ pub(crate) enum ControlResponse {
         descriptor: HostDescriptor,
         preview: StopPreview,
     },
+    Stopping {
+        descriptor: HostDescriptor,
+    },
     Attached {
         descriptor: HostDescriptor,
     },
@@ -105,12 +108,6 @@ impl RemoteAuth {
         }
     }
 
-    pub(crate) fn legacy(session: &str, callback: &str) -> Self {
-        let auth = Self::new(callback);
-        auth.register(session);
-        auth
-    }
-
     pub(crate) fn register(&self, token: &str) {
         self.attachments.write().unwrap().insert(digest(token));
     }
@@ -120,11 +117,7 @@ impl RemoteAuth {
     }
 
     pub(crate) fn matches_attachment(&self, provided: &[u8]) -> bool {
-        self.attachments
-            .read()
-            .unwrap()
-            .iter()
-            .any(|candidate| constant_time_eq(provided, candidate))
+        self.attachments.read().unwrap().contains(provided)
     }
 
     pub(crate) fn matches_callback(&self, provided: &[u8]) -> bool {
@@ -273,8 +266,12 @@ pub(crate) async fn start_control_server(
     let task_descriptor = descriptor.clone();
     let task = tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else {
-                break;
+            let (stream, _) = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(_) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
             };
             if stream
                 .peer_cred()
@@ -310,10 +307,16 @@ async fn handle_control(
     stop: watch::Sender<bool>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    let line = read_bounded_line(&mut reader).await?;
+    let line = tokio::time::timeout(CONTROL_TIMEOUT, read_bounded_line(&mut reader))
+        .await
+        .map_err(|_| anyhow!("Timed out reading a remote-host control message."))??;
     let request: ControlRequest = serde_json::from_str(&line)?;
     match request {
         ControlRequest::Status => {
+            if stopping.load(Ordering::SeqCst) {
+                write_response(reader.get_mut(), &ControlResponse::Stopping { descriptor }).await?;
+                return Ok(());
+            }
             let preview = stop_preview(&chat, &auth).await;
             write_response(
                 reader.get_mut(),
@@ -328,6 +331,16 @@ async fn handle_control(
             expected_instance_id,
             token,
         } => {
+            if stopping.load(Ordering::SeqCst) {
+                write_response(
+                    reader.get_mut(),
+                    &ControlResponse::Error {
+                        error: "The remote OpenResearch host is stopping.".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             if expected_instance_id != descriptor.instance_id {
                 write_response(
                     reader.get_mut(),
@@ -339,12 +352,18 @@ async fn handle_control(
                 return Ok(());
             }
             validate_token(&token)?;
-            auth.register(&token);
             write_response(reader.get_mut(), &ControlResponse::Attached { descriptor }).await?;
-            let mut byte = [0_u8; 1];
+            auth.register(&token);
             let result = async {
-                while reader.read(&mut byte).await? > 0 {}
-                Ok::<_, std::io::Error>(())
+                loop {
+                    let line =
+                        tokio::time::timeout(ATTACHMENT_TIMEOUT, read_bounded_line(&mut reader))
+                            .await
+                            .map_err(|_| anyhow!("Remote attachment heartbeat expired."))??;
+                    if line != "ping" {
+                        return Err(anyhow!("Invalid remote attachment heartbeat."));
+                    }
+                }
             }
             .await;
             auth.unregister(&token);
@@ -354,8 +373,22 @@ async fn handle_control(
             expected_instance_id,
             expected_preview,
         } => {
+            if stopping
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
+            {
+                write_response(
+                    reader.get_mut(),
+                    &ControlResponse::Error {
+                        error: "The remote OpenResearch host is already stopping.".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             let preview = stop_preview(&chat, &auth).await;
             if expected_instance_id != descriptor.instance_id || expected_preview != preview {
+                stopping.store(false, Ordering::SeqCst);
                 write_response(
                     reader.get_mut(),
                     &ControlResponse::Conflict {
@@ -368,9 +401,9 @@ async fn handle_control(
                 .await?;
                 return Ok(());
             }
-            stopping.store(true, Ordering::SeqCst);
-            write_response(reader.get_mut(), &ControlResponse::Accepted).await?;
+            let response = write_response(reader.get_mut(), &ControlResponse::Accepted).await;
             let _ = stop.send(true);
+            response?;
         }
     }
     Ok(())
@@ -399,9 +432,18 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
 
 async fn ensure(expected_instance: Option<String>) -> Result<()> {
     let data_dir = canonical_data_dir()?;
-    if let Some(descriptor) = live_descriptor(&data_dir).await {
-        verify_expected(&descriptor, expected_instance.as_deref())?;
-        return print_descriptor(&descriptor);
+    match live_descriptor(&data_dir).await {
+        LiveHost::Running(descriptor) => {
+            verify_expected(&descriptor, expected_instance.as_deref())?;
+            return print_descriptor(&descriptor);
+        }
+        LiveHost::Stopping(descriptor) if expected_instance.is_some() => {
+            verify_expected(&descriptor, expected_instance.as_deref())?;
+            return Err(anyhow!(
+                "The expected OpenResearch host is stopping. Retry after it exits."
+            ));
+        }
+        LiveHost::Stopping(_) | LiveHost::Missing => {}
     }
     if expected_instance.is_some() {
         ensure_server_lock_free(&data_dir)?;
@@ -412,14 +454,15 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
 
     let mut start_lock = open_lock(&shared_path(&data_dir, "start.lock")?)?;
     let _start_guard = start_lock.write()?;
-    if let Some(descriptor) = live_descriptor(&data_dir).await {
-        return print_descriptor(&descriptor);
+    match live_descriptor(&data_dir).await {
+        LiveHost::Running(descriptor) => return print_descriptor(&descriptor),
+        LiveHost::Stopping(_) => wait_for_server_lock_free(&data_dir).await?,
+        LiveHost::Missing => ensure_server_lock_free(&data_dir)?,
     }
-    ensure_server_lock_free(&data_dir)?;
     spawn_detached_host()?;
     let started = tokio::time::timeout(START_TIMEOUT, async {
         loop {
-            if let Some(descriptor) = live_descriptor(&data_dir).await {
+            if let LiveHost::Running(descriptor) = live_descriptor(&data_dir).await {
                 return descriptor;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -460,19 +503,23 @@ async fn attach(expected_instance: &str) -> Result<()> {
     let response: ControlResponse = serde_json::from_str(&read_bounded_line(&mut reader).await?)?;
     match response {
         ControlResponse::Attached { .. } => {
-            println!("{ATTACHED_MARKER}");
-            tokio::io::stdout().flush().await?;
+            let mut stdout = tokio::io::stdout();
+            stdout
+                .write_all(format!("{ATTACHED_MARKER}\n").as_bytes())
+                .await?;
+            stdout.flush().await?;
         }
-        ControlResponse::Error { error } | ControlResponse::Conflict { error, .. } => {
-            return Err(anyhow!(error));
-        }
+        ControlResponse::Error { error } => return Err(anyhow!(error)),
         _ => return Err(anyhow!("Unexpected remote-host attachment response.")),
     }
 
     loop {
         let mut line = String::new();
         match tokio::time::timeout(ATTACHMENT_TIMEOUT, input.read_line(&mut line)).await {
-            Ok(Ok(read)) if read > 0 && line.trim() == "ping" => {}
+            Ok(Ok(read)) if read > 0 && line.trim() == "ping" => {
+                reader.get_mut().write_all(b"ping\n").await?;
+                reader.get_mut().flush().await?;
+            }
             _ => return Ok(()),
         }
     }
@@ -494,26 +541,43 @@ async fn stop() -> Result<()> {
     Ok(())
 }
 
-async fn live_descriptor(data_dir: &Path) -> Option<HostDescriptor> {
-    let response = control_exchange(data_dir, &ControlRequest::Status)
-        .await
-        .ok()?;
-    if !server_lock_is_held(data_dir).ok()? {
-        return None;
+enum LiveHost {
+    Running(HostDescriptor),
+    Stopping(HostDescriptor),
+    Missing,
+}
+
+async fn live_descriptor(data_dir: &Path) -> LiveHost {
+    let Ok(response) = control_exchange(data_dir, &ControlRequest::Status).await else {
+        return LiveHost::Missing;
+    };
+    if !server_lock_is_held(data_dir).unwrap_or(false) {
+        return LiveHost::Missing;
     }
     match response {
-        ControlResponse::Status { descriptor, .. } => Some(descriptor),
-        _ => None,
+        ControlResponse::Status { descriptor, .. } => LiveHost::Running(descriptor),
+        ControlResponse::Stopping { descriptor } => LiveHost::Stopping(descriptor),
+        _ => LiveHost::Missing,
     }
 }
 
 fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
     let mut lock = open_lock(&shared_path(data_dir, "lock")?)?;
-    let held = match lock.try_write() {
-        Ok(_) => Ok(false),
-        Err(_) => Ok(true),
-    };
-    held
+    let held = lock.try_write().is_err();
+    Ok(held)
+}
+
+async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
+    tokio::time::timeout(START_TIMEOUT, async {
+        loop {
+            if !server_lock_is_held(data_dir)? {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("Timed out waiting for the previous OpenResearch host to stop."))?
 }
 
 async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<ControlResponse> {
@@ -620,7 +684,7 @@ fn ensure_server_lock_free(data_dir: &Path) -> Result<()> {
             .map(|descriptor| descriptor.hostname)
             .unwrap_or_else(|| "the remote machine".into());
         anyhow!(
-            "OpenResearch is running on {host}, but its private control channel is unavailable. Stop that process before starting another host."
+            "Another OpenResearch dashboard is using this database on {host}. Stop it before starting a persistent host."
         )
     })
 }

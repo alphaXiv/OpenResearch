@@ -8,7 +8,7 @@
 //! Fully local: no OpenResearch api anywhere on these paths (the /api/papers
 //! routes proxy alphaXiv's public, token-free endpoints — needed because the
 //! browser can't call api.alphaxiv.org cross-origin). The normal dashboard is
-//! loopback-only; the hidden remote-session mode also requires a session bearer.
+//! loopback-only; the hidden persistent-host mode also requires a session bearer.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -30,7 +30,6 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc;
 
 use crate::commands::remote_host::{DashboardLock, DashboardLockMode, HostDescriptor, RemoteAuth};
@@ -47,35 +46,16 @@ use crate::{browser, UpArgs};
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
     let persistent_host = args.remote_host;
-    let mut remote_input = if args.remote_session_stdin {
-        let mut input = BufReader::new(tokio::io::stdin());
-        let mut token = String::new();
-        tokio::time::timeout(Duration::from_secs(10), input.read_line(&mut token))
-            .await
-            .map_err(|_| anyhow!("Timed out waiting for the remote session credential."))??;
-        let token = token.trim_end_matches(['\r', '\n']);
-        if token.len() < 32
-            || token.len() > 256
-            || !token.bytes().all(|byte| byte.is_ascii_graphic())
-        {
-            return Err(anyhow!("Invalid remote session credential."));
-        }
-        let callback = derive_callback_token(token);
-        local::chat::set_up_auth_token(callback.clone());
-        Some((RemoteAuth::legacy(token, &callback), input))
-    } else {
-        None
-    };
     let remote_auth = if persistent_host {
         let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
         local::chat::set_up_auth_token(callback.clone());
         Some(RemoteAuth::new(&callback))
     } else {
-        remote_input.as_ref().map(|(auth, _)| auth.clone())
+        None
     };
     let dashboard_lock = DashboardLock::acquire(
         &crate::commands::remote_host::canonical_data_dir()?,
-        if persistent_host || remote_input.is_some() {
+        if persistent_host {
             DashboardLockMode::Exclusive
         } else {
             DashboardLockMode::Shared
@@ -184,10 +164,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
     // URL, and skip the (futile) browser-open. Otherwise, today's local flow.
-    if remote_input.is_some() {
-        println!("{}", crate::commands::up_remote::REMOTE_READY_MARKER);
-        let _ = tokio::io::stdout().flush().await;
-    } else if let Some(session) = crate::remote::detect_ssh_session() {
+    if let Some(session) = crate::remote::detect_ssh_session() {
         eprint!("{}", session.instructions(actual_port));
     } else {
         eprintln!("orx up: dashboard on {url}");
@@ -212,13 +189,6 @@ pub async fn run(args: UpArgs) -> Result<()> {
             changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
             _ = persistent_shutdown_signal() => false,
         }
-    } else if let Some((_, input)) = remote_input.take() {
-        tokio::select! {
-            r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
-            _ = remote_heartbeat(input) => eprintln!("orx up: remote session ended"),
-            _ = shutdown_signal() => eprintln!("orx up: shutting down"),
-        }
-        false
     } else {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
@@ -315,23 +285,6 @@ struct AppState {
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
-}
-
-fn derive_callback_token(session: &str) -> String {
-    Sha256::digest(format!("orx-callback:{session}").as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-async fn remote_heartbeat(mut input: BufReader<tokio::io::Stdin>) {
-    loop {
-        let mut line = String::new();
-        match tokio::time::timeout(Duration::from_secs(20), input.read_line(&mut line)).await {
-            Ok(Ok(read)) if read > 0 && line.trim() == "ping" => {}
-            _ => return,
-        }
-    }
 }
 
 async fn project_publication_lock(
@@ -711,6 +664,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/update/apply"
             | "/api/update/auto"
             | "/api/update/install-cli"
+            | "/api/settings/data-dir"
+            | "/api/settings/data-dir/move"
             | "/api/settings/ssh/master"
             | "/api/settings/ssh/preflight"
             | "/api/settings/ssh/connect"
@@ -3990,8 +3945,16 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     .map_err(bad_request)?;
 
     let lock_path = std::path::PathBuf::from(&path);
+    let persistent_host = state.remote_instance_id.is_some();
     let next_lock = tokio::task::spawn_blocking(move || {
-        DashboardLock::acquire(&lock_path, DashboardLockMode::Shared)
+        DashboardLock::acquire(
+            &lock_path,
+            if persistent_host {
+                DashboardLockMode::Exclusive
+            } else {
+                DashboardLockMode::Shared
+            },
+        )
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("dashboard lock task failed: {e}")))?
@@ -4129,8 +4092,16 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     }
 
     let lock_target = std::path::PathBuf::from(&path);
+    let persistent_host = state.remote_instance_id.is_some();
     let next_lock = match tokio::task::spawn_blocking(move || {
-        DashboardLock::acquire(&lock_target, DashboardLockMode::Shared)
+        DashboardLock::acquire(
+            &lock_target,
+            if persistent_host {
+                DashboardLockMode::Exclusive
+            } else {
+                DashboardLockMode::Shared
+            },
+        )
     })
     .await
     {
@@ -6104,6 +6075,7 @@ async fn run_shell_command(
     Path(id): Path<String>,
     Json(req): Json<ShellCommandReq>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let command = req.command.trim().to_string();
     if command.is_empty() {
@@ -6262,6 +6234,7 @@ async fn recover_chat_turn(
     Path((id, turn_id)): Path<(String, String)>,
     Json(req): Json<RecoverChatReq>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let result = state
         .chat
@@ -6297,6 +6270,7 @@ async fn fork_chat_turn(
     Path(id): Path<String>,
     Json(req): Json<ForkChatReq>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let edit_text = match req.text {
         Some(text) if !text.trim().is_empty() => Some(text),
@@ -6415,6 +6389,7 @@ async fn retry_queued_chat(
     State(state): State<AppState>,
     Path((id, item_id)): Path<(String, String)>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let retried = state.chat.retry_queued(&id, &item_id)?;
     if !retried {
@@ -6452,6 +6427,7 @@ async fn respond_chat(
     Path(id): Path<String>,
     Json(req): Json<RespondReq>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     state
         .chat
         .respond(local::chat::PromptAnswer {
@@ -6845,6 +6821,8 @@ mod tests {
             "/api/project-path/pick",
             "/api/update",
             "/api/update/apply",
+            "/api/settings/data-dir",
+            "/api/settings/data-dir/move",
             "/api/settings/ssh/master",
             "/api/settings/ssh/preflight",
             "/api/settings/ssh/connect",

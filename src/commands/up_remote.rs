@@ -38,8 +38,9 @@ use crate::{browser, UpArgs};
 
 /// How long to wait for the remote server to answer through the forward.
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 pub(crate) const DASHBOARD_PROTOCOL: u32 = 1;
-pub(crate) const REMOTE_READY_MARKER: &str = "ORX_REMOTE_READY=1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,10 +170,22 @@ impl RemoteSessionManager {
     ) -> Result<(bool, RemoteSessionInfo)> {
         let mut registry = self.registry.lock().await;
         if let Some(id) = registry.by_host.get(&host) {
-            if let Some(session) = registry.by_id.get(id) {
-                let mut info = session.info.write().await;
-                info.ui_preferences = preferences;
-                return Ok((false, info.clone()));
+            if let Some(session) = registry.by_id.get(id).cloned() {
+                drop(registry);
+                let reconnect = {
+                    let mut info = session.info.write().await;
+                    info.ui_preferences = preferences;
+                    matches!(
+                        info.status,
+                        RemoteSessionStatus::Disconnected | RemoteSessionStatus::Failed
+                    )
+                };
+                let info = if reconnect {
+                    reconnect_session(session).await
+                } else {
+                    session.info.read().await.clone()
+                };
+                return Ok((false, info));
             }
         }
 
@@ -322,6 +335,25 @@ async fn update_session_if_current(
 }
 
 async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
+    let timed_session = session.clone();
+    if tokio::time::timeout(
+        PREPARE_TIMEOUT,
+        prepare_remote_session_inner(timed_session, generation),
+    )
+    .await
+    .is_err()
+    {
+        set_session_state_if_current(
+            &session,
+            generation,
+            RemoteSessionStatus::Failed,
+            Some("Timed out preparing the remote OpenResearch host.".into()),
+        )
+        .await;
+    }
+}
+
+async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u64) {
     let _operation = session.operation.lock().await;
     if session.generation.load(Ordering::SeqCst) != generation {
         return;
@@ -454,6 +486,8 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
             update_session_if_current(&session, generation, |info| {
                 info.status = RemoteSessionStatus::NeedsUpdate;
                 info.error = message;
+                info.version = Some(remote_orx.version.clone());
+                info.dashboard_protocol = protocol;
                 info.install_paths = Some((&paths).into());
             })
             .await;
@@ -535,12 +569,20 @@ async fn install_and_connect(
     requested: RemoteInstallPathsInfo,
 ) -> Result<RemoteSessionInfo> {
     let _operation = session.operation.lock().await;
-    let previous = session.info.read().await.status;
+    let (previous, remote_protocol) = {
+        let info = session.info.read().await;
+        (info.status, info.dashboard_protocol)
+    };
     if !matches!(
         previous,
         RemoteSessionStatus::NeedsInstall | RemoteSessionStatus::NeedsUpdate
     ) {
         return Ok(session.info.read().await.clone());
+    }
+    if remote_protocol.is_some_and(|protocol| protocol > DASHBOARD_PROTOCOL) {
+        return Err(anyhow!(
+            "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect."
+        ));
     }
     if crate::telemetry::build_channel() != "production" {
         return Err(anyhow!(
@@ -563,7 +605,7 @@ async fn install_and_connect(
     {
         return Ok(session.info.read().await.clone());
     }
-    let result = async {
+    let result = tokio::time::timeout(INSTALL_TIMEOUT, async {
         let paths = remote_install_paths(&session.target, &host)
             .await?
             .with_requested(requested.binary, requested.database, requested.cache);
@@ -571,8 +613,10 @@ async fn install_and_connect(
         let remote_orx = install_remote_orx(&session.target, &host, &paths).await?;
         let protocol = remote_dashboard_protocol(&session.target, &host, &remote_orx.path).await?;
         Ok::<_, crate::error::Error>((paths, remote_orx, protocol))
-    }
-    .await;
+    })
+    .await
+    .map_err(|_| anyhow!("Timed out installing OpenResearch on '{host}'."))
+    .and_then(|result| result);
     let (paths, remote_orx, protocol) = match result {
         Ok(result) => result,
         Err(error) => {
@@ -608,7 +652,20 @@ async fn install_and_connect(
         info.dashboard_protocol = protocol;
         info.install_paths = None;
     }
-    let descriptor = ensure_remote_host(&session.target, &remote_orx.path, &paths, None).await?;
+    let descriptor = match ensure_remote_host(&session.target, &remote_orx.path, &paths, None).await
+    {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            set_session_state_if_current(
+                &session,
+                generation,
+                RemoteSessionStatus::Failed,
+                Some(error.to_string()),
+            )
+            .await;
+            return Err(error);
+        }
+    };
     *session.expected_instance.write().await = Some(descriptor.instance_id.clone());
     start_connection(
         session.clone(),
@@ -634,8 +691,14 @@ async fn start_connection(
         return;
     }
     let mut connection = session.connection.lock().await;
+    if session.generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
     if let Some(control) = connection.take() {
         stop_connection(control).await;
+    }
+    if session.generation.load(Ordering::SeqCst) != generation {
+        return;
     }
     if !set_session_state_if_current(
         &session,
@@ -669,10 +732,10 @@ async fn start_connection(
 
 async fn disconnect_session(session: &Arc<RemoteSession>) {
     session.generation.fetch_add(1, Ordering::SeqCst);
-    *session.route.write().await = None;
     if let Some(control) = session.connection.lock().await.take() {
         stop_connection(control).await;
     }
+    *session.route.write().await = None;
     set_session_state(session, RemoteSessionStatus::Disconnected, None).await;
 }
 
@@ -1128,6 +1191,7 @@ async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serd
     Json(serde_json::json!({
         "kind": "ssh",
         "version": env!("CARGO_PKG_VERSION"),
+        "dashboardProtocol": DASHBOARD_PROTOCOL,
         "session": session.info.read().await.clone(),
     }))
 }

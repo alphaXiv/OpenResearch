@@ -1073,6 +1073,7 @@
   "remote_switch_host": "切换主机…",
   "remote_disconnect": "断开连接",
   "remote_persistence_explanation": "关闭此标签页或断开连接后，代理和实验仍会继续运行。审批请求最多保持待处理 55 分钟。主机重启或管理员策略可能会停止 OpenResearch。",
+  "remote_gateway_unavailable": "请重新启动本地 OpenResearch 并再次选择此 SSH 主机。远程主机上的工作仍在继续。",
   "remote_stop_host": "停止主机上的 OpenResearch…",
   "remote_start_new_host": "启动新的 OpenResearch 主机",
   "remote_stopping_host": "正在停止主机…",

@@ -823,7 +823,7 @@ export interface RemoteSessionInfo {
 
 export type RuntimeInfo =
   | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; session: RemoteSessionInfo };
+  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
 export const getRuntime = () => get<RuntimeInfo>("/_orx/runtime");
 

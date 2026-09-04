@@ -1073,6 +1073,7 @@
   "remote_switch_host": "Switch host…",
   "remote_disconnect": "Disconnect",
   "remote_persistence_explanation": "Closing this tab or disconnecting leaves agents and experiments running. Approval requests remain pending for up to 55 minutes. A host restart or administrator policy may stop OpenResearch.",
+  "remote_gateway_unavailable": "Restart local OpenResearch and select this SSH host again. Work on the remote host continues.",
   "remote_stop_host": "Stop OpenResearch on host…",
   "remote_start_new_host": "Start a new OpenResearch host",
   "remote_stopping_host": "Stopping host…",

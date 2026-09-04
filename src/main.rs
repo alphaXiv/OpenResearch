@@ -558,11 +558,8 @@ pub struct UpArgs {
     /// opencode model override, e.g. `anthropic/claude-sonnet-4-5`.
     #[arg(long)]
     pub model: Option<String>,
-    /// Internal authenticated dashboard mode used behind a local SSH gateway.
-    #[arg(long, hide = true)]
-    pub remote_session_stdin: bool,
     /// Internal persistent dashboard/agent-host mode.
-    #[arg(long, hide = true, conflicts_with = "remote_session_stdin")]
+    #[arg(long, hide = true)]
     pub remote_host: bool,
 }
 
