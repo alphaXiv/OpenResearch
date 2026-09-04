@@ -60,6 +60,7 @@ import {
   getChatMessages,
   getProjectStarterPrompts,
   getSkills,
+  type HarnessId,
   type StarterPrompt,
   interruptChat,
   listChatSessions,
@@ -5100,31 +5101,35 @@ export function ChatPanel({
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
 
-  // Keyed by project+harness so a switch never shows another project's prompts.
+  // Keyed by project so a switch never shows another project's prompts; a
+  // harness or model switch keeps them, and only a failed harness is retried.
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const [starter, setStarter] = useState<{
-    key: string;
+    projectId: string;
+    harness: HarnessId;
     prompts: StarterPrompt[] | null;
   } | null>(null);
-  const starterKey = `${projectId}\0${starterHarness ?? ""}\0${starterModel ?? ""}`;
+  const starterSettled =
+    starter?.projectId === projectId &&
+    (starter.prompts !== null || starter.harness === starterHarness);
   const starterVisible = mainView === "chat" && !threadMounted && !historyLoading;
   useEffect(() => {
-    if (!starterVisible || !starterHarness) return;
+    if (!starterVisible || !starterHarness || starterSettled) return;
     let current = true;
     getProjectStarterPrompts(projectId, starterHarness, starterModel, getLocale())
       .then((result) => {
-        if (current) setStarter({ key: starterKey, prompts: result.prompts });
+        if (current) setStarter({ projectId, harness: starterHarness, prompts: result.prompts });
       })
       .catch(() => {
-        if (current) setStarter({ key: starterKey, prompts: null });
+        if (current) setStarter({ projectId, harness: starterHarness, prompts: null });
       });
     return () => {
       current = false;
     };
-  }, [projectId, starterHarness, starterModel, starterKey, starterVisible]);
-  const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
-  const starterLoading = starterHarness !== null && starter?.key !== starterKey;
+  }, [projectId, starterHarness, starterModel, starterSettled, starterVisible]);
+  const starterPrompts = starterSettled && starter ? starter.prompts : null;
+  const starterLoading = starterHarness !== null && !starterSettled;
   const applyStarterPrompt = (prompt: string) => {
     setDraft(prompt);
     setSkillMenuDismissed(false);
@@ -6015,7 +6020,7 @@ export function ChatPanel({
               ))}
             </div>
           )}
-          {starterPrompts && (
+          {starterPrompts && starterPrompts.length > 0 && (
             <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
               {starterPrompts.map((item, index) => {
                 const Icon = STARTER_ICONS[index];
