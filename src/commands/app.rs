@@ -365,6 +365,7 @@ mod imp {
                 no_agent: false,
                 model: None,
                 remote_session_stdin: false,
+                remote_host: false,
             };
             if let Err(err) = crate::commands::up::run(args).await {
                 eprintln!("openresearch app: dashboard server exited: {err}");

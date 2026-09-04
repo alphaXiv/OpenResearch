@@ -881,7 +881,7 @@ pub(crate) fn write_mcp_config(
 ) -> Result<PathBuf> {
     let orx = std::env::current_exe()
         .map_err(|e| anyhow!("cannot resolve orx binary path for the mcp bridge: {e}"))?;
-    let mut env = serde_json::Map::from_iter([
+    let env = serde_json::Map::from_iter([
         (
             "ORX_UP_PORT".to_string(),
             serde_json::Value::String(up_port.to_string()),
@@ -895,12 +895,6 @@ pub(crate) fn write_mcp_config(
             serde_json::Value::String(token.to_string()),
         ),
     ]);
-    if let Some(token) = crate::local::chat::up_auth_token() {
-        env.insert(
-            "ORX_UP_AUTH_TOKEN".to_string(),
-            serde_json::Value::String(token.to_string()),
-        );
-    }
     let config = serde_json::json!({
         "mcpServers": {
             "orx": {
@@ -916,11 +910,12 @@ pub(crate) fn write_mcp_config(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap())
-        .map_err(|e| anyhow!("cannot write {}: {e}", path.display()))?;
-    #[cfg(unix)]
-    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-        .map_err(|e| anyhow!("cannot protect {}: {e}", path.display()))?;
+    crate::local::git::atomic_write_with_mode(
+        &path,
+        &serde_json::to_vec_pretty(&config).unwrap(),
+        Some(0o600),
+    )
+    .map_err(|e| anyhow!("cannot protect {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -2133,10 +2128,18 @@ mod tests {
         let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
         let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
         let config: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
         assert!(env.values().all(serde_json::Value::is_string));
         assert!(!env.contains_key("ORX_UP_AUTH_TOKEN"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
         std::fs::remove_dir_all(repo).unwrap();
     }
 

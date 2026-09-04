@@ -69,6 +69,7 @@ import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, Spinner } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
+import { RemoteStatus } from "./components/RemoteStatus";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -815,9 +816,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
     const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
-    const prefix = runtime.kind === "ssh" ? `SSH: ${runtime.session.host} — ` : "";
-    document.title = name ? `${prefix}${autoDir(name)} — OpenResearch` : `${prefix}OpenResearch`;
-  }, [homeOpen, startupError, uiState, activeProject, runtime]);
+    document.title = name ? `${autoDir(name)} — OpenResearch` : "OpenResearch";
+  }, [homeOpen, startupError, uiState, activeProject]);
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
@@ -1668,6 +1668,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
           <p>{startupError}</p>
           <Button variant="primary" onClick={loadInitialState}>{m.app_retry()}</Button>
         </div>
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1678,6 +1679,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1711,6 +1713,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
             }}
          />
         )}
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1730,16 +1733,19 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       {homeOpen ? (
-        <ProjectsHome
-          remote={runtime.kind === "ssh"}
-          projects={projects}
-          onOpen={(id) => {
-            setProjectId(id);
-            setHomeOpen(false);
-          }}
-          onCreated={onProjectCreated}
-          onDeleted={onProjectDeleted}
-       />
+        <>
+          <ProjectsHome
+            remote={runtime.kind === "ssh"}
+            projects={projects}
+            onOpen={(id) => {
+              setProjectId(id);
+              setHomeOpen(false);
+            }}
+            onCreated={onProjectCreated}
+            onDeleted={onProjectDeleted}
+         />
+          {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+        </>
       ) : (
       <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
         {projectId && (

@@ -483,8 +483,10 @@ pub(crate) fn atomic_write_with_mode(
         let mut file = options.open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            std::fs::set_permissions(&temporary, metadata.permissions())?;
+        if mode.is_none() {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                std::fs::set_permissions(&temporary, metadata.permissions())?;
+            }
         }
         if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()) {
             return Err(anyhow!(

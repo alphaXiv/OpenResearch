@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +33,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::mpsc;
 
+use crate::commands::remote_host::{DashboardLock, DashboardLockMode, HostDescriptor, RemoteAuth};
 use crate::error::{anyhow, Result};
 use crate::local;
 use crate::local::chat::ChatHost;
@@ -45,6 +46,7 @@ use crate::{browser, UpArgs};
 
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
+    let persistent_host = args.remote_host;
     let mut remote_input = if args.remote_session_stdin {
         let mut input = BufReader::new(tokio::io::stdin());
         let mut token = String::new();
@@ -60,32 +62,29 @@ pub async fn run(args: UpArgs) -> Result<()> {
         }
         let callback = derive_callback_token(token);
         local::chat::set_up_auth_token(callback.clone());
-        Some((RemoteAuth::new(token, &callback), input))
+        Some((RemoteAuth::legacy(token, &callback), input))
     } else {
         None
     };
-    let mut remote_session_lock = if remote_input.is_some() {
-        let data_dir = crate::store::data_dir();
-        std::fs::create_dir_all(&data_dir)?;
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(data_dir.join("remote-session.lock"))?;
-        Some(fd_lock::RwLock::new(file))
+    let remote_auth = if persistent_host {
+        let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+        local::chat::set_up_auth_token(callback.clone());
+        Some(RemoteAuth::new(&callback))
     } else {
-        None
+        remote_input.as_ref().map(|(auth, _)| auth.clone())
     };
-    let _remote_session_guard = remote_session_lock
-        .as_mut()
-        .map(fd_lock::RwLock::try_write)
-        .transpose()
-        .map_err(|_| {
-            anyhow!("Another remote OpenResearch session is already using this database.")
-        })?;
+    let dashboard_lock = DashboardLock::acquire(
+        &crate::commands::remote_host::canonical_data_dir()?,
+        if persistent_host || remote_input.is_some() {
+            DashboardLockMode::Exclusive
+        } else {
+            DashboardLockMode::Shared
+        },
+    )?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
+    let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
@@ -105,6 +104,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let codex = Arc::new(local::codex::CodexHost::new());
     let claude = Arc::new(local::claude::ClaudeHost::new());
     claude.start_reaper();
+    let remote_instance_id = persistent_host.then(|| uuid::Uuid::new_v4().to_string());
+    let stopping = Arc::new(AtomicBool::new(false));
     let state = AppState {
         agent: agent.clone(),
         chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
@@ -116,9 +117,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
+        remote_instance_id: remote_instance_id.clone(),
+        stopping: stopping.clone(),
+        dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
-    state.chat.set_up_port(port);
+    state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
     {
         let chat = state.chat.clone();
@@ -151,13 +155,32 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_gate.clone(),
     ));
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
-    spawn_background_tasks(remote_input.is_none());
+    spawn_background_tasks(remote_auth.is_none());
 
-    let app = router(
-        state.clone(),
-        remote_input.as_ref().map(|(auth, _)| auth.clone()),
-    );
-    let url = format!("http://127.0.0.1:{port}");
+    let app = router(state.clone(), remote_auth.clone());
+    let url = format!("http://127.0.0.1:{actual_port}");
+    let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
+    let control_server = if persistent_host {
+        Some(
+            crate::commands::remote_host::start_control_server(
+                HostDescriptor {
+                    instance_id: remote_instance_id.clone().expect("persistent instance id"),
+                    hostname: crate::commands::remote_host::hostname(),
+                    port: actual_port,
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    dashboard_protocol: crate::commands::up_remote::DASHBOARD_PROTOCOL,
+                    control_protocol: crate::commands::remote_host::CONTROL_PROTOCOL,
+                },
+                remote_auth.clone().expect("persistent remote auth"),
+                state.chat.clone(),
+                stopping.clone(),
+                stop_tx,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     // In an SSH session the loopback URL only works on the remote box and there's
     // no local browser to open — print forwarding guidance instead of the bare
     // URL, and skip the (futile) browser-open. Otherwise, today's local flow.
@@ -165,7 +188,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         println!("{}", crate::commands::up_remote::REMOTE_READY_MARKER);
         let _ = tokio::io::stdout().flush().await;
     } else if let Some(session) = crate::remote::detect_ssh_session() {
-        eprint!("{}", session.instructions(port));
+        eprint!("{}", session.instructions(actual_port));
     } else {
         eprintln!("orx up: dashboard on {url}");
         if !args.no_browser {
@@ -180,22 +203,39 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
-    if let Some((_, input)) = remote_input.take() {
+    let explicit_stop = if persistent_host {
+        tokio::select! {
+            r = axum::serve(listener, app) => {
+                r.map_err(|e| anyhow!("orx up: server error: {e}"))?;
+                false
+            }
+            changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
+            _ = persistent_shutdown_signal() => false,
+        }
+    } else if let Some((_, input)) = remote_input.take() {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
             _ = remote_heartbeat(input) => eprintln!("orx up: remote session ended"),
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
+        false
     } else {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
+        false
+    };
+    if explicit_stop {
+        state.chat.interrupt_all().await;
     }
     state.remote_sessions.shutdown().await;
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    if let Some(server) = control_server {
+        server.shutdown().await;
+    }
     Ok(())
 }
 
@@ -230,6 +270,30 @@ async fn shutdown_signal() {
     }
 }
 
+async fn persistent_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, Signal, SignalKind};
+        async fn wait(signal: &mut Option<Signal>) {
+            match signal {
+                Some(signal) => {
+                    signal.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+        let mut term = signal(SignalKind::terminate()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = wait(&mut term) => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     agent: Arc<AgentHost>,
@@ -248,21 +312,9 @@ struct AppState {
     /// Serializes wake-up store writes with a live data-directory move.
     data_dir_gate: Arc<tokio::sync::Mutex<()>>,
     remote_sessions: crate::commands::up_remote::RemoteSessionManager,
-}
-
-#[derive(Clone)]
-struct RemoteAuth {
-    session: [u8; 32],
-    callback: [u8; 32],
-}
-
-impl RemoteAuth {
-    fn new(session: &str, callback: &str) -> Self {
-        Self {
-            session: Sha256::digest(session.as_bytes()).into(),
-            callback: Sha256::digest(callback.as_bytes()).into(),
-        }
-    }
+    remote_instance_id: Option<String>,
+    stopping: Arc<AtomicBool>,
+    dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
 }
 
 fn derive_callback_token(session: &str) -> String {
@@ -634,11 +686,11 @@ async fn require_remote_auth(
         .map(|value| Sha256::digest(value.as_bytes()));
     let session = provided
         .as_ref()
-        .is_some_and(|digest| constant_time_eq(digest, &auth.session));
+        .is_some_and(|digest| auth.matches_attachment(digest));
     let callback = is_remote_callback_route(request.method(), path)
         && provided
             .as_ref()
-            .is_some_and(|digest| constant_time_eq(digest, &auth.callback));
+            .is_some_and(|digest| auth.matches_callback(digest));
     if session || callback {
         next.run(request).await
     } else {
@@ -674,17 +726,6 @@ fn is_remote_callback_route(method: &Method, path: &str) -> bool {
             .strip_prefix("/api/runs/")
             .and_then(|path| path.strip_suffix("/cancel"))
             .is_some_and(|id| !id.is_empty() && !id.contains('/'))
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .fold(0_u8, |difference, (left, right)| {
-                difference | (left ^ right)
-            })
-            == 0
 }
 
 // --- error plumbing -------------------------------------------------------
@@ -764,11 +805,12 @@ impl From<&StoredRun> for ApiRun {
 
 // --- basic routes ---------------------------------------------------------
 
-async fn health() -> Json<Value> {
+async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
+        "instanceId": state.remote_instance_id,
     }))
 }
 
@@ -1920,6 +1962,7 @@ pub(crate) async fn cancel_run_via_up(port: u16, run_id: &str) -> Result<()> {
 }
 
 async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let experiment = store
@@ -3945,10 +3988,19 @@ async fn set_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq>
     .map_err(|e| ApiError::from(anyhow!("validate task failed: {e}")))?
     .map_err(bad_request)?;
 
+    let lock_path = std::path::PathBuf::from(&path);
+    let next_lock = tokio::task::spawn_blocking(move || {
+        DashboardLock::acquire(&lock_path, DashboardLockMode::Shared)
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("dashboard lock task failed: {e}")))?
+    .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
+
     state.chat.shutdown_harnesses().await;
     tokio::task::spawn_blocking(move || crate::config::set_settings_data_dir(Some(path)))
         .await
         .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))??;
+    *state.dashboard_lock.lock().unwrap() = Some(next_lock);
     state.chat.shutdown_harnesses().await;
     Ok(Json(data_dir_json()))
 }
@@ -4075,6 +4127,25 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
         }
     }
 
+    let lock_target = std::path::PathBuf::from(&path);
+    let next_lock = match tokio::task::spawn_blocking(move || {
+        DashboardLock::acquire(&lock_target, DashboardLockMode::Shared)
+    })
+    .await
+    {
+        Ok(Ok(lock)) => lock,
+        Ok(Err(error)) => {
+            release_move_claim(&move_token);
+            release(&state);
+            return ApiError(StatusCode::CONFLICT, error.to_string()).into_response();
+        }
+        Err(error) => {
+            release_move_claim(&move_token);
+            release(&state);
+            return ApiError::from(anyhow!("dashboard lock task failed: {error}")).into_response();
+        }
+    };
+
     let chat = state.chat.clone();
     // Provider-native SQLite/session stores now live inside this directory.
     // Close every idle harness child before the filesystem begins moving it.
@@ -4083,6 +4154,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
     // Spawn the move on a blocking task (it does synchronous FS work); forward
     // throttled progress onto the SSE broadcast, clear the flag when done.
     let flag = state.data_dir_move_in_progress.clone();
+    let dashboard_lock = state.dashboard_lock.clone();
     let target = std::path::PathBuf::from(path);
     tokio::spawn(async move {
         let _data_dir_guard = data_dir_guard;
@@ -4110,6 +4182,7 @@ async fn move_data_dir(State(state): State<AppState>, Json(req): Json<DataDirReq
 
         match result {
             Ok(Ok(outcome)) => {
+                *dashboard_lock.lock().unwrap() = Some(next_lock);
                 // Close any child spawned while a cross-filesystem copy ran.
                 chat.shutdown_harnesses().await;
                 chat.emit_event("datadir.move.done", json!(outcome));
@@ -4155,6 +4228,16 @@ fn reject_if_moving(state: &AppState) -> std::result::Result<(), ApiError> {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "A data-directory move is in progress. Try again once it finishes.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
+    if state.stopping.load(Ordering::SeqCst) {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "The persistent OpenResearch host is stopping.".into(),
         ));
     }
     Ok(())
@@ -6011,6 +6094,7 @@ async fn send_chat_message(
     Path(id): Path<String>,
     Json(req): Json<SendChatReq>,
 ) -> ApiResult {
+    reject_if_stopping(&state)?;
     reject_if_moving(&state)?;
     let store = Store::open()?;
     let session = store

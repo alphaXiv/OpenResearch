@@ -61,7 +61,6 @@ import {
   getChatMessages,
   getProjectStarterPrompts,
   createRemoteSession,
-  disconnectCurrentRemote,
   getSshHosts,
   getSkills,
   type StarterPrompt,
@@ -127,6 +126,7 @@ import { SkillMenu } from "./SkillMenu";
 import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
 import { SshConfigDialog } from "./SshConfigDialog";
 import { RemoteIcon } from "./RemoteIcon";
+import { RemoteStatus } from "./RemoteStatus";
 import {
   defaultSelection,
   HARNESS_LABELS,
@@ -4267,8 +4267,6 @@ export function ChatPanel({
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
   const [sshConfigOpen, setSshConfigOpen] = useState(false);
-  const [disconnectingRemote, setDisconnectingRemote] = useState(false);
-  const remoteMenu = usePopover();
   const [activeId, setActiveId] = useState<string | null>(null);
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
@@ -5884,65 +5882,21 @@ export function ChatPanel({
           </div>
         )}
       </div>
-      <div className="relative shrink-0 border-t border-border" ref={remoteMenu.ref}>
-        {runtime.kind === "ssh" && remoteMenu.open && (
-          <div className="option-menu absolute bottom-[calc(100%_+_6px)] start-2 z-50 min-w-60 overflow-hidden rounded-lg border border-border bg-background p-1.5 shadow-menu">
-            <div className="border-b border-border-variant px-2 pt-1 pb-2">
-              <div className="text-sm font-medium text-text">
-                {m.remote_connected_as({
-                  host: ltr(runtime.session.host),
-                  user: ltr(runtime.session.user ?? ""),
-                })}
-              </div>
-              <div className="mt-0.5 text-xs text-subtext">
-                OpenResearch {ltr(runtime.session.version ?? "…")}
-              </div>
-            </div>
-            <MenuItem
-              danger
-              disabled={disconnectingRemote}
-              onClick={async () => {
-                setDisconnectingRemote(true);
-                try {
-                  await disconnectCurrentRemote();
-                  remoteMenu.setOpen(false);
-                } catch (error) {
-                  showAlert(error instanceof Error ? error.message : String(error), "error");
-                } finally {
-                  setDisconnectingRemote(false);
-                }
-              }}
-            >
-              {disconnectingRemote ? m.remote_closing() : m.remote_disconnect()}
-            </MenuItem>
-          </div>
-        )}
-        {runtime.kind === "ssh" ? (
-          <Button
-            variant="default"
-            className="h-auto w-full justify-start rounded-none border-accent-blue bg-accent-blue px-4 py-2.5 font-normal text-white [&:hover:not(:disabled)]:border-accent-blue [&:hover:not(:disabled)]:bg-accent-blue/90"
-            aria-haspopup="menu"
-            aria-expanded={remoteMenu.open}
-            onClick={() => remoteMenu.setOpen((open) => !open)}
-          >
-            <RemoteIcon size={14} className="shrink-0" />
-            <span className="flex min-w-0 flex-col text-start">
-              <span className="truncate text-sm leading-tight">{m.remote_ssh_host({ host: ltr(runtime.session.host) })}</span>
-              <span className="truncate text-xs leading-tight text-white/80">OpenResearch {ltr(runtime.session.version ?? "…")}</span>
-            </span>
-          </Button>
-        ) : (
-          <div className="flex items-center gap-1.5 px-1 py-2.5">
+      {runtime.kind === "ssh" ? (
+        <RemoteStatus runtime={runtime} />
+      ) : (
+        <div className="relative shrink-0 border-t border-border">
+          <div className="flex items-center gap-1.5 px-1 py-2">
             <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
               <RemoteIcon size={14} className="shrink-0" />
             </IconButton>
-            <span className="flex min-w-0 flex-col text-start text-text">
+            <span className="flex min-w-0 flex-col gap-1 text-start text-text">
               <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
               <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
             </span>
           </div>
-        )}
-      </div>
+        </div>
+      )}
       {remoteDialogOpen && (
         <RemoteHostDialog
           onClose={() => setRemoteDialogOpen(false)}

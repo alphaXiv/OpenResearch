@@ -29,6 +29,9 @@ use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tokio::sync::{watch, Mutex, RwLock};
 
+use crate::commands::remote_host::{
+    ControlResponse, HostDescriptor, ATTACHED_MARKER, CONTROL_PROTOCOL, HOST_MARKER,
+};
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::{HostKeyPolicy, SshTarget};
 use crate::{browser, UpArgs};
@@ -91,6 +94,7 @@ pub(crate) struct RemoteSessionInfo {
     pub error: Option<String>,
     pub install_paths: Option<RemoteInstallPathsInfo>,
     pub ui_preferences: RemoteUiPreferences,
+    pub can_start_new_host: bool,
 }
 
 #[derive(Clone)]
@@ -114,6 +118,7 @@ struct RemoteSession {
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     generation: AtomicU64,
     dev_origin: Option<String>,
+    expected_instance: RwLock<Option<String>>,
 }
 
 #[derive(Default)]
@@ -193,6 +198,7 @@ impl RemoteSessionManager {
             error: None,
             install_paths: None,
             ui_preferences: preferences,
+            can_start_new_host: false,
         };
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -210,6 +216,7 @@ impl RemoteSessionManager {
             gateway_task: Mutex::new(None),
             generation: AtomicU64::new(0),
             dev_origin: validated_dev_origin(),
+            expected_instance: RwLock::new(None),
         });
         registry.by_host.insert(host, id.clone());
         registry.by_id.insert(id, session.clone());
@@ -385,12 +392,13 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
             return;
         }
     };
-    let protocol_result = remote_dashboard_protocol(&session.target, &host, &remote_orx.path).await;
+    let expected_instance = session.expected_instance.read().await.clone();
+    let running = remote_host_status(&session.target, &remote_orx.path, &paths).await;
     if session.generation.load(Ordering::SeqCst) != generation {
         return;
     }
-    let protocol = match protocol_result {
-        Ok(protocol) => protocol,
+    let running = match running {
+        Ok(running) => running,
         Err(error) => {
             set_session_state_if_current(
                 &session,
@@ -402,8 +410,90 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
             return;
         }
     };
+    let descriptor = if let Some(descriptor) = running {
+        if expected_instance
+            .as_deref()
+            .is_some_and(|expected| expected != descriptor.instance_id)
+        {
+            set_session_state_if_current(
+                &session,
+                generation,
+                RemoteSessionStatus::Failed,
+                Some(format!(
+                    "A different OpenResearch host is running on {}. Start a new connection explicitly.",
+                    descriptor.hostname
+                )),
+            )
+            .await;
+            return;
+        }
+        descriptor
+    } else {
+        let protocol =
+            match remote_dashboard_protocol(&session.target, &host, &remote_orx.path).await {
+                Ok(protocol) => protocol,
+                Err(error) => {
+                    set_session_state_if_current(
+                        &session,
+                        generation,
+                        RemoteSessionStatus::Failed,
+                        Some(error.to_string()),
+                    )
+                    .await;
+                    return;
+                }
+            };
+        if protocol != Some(DASHBOARD_PROTOCOL) {
+            let message = protocol
+                .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
+                .map(|_| "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect.".to_string())
+                .or_else(|| (crate::telemetry::build_channel() != "production").then(|| {
+                    "This development build cannot install an unreleased public version. Build this branch for the remote machine and replace the binary at the path shown below."
+                        .to_string()
+                }));
+            update_session_if_current(&session, generation, |info| {
+                info.status = RemoteSessionStatus::NeedsUpdate;
+                info.error = message;
+                info.install_paths = Some((&paths).into());
+            })
+            .await;
+            return;
+        }
+        match ensure_remote_host(
+            &session.target,
+            &remote_orx.path,
+            &paths,
+            expected_instance.as_deref(),
+        )
+        .await
+        {
+            Ok(descriptor) => descriptor,
+            Err(error) => {
+                let error = error.to_string();
+                update_session_if_current(&session, generation, |info| {
+                    info.status = RemoteSessionStatus::Failed;
+                    info.can_start_new_host = expected_instance.is_some()
+                        && error.contains("The expected OpenResearch host is no longer running.");
+                    info.error = Some(error);
+                })
+                .await;
+                return;
+            }
+        }
+    };
+    if descriptor.control_protocol != CONTROL_PROTOCOL {
+        set_session_state_if_current(
+            &session,
+            generation,
+            RemoteSessionStatus::Failed,
+            Some("The running OpenResearch host uses an incompatible control protocol.".into()),
+        )
+        .await;
+        return;
+    }
+    let protocol = Some(descriptor.dashboard_protocol);
     if !update_session_if_current(&session, generation, |info| {
-        info.version = Some(remote_orx.version.clone());
+        info.version = Some(descriptor.version.clone());
         info.dashboard_protocol = protocol;
     })
     .await
@@ -414,23 +504,30 @@ async fn prepare_remote_session(session: Arc<RemoteSession>, generation: u64) {
         let message = protocol
             .filter(|protocol| *protocol > DASHBOARD_PROTOCOL)
             .map(|_| "This remote OpenResearch is newer than the local app. Update OpenResearch locally, then reconnect.".to_string())
-            .or_else(|| (crate::telemetry::build_channel() != "production").then(|| {
-                "This development build cannot install an unreleased public version. Build this branch for the remote machine and replace the binary at the path shown below."
-                    .to_string()
-            }));
+            .or_else(|| Some("The running OpenResearch host uses an older dashboard protocol. Stop it before updating the remote binary.".to_string()));
         update_session_if_current(&session, generation, |info| {
             info.status = RemoteSessionStatus::NeedsUpdate;
             info.error = message;
-            info.install_paths = Some((&paths).into());
+            info.install_paths = None;
         })
         .await;
         return;
     }
+    *session.expected_instance.write().await = Some(descriptor.instance_id.clone());
     update_session_if_current(&session, generation, |info| {
         info.install_paths = None;
+        info.can_start_new_host = false;
     })
     .await;
-    start_connection(session.clone(), remote_orx, paths, generation, false).await;
+    start_connection(
+        session.clone(),
+        remote_orx,
+        paths,
+        descriptor,
+        generation,
+        false,
+    )
+    .await;
 }
 
 async fn install_and_connect(
@@ -511,7 +608,17 @@ async fn install_and_connect(
         info.dashboard_protocol = protocol;
         info.install_paths = None;
     }
-    start_connection(session.clone(), remote_orx, paths, generation, false).await;
+    let descriptor = ensure_remote_host(&session.target, &remote_orx.path, &paths, None).await?;
+    *session.expected_instance.write().await = Some(descriptor.instance_id.clone());
+    start_connection(
+        session.clone(),
+        remote_orx,
+        paths,
+        descriptor,
+        generation,
+        false,
+    )
+    .await;
     Ok(session.info.read().await.clone())
 }
 
@@ -519,6 +626,7 @@ async fn start_connection(
     session: Arc<RemoteSession>,
     remote_orx: RemoteOrx,
     paths: RemoteInstallPaths,
+    descriptor: HostDescriptor,
     generation: u64,
     reconnecting: bool,
 ) {
@@ -546,7 +654,15 @@ async fn start_connection(
     let (cancel, cancelled) = watch::channel(false);
     let task_session = session.clone();
     let task = tokio::spawn(async move {
-        supervise_connection(task_session, remote_orx, paths, generation, cancelled).await;
+        supervise_connection(
+            task_session,
+            remote_orx,
+            paths,
+            descriptor,
+            generation,
+            cancelled,
+        )
+        .await;
     });
     *connection = Some(ConnectionControl { cancel, task });
 }
@@ -595,16 +711,17 @@ async fn supervise_connection(
     session: Arc<RemoteSession>,
     remote_orx: RemoteOrx,
     paths: RemoteInstallPaths,
+    descriptor: HostDescriptor,
     generation: u64,
     cancelled: watch::Receiver<bool>,
 ) {
     const BACKOFF: [u64; 5] = [1, 2, 5, 10, 20];
-    let mut first_attempt = true;
-    for retry_delay in BACKOFF.into_iter().map(Some).chain(std::iter::once(None)) {
+    let mut retry = 0_usize;
+    loop {
         if *cancelled.borrow() || session.generation.load(Ordering::SeqCst) != generation {
             return;
         }
-        if !first_attempt
+        if retry > 0
             && !set_session_state_if_current(
                 &session,
                 generation,
@@ -615,13 +732,30 @@ async fn supervise_connection(
         {
             return;
         }
-        first_attempt = false;
-        match (
-            connect_once(&session, &remote_orx, &paths, generation, cancelled.clone()).await,
-            retry_delay,
-        ) {
-            (ConnectionEnd::Cancelled, _) => return,
-            (ConnectionEnd::Ended(error), Some(delay)) => {
+        match connect_once(
+            &session,
+            &remote_orx,
+            &paths,
+            &descriptor,
+            generation,
+            cancelled.clone(),
+            retry > 0,
+        )
+        .await
+        {
+            ConnectionEnd::Cancelled => return,
+            ConnectionEnd::Terminal(error) => {
+                *session.route.write().await = None;
+                set_session_state_if_current(
+                    &session,
+                    generation,
+                    RemoteSessionStatus::Failed,
+                    Some(error),
+                )
+                .await;
+                return;
+            }
+            ConnectionEnd::Retryable(error) => {
                 *session.route.write().await = None;
                 if !set_session_state_if_current(
                     &session,
@@ -633,6 +767,8 @@ async fn supervise_connection(
                 {
                     return;
                 }
+                let delay = BACKOFF[retry.min(BACKOFF.len() - 1)];
+                retry += 1;
                 let mut wait_cancel = cancelled.clone();
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(delay)) => {}
@@ -641,47 +777,56 @@ async fn supervise_connection(
                     }
                 }
             }
-            (ConnectionEnd::Ended(error), None) => {
-                *session.route.write().await = None;
-                set_session_state_if_current(
-                    &session,
-                    generation,
-                    RemoteSessionStatus::Failed,
-                    Some(error),
-                )
-                .await;
-                return;
-            }
         }
     }
 }
 
 enum ConnectionEnd {
     Cancelled,
-    Ended(String),
+    Retryable(String),
+    Terminal(String),
 }
 
 async fn connect_once(
     session: &RemoteSession,
     remote_orx: &RemoteOrx,
     paths: &RemoteInstallPaths,
+    expected: &HostDescriptor,
     generation: u64,
     mut cancelled: watch::Receiver<bool>,
+    retrying: bool,
 ) -> ConnectionEnd {
+    let descriptor = match ensure_remote_host(
+        &session.target,
+        &remote_orx.path,
+        paths,
+        Some(&expected.instance_id),
+    )
+    .await
+    {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let error = error.to_string();
+            return if retrying && retryable_ssh_transport_error(&error) {
+                ConnectionEnd::Retryable(error)
+            } else {
+                ConnectionEnd::Terminal(error)
+            };
+        }
+    };
     let local_port = match reserve_loopback_port() {
         Ok(port) => port,
-        Err(error) => return ConnectionEnd::Ended(error.to_string()),
+        Err(error) => return ConnectionEnd::Terminal(error.to_string()),
     };
-    let remote_port = random_remote_port();
     let token = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    let forward = forward_spec(local_port, remote_port);
-    let remote_cmd = match remote_session_cmd(&remote_orx.path, remote_port, paths) {
+    let forward = forward_spec(local_port, descriptor.port);
+    let remote_cmd = match remote_attach_cmd(&remote_orx.path, &descriptor.instance_id, paths) {
         Ok(command) => command,
-        Err(error) => return ConnectionEnd::Ended(error.to_string()),
+        Err(error) => return ConnectionEnd::Terminal(error.to_string()),
     };
     let mut command = match ssh_forward_command(&session.target, &forward, &remote_cmd) {
         Ok(command) => command,
-        Err(error) => return ConnectionEnd::Ended(error.to_string()),
+        Err(error) => return ConnectionEnd::Terminal(error.to_string()),
     };
     command
         .stdin(Stdio::piped())
@@ -690,7 +835,8 @@ async fn connect_once(
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return ConnectionEnd::Ended(ssh_spawn_error(error, "remote access").to_string())
+            let error = ssh_spawn_error(error, "remote access").to_string();
+            return ConnectionEnd::Terminal(error);
         }
     };
     let mut stdin = match child.stdin.take() {
@@ -698,7 +844,7 @@ async fn connect_once(
         None => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return ConnectionEnd::Ended("Could not open the SSH session input.".into());
+            return ConnectionEnd::Terminal("Could not open the SSH session input.".into());
         }
     };
     if tokio::io::AsyncWriteExt::write_all(&mut stdin, format!("{token}\n").as_bytes())
@@ -708,7 +854,7 @@ async fn connect_once(
     {
         let _ = child.start_kill();
         let _ = child.wait().await;
-        return ConnectionEnd::Ended(
+        return ConnectionEnd::Terminal(
             "Could not authenticate the remote OpenResearch process.".into(),
         );
     }
@@ -717,7 +863,7 @@ async fn connect_once(
         None => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return ConnectionEnd::Ended("Could not read remote OpenResearch startup.".into());
+            return ConnectionEnd::Terminal("Could not read remote OpenResearch startup.".into());
         }
     };
     let mut reader = tokio::io::BufReader::new(stdout);
@@ -733,7 +879,7 @@ async fn connect_once(
             if bytes > 64 * 1024 {
                 return Ok(false);
             }
-            if line.trim() == REMOTE_READY_MARKER {
+            if line.trim() == ATTACHED_MARKER {
                 return Ok(true);
             }
         }
@@ -743,20 +889,24 @@ async fn connect_once(
         changed = cancelled.changed() => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            return if changed.is_ok() && *cancelled.borrow() { ConnectionEnd::Cancelled } else { ConnectionEnd::Ended("Remote session cancelled.".into()) };
+            return if changed.is_ok() && *cancelled.borrow() { ConnectionEnd::Cancelled } else { ConnectionEnd::Terminal("Remote session cancelled.".into()) };
         }
     };
     if !ready {
         let _ = child.start_kill();
         let _ = child.wait().await;
-        return ConnectionEnd::Ended("SSH closed before the remote dashboard became ready.".into());
+        let error = "SSH closed before the remote dashboard became ready.".into();
+        return if retrying {
+            ConnectionEnd::Retryable(error)
+        } else {
+            ConnectionEnd::Terminal(error)
+        };
     }
-    if let Err(error) =
-        authenticated_health(&session.client, local_port, &token, &remote_orx.version).await
+    if let Err(error) = authenticated_health(&session.client, local_port, &token, &descriptor).await
     {
         let _ = child.start_kill();
         let _ = child.wait().await;
-        return ConnectionEnd::Ended(error.to_string());
+        return ConnectionEnd::Terminal(error.to_string());
     }
     if session.generation.load(Ordering::SeqCst) != generation {
         let _ = child.start_kill();
@@ -784,7 +934,7 @@ async fn connect_once(
     loop {
         tokio::select! {
             status = child.wait() => {
-                return ConnectionEnd::Ended(match status {
+                return ConnectionEnd::Retryable(match status {
                     Ok(status) => format!("SSH connection ended ({status})."),
                     Err(error) => format!("Could not wait for SSH: {error}"),
                 });
@@ -795,7 +945,7 @@ async fn connect_once(
                 {
                     let _ = child.start_kill();
                     let _ = child.wait().await;
-                    return ConnectionEnd::Ended("The SSH heartbeat failed.".into());
+                    return ConnectionEnd::Retryable("The SSH heartbeat failed.".into());
                 }
             }
             changed = cancelled.changed() => {
@@ -804,11 +954,25 @@ async fn connect_once(
                 return if changed.is_ok() && *cancelled.borrow() {
                     ConnectionEnd::Cancelled
                 } else {
-                    ConnectionEnd::Ended("Remote session cancelled.".into())
+                    ConnectionEnd::Retryable("Remote session cancelled.".into())
                 };
             }
         }
     }
+}
+
+fn retryable_ssh_transport_error(error: &str) -> bool {
+    error.contains("failed (exit 255)")
+        && ![
+            "Permission denied",
+            "Host key verification failed",
+            "REMOTE HOST IDENTIFICATION HAS CHANGED",
+            "No matching host key",
+            "no matching host key",
+            "Too many authentication failures",
+        ]
+        .iter()
+        .any(|terminal| error.contains(terminal))
 }
 
 fn reserve_loopback_port() -> Result<u16> {
@@ -816,16 +980,11 @@ fn reserve_loopback_port() -> Result<u16> {
     Ok(listener.local_addr()?.port())
 }
 
-fn random_remote_port() -> u16 {
-    let bytes = uuid::Uuid::new_v4().into_bytes();
-    40_000 + (u16::from_be_bytes([bytes[0], bytes[1]]) % 20_000)
-}
-
 async fn authenticated_health(
     client: &reqwest::Client,
     port: u16,
     token: &str,
-    expected_version: &str,
+    expected: &HostDescriptor,
 ) -> Result<()> {
     let response = tokio::time::timeout(
         Duration::from_secs(5),
@@ -838,11 +997,14 @@ async fn authenticated_health(
     .map_err(|_| anyhow!("Timed out checking the remote OpenResearch process."))??;
     let health = response.json::<serde_json::Value>().await?;
     if health.get("ok").and_then(serde_json::Value::as_bool) != Some(true)
-        || health.get("version").and_then(serde_json::Value::as_str) != Some(expected_version)
+        || health.get("version").and_then(serde_json::Value::as_str)
+            != Some(expected.version.as_str())
         || health
             .get("dashboardProtocol")
             .and_then(serde_json::Value::as_u64)
             != Some(u64::from(DASHBOARD_PROTOCOL))
+        || health.get("instanceId").and_then(serde_json::Value::as_str)
+            != Some(expected.instance_id.as_str())
     {
         return Err(anyhow!(
             "The remote OpenResearch health response is incompatible."
@@ -856,7 +1018,12 @@ fn gateway_router(session: Arc<RemoteSession>) -> Router {
         .route("/_orx/runtime", get(gateway_runtime))
         .route("/_orx/install", post(gateway_install))
         .route("/_orx/reconnect", post(gateway_reconnect))
+        .route("/_orx/start-host", post(gateway_start_new_host))
         .route("/_orx/disconnect", post(gateway_disconnect))
+        .route(
+            "/_orx/stop-host",
+            get(gateway_stop_host_preview).post(gateway_stop_host),
+        )
         .fallback(gateway_fallback)
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(middleware::from_fn(gateway_loopback_guard))
@@ -979,9 +1146,106 @@ async fn gateway_reconnect(State(session): State<Arc<RemoteSession>>) -> Respons
     Json(serde_json::json!(reconnect_session(session).await)).into_response()
 }
 
+async fn gateway_start_new_host(State(session): State<Arc<RemoteSession>>) -> Response {
+    *session.expected_instance.write().await = None;
+    {
+        let mut info = session.info.write().await;
+        info.can_start_new_host = false;
+    }
+    Json(serde_json::json!(reconnect_session(session).await)).into_response()
+}
+
 async fn gateway_disconnect(State(session): State<Arc<RemoteSession>>) -> Response {
     disconnect_session(&session).await;
     Json(serde_json::json!(session.info.read().await.clone())).into_response()
+}
+
+async fn gateway_stop_host_preview(State(session): State<Arc<RemoteSession>>) -> Response {
+    match remote_stop_context(&session).await {
+        Ok((descriptor, preview, _, _)) => Json(serde_json::json!({
+            "instanceId": descriptor.instance_id,
+            "activeTurnCount": preview.active_turn_count,
+            "queuedMessageCount": preview.queued_message_count,
+            "pendingPermissionCount": preview.pending_permission_count,
+            "activeRunCount": preview.active_run_count,
+            "attachmentCount": preview.attachment_count,
+        }))
+        .into_response(),
+        Err(error) => gateway_error(StatusCode::CONFLICT, error.to_string()),
+    }
+}
+
+async fn gateway_stop_host(
+    State(session): State<Arc<RemoteSession>>,
+    Json(request): Json<crate::commands::remote_host::StopRequest>,
+) -> Response {
+    let result = async {
+        let (_, _, remote_orx, paths) = remote_stop_context(&session).await?;
+        let body = format!("{}\n", serde_json::to_string(&request)?);
+        let output = crate::jobs::ssh::ssh_run(
+            &session.target,
+            &remote_host_cmd(&remote_orx.path, &paths, "stop")?,
+            Some(&body),
+        )
+        .await?;
+        parse_control_response(&output)
+            .ok_or_else(|| anyhow!("The remote OpenResearch host returned an invalid response."))
+    }
+    .await;
+    match result {
+        Ok(ControlResponse::Accepted) => {
+            disconnect_session(&session).await;
+            session.info.write().await.can_start_new_host = true;
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({ "accepted": true })),
+            )
+                .into_response()
+        }
+        Ok(ControlResponse::Conflict {
+            error,
+            descriptor,
+            preview,
+        }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": error,
+                "instanceId": descriptor.instance_id,
+                "activeTurnCount": preview.active_turn_count,
+                "queuedMessageCount": preview.queued_message_count,
+                "pendingPermissionCount": preview.pending_permission_count,
+                "activeRunCount": preview.active_run_count,
+                "attachmentCount": preview.attachment_count,
+            })),
+        )
+            .into_response(),
+        Ok(ControlResponse::Error { error }) => gateway_error(StatusCode::CONFLICT, error),
+        Ok(_) => gateway_error(
+            StatusCode::BAD_GATEWAY,
+            "Unexpected remote OpenResearch stop response.".into(),
+        ),
+        Err(error) => gateway_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+async fn remote_stop_context(
+    session: &RemoteSession,
+) -> Result<(
+    HostDescriptor,
+    crate::commands::remote_host::StopPreview,
+    RemoteOrx,
+    RemoteInstallPaths,
+)> {
+    let host = session.info.read().await.host.clone();
+    let paths = remote_install_paths(&session.target, &host).await?;
+    let remote_orx = find_remote_orx(&session.target, &host)
+        .await?
+        .ok_or_else(|| anyhow!("OpenResearch is no longer installed on '{host}'."))?;
+    let (descriptor, preview) =
+        remote_host_control_status(&session.target, &remote_orx.path, &paths)
+            .await?
+            .ok_or_else(|| anyhow!("The persistent OpenResearch host is not running."))?;
+    Ok((descriptor, preview, remote_orx, paths))
 }
 
 fn gateway_error(status: StatusCode, error: String) -> Response {
@@ -1684,14 +1948,87 @@ fn host_is_ip_literal(dest: &str) -> bool {
 /// `~/.local/bin` — keep the two in step.
 const REMOTE_ORX_PATH: &str = "${CARGO_HOME:-$HOME/.cargo}/bin:$HOME/.local/bin";
 
-fn remote_session_cmd(path: &str, port: u16, paths: &RemoteInstallPaths) -> Result<String> {
+fn remote_host_cmd(path: &str, paths: &RemoteInstallPaths, operation: &str) -> Result<String> {
     let (_, data, cache) = validated_roots(paths)?;
     Ok(remote_orx_cmd(&format!(
-        "export ORX_DATA_DIR={} ORX_CACHE_DIR={}; exec {} up --no-browser --remote-session-stdin --port {port}",
+        "export ORX_DATA_DIR={} ORX_CACHE_DIR={}; exec {} remote-host {operation}",
         crate::jobs::ssh::sh_quote(&data.to_string_lossy()),
         crate::jobs::ssh::sh_quote(&cache.to_string_lossy()),
         crate::jobs::ssh::sh_quote(path),
     )))
+}
+
+fn remote_attach_cmd(path: &str, instance_id: &str, paths: &RemoteInstallPaths) -> Result<String> {
+    remote_host_cmd(
+        path,
+        paths,
+        &format!(
+            "attach --expected-instance {}",
+            crate::jobs::ssh::sh_quote(instance_id)
+        ),
+    )
+}
+
+async fn remote_host_status(
+    target: &SshTarget,
+    path: &str,
+    paths: &RemoteInstallPaths,
+) -> Result<Option<HostDescriptor>> {
+    Ok(remote_host_control_status(target, path, paths)
+        .await?
+        .map(|(descriptor, _)| descriptor))
+}
+
+async fn remote_host_control_status(
+    target: &SshTarget,
+    path: &str,
+    paths: &RemoteInstallPaths,
+) -> Result<Option<(HostDescriptor, crate::commands::remote_host::StopPreview)>> {
+    let command = format!(
+        "{} 2>/dev/null || true",
+        remote_host_cmd(path, paths, "status")?
+    );
+    let output = crate::jobs::ssh::ssh_run(target, &command, None).await?;
+    Ok(
+        parse_control_response(&output).and_then(|response| match response {
+            ControlResponse::Status {
+                descriptor,
+                preview,
+            } => Some((descriptor, preview)),
+            _ => None,
+        }),
+    )
+}
+
+async fn ensure_remote_host(
+    target: &SshTarget,
+    path: &str,
+    paths: &RemoteInstallPaths,
+    expected_instance: Option<&str>,
+) -> Result<HostDescriptor> {
+    let operation = expected_instance.map_or_else(
+        || "ensure".to_string(),
+        |instance| {
+            format!(
+                "ensure --expected-instance {}",
+                crate::jobs::ssh::sh_quote(instance)
+            )
+        },
+    );
+    let output =
+        crate::jobs::ssh::ssh_run(target, &remote_host_cmd(path, paths, &operation)?, None).await?;
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(HOST_MARKER))
+        .and_then(|json| serde_json::from_str(json).ok())
+        .ok_or_else(|| anyhow!("The remote OpenResearch host returned an invalid descriptor."))
+}
+
+fn parse_control_response(output: &str) -> Option<ControlResponse> {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(HOST_MARKER))
+        .and_then(|json| serde_json::from_str(json).ok())
 }
 
 async fn remote_dashboard_protocol(
@@ -1794,13 +2131,28 @@ mod tests {
     }
 
     #[test]
-    fn forward_and_remote_cmd_use_the_same_port() {
+    fn forward_and_remote_attach_use_the_daemon_port() {
         assert_eq!(forward_spec(4899, 4900), "127.0.0.1:4899:127.0.0.1:4900");
-        let command = remote_session_cmd("/home/me/.cargo/bin/orx", 4900, &sample_paths()).unwrap();
+        let command =
+            remote_attach_cmd("/home/me/.cargo/bin/orx", "instance-1", &sample_paths()).unwrap();
         assert!(command.contains("/home/me/.cargo/bin/orx"));
-        assert!(command.contains("up --no-browser --remote-session-stdin --port 4900"));
+        assert!(command.contains("remote-host attach --expected-instance"));
+        assert!(command.contains("instance-1"));
         assert!(command.contains("ORX_DATA_DIR="));
         assert!(command.contains("ORX_CACHE_DIR="));
+    }
+
+    #[test]
+    fn reconnect_retries_transport_but_not_authentication_failures() {
+        assert!(retryable_ssh_transport_error(
+            "ssh ini failed (exit 255): Connection timed out"
+        ));
+        assert!(!retryable_ssh_transport_error(
+            "ssh ini failed (exit 255): Permission denied (publickey)"
+        ));
+        assert!(!retryable_ssh_transport_error(
+            "ssh ini failed (exit 1): expected host is no longer running"
+        ));
     }
 
     #[test]

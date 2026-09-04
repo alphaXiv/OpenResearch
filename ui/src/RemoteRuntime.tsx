@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import App from "./App";
 import {
   getRuntime,
+  getRemoteStopPreview,
   installRemoteSession,
   reconnectCurrentRemote,
+  startCurrentRemoteHost,
+  stopCurrentRemoteHost,
   type RemoteInstallPaths,
   type RuntimeInfo,
 } from "./api";
@@ -16,7 +19,7 @@ import { Button, Input, showAlert, Spinner } from "./components/ui";
 
 const REMOTE_FAVICON =
   "data:image/svg+xml," +
-  encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#3b82f6"/><path d="M7 11l5 5-5 5M25 11l-5 5 5 5" fill="none" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+  encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="8" fill="#3b82f6"/><path d="M15.375 16.782v63.843a4 4 0 0 0 4 4h63.843c3.564 0 5.348-4.309 2.829-6.828L22.203 13.953c-2.52-2.52-6.828-.735-6.828 2.829" fill="#fff"/></svg>');
 
 function setFavicon(remote: boolean) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -68,10 +71,40 @@ function RemoteSetup({
     }
   }
 
+  async function stopHost() {
+    setBusy(true);
+    try {
+      const preview = await getRemoteStopPreview();
+      if (!window.confirm(m.remote_stop_confirm({
+        turns: String(preview.activeTurnCount),
+        clients: String(preview.attachmentCount),
+        runs: String(preview.activeRunCount),
+        queued: String(preview.queuedMessageCount),
+        approvals: String(preview.pendingPermissionCount),
+      }))) return;
+      await stopCurrentRemoteHost(preview);
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startNewHost() {
+    setBusy(true);
+    try {
+      await startCurrentRemoteHost();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const installing = session.status === "installing" || session.status === "updating" || busy;
   const needsInstall = session.status === "needsInstall";
   const needsUpdate = session.status === "needsUpdate";
-  const showPaths = paths && (needsInstall || (needsUpdate && !session.error));
+  const showPaths = paths && (needsInstall || needsUpdate);
   const working = ["checking", "connecting", "installing", "updating", "reconnecting"].includes(
     session.status,
   );
@@ -136,9 +169,24 @@ function RemoteSetup({
 
         {(session.status === "disconnected" || session.status === "failed") && (
           <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
-            <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+            {session.canStartNewHost ? (
+              <Button variant="primary" disabled={busy} onClick={() => void startNewHost()}>
+                {busy ? <Spinner /> : null}
+                {m.remote_start_new_host()}
+              </Button>
+            ) : (
+              <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                {busy ? <Spinner /> : null}
+                {m.remote_reconnect()}
+              </Button>
+            )}
+          </div>
+        )}
+        {needsUpdate && session.error && session.dashboardProtocol !== null && session.dashboardProtocol < 1 && (
+          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+            <Button variant="danger" disabled={busy} onClick={() => void stopHost()}>
               {busy ? <Spinner /> : null}
-              {m.remote_reconnect()}
+              {m.remote_stop_host()}
             </Button>
           </div>
         )}
@@ -190,7 +238,7 @@ export function RuntimeRoot() {
     const remote = runtime?.kind === "ssh";
     setFavicon(remote);
     if (remote && (!everConnected.current || runtime.session.status === "disconnected")) {
-      document.title = `SSH: ${runtime.session.host} — OpenResearch`;
+      document.title = "OpenResearch";
     }
   }, [runtime]);
 

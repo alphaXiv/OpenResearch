@@ -2644,6 +2644,25 @@ impl ChatHost {
         self.turns.lock().await.keys().cloned().collect()
     }
 
+    pub fn queued_count(&self) -> usize {
+        self.queued
+            .lock()
+            .unwrap()
+            .values()
+            .map(VecDeque::len)
+            .sum()
+    }
+
+    pub fn pending_permission_count(&self) -> usize {
+        self.pending_permissions.lock().unwrap().len()
+    }
+
+    pub async fn interrupt_all(self: &Arc<Self>) {
+        for session_id in self.busy_sessions().await {
+            let _ = self.interrupt(&session_id).await;
+        }
+    }
+
     pub async fn is_busy(&self, session_id: &str) -> bool {
         self.turns.lock().await.contains_key(session_id)
     }

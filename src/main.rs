@@ -156,6 +156,10 @@ enum Command {
     /// Internal: detached worker for optional local-project publication.
     #[command(name = "publish-branch", hide = true)]
     PublishBranch(PublishBranchArgs),
+
+    /// Internal: manage a persistent SSH remote host.
+    #[command(name = "remote-host", hide = true)]
+    RemoteHost(RemoteHostArgs),
 }
 
 #[derive(Args, Debug)]
@@ -557,6 +561,29 @@ pub struct UpArgs {
     /// Internal authenticated dashboard mode used behind a local SSH gateway.
     #[arg(long, hide = true)]
     pub remote_session_stdin: bool,
+    /// Internal persistent dashboard/agent-host mode.
+    #[arg(long, hide = true, conflicts_with = "remote_session_stdin")]
+    pub remote_host: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+pub struct RemoteHostArgs {
+    #[command(subcommand)]
+    pub command: RemoteHostCommand,
+}
+
+#[derive(Clone, Subcommand, Debug)]
+pub enum RemoteHostCommand {
+    Ensure {
+        #[arg(long)]
+        expected_instance: Option<String>,
+    },
+    Status,
+    Attach {
+        #[arg(long)]
+        expected_instance: String,
+    },
+    Stop,
 }
 
 #[derive(Args, Debug)]
@@ -812,6 +839,13 @@ async fn main() {
         }
         return;
     }
+    if let Command::RemoteHost(args) = &command {
+        if let Err(err) = commands::remote_host::run(args.clone()).await {
+            eprintln!("orx remote-host: {err}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Command::PublishBranch(args) = &command {
         if let Err(err) =
             local::git::push_branch(&args.repo_path, &args.branch, &args.owner, &args.repo)
@@ -894,6 +928,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
         Command::PublishBranch(_) => "publish-branch",
+        Command::RemoteHost(_) => "remote-host",
     }
 }
 
@@ -942,6 +977,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::PlanGate => commands::plan_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
+        Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
 }
 
@@ -959,6 +995,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::PlanGate
             | Command::McpGate
             | Command::PublishBranch(_)
+            | Command::RemoteHost(_)
     )
 }
 

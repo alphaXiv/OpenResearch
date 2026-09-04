@@ -818,6 +818,7 @@ export interface RemoteSessionInfo {
   error: string | null;
   installPaths: RemoteInstallPaths | null;
   uiPreferences: { theme: string | null; locale: string | null };
+  canStartNewHost: boolean;
 }
 
 export type RuntimeInfo =
@@ -846,6 +847,31 @@ export const installRemoteSession = (paths: RemoteInstallPaths) =>
 export const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
 
 export const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
+
+export const startCurrentRemoteHost = () => post<RemoteSessionInfo>("/_orx/start-host");
+
+export interface RemoteStopPreview {
+  instanceId: string;
+  activeTurnCount: number;
+  queuedMessageCount: number;
+  pendingPermissionCount: number;
+  activeRunCount: number;
+  attachmentCount: number;
+}
+
+export const getRemoteStopPreview = () => get<RemoteStopPreview>("/_orx/stop-host");
+
+export const stopCurrentRemoteHost = (preview: RemoteStopPreview) =>
+  post<{ accepted: boolean }>("/_orx/stop-host", {
+    expectedInstanceId: preview.instanceId,
+    expectedPreview: {
+      activeTurnCount: preview.activeTurnCount,
+      queuedMessageCount: preview.queuedMessageCount,
+      pendingPermissionCount: preview.pendingPermissionCount,
+      activeRunCount: preview.activeRunCount,
+      attachmentCount: preview.attachmentCount,
+    },
+  });
 
 export interface SshPreflight {
   reachable: boolean;
