@@ -21,20 +21,24 @@ import {
   getCodeTree,
   getSessionWorktree,
   githubBranchUrl,
-  listChatSessions,
+  manageProjectFile,
   type CodeTree,
   type Project,
   type SessionWorktree,
 } from "../api";
-import { onChatEvent } from "../events";
+import { useSessionBusyRefresh } from "../events";
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
 import type { TabOpenIntent } from "../tabPreview";
 import { CodeTabBody, CodeTabNote } from "./layout/TabBody";
-
-/** Poll cadence while the session's agent is working. */
-const POLL_MS = 5000;
+import {
+  FileContextMenu,
+  copyFilePath,
+  fileContextMenuTarget,
+  type FileContextMenuTarget,
+} from "./FileTreeActions";
+import { showAlert } from "./ui";
 
 export type WorktreeView = CodeBrowserView;
 
@@ -46,6 +50,7 @@ export function WorktreeTab({
   onViewChange,
   onToggledChange,
   onOpenFile,
+  canRenameFile,
 }: {
   sessionId?: string;
   project: Project;
@@ -63,12 +68,15 @@ export function WorktreeTab({
     ref: string | undefined,
     intent: TabOpenIntent,
   ) => void;
+  canRenameFile: (path: string) => boolean;
 }) {
   const projectId = project.id;
   const [wt, setWt] = useState<SessionWorktree | null>(null);
   const [tree, setTree] = useState<CodeTree | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
+  const [renamingPath, setRenamingPath] = useState<string | null>(null);
   // A request id drops stale responses — superseded refreshes, poll ticks, and
   // (via the effect-cleanup bump) post-unmount completions.
   const reqId = useRef(0);
@@ -114,58 +122,7 @@ export function WorktreeTab({
     };
   }, [load]);
 
-  // Poll only while this session is busy, and refresh once on the busy→idle
-  // edge (the final state after a turn). No idle polling — committed/quiescent
-  // worktrees don't move, which is what made the original always-on session
-  // mode wasteful.
-  useEffect(() => {
-    if (!sessionId) return;
-    let busy = false;
-    // Once any edge arrives for this session it supersedes the mount-time
-    // snapshot below (which may resolve later, out of date).
-    let edgeSeen = false;
-    let disposed = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const start = () => {
-      if (timer) return;
-      timer = setInterval(load, POLL_MS);
-    };
-    const stop = () => {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-    };
-    const off = onChatEvent((ev) => {
-      if (ev.type !== "busy" || ev.sessionId !== sessionId) return;
-      edgeSeen = true;
-      if (ev.busy && !busy) {
-        busy = true;
-        start();
-      } else if (!ev.busy && busy) {
-        busy = false;
-        stop();
-        load(); // catch the final post-turn state
-      }
-    });
-    // chat.busy is edge-only: a tab opened mid-turn would never see a
-    // busy:true edge, so polling (and the gated busy→idle refresh) would sit
-    // out the whole turn. Seed from the session list's busy snapshot instead.
-    listChatSessions(projectId)
-      .then((sessions) => {
-        if (disposed || edgeSeen || busy) return;
-        if (sessions.find((s) => s.id === sessionId)?.busy) {
-          busy = true;
-          start();
-        }
-      })
-      .catch(() => {});
-    return () => {
-      disposed = true;
-      off();
-      stop();
-    };
-  }, [sessionId, projectId, load]);
+  useSessionBusyRefresh(projectId, sessionId, true, load);
 
   const filesTree = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree]);
 
@@ -188,6 +145,25 @@ export function WorktreeTab({
     ? m.worktree_current({ branch: ltr(`${checkedOut}${fileCount > 0 ? "*" : ""}`) })
     : m.worktree_default_branch({ branch: ltr(project.baselineBranch) });
   const githubBranch = liveWorktree ? liveWorktree.branch : project.baselineBranch;
+  const openFile = (path: string, intent: TabOpenIntent) =>
+    liveWorktree
+      ? onOpenFile(path, sessionId, undefined, intent)
+      : onOpenFile(path, undefined, project.baselineBranch, intent);
+  const canManageFiles = tree?.root === "worktree" || (tree?.root === "clone" && !sessionId);
+  const manage = async (path: string, action: Parameters<typeof manageProjectFile>[2]) => {
+    try {
+      await manageProjectFile(projectId, path, action, {
+        sessionId,
+      });
+      load();
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
+  const copyPath = (path: string) => {
+    const root = tree?.path ?? project.repoPath;
+    copyFilePath(root, path);
+  };
 
   return (
     <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
@@ -247,15 +223,40 @@ export function WorktreeTab({
                 depth={0}
                 toggled={toggled}
                 onToggle={toggle}
-                onOpenFile={(path, intent) =>
-                  liveWorktree
-                    ? onOpenFile(path, sessionId, undefined, intent)
-                    : onOpenFile(path, undefined, project.baselineBranch, intent)
-                }
+                onOpenFile={openFile}
+                renamingPath={renamingPath}
+                onContextMenu={(event, path) => {
+                  setContextMenu(fileContextMenuTarget(event, path));
+                }}
+                onRename={(path, name) => {
+                  setRenamingPath(null);
+                  void manage(path, { action: "rename", newName: name });
+                }}
+                onCancelRename={() => setRenamingPath(null)}
              />
             </div>
           )}
         </CodeTabBody>
+      )}
+      {contextMenu && (
+        <FileContextMenu
+          target={contextMenu}
+          onOpen={() => openFile(contextMenu.path, "keepOpen")}
+          onRename={canManageFiles && canRenameFile(contextMenu.path)
+            ? () => setRenamingPath(contextMenu.path)
+            : undefined}
+          onDuplicate={canManageFiles
+            ? () => void manage(contextMenu.path, { action: "duplicate" })
+            : undefined}
+          onCopyPath={() => copyPath(contextMenu.path)}
+          onDelete={canManageFiles
+            ? () => {
+                if (window.confirm(m.file_tree_delete_confirm({ path: ltr(contextMenu.path) })))
+                  void manage(contextMenu.path, { action: "delete" });
+              }
+            : undefined}
+          onClose={() => setContextMenu(null)}
+       />
       )}
     </div>
   );

@@ -3,6 +3,7 @@
 // terminals can subscribe without threading props everywhere.
 
 import { useEffect, useRef } from "react";
+import { listChatSessions } from "./api";
 import type {
   ChatMessage,
   ChatSession,
@@ -67,6 +68,66 @@ export function onChatEvent(fn: ChatListener): () => void {
 
 function emitChat(ev: ChatEvent) {
   chatListeners.forEach((fn) => fn(ev));
+}
+
+/** Reuse the Files pane's low-churn freshness policy: poll only while an agent
+ * is working, then catch the final state and any reconnect gap. */
+export function useSessionBusyRefresh(
+  projectId: string,
+  sessionId: string | undefined,
+  enabled: boolean,
+  refresh: () => void,
+) {
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    if (!enabled || !sessionId) return;
+    let disposed = false;
+    let edgeSeen = false;
+    let busy = false;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    };
+    const start = () => {
+      if (!timer) timer = setInterval(() => refreshRef.current(), 5000);
+    };
+    const seed = () => {
+      edgeSeen = false;
+      listChatSessions(projectId)
+        .then((sessions) => {
+          if (disposed || edgeSeen) return;
+          busy = Boolean(sessions.find((session) => session.id === sessionId)?.busy);
+          if (busy) start();
+          else stop();
+        })
+        .catch(() => {});
+    };
+    const off = onChatEvent((event) => {
+      if (event.type === "reconnected") {
+        refreshRef.current();
+        seed();
+        return;
+      }
+      if (event.type !== "busy" || event.sessionId !== sessionId) return;
+      edgeSeen = true;
+      if (event.busy === busy) return;
+      busy = event.busy;
+      if (busy) start();
+      else {
+        stop();
+        refreshRef.current();
+      }
+    });
+    seed();
+    return () => {
+      disposed = true;
+      off();
+      stop();
+    };
+  }, [enabled, projectId, sessionId]);
 }
 
 const projectActivityListeners = new Set<() => void>();

@@ -49,11 +49,12 @@ import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
-import { ArtifactsTab } from "./components/ArtifactsTab";
+import { ArtifactsTab, findArtifactEntry } from "./components/ArtifactsTab";
 import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
+import type { FileBufferState } from "./fileSync";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -435,7 +436,7 @@ function initialPanelWidth(): number {
   } catch {
     // storage unavailable — fall through to the default
   }
-  return Math.max(PANEL_MIN_WIDTH, Math.min(760, max, Math.round(window.innerWidth * 0.42)));
+  return Math.max(PANEL_MIN_WIDTH, Math.min(760, max, Math.round(window.innerWidth * 0.4)));
 }
 
 function upsert<T extends { id: string }>(list: T[], item: T): T[] {
@@ -522,6 +523,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
+  const fileBuffersRef = useRef(new Map<string, FileBufferState>());
   const fileLineScrollRequestRef = useRef(0);
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
@@ -576,9 +578,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     setCodeTabs((prev) => withoutTab(prev, key));
     const project = projectIdRef.current;
     if (project && "path" in tab) {
-      fileScrollPositionsRef.current.delete(
-        fileScrollKey(project, activeSessionIdRef.current, tab),
-      );
+      const fileKey = fileScrollKey(project, activeSessionIdRef.current, tab);
+      fileScrollPositionsRef.current.delete(fileKey);
     }
     const next = tabHistoryRef.current.filter((item) => rightTabKey(item) !== key);
     tabHistoryRef.current = next;
@@ -1238,9 +1239,12 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     (tab: FileViewDef) => {
       const idx = fileTabs.findIndex((t) => sameFileTab(t, tab));
       if (idx === -1) return;
+      const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
+      if (key && fileBuffersRef.current.has(key) && !window.confirm(m.file_viewer_discard_unsaved_changes())) return;
       setFileTabs((prev) => prev.filter((_, i) => i !== idx));
-      if (projectId) {
-        fileScrollPositionsRef.current.delete(fileScrollKey(projectId, activeSessionId, tab));
+      if (key) {
+        fileScrollPositionsRef.current.delete(key);
+        fileBuffersRef.current.delete(key);
       }
       if (
         activeSessionId === DEMO_MAIN_SESSION_ID &&
@@ -1538,6 +1542,12 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const expTab =
     typeof rightTab === "object" && "id" in rightTab ? rightTab : null;
   const fileTab = typeof rightTab === "object" && "path" in rightTab ? rightTab : null;
+  const fileArtifactEntry = fileTab?.source === "artifacts" && artifacts
+    ? findArtifactEntry(artifacts.entries, fileTab.path)
+    : null;
+  const artifactVersion = fileArtifactEntry
+    ? `${fileArtifactEntry.modifiedAt}:${fileArtifactEntry.size}`
+    : null;
   const onboardingOverviewTab =
     activeSessionId === DEMO_MAIN_SESSION_ID && demoOverviewLeading
       ? fileTabs.find(
@@ -1881,6 +1891,9 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   artifacts={artifacts}
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
+                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                    fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
+                  )}
                   onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                />
               )}
@@ -2012,6 +2025,13 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   toggled={filesToggled}
                   onViewChange={setFilesView}
                   onToggledChange={setFilesToggled}
+                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                    fileScrollKey(activeProject.id, activeSessionId, {
+                      path,
+                      source: "repo",
+                      sessionId: activeSessionId ?? undefined,
+                    }),
+                  )}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFileTab(
                       path,
@@ -2053,6 +2073,16 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   gitRef={fileTab.ref}
                   line={fileTab.line}
                   branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
+                  artifactVersion={artifactVersion}
+                  artifactEntries={fileTab.source === "artifacts" ? artifacts?.entries : undefined}
+                  initialBuffer={fileBuffersRef.current.get(
+                    fileScrollKey(projectId, activeSessionId, fileTab),
+                  )}
+                  onBufferStateChange={(buffer) => {
+                    const key = fileScrollKey(projectId, activeSessionId, fileTab);
+                    if (buffer) fileBuffersRef.current.set(key, buffer);
+                    else fileBuffersRef.current.delete(key);
+                  }}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFromRightTab(fileTab, () =>
                       openFileTab(

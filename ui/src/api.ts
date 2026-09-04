@@ -16,6 +16,22 @@ export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
 export const DEMO_RUN_EXPERIMENT_PROMPT =
   "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
 
+export class FileChangedError extends Error {
+  readonly currentVersion: string | null;
+  readonly exists: boolean;
+
+  constructor(
+    message: string,
+    currentVersion: string | null,
+    exists: boolean,
+  ) {
+    super(message);
+    this.name = "FileChangedError";
+    this.currentVersion = currentVersion;
+    this.exists = exists;
+  }
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -84,9 +100,25 @@ async function json<T>(res: Response): Promise<T> {
     const text = await res.text().catch(() => "");
     let message = text;
     try {
-      const parsed = JSON.parse(text) as { error?: string };
-      if (parsed.error) message = parsed.error;
-    } catch {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed === "object" && parsed !== null) {
+        if ("error" in parsed && typeof parsed.error === "string") message = parsed.error;
+        if (
+          res.status === 409 &&
+          "code" in parsed &&
+          parsed.code === "fileChanged" &&
+          "exists" in parsed &&
+          typeof parsed.exists === "boolean"
+        ) {
+          const currentVersion =
+            "currentVersion" in parsed && typeof parsed.currentVersion === "string"
+              ? parsed.currentVersion
+              : null;
+          throw new FileChangedError(message, currentVersion, parsed.exists);
+        }
+      }
+    } catch (error) {
+      if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
     throw new Error(message || `HTTP ${res.status}`);
@@ -356,6 +388,9 @@ export interface ProjectFile {
   notFound: boolean;
   root: CheckoutRoot;
   presentation: FilePresentation;
+  /** Exact live-checkout bytes; null for read-only/incomplete sources and
+   * absent when connected to an older remote server. */
+  version?: string | null;
 }
 
 /** One file from the project — a branch's committed copy when `ref` is given,
@@ -393,12 +428,33 @@ export const saveProjectFile = (
   projectId: string,
   path: string,
   content: string,
+  opts: { sessionId?: string; expectedVersion: string },
+) =>
+  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number; version: string }>(
+    `/api/projects/${projectId}/file`,
+    { path, content, sessionId: opts.sessionId, expectedVersion: opts.expectedVersion },
+  );
+
+export type FileAction =
+  | { action: "rename"; newName: string }
+  | { action: "duplicate" | "delete" };
+
+export interface FileActionResult {
+  ok: boolean;
+  path: string;
+}
+
+export const manageProjectFile = (
+  projectId: string,
+  path: string,
+  action: FileAction,
   opts: { sessionId?: string } = {},
 ) =>
-  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number }>(
-    `/api/projects/${projectId}/file`,
-    { path, content, sessionId: opts.sessionId },
-  );
+  patch<FileActionResult>(`/api/projects/${projectId}/file`, {
+    path,
+    ...action,
+    sessionId: opts.sessionId,
+  });
 
 /** Open a checkout file on the machine running `orx up`, in the OS default app
  * for its type (the user's editor for source files). */
@@ -553,6 +609,8 @@ export const overleafUploadUrl = (
 
 export interface CodeTree {
   root: CheckoutRoot;
+  /** Absolute live checkout path; absent for committed branch listings. */
+  path?: string;
   /** The listed branch (`ref` mode), else the checked-out branch, else null
    * (detached HEAD). */
   branch: string | null;
@@ -1056,6 +1114,9 @@ export const deleteArtifact = (projectId: string, path: string) =>
   fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean }>(r));
+
+export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
+  patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>

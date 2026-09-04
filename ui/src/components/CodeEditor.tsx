@@ -21,6 +21,7 @@ export function CodeEditor({
   onChange,
   onSave,
   onBlur,
+  readOnly = false,
   path,
   highlightLine,
   scrollRequest,
@@ -32,6 +33,7 @@ export function CodeEditor({
   onSave: () => void;
   /** Focus left the editor — the viewer saves any pending edit. */
   onBlur?: () => void;
+  readOnly?: boolean;
   path: string;
   /** 1-based line to scroll to and place the caret on (from a `file:line` chip). */
   highlightLine?: number;
@@ -82,6 +84,7 @@ export function CodeEditor({
   }, [path, scrollRequest]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (readOnly) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       onSave();
@@ -140,10 +143,13 @@ export function CodeEditor({
         className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => {
+          if (!readOnly) onChange(e.target.value);
+        }}
         onScroll={syncScroll}
         onKeyDown={onKeyDown}
-        onBlur={onBlur}
+        onBlur={readOnly ? undefined : onBlur}
+        readOnly={readOnly}
         spellCheck={false}
         autoComplete="off"
         autoCorrect="off"
