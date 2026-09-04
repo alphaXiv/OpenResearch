@@ -161,6 +161,35 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     opts
 }
 
+/// Arguments for a long-lived local forward over the same authenticated
+/// ControlMaster used by settings and background jobs.
+pub(crate) fn forward_args(
+    target: &SshTarget,
+    forward: &str,
+    remote_cmd: &str,
+) -> Result<Vec<String>> {
+    prepare_control_dir()?;
+    let mut args = ssh_opts(target, true);
+    for option in [
+        "ExitOnForwardFailure=yes",
+        "ServerAliveInterval=30",
+        "ServerAliveCountMax=3",
+    ] {
+        args.extend(["-o".into(), option.into()]);
+    }
+    args.extend([
+        // No PTY: the remote session bearer is delivered over stdin and must
+        // never be echoed by terminal line discipline.
+        "-T".into(),
+        "-L".into(),
+        forward.into(),
+        "--".into(),
+        target.dest.clone(),
+        remote_cmd.into(),
+    ]);
+    Ok(args)
+}
+
 /// Arguments for the short interactive login opened by Settings. `true` ends
 /// the visible session after authentication while ControlPersist keeps its
 /// master connection available to the ordinary batch-mode calls below.
@@ -171,12 +200,25 @@ pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// OpenSSH removes this path on normal shutdown.
-/// ponytail: existence-only can show Ready after an abrupt kill; a future probe must not reset ControlPersist.
-pub(crate) fn master_is_running(target: &SshTarget) -> Result<bool> {
+pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
+    prepare_control_dir()?;
     let path = control_path(target);
-    path.try_exists()
-        .map_err(|e| anyhow!("Could not inspect SSH control path {}: {e}", path.display()))
+    if !path.try_exists()? {
+        return Ok(false);
+    }
+    let status = Command::new("ssh")
+        .args(["-O", "check", "-S"])
+        .arg(path)
+        .arg("--")
+        .arg(&target.dest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await
+        .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
+    Ok(status.success())
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
@@ -208,7 +250,8 @@ async fn ssh_run_bytes(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     let mut child = cmd.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             anyhow!("`ssh` not found on PATH — the SSH backend needs the OpenSSH client.")

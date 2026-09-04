@@ -39,11 +39,13 @@ import {
   type Experiment,
   type ProjectArtifacts,
   type Project,
+  type RuntimeInfo,
   type Run,
   type ChatMessage,
   type UiState,
 } from "./api";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
+import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
@@ -53,13 +55,12 @@ import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
 import { RailHeader } from "./components/Header";
-import { UpdateBanner } from "./components/UpdateBanner";
+import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
 import { Onboarding } from "./components/Onboarding";
 import { NewProjectDialog, ProjectsHome } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { Md } from "./components/Md";
-import { usePopover } from "./components/ModelPicker";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { clearReadDemoSessions } from "./demoSessionState";
@@ -68,6 +69,7 @@ import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, Spinner } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
+import { RemoteStatus } from "./components/RemoteStatus";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -452,8 +454,9 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
   return current.current;
 }
 
-export default function App() {
+export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const locale = useLocale();
+  const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [uiState, setUiState] = useState<UiState | null>(null);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
@@ -813,7 +816,7 @@ export default function App() {
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
     const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
-    document.title = name ? `${autoDir(name)} - OpenResearch` : "OpenResearch";
+    document.title = name ? `${autoDir(name)} — OpenResearch` : "OpenResearch";
   }, [homeOpen, startupError, uiState, activeProject]);
 
   const projectIdRef = useRef(projectId);
@@ -1665,6 +1668,7 @@ export default function App() {
           <p>{startupError}</p>
           <Button variant="primary" onClick={loadInitialState}>{m.app_retry()}</Button>
         </div>
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1675,6 +1679,7 @@ export default function App() {
         <div className={EMPTY_STATE_CLASS_NAME}>
           <Spinner />
         </div>
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1683,9 +1688,10 @@ export default function App() {
   if (projects.length === 0) {
     return (
       <div className="app flex flex-col h-full">
-        <OfflineBanner />
+        {runtime.kind === "local" && <OfflineBanner />}
         {onboarded ? (
           <ProjectsHome
+            remote={runtime.kind === "ssh"}
             projects={projects}
             onOpen={setProjectId}
             onCreated={onProjectCreated}
@@ -1707,6 +1713,7 @@ export default function App() {
             }}
          />
         )}
+        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
       </div>
     );
   }
@@ -1723,18 +1730,22 @@ export default function App() {
 
   return (
     <div className="app flex flex-col h-full">
-      <OfflineBanner />
-      <UpdateBanner />
+      {runtime.kind === "local" && <OfflineBanner />}
+      {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       {homeOpen ? (
-        <ProjectsHome
-          projects={projects}
-          onOpen={(id) => {
-            setProjectId(id);
-            setHomeOpen(false);
-          }}
-          onCreated={onProjectCreated}
-          onDeleted={onProjectDeleted}
-       />
+        <>
+          <ProjectsHome
+            remote={runtime.kind === "ssh"}
+            projects={projects}
+            onOpen={(id) => {
+              setProjectId(id);
+              setHomeOpen(false);
+            }}
+            onCreated={onProjectCreated}
+            onDeleted={onProjectDeleted}
+         />
+          {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+        </>
       ) : (
       <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
         {projectId && (
@@ -1768,6 +1779,7 @@ export default function App() {
                 ? DEMO_RUN_EXPERIMENT_PROMPT
                 : null
             }
+            runtime={runtime}
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
             }
@@ -1779,6 +1791,7 @@ export default function App() {
               <SkillsTab />
             ) : mainView !== "chat" ? (
               <SettingsView
+                remote={runtime.kind === "ssh"}
                 tab={mainView}
                 project={activeProject}
                 githubPublicationError={
@@ -1868,7 +1881,7 @@ export default function App() {
                   artifacts={artifacts}
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
-                  onOpenStorage={() => selectMainView("storage")}
+                  onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                />
               )}
             </TabBody>
@@ -2026,6 +2039,7 @@ export default function App() {
             <TabBody>
               {projectId && (
                 <FileViewer
+                  remote={runtime.kind === "ssh"}
                   key={fileScrollKey(projectId, activeSessionId, fileTab)}
                   projectId={projectId}
                   path={fileTab.path}
@@ -2185,6 +2199,7 @@ export default function App() {
       )}
       {newProjectOpen && (
         <NewProjectDialog
+          remote={runtime.kind === "ssh"}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, publicationError) => {
             setNewProjectOpen(false);

@@ -62,9 +62,11 @@ type ProjectDraft = {
 export function NewProjectForm({
   onCreated,
   onCancel,
+  remote = false,
 }: {
   onCreated: (project: Project, githubPublicationError: string | null) => void;
   onCancel?: () => void;
+  remote?: boolean;
 }) {
   const [mode, setMode] = useState<Mode>("blank");
   const [name, setName] = useState("");
@@ -555,7 +557,7 @@ export function NewProjectForm({
                 </span>
               )}
             </label>
-          ) : mode === "folder" ? (
+          ) : mode === "folder" && !remote ? (
             <button
               data-initial-focus
               type="button"
@@ -571,6 +573,23 @@ export function NewProjectForm({
               </span>
               <ChevronRight className="folder-picker-chevron" size={15} />
             </button>
+          ) : mode === "folder" ? (
+            <label className="project-location-field">
+              <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>
+              <input
+                data-initial-focus
+                className="text-sm font-normal"
+                value={path}
+                onChange={(event) => {
+                  setPathTouched(true);
+                  setPathStatus(null);
+                  setPath(event.target.value);
+                }}
+                placeholder="/home/user/project"
+                spellCheck={false}
+                dir="ltr"
+              />
+            </label>
           ) : name.trim() ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>

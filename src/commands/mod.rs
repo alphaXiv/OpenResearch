@@ -35,6 +35,7 @@ pub mod paper;
 pub mod plan_gate;
 pub mod project;
 pub mod projects;
+pub mod remote_host;
 pub mod runs;
 pub mod serve;
 pub mod skill;

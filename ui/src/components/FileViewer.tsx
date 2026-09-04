@@ -131,6 +131,7 @@ export function FileViewer({
   lineScrollRequest,
   onLineScrollRequestHandled,
   onEdit,
+  remote = false,
 }: {
   projectId: string;
   path: string;
@@ -163,6 +164,7 @@ export function FileViewer({
   /** Typing in the editor — the commitment that takes a preview tab out of
    * preview mode. */
   onEdit?: () => void;
+  remote?: boolean;
 }) {
   const [loaded, setLoaded] = useState<LoadedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -580,7 +582,7 @@ export function FileViewer({
             <Code size={13} />
           </IconButton>
         )}
-        {onDisk && (
+        {onDisk && !remote && (
           <IconButton
             data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
             data-tip-align="end"

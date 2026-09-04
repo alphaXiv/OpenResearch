@@ -17,10 +17,11 @@ export interface UpdateState {
 
 /** Live update status: the initial fetch plus every `update.status` SSE frame.
  *  Exported because the Updates settings card renders the same state. */
-export function useUpdateStatus(): UpdateState {
+export function useUpdateStatus(enabled = true): UpdateState {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    if (!enabled) return;
     let fromEvent = false;
     const stop = onUpdateStatus((next) => {
       fromEvent = true;
@@ -31,7 +32,7 @@ export function useUpdateStatus(): UpdateState {
       .then((next) => !fromEvent && setStatus(next))
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
     return stop;
-  }, []);
+  }, [enabled]);
   // `setStatus` is referentially stable, so this needs no memoization.
   return { status, error, apply: setStatus };
 }
@@ -41,8 +42,7 @@ export function useUpdateStatus(): UpdateState {
  *
  *  Deliberately not shown for a merely *available* update — that is the
  *  updater's job, and a banner for something already in hand is noise. */
-export function UpdateBanner() {
-  const { status } = useUpdateStatus();
+export function UpdateBanner({ status }: { status: UpdateStatus | null }) {
   const [dismissed, setDismissed] = useState<string | null>(null);
 
   // `installedVersion`, not `latest`: a release can land between the install and

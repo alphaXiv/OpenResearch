@@ -1,6 +1,7 @@
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
+import { getThemePreference } from "../theme";
 import {
   ArrowDown,
   ArrowUpRight,
@@ -33,6 +34,7 @@ import {
   Users,
   X,
 } from "lucide-react";
+import { createPortal } from "react-dom";
 import {
   memo,
   useCallback,
@@ -59,10 +61,13 @@ import {
   fmtNumber,
   getChatMessages,
   getProjectStarterPrompts,
+  createRemoteSession,
+  getSshHosts,
   getSkills,
   type HarnessId,
   type StarterPrompt,
   interruptChat,
+  listRemoteSessions,
   listChatSessions,
   reasoningFor,
   recoverChatTurn,
@@ -86,7 +91,10 @@ import {
   type Harness,
   type PromptAnswer,
   type QueuedMessage,
+  type RemoteSessionInfo,
+  type RuntimeInfo,
   type SkillInfo,
+  type SshHost,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
@@ -119,6 +127,9 @@ import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
+import { SshConfigDialog } from "./SshConfigDialog";
+import { RemoteIcon } from "./RemoteIcon";
+import { RemoteStatus } from "./RemoteStatus";
 import {
   defaultSelection,
   HARNESS_LABELS,
@@ -151,7 +162,8 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
+import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
+import { useDialogFocus } from "./useDialogFocus";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -4126,6 +4138,129 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+function RemoteHostDialog({
+  onClose,
+  onConfigureSsh,
+}: {
+  onClose: () => void;
+  onConfigureSsh: () => void;
+}) {
+  const [hosts, setHosts] = useState<SshHost[] | null>(null);
+  const [sessions, setSessions] = useState<RemoteSessionInfo[]>([]);
+  const [query, setQuery] = useState("");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [openingHost, setOpeningHost] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    Promise.all([getSshHosts(), listRemoteSessions()])
+      .then(([nextHosts, nextSessions]) => {
+        setHosts(nextHosts);
+        setSessions(nextSessions);
+      })
+      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
+  }, []);
+
+  useDialogFocus(dialogRef, onClose);
+
+  async function openRemote(host: string) {
+    const remoteWindow = window.open("/remote-launch", "_blank");
+    if (!remoteWindow) {
+      showAlert(m.remote_popup_blocked(), "error");
+      return;
+    }
+    setOpeningHost(host);
+    try {
+      const session = await createRemoteSession(host, {
+        theme: getThemePreference(),
+        locale: getLocale(),
+      });
+      remoteWindow.location.replace(session.gatewayUrl);
+      onClose();
+    } catch (error) {
+      remoteWindow.close();
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      setOpeningHost(null);
+    }
+  }
+
+  const filteredHosts = hosts?.filter((host) =>
+    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="remote-host-dialog-title"
+        tabIndex={-1}
+      >
+        <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={onClose}>
+          <X size={16} />
+        </IconButton>
+        <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
+          <h2 id="remote-host-dialog-title" className="m-0 text-xl font-medium">{m.remote_dialog_title()}</h2>
+          <p className="mt-2 mb-0 text-sm leading-normal text-subtext">{m.remote_dialog_description()}</p>
+          <Input
+            data-initial-focus
+            className="mt-4"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={m.remote_search_hosts()}
+            aria-label={m.remote_search_hosts()}
+          />
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
+          {loadError ? (
+            <p className="m-3 text-sm text-accent-red">{loadError}</p>
+          ) : hosts === null ? (
+            <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
+          ) : filteredHosts?.length === 0 ? (
+            <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
+          ) : (
+            filteredHosts?.map((host) => {
+              const session = sessionByHost.get(host.host);
+              return (
+                <Button
+                  key={host.host}
+                  variant="ghost"
+                  className="w-full justify-start text-base font-normal"
+                  disabled={openingHost === host.host}
+                  onClick={() => void openRemote(host.host)}
+                >
+                  <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
+                  {openingHost === host.host ? (
+                    <Spinner />
+                  ) : session ? (
+                    <span className="text-sm text-subtext">{m.remote_open()}</span>
+                  ) : null}
+                </Button>
+              );
+            })
+          )}
+        </div>
+        <div className="shrink-0 border-t border-border-variant p-2">
+          <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={onConfigureSsh}>
+            <SlidersHorizontal size={15} />
+            {m.ssh_configure_hosts()}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -4147,6 +4282,7 @@ export function ChatPanel({
   onOpenPlan,
   onOpenSubagent,
   onOpenWorktree,
+  runtime,
   onOpenDemoWelcome,
   composerPrefill = null,
   onActiveSessionChange,
@@ -4207,6 +4343,7 @@ export function ChatPanel({
   ) => void;
   /** Open the pinned Files home for the active session. */
   onOpenWorktree: () => void;
+  runtime: RuntimeInfo;
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
   composerPrefill?: string | null;
@@ -4219,6 +4356,8 @@ export function ChatPanel({
   children?: React.ReactNode;
 }) {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
+  const [sshConfigOpen, setSshConfigOpen] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
@@ -5921,6 +6060,38 @@ export function ChatPanel({
           </div>
         )}
       </div>
+      {runtime.kind === "ssh" ? (
+        <RemoteStatus runtime={runtime} />
+      ) : (
+        <div className="relative shrink-0 border-t border-border">
+          <div className="flex items-center gap-1.5 py-2 ps-1 pe-2.5">
+            <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
+              <RemoteIcon size={14} className="shrink-0" />
+            </IconButton>
+            <span className="flex min-w-0 flex-col gap-1 text-start text-text">
+              <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
+              <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
+            </span>
+          </div>
+        </div>
+      )}
+      {remoteDialogOpen && (
+        <RemoteHostDialog
+          onClose={() => setRemoteDialogOpen(false)}
+          onConfigureSsh={() => {
+            setRemoteDialogOpen(false);
+            setSshConfigOpen(true);
+          }}
+        />
+      )}
+      {sshConfigOpen && (
+        <SshConfigDialog
+          onClose={() => {
+            setSshConfigOpen(false);
+            setRemoteDialogOpen(true);
+          }}
+        />
+      )}
     </aside>
   );
 

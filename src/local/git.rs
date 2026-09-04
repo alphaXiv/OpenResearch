@@ -56,7 +56,9 @@ pub fn clone_path(owner: &str, repo: &str) -> PathBuf {
 
 fn cache_root() -> PathBuf {
     std::env::var_os("ORX_CACHE_DIR")
+        .filter(|path| !path.is_empty())
         .map(PathBuf::from)
+        .or_else(crate::config::settings_cache_dir)
         .unwrap_or_else(|| {
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -456,19 +458,35 @@ fn file_backup(path: &Path) -> Result<FileBackup> {
 }
 
 fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    atomic_write_with_mode(path, contents, None)
+}
+
+pub(crate) fn atomic_write_with_mode(
+    path: &Path,
+    contents: &[u8],
+    mode: Option<u32>,
+) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("{} has no parent directory", path.display()))?;
     let temporary = parent.join(format!(".openresearch-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(mode);
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        let mut file = options.open(&temporary)?;
         file.write_all(contents)?;
         file.sync_all()?;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            std::fs::set_permissions(&temporary, metadata.permissions())?;
+        if mode.is_none() {
+            if let Ok(metadata) = std::fs::metadata(path) {
+                std::fs::set_permissions(&temporary, metadata.permissions())?;
+            }
         }
         if std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink()) {
             return Err(anyhow!(

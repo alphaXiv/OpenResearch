@@ -777,8 +777,99 @@ export interface SshHost {
 export const getSshHosts = () =>
   get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
 
+export interface SshConfigFile {
+  path: string;
+  content: string;
+}
+
+export const getSshConfig = () => get<SshConfigFile>("/api/settings/ssh/config");
+
+export const saveSshConfig = (content: string, previousContent: string) =>
+  put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
+
 export const getSshMasterStatus = (host: string) =>
   get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+
+export type RemoteSessionStatus =
+  | "connecting"
+  | "needsInstall"
+  | "needsUpdate"
+  | "applying"
+  | "connected"
+  | "reconnecting"
+  | "disconnected";
+
+export interface RemoteInstallPaths {
+  binary: string;
+  database: string;
+  cache: string;
+}
+
+export interface RemoteSessionInfo {
+  id: string;
+  host: string;
+  user: string | null;
+  status: RemoteSessionStatus;
+  version: string | null;
+  dashboardProtocol: number | null;
+  gatewayUrl: string;
+  error: string | null;
+  installPaths: RemoteInstallPaths | null;
+  uiPreferences: { theme: string | null; locale: string | null };
+  canStartNewHost: boolean;
+}
+
+export type RuntimeInfo =
+  | { kind: "local"; version: string }
+  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+
+export const getRuntime = () => get<RuntimeInfo>("/_orx/runtime");
+
+export const listRemoteSessions = () =>
+  get<{ sessions: RemoteSessionInfo[] }>("/api/remote/sessions").then((r) => r.sessions);
+
+export const createRemoteSession = (
+  host: string,
+  uiPreferences: { theme: string | null; locale: string | null },
+) => post<RemoteSessionInfo>("/api/remote/sessions", { host, uiPreferences });
+
+export const reconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/reconnect`);
+
+export const disconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/disconnect`);
+
+export const installRemoteSession = (paths: RemoteInstallPaths) =>
+  post<RemoteSessionInfo>("/_orx/install", paths);
+
+export const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
+
+export const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
+
+export const startCurrentRemoteHost = () => post<RemoteSessionInfo>("/_orx/start-host");
+
+export interface RemoteStopPreview {
+  instanceId: string;
+  activeTurnCount: number;
+  queuedMessageCount: number;
+  pendingPermissionCount: number;
+  activeRunCount: number;
+  attachmentCount: number;
+}
+
+export const getRemoteStopPreview = () => get<RemoteStopPreview>("/_orx/stop-host");
+
+export const stopCurrentRemoteHost = (preview: RemoteStopPreview) =>
+  post<{ accepted: boolean }>("/_orx/stop-host", {
+    expectedInstanceId: preview.instanceId,
+    expectedPreview: {
+      activeTurnCount: preview.activeTurnCount,
+      queuedMessageCount: preview.queuedMessageCount,
+      pendingPermissionCount: preview.pendingPermissionCount,
+      activeRunCount: preview.activeRunCount,
+      attachmentCount: preview.attachmentCount,
+    },
+  });
 
 export interface SshPreflight {
   reachable: boolean;

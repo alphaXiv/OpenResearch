@@ -900,8 +900,12 @@ pub(crate) fn write_mcp_config(
         std::fs::create_dir_all(parent)
             .map_err(|e| anyhow!("cannot create {}: {e}", parent.display()))?;
     }
-    std::fs::write(&path, serde_json::to_vec_pretty(&config).unwrap())
-        .map_err(|e| anyhow!("cannot write {}: {e}", path.display()))?;
+    crate::local::git::atomic_write_with_mode(
+        &path,
+        &serde_json::to_vec_pretty(&config).unwrap(),
+        Some(0o600),
+    )
+    .map_err(|e| anyhow!("cannot protect {}: {e}", path.display()))?;
     Ok(path)
 }
 
@@ -2108,6 +2112,26 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    #[test]
+    fn local_mcp_config_contains_only_string_environment_values() {
+        let repo = std::env::temp_dir().join(format!("orx-mcp-test-{}", uuid::Uuid::new_v4()));
+        let path = write_mcp_config(&repo, 4791, "session", "gate").unwrap();
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let env = config["mcpServers"]["orx"]["env"].as_object().unwrap();
+        assert!(env.values().all(serde_json::Value::is_string));
+        assert!(!env.contains_key("ORX_UP_AUTH_TOKEN"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 
     /// Plugins live in the version cache or a marketplace checkout, and a
     /// marketplace holds plugins that are merely on offer — so only the

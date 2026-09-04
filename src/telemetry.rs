@@ -117,6 +117,14 @@ pub(crate) struct Settings {
     /// (each mutation re-reads and patches only its own field via `mutate_settings`).
     #[serde(default)]
     pub data_dir: Option<String>,
+    /// User-chosen cache directory. Kept beside `data_dir` so remote installs
+    /// can persist both storage roots without relying on shell startup files.
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+    /// Binary selected by the remote installer. The local SSH launcher uses a
+    /// separate compatibility file, but retaining this avoids dropping it.
+    #[serde(default)]
+    pub orx_binary_path: Option<String>,
     /// Default compute target for local-mode launches (Settings → Compute).
     /// Absent = no default: local launches require an explicit `--backend`.
     #[serde(default)]
@@ -185,6 +193,12 @@ pub(crate) struct ResearchProfile {
 pub(crate) fn persisted_data_dir() -> Option<String> {
     load_settings()
         .and_then(|s| s.data_dir)
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn persisted_cache_dir() -> Option<String> {
+    load_settings()
+        .and_then(|s| s.cache_dir)
         .filter(|s| !s.is_empty())
 }
 

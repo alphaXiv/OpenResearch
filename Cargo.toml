@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.1.119"
+version = "0.1.120"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
@@ -36,6 +36,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # `orx up` dashboard: axum for routing/SSE, rust-embed for the SPA, futures for
 # the stream plumbing. TLS-free, so the rustls-only musl build stays intact.
 axum = { version = "0.8", features = ["ws"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 rust-embed = "8"
 futures = "0.3"
 portable-pty = "0.9"
