@@ -461,7 +461,7 @@ function TreeRows({
 }
 
 /** The artifacts directory path, copyable in the tree footer. */
-function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => void }) {
+function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage?: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={ltr(dir)}>
@@ -478,15 +478,17 @@ function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage: () => v
       >
         {copied ? <Check size={12} /> : <Copy size={12} />}
       </IconButton>
-      <IconButton size="small"
-        className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
-        data-tip={m.artifacts_tab_storage_settings()}
-        data-tip-align="end"
-        aria-label={m.artifacts_tab_storage_settings()}
-        onClick={onOpenStorage}
-      >
-        <Settings2 size={12} />
-      </IconButton>
+      {onOpenStorage && (
+        <IconButton size="small"
+          className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
+          data-tip={m.artifacts_tab_storage_settings()}
+          data-tip-align="end"
+          aria-label={m.artifacts_tab_storage_settings()}
+          onClick={onOpenStorage}
+        >
+          <Settings2 size={12} />
+        </IconButton>
+      )}
     </div>
   );
 }
@@ -506,7 +508,7 @@ export function ArtifactsTab({
   onChanged: () => void;
   onOpenFile: (path: string) => void;
   /** Navigate to Settings → Storage (where the data dir can be changed). */
-  onOpenStorage: () => void;
+  onOpenStorage?: () => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this

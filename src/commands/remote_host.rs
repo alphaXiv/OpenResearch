@@ -264,6 +264,7 @@ pub(crate) async fn start_control_server(
     write_descriptor(&descriptor_path, &descriptor)?;
     let instance_id = descriptor.instance_id.clone();
     let task_descriptor = descriptor.clone();
+    let control_gate = Arc::new(tokio::sync::Mutex::new(()));
     let task = tokio::spawn(async move {
         loop {
             let (stream, _) = match listener.accept().await {
@@ -285,8 +286,11 @@ pub(crate) async fn start_control_server(
             let chat = chat.clone();
             let stopping = stopping.clone();
             let stop = stop.clone();
+            let control_gate = control_gate.clone();
             tokio::spawn(async move {
-                let _ = handle_control(stream, descriptor, auth, chat, stopping, stop).await;
+                let _ =
+                    handle_control(stream, descriptor, auth, chat, stopping, stop, control_gate)
+                        .await;
             });
         }
     });
@@ -305,6 +309,7 @@ async fn handle_control(
     chat: Arc<ChatHost>,
     stopping: Arc<AtomicBool>,
     stop: watch::Sender<bool>,
+    control_gate: Arc<tokio::sync::Mutex<()>>,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let line = tokio::time::timeout(CONTROL_TIMEOUT, read_bounded_line(&mut reader))
@@ -331,6 +336,7 @@ async fn handle_control(
             expected_instance_id,
             token,
         } => {
+            let _control = control_gate.lock().await;
             if stopping.load(Ordering::SeqCst) {
                 write_response(
                     reader.get_mut(),
@@ -354,6 +360,7 @@ async fn handle_control(
             validate_token(&token)?;
             write_response(reader.get_mut(), &ControlResponse::Attached { descriptor }).await?;
             auth.register(&token);
+            drop(_control);
             let result = async {
                 loop {
                     let line =
@@ -373,6 +380,7 @@ async fn handle_control(
             expected_instance_id,
             expected_preview,
         } => {
+            let _control = control_gate.lock().await;
             if stopping
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()

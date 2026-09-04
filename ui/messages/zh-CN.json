@@ -1059,6 +1059,7 @@
   "remote_connecting_title": "正在连接到 {host}",
   "remote_connecting_description": "正在准备远程工作区…",
   "remote_reconnect": "重新连接",
+  "remote_check_again": "再次检查",
   "remote_preparing": "正在准备远程工作区…",
   "remote_not_installed_description": "{user} 尚未在 {host} 上安装 OpenResearch。现在安装吗？",
   "remote_install_location": "OpenResearch 将为你的远程 SSH 用户使用以下位置，无需 sudo。",

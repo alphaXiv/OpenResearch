@@ -838,7 +838,7 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
   return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
 }
 
-function SlurmSection() {
+function SlurmSection({ remote = false }: { remote?: boolean }) {
   const [settings, setSettings] = useState<SlurmSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [host, setHost] = useState("");
@@ -851,7 +851,7 @@ function SlurmSection() {
   const [connecting, setConnecting] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const readyHost = host && test?.reachable && test.slurmFound && test.toolsFound ? [host] : [];
+  const readyHost = !remote && host && test?.reachable && test.slurmFound && test.toolsFound ? [host] : [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(readyHost);
 
   function connect() {
@@ -988,27 +988,29 @@ function SlurmSection() {
               <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
                 {saving ? m.common_saving() : m.common_save()}
               </Button>
-              <Button
-                type="button"
-                onClick={() => {
-                  if (connecting && !connectionFailed) {
-                    setConnectionFailed(false);
-                    setConnecting(false);
-                  } else {
-                    connect();
-                  }
-                }}
-                disabled={!host}
-                title={host ? undefined : m.settings_pick_login_node()}
-              >
-                {connecting
-                  ? connectionFailed
-                    ? m.app_retry()
-                    : m.settings_page_cancel()
-                  : test
-                    ? m.settings_reconnect()
-                    : m.settings_connect()}
-              </Button>
+              {!remote && (
+                <Button
+                  type="button"
+                  onClick={() => {
+                    if (connecting && !connectionFailed) {
+                      setConnectionFailed(false);
+                      setConnecting(false);
+                    } else {
+                      connect();
+                    }
+                  }}
+                  disabled={!host}
+                  title={host ? undefined : m.settings_pick_login_node()}
+                >
+                  {connecting
+                    ? connectionFailed
+                      ? m.app_retry()
+                      : m.settings_page_cancel()
+                    : test
+                      ? m.settings_reconnect()
+                      : m.settings_connect()}
+                </Button>
+              )}
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1018,7 +1020,7 @@ function SlurmSection() {
               </span>
             </div>
           </form>
-          {connecting && (
+          {!remote && connecting && (
             <SshConnectTerminal
               key={connectionAttempt}
               host={host}
@@ -1664,7 +1666,7 @@ function BackendDetailPage({
           {target.id === "modal" && <ModalSection />}
           {target.id === "k8s" && <K8sSection />}
           {target.id === "ssh" && <SshSection remote={remote} />}
-          {target.id === "slurm" && <SlurmSection />}
+          {target.id === "slurm" && <SlurmSection remote={remote} />}
           {target.id === "ray" && <RaySection />}
           {target.id === "openresearch" && <OpenResearchSection />}
         </div>
@@ -3359,9 +3361,11 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <StorageTab />
-            </section>
+            {!remote && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <StorageTab />
+              </section>
+            )}
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>

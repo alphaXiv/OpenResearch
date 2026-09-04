@@ -1059,6 +1059,7 @@
   "remote_connecting_title": "در حال اتصال به {host}",
   "remote_connecting_description": "در حال آماده‌سازی فضای کاری راه‌دور…",
   "remote_reconnect": "اتصال دوباره",
+  "remote_check_again": "بررسی دوباره",
   "remote_preparing": "در حال آماده‌سازی فضای کاری راه‌دور…",
   "remote_not_installed_description": "OpenResearch برای {user} روی {host} نصب نیست. اکنون نصب شود؟",
   "remote_install_location": "OpenResearch از این مسیرها برای کاربر SSH راه‌دور شما استفاده می‌کند و به sudo نیاز ندارد.",

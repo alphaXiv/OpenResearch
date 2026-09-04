@@ -1881,7 +1881,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   artifacts={artifacts}
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
-                  onOpenStorage={() => selectMainView("storage")}
+                  onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                />
               )}
             </TabBody>

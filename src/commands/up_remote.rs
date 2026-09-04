@@ -119,7 +119,7 @@ struct RemoteSession {
     gateway_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     generation: AtomicU64,
     dev_origin: Option<String>,
-    expected_instance: RwLock<Option<String>>,
+    expected_instance: std::sync::RwLock<Option<String>>,
 }
 
 #[derive(Default)]
@@ -229,7 +229,7 @@ impl RemoteSessionManager {
             gateway_task: Mutex::new(None),
             generation: AtomicU64::new(0),
             dev_origin: validated_dev_origin(),
-            expected_instance: RwLock::new(None),
+            expected_instance: std::sync::RwLock::new(None),
         });
         registry.by_host.insert(host, id.clone());
         registry.by_id.insert(id, session.clone());
@@ -243,7 +243,7 @@ impl RemoteSessionManager {
         });
         *session.gateway_task.lock().await = Some(task);
         let preparing = session.clone();
-        let generation = session.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = advance_generation(&session, false);
         tokio::spawn(async move {
             prepare_remote_session(preparing, generation).await;
         });
@@ -331,6 +331,27 @@ async fn update_session_if_current(
         return false;
     }
     update(&mut info);
+    true
+}
+
+fn advance_generation(session: &RemoteSession, clear_expected_instance: bool) -> u64 {
+    let mut expected = session.expected_instance.write().unwrap();
+    if clear_expected_instance {
+        *expected = None;
+    }
+    session.generation.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+fn set_expected_instance_if_current(
+    session: &RemoteSession,
+    generation: u64,
+    instance_id: String,
+) -> bool {
+    let mut expected = session.expected_instance.write().unwrap();
+    if session.generation.load(Ordering::SeqCst) != generation {
+        return false;
+    }
+    *expected = Some(instance_id);
     true
 }
 
@@ -424,7 +445,7 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
             return;
         }
     };
-    let expected_instance = session.expected_instance.read().await.clone();
+    let expected_instance = session.expected_instance.read().unwrap().clone();
     let running = remote_host_status(&session.target, &remote_orx.path, &paths).await;
     if session.generation.load(Ordering::SeqCst) != generation {
         return;
@@ -547,7 +568,9 @@ async fn prepare_remote_session_inner(session: Arc<RemoteSession>, generation: u
         .await;
         return;
     }
-    *session.expected_instance.write().await = Some(descriptor.instance_id.clone());
+    if !set_expected_instance_if_current(&session, generation, descriptor.instance_id.clone()) {
+        return;
+    }
     update_session_if_current(&session, generation, |info| {
         info.install_paths = None;
         info.can_start_new_host = false;
@@ -589,7 +612,7 @@ async fn install_and_connect(
             "This development build cannot install an unreleased remote protocol. Build this branch for the remote machine and place the binary at the selected path."
         ));
     }
-    let generation = session.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = advance_generation(&session, false);
     let host = session.info.read().await.host.clone();
     if !set_session_state_if_current(
         &session,
@@ -666,7 +689,9 @@ async fn install_and_connect(
             return Err(error);
         }
     };
-    *session.expected_instance.write().await = Some(descriptor.instance_id.clone());
+    if !set_expected_instance_if_current(&session, generation, descriptor.instance_id.clone()) {
+        return Ok(session.info.read().await.clone());
+    }
     start_connection(
         session.clone(),
         remote_orx,
@@ -730,27 +755,37 @@ async fn start_connection(
     *connection = Some(ConnectionControl { cancel, task });
 }
 
-async fn disconnect_session(session: &Arc<RemoteSession>) {
-    session.generation.fetch_add(1, Ordering::SeqCst);
+async fn disconnect_session(session: &Arc<RemoteSession>) -> u64 {
+    let generation = advance_generation(session, false);
     if let Some(control) = session.connection.lock().await.take() {
         stop_connection(control).await;
     }
     *session.route.write().await = None;
     set_session_state(session, RemoteSessionStatus::Disconnected, None).await;
+    generation
 }
 
 async fn reconnect_session(session: Arc<RemoteSession>) -> RemoteSessionInfo {
+    reconnect_session_inner(session, false).await
+}
+
+async fn reconnect_session_inner(
+    session: Arc<RemoteSession>,
+    clear_expected_instance: bool,
+) -> RemoteSessionInfo {
     let generation = {
         let mut info = session.info.write().await;
         if !matches!(
             info.status,
-            RemoteSessionStatus::Disconnected | RemoteSessionStatus::Failed
+            RemoteSessionStatus::Disconnected
+                | RemoteSessionStatus::Failed
+                | RemoteSessionStatus::NeedsUpdate
         ) {
             return info.clone();
         }
         info.status = RemoteSessionStatus::Checking;
         info.error = None;
-        session.generation.fetch_add(1, Ordering::SeqCst) + 1
+        advance_generation(&session, clear_expected_instance)
     };
     let reconnecting = session.clone();
     tokio::spawn(async move {
@@ -1211,12 +1246,14 @@ async fn gateway_reconnect(State(session): State<Arc<RemoteSession>>) -> Respons
 }
 
 async fn gateway_start_new_host(State(session): State<Arc<RemoteSession>>) -> Response {
-    *session.expected_instance.write().await = None;
     {
         let mut info = session.info.write().await;
         info.can_start_new_host = false;
     }
-    Json(serde_json::json!(reconnect_session(session).await)).into_response()
+    Json(serde_json::json!(
+        reconnect_session_inner(session, true).await
+    ))
+    .into_response()
 }
 
 async fn gateway_disconnect(State(session): State<Arc<RemoteSession>>) -> Response {
@@ -1258,8 +1295,11 @@ async fn gateway_stop_host(
     .await;
     match result {
         Ok(ControlResponse::Accepted) => {
-            disconnect_session(&session).await;
-            session.info.write().await.can_start_new_host = true;
+            let generation = disconnect_session(&session).await;
+            update_session_if_current(&session, generation, |info| {
+                info.can_start_new_host = true;
+            })
+            .await;
             (
                 StatusCode::ACCEPTED,
                 Json(serde_json::json!({ "accepted": true })),
@@ -2192,6 +2232,48 @@ mod tests {
             cache: "/scratch/me/openresearch/repos".into(),
             settings: "/home/me/.config/openresearch/settings.json".into(),
         }
+    }
+
+    fn sample_session() -> RemoteSession {
+        RemoteSession {
+            target: parse_remote_target("example"),
+            client: reqwest::Client::new(),
+            info: RwLock::new(RemoteSessionInfo {
+                id: "session".into(),
+                host: "example".into(),
+                user: None,
+                status: RemoteSessionStatus::Checking,
+                version: None,
+                dashboard_protocol: None,
+                gateway_url: "http://127.0.0.1:1".into(),
+                error: None,
+                install_paths: None,
+                ui_preferences: RemoteUiPreferences::default(),
+                can_start_new_host: false,
+            }),
+            route: RwLock::new(None),
+            operation: Mutex::new(()),
+            connection: Mutex::new(None),
+            gateway_task: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            dev_origin: None,
+            expected_instance: std::sync::RwLock::new(None),
+        }
+    }
+
+    #[test]
+    fn stale_prepare_cannot_restore_a_cleared_expected_instance() {
+        let session = sample_session();
+        let stale = advance_generation(&session, false);
+        let current = advance_generation(&session, true);
+
+        assert!(!set_expected_instance_if_current(
+            &session,
+            stale,
+            "stale".into()
+        ));
+        assert_eq!(session.generation.load(Ordering::SeqCst), current);
+        assert_eq!(*session.expected_instance.read().unwrap(), None);
     }
 
     #[test]

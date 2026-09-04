@@ -1059,6 +1059,7 @@
   "remote_connecting_title": "Connecting to {host}",
   "remote_connecting_description": "Preparing your remote workspace…",
   "remote_reconnect": "Reconnect",
+  "remote_check_again": "Check again",
   "remote_preparing": "Preparing remote workspace…",
   "remote_not_installed_description": "OpenResearch is not installed for {user} on {host}. Install it now?",
   "remote_install_location": "OpenResearch will use these locations for your remote SSH user and does not require sudo.",

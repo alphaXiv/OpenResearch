@@ -217,6 +217,13 @@ function RemoteSetup({
             <Button disabled={busy} onClick={() => void disconnect()}>
               {m.remote_disconnect()}
             </Button>
+            {session.installPaths !== null &&
+              (session.dashboardProtocol === null || session.dashboardProtocol < runtime.dashboardProtocol) && (
+                <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                  {busy ? <Spinner /> : null}
+                  {m.remote_check_again()}
+                </Button>
+              )}
             {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
               <Button variant="danger" disabled={busy} onClick={() => void stopHost()}>
                 {busy ? <Spinner /> : null}
