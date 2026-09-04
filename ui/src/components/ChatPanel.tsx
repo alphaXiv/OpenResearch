@@ -5004,17 +5004,18 @@ export function ChatPanel({
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
 
-  // Keyed by project+harness so a switch never shows another project's prompts.
+  // Keyed by project so a switch never shows another project's prompts;
+  // a harness or model switch keeps the prompts already on screen.
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const [starter, setStarter] = useState<{
     key: string;
     prompts: StarterPrompt[] | null;
   } | null>(null);
-  const starterKey = `${projectId}\0${starterHarness ?? ""}\0${starterModel ?? ""}`;
+  const starterKey = projectId;
   const starterVisible = mainView === "chat" && !threadMounted && !historyLoading;
   useEffect(() => {
-    if (!starterVisible || !starterHarness) return;
+    if (!starterVisible || !starterHarness || starter?.key === starterKey) return;
     let current = true;
     getProjectStarterPrompts(projectId, starterHarness, starterModel, getLocale())
       .then((result) => {
@@ -5026,7 +5027,7 @@ export function ChatPanel({
     return () => {
       current = false;
     };
-  }, [projectId, starterHarness, starterModel, starterKey, starterVisible]);
+  }, [projectId, starterHarness, starterModel, starterKey, starterVisible, starter]);
   const starterPrompts = starter?.key === starterKey ? starter.prompts : null;
   const starterLoading = starterHarness !== null && starter?.key !== starterKey;
   const applyStarterPrompt = (prompt: string) => {

@@ -145,7 +145,7 @@ async fn generate(
     agent: &Agent,
     locale: &str,
 ) -> Option<Vec<StarterPrompt>> {
-    let key = fingerprint(&brief, agent, locale);
+    let key = fingerprint(&brief, locale);
     // Serialize per brief: an in-flight pre-warm, the dev double-effect, and a
     // reopened empty state all wait on the first call's cache entry.
     let lock = brief_lock(&key);
@@ -269,12 +269,10 @@ fn brief_lock(key: &str) -> Arc<tokio::sync::Mutex<()>> {
     locks.entry(key.to_string()).or_default().clone()
 }
 
-fn fingerprint(brief: &str, agent: &Agent, locale: &str) -> String {
+/// The agent is left out on purpose: switching harness or model in the
+/// composer keeps the prompts already on screen instead of regenerating them.
+fn fingerprint(brief: &str, locale: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(agent.harness.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(agent.effective_model().unwrap_or("").as_bytes());
-    hasher.update(b"\0");
     hasher.update(locale.as_bytes());
     hasher.update(b"\0");
     hasher.update(brief.as_bytes());
@@ -693,33 +691,10 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_changes_with_brief_agent_and_locale() {
-        let agent = |harness: &str, model: Option<&str>| Agent {
-            harness: harness.into(),
-            model: model.map(String::from),
-        };
-        let base = fingerprint("brief", &agent("claude-code", None), "en");
-        assert_ne!(
-            base,
-            fingerprint("brief2", &agent("claude-code", None), "en")
-        );
-        assert_ne!(base, fingerprint("brief", &agent("codex", None), "en"));
-        // Claude's one-shot ignores the picked model, so neither does the key.
-        assert_eq!(
-            base,
-            fingerprint("brief", &agent("claude-code", Some("opus")), "en")
-        );
-        assert_ne!(
-            fingerprint("brief", &agent("codex", None), "en"),
-            fingerprint("brief", &agent("codex", Some("gpt-5.5")), "en")
-        );
-        assert_ne!(
-            base,
-            fingerprint("brief", &agent("claude-code", None), "fa")
-        );
-        assert_eq!(
-            base,
-            fingerprint("brief", &agent("claude-code", None), "en")
-        );
+    fn fingerprint_changes_with_brief_and_locale() {
+        let base = fingerprint("brief", "en");
+        assert_ne!(base, fingerprint("brief2", "en"));
+        assert_ne!(base, fingerprint("brief", "fa"));
+        assert_eq!(base, fingerprint("brief", "en"));
     }
 }
