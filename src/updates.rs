@@ -706,6 +706,7 @@ fn instance_id() -> &'static str {
 /// Environment the app-bundle relaunch hands to the new app: the port the old
 /// one served on, so the dashboard tab that asked for the restart reconnects to
 /// the same origin instead of timing out against a fresh ephemeral port.
+#[cfg(target_os = "macos")]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
 /// Relaunch this process into the copy on disk. Returns only on failure.
@@ -729,6 +730,9 @@ pub fn relaunch(port: u16) -> std::io::Error {
             None => return std::io::Error::other("could not locate the app bundle to relaunch"),
         }
     }
+    // Only the bundle relaunch needs the port; exec keeps the original `--port`.
+    #[cfg(not(target_os = "macos"))]
+    let _ = port;
 
     // Not the canonical helper: the launch path is what the installer swapped
     // under, and canonicalizing a replaced binary would pin the old inode.
