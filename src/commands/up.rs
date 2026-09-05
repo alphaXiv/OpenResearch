@@ -100,6 +100,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
+        restart: Arc::new(tokio::sync::Notify::new()),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -180,6 +181,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
+    let restart = state.restart.clone();
+    let mut restarting = false;
     let explicit_stop = if persistent_host {
         tokio::select! {
             r = axum::serve(listener, app) => {
@@ -187,11 +190,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 false
             }
             changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
+            _ = restart.notified() => { restarting = true; false }
             _ = persistent_shutdown_signal() => false,
         }
     } else {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
+            _ = restart.notified() => restarting = true,
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
         false
@@ -210,6 +215,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         server.shutdown().await;
     }
     state.dashboard_lock.lock().unwrap().take();
+    if restarting {
+        eprintln!("orx up: restarting into the updated orx");
+        let err = updates::relaunch(actual_port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
     Ok(())
 }
 
@@ -289,6 +299,8 @@ struct AppState {
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
+    /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
+    restart: Arc<tokio::sync::Notify>,
 }
 
 async fn project_publication_lock(
@@ -525,6 +537,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/update", get(update_status))
         .route("/api/update/apply", post(apply_update))
+        .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
@@ -670,6 +683,7 @@ fn remote_route_forbidden(path: &str) -> bool {
         "/api/project-path/pick"
             | "/api/update"
             | "/api/update/apply"
+            | "/api/update/restart"
             | "/api/update/auto"
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
@@ -4659,6 +4673,33 @@ async fn apply_update() -> ApiResult {
     Ok(Json(json!(updates::status())))
 }
 
+/// Relaunch into the copy the updater already installed. Answers first, then
+/// restarts, so the dashboard learns the request landed before the connection
+/// drops; it reloads once the new server is up.
+async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
+    let status = tokio::task::spawn_blocking(updates::status)
+        .await
+        .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?;
+    if !status.can_restart {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "orx cannot restart itself on this platform".into(),
+        ));
+    }
+    let Some(version) = status.installed_version else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "no newer orx is installed to restart into".into(),
+        ));
+    };
+    let restart = state.restart.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        restart.notify_one();
+    });
+    Ok(Json(json!({ "restarting": true, "version": version })))
+}
+
 #[derive(Deserialize)]
 struct InstallCliReq {
     /// Replace an `orx` that is already on PATH. The card only sends this after
@@ -7109,6 +7150,7 @@ mod tests {
             "/api/project-path/pick",
             "/api/update",
             "/api/update/apply",
+            "/api/update/restart",
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
             "/api/settings/ssh/master",

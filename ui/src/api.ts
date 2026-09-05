@@ -704,6 +704,10 @@ export interface UpdateStatus {
    *  land between the install and the restart. */
   installedVersion: string | null;
   restartRequired: boolean;
+  /** Whether this platform supports `restartApp`; pair with `restartRequired`. */
+  canRestart: boolean;
+  /** Per-process id: changes when the server has relaunched. */
+  instance: string;
 }
 
 export interface InstalledCli {
@@ -718,6 +722,11 @@ export interface InstalledCli {
 export const getUpdateStatus = () => get<UpdateStatus>("/api/update");
 
 export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
+
+/** Relaunch the server into the copy the updater installed. The old server
+ *  answers and then goes away; poll `getUpdateStatus` for the new one. */
+export const restartApp = () =>
+  post<{ restarting: boolean; version: string }>("/api/update/restart");
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
