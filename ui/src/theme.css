@@ -74,6 +74,8 @@
   --color-diff-gutter-text: color-mix(in oklab, var(--text) 45%, var(--base));
 
   --text-prose-emphasis: 1.05em;
+  --text-menu: 0.8125rem;
+  --text-menu--line-height: 1.25rem;
 
   --shadow-elevated: 0 6px 24px color-mix(in oklab, var(--text) 5%, transparent), 0 1px 4px color-mix(in oklab, var(--text) 4%, transparent);
   --shadow-panel-max: 0 12px 40px color-mix(in oklab, var(--text) 22%, transparent);

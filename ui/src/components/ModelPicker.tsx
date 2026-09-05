@@ -69,7 +69,7 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+      if (e.target instanceof Node && !ref.current?.contains(e.target) && !triggerRef?.current?.contains(e.target)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       // Escape closes the picker and must NOT bubble to other document-level

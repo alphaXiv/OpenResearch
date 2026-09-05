@@ -9,6 +9,10 @@ import { ltr } from "../i18n";
 
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { FileTypeIcon } from "./FileTypeIcon";
+import {
+  FileRenameInput,
+  type FileContextMenuEvent,
+} from "./FileTreeActions";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 
 const FILE_TREE_ROW_CLASS_NAME = [
@@ -70,6 +74,10 @@ function DirRow({
   toggled,
   onToggle,
   onOpenFile,
+  renamingPath,
+  onContextMenu,
+  onRename,
+  onCancelRename,
 }: {
   name: string;
   node: DirNode;
@@ -79,6 +87,10 @@ function DirRow({
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string, intent: TabOpenIntent) => void;
+  renamingPath?: string | null;
+  onContextMenu?: (event: FileContextMenuEvent, path: string) => void;
+  onRename?: (path: string, name: string) => void;
+  onCancelRename?: () => void;
 }) {
   const defaultOpen = depth === 0;
   const isOpen = toggled.has(path) ? !defaultOpen : defaultOpen;
@@ -106,6 +118,10 @@ function DirRow({
           toggled={toggled}
           onToggle={onToggle}
           onOpenFile={onOpenFile}
+          renamingPath={renamingPath}
+          onContextMenu={onContextMenu}
+          onRename={onRename}
+          onCancelRename={onCancelRename}
        />
       )}
     </>
@@ -119,6 +135,10 @@ export function TreeLevel({
   toggled,
   onToggle,
   onOpenFile,
+  renamingPath,
+  onContextMenu,
+  onRename,
+  onCancelRename,
 }: {
   node: DirNode;
   parentPath: string;
@@ -126,6 +146,10 @@ export function TreeLevel({
   toggled: ReadonlySet<string>;
   onToggle: (path: string) => void;
   onOpenFile: (path: string, intent: TabOpenIntent) => void;
+  renamingPath?: string | null;
+  onContextMenu?: (event: FileContextMenuEvent, path: string) => void;
+  onRename?: (path: string, name: string) => void;
+  onCancelRename?: () => void;
 }) {
   const dirNames = [...node.dirs.keys()].sort((a, b) => a.localeCompare(b));
   const fileNames = [...node.files].sort((a, b) => a.localeCompare(b));
@@ -143,20 +167,54 @@ export function TreeLevel({
             toggled={toggled}
             onToggle={onToggle}
             onOpenFile={onOpenFile}
+            renamingPath={renamingPath}
+            onContextMenu={onContextMenu}
+            onRename={onRename}
+            onCancelRename={onCancelRename}
          />
         );
       })}
       {fileNames.map((name) => {
         const path = parentPath ? `${parentPath}/${name}` : name;
+        if (renamingPath === path && onRename && onCancelRename) {
+          return (
+            <div
+              key={`f:${path}`}
+              className={FILE_TREE_ROW_CLASS_NAME}
+              style={{ paddingInlineStart: 8 + depth * 14 }}
+            >
+              <FileTypeIcon name={name} />
+              <FileRenameInput
+                name={name}
+                onCommit={(next) => onRename(path, next)}
+                onCancel={onCancelRename}
+             />
+            </div>
+          );
+        }
+        const openHandlers = tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
+          onOpenFile(path, intent),
+        );
         return (
           <button
             key={`f:${path}`}
             type="button"
             className={FILE_TREE_ROW_CLASS_NAME}
             style={{ paddingInlineStart: 8 + depth * 14 }}
-            {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-              onOpenFile(path, intent),
-            )}
+            {...openHandlers}
+            onContextMenu={(event) => {
+              if (!onContextMenu) return;
+              event.preventDefault();
+              onContextMenu(event, path);
+            }}
+            onKeyDown={(event) => {
+              if (onContextMenu && (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10"))) {
+                event.preventDefault();
+                onContextMenu(event, path);
+                return;
+              }
+              openHandlers.onKeyDown(event);
+            }}
             title={m.a11y_keep_open({ name: ltr(path) })}
           >
             <FileTypeIcon name={name} />

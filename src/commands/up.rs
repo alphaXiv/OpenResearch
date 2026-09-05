@@ -459,7 +459,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/projects/{id}/code-tree", get(project_code_tree))
         .route(
             "/api/projects/{id}/file",
-            get(project_file).put(write_project_file),
+            get(project_file)
+                .put(write_project_file)
+                .patch(manage_project_file),
         )
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
@@ -493,7 +495,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route(
             "/api/projects/{id}/files",
-            get(list_artifacts).delete(delete_artifact),
+            get(list_artifacts)
+                .patch(manage_artifact_file)
+                .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
         .route("/api/events", get(events))
@@ -2469,6 +2473,9 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         // for a live listing the session's worktree is the live view when given
         // (its untracked files the clone never sees), else the hub clone.
         let (root, root_kind) = resolve_checkout_root(&store, &project, session_id)?;
+        let path = ref_name
+            .is_none()
+            .then(|| root.to_string_lossy().into_owned());
         let (root_kind, branch, mut entries) = match ref_name {
             Some(name) => {
                 let sha = local::git::resolve_branch_commit(&root, name)?
@@ -2490,6 +2497,7 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         entries.truncate(CODE_TREE_LIMIT);
         Ok(Json(json!({
             "root": root_kind,
+            "path": path,
             "branch": branch,
             "entries": entries,
             "truncated": truncated,
@@ -2519,6 +2527,7 @@ struct ProjectFileResponse {
     not_found: bool,
     root: &'static str,
     presentation: local::files::FilePresentation,
+    version: Option<String>,
 }
 
 impl ProjectFileResponse {
@@ -2535,6 +2544,7 @@ impl ProjectFileResponse {
             not_found: true,
             root,
             presentation,
+            version: None,
         }
     }
 
@@ -2551,6 +2561,7 @@ impl ProjectFileResponse {
             not_found: false,
             root,
             presentation,
+            version: None,
         }
     }
 
@@ -2561,6 +2572,7 @@ impl ProjectFileResponse {
         truncated: bool,
         binary: bool,
         presentation: local::files::FilePresentation,
+        version: Option<String>,
     ) -> Self {
         Self {
             path,
@@ -2570,8 +2582,22 @@ impl ProjectFileResponse {
             not_found: false,
             root,
             presentation,
+            version,
         }
     }
+}
+
+fn file_version(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn file_version_on_disk(path: &std::path::Path) -> std::result::Result<String, ApiError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn validated_project_file_path(
@@ -2668,6 +2694,7 @@ async fn project_file(
                         truncated,
                         binary,
                         presentation,
+                        None,
                     )))
                 }
                 None => Ok(Json(ProjectFileResponse::missing(
@@ -2724,6 +2751,7 @@ async fn project_file(
         let truncated = buf.len() as u64 > FILE_READ_LIMIT;
         buf.truncate(FILE_READ_LIMIT as usize);
         let (content, binary) = decode_project_file_text(buf, truncated);
+        let version = (!truncated && !binary).then(|| file_version(content.as_bytes()));
         let presentation = if binary {
             local::files::FilePresentation::Download
         } else {
@@ -2736,6 +2764,7 @@ async fn project_file(
             truncated,
             binary,
             presentation,
+            version,
         )))
     })
     .await
@@ -2762,6 +2791,181 @@ struct WriteProjectFileReq {
     content: String,
     /// Chat session whose worktree owns the file; absent writes the hub clone.
     session_id: Option<String>,
+    /// Exact version returned by the read endpoint. Older clients may omit it.
+    expected_version: Option<String>,
+}
+
+enum WriteProjectFileOutcome {
+    Saved(Value),
+    Conflict {
+        current_version: Option<String>,
+        exists: bool,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FileAction {
+    Rename,
+    Duplicate,
+    Delete,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageFileReq {
+    path: String,
+    action: FileAction,
+    new_name: Option<String>,
+    session_id: Option<String>,
+}
+
+fn validated_file_name(name: Option<&str>) -> std::result::Result<&str, ApiError> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    match name {
+        Some(name)
+            if name != "." && name != ".." && name.len() <= 255 && !name.contains(['/', '\\']) =>
+        {
+            Ok(name)
+        }
+        _ => Err(bad_request("invalid file name")),
+    }
+}
+
+fn duplicate_file_name(name: &str, number: usize) -> String {
+    let suffix = if number == 1 {
+        " copy".to_string()
+    } else {
+        format!(" copy {number}")
+    };
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}{suffix}.{extension}"),
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+fn manage_local_file(
+    root: &std::path::Path,
+    rel: &str,
+    action: FileAction,
+    new_name: Option<&str>,
+    protect_git_dir: bool,
+) -> std::result::Result<String, ApiError> {
+    let (rel, rel_path) = validated_project_file_path(rel)?;
+    if protect_git_dir && touches_git_dir(&rel_path) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| ApiError::from(anyhow!("file root unavailable: {e}")))?;
+    let source = root.join(&rel_path);
+    let resolved = std::fs::canonicalize(&source).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => not_found("file"),
+        _ => ApiError::from(anyhow!("file unavailable: {e}")),
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(bad_request("path escapes file root"));
+    }
+    if protect_git_dir && resolved.strip_prefix(&root).is_ok_and(touches_git_dir) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    if resolved.is_dir() {
+        return Err(bad_request("path is a directory"));
+    }
+
+    let parent = source.parent().ok_or_else(|| bad_request("invalid path"))?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| ApiError::from(anyhow!("parent directory unavailable: {e}")))?;
+    if !parent.starts_with(&root) {
+        return Err(bad_request("path escapes file root"));
+    }
+    if matches!(action, FileAction::Delete) {
+        std::fs::remove_file(&source).map_err(|e| ApiError::from(anyhow!("delete failed: {e}")))?;
+        return Ok(rel);
+    }
+
+    if matches!(action, FileAction::Duplicate)
+        && std::fs::symlink_metadata(&source)
+            .map_err(|e| ApiError::from(anyhow!("file unavailable: {e}")))?
+            .file_type()
+            .is_symlink()
+    {
+        return Err(bad_request("cannot duplicate a symbolic link"));
+    }
+    let old_name = rel_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| bad_request("invalid file name"))?;
+    let destination_name = match action {
+        FileAction::Rename => validated_file_name(new_name)?.to_string(),
+        FileAction::Duplicate => {
+            let mut number = 1;
+            loop {
+                let candidate = duplicate_file_name(old_name, number);
+                match std::fs::symlink_metadata(parent.join(&candidate)) {
+                    Ok(_) => number += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break candidate,
+                    Err(error) => {
+                        return Err(ApiError::from(anyhow!(
+                            "could not choose a copy name: {error}"
+                        )))
+                    }
+                }
+            }
+        }
+        FileAction::Delete => unreachable!(),
+    };
+    let destination_rel = rel_path.with_file_name(&destination_name);
+    if protect_git_dir && touches_git_dir(&destination_rel) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    if destination_rel == rel_path {
+        return Ok(rel);
+    }
+    let destination = parent.join(&destination_name);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(bad_request("a file with that name already exists"));
+        }
+        Ok(_) => match std::fs::canonicalize(&destination) {
+            Ok(path) if path == resolved => {}
+            Ok(_) | Err(_) => return Err(bad_request("a file with that name already exists")),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ApiError::from(anyhow!("destination unavailable: {error}"))),
+    }
+    match action {
+        FileAction::Rename => std::fs::rename(&source, &destination)
+            .map_err(|e| ApiError::from(anyhow!("rename failed: {e}")))?,
+        FileAction::Duplicate => {
+            std::fs::copy(&source, &destination)
+                .map_err(|e| ApiError::from(anyhow!("copy failed: {e}")))?;
+        }
+        FileAction::Delete => unreachable!(),
+    }
+    Ok(destination_rel.to_string_lossy().into_owned())
+}
+
+async fn manage_project_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ManageFileReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let (root, root_kind) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+        if req.session_id.is_some() && root_kind == "clone" {
+            return Err(bad_request(
+                "this session's worktree is no longer available — reload the files",
+            ));
+        }
+        let path = manage_local_file(&root, &req.path, req.action, req.new_name.as_deref(), true)?;
+        Ok(Json(json!({ "ok": true, "path": path })))
+    })
+    .await
 }
 
 /// Overwrite an existing text file in the project's live checkout with edited
@@ -2769,10 +2973,12 @@ struct WriteProjectFileReq {
 /// `ref` path here and stay read-only. Traversal and symlink escapes are
 /// rejected by canonicalizing the target and confirming it stays under the root.
 async fn write_project_file(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<WriteProjectFileReq>,
-) -> ApiResult {
-    blocking_api(move || {
+) -> std::result::Result<Response, ApiError> {
+    reject_if_moving(&state)?;
+    let outcome = tokio::task::spawn_blocking(move || {
         let (rel, rel_path) = validated_project_file_path(&req.path)?;
         if touches_git_dir(&rel_path) {
             return Err(bad_request("cannot edit files under .git"));
@@ -2802,7 +3008,15 @@ async fn write_project_file(
         // checkout; a missing file means the editor's copy is stale.
         let full = match std::fs::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if req.expected_version.is_some() {
+                    return Ok(WriteProjectFileOutcome::Conflict {
+                        current_version: None,
+                        exists: false,
+                    });
+                }
+                return Err(not_found("file"));
+            }
             Err(e) => return Err(ApiError::from(anyhow!("save failed: {e}"))),
         };
         if !full.starts_with(&root) {
@@ -2811,15 +3025,44 @@ async fn write_project_file(
         if full.is_dir() {
             return Err(bad_request("path is a directory"));
         }
+        // ponytail: external writers do not share a lock; add platform file coordination if this race becomes observable.
+        if let Some(expected) = req.expected_version.as_deref() {
+            let current = file_version_on_disk(&full)?;
+            if current != expected {
+                return Ok(WriteProjectFileOutcome::Conflict {
+                    current_version: Some(current),
+                    exists: true,
+                });
+            }
+        }
         std::fs::write(&full, req.content.as_bytes())
             .map_err(|e| ApiError::from(anyhow!("save failed: {e}")))?;
-        Ok(Json(json!({
+        Ok(WriteProjectFileOutcome::Saved(json!({
             "ok": true,
             "root": root_kind,
             "bytesWritten": req.content.len(),
+            "version": file_version(req.content.as_bytes()),
         })))
     })
     .await
+    .map_err(|e| ApiError::from(anyhow!("file task failed: {e}")))??;
+
+    Ok(match outcome {
+        WriteProjectFileOutcome::Saved(value) => Json(value).into_response(),
+        WriteProjectFileOutcome::Conflict {
+            current_version,
+            exists,
+        } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "file changed on disk",
+                "code": "fileChanged",
+                "currentVersion": current_version,
+                "exists": exists,
+            })),
+        )
+            .into_response(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -3417,6 +3660,7 @@ async fn absolute_file(
             truncated,
             binary,
             presentation,
+            None,
         )))
     })
     .await
@@ -3478,6 +3722,24 @@ async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
             .ok_or_else(|| not_found("project"))?;
         let listing = local::files::list(&project)?;
         Ok(Json(json!(listing)))
+    })
+    .await
+}
+
+async fn manage_artifact_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ManageFileReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let root = local::files::ensure_dir(&project)?;
+        let path = manage_local_file(&root, &req.path, req.action, req.new_name.as_deref(), false)?;
+        Ok(Json(json!({ "ok": true, "path": path })))
     })
     .await
 }
@@ -7416,6 +7678,30 @@ mod tests {
     }
 
     #[test]
+    fn project_file_versions_track_exact_bytes() {
+        let first = file_version(b"same-size-a");
+        let second = file_version(b"same-size-b");
+        assert_ne!(first, second);
+
+        let path = std::env::temp_dir().join(format!("orx-file-version-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"same-size-a").unwrap();
+        assert_eq!(
+            file_version_on_disk(&path)
+                .map_err(|error| error.1)
+                .unwrap(),
+            first
+        );
+        std::fs::write(&path, b"same-size-b").unwrap();
+        assert_eq!(
+            file_version_on_disk(&path)
+                .map_err(|error| error.1)
+                .unwrap(),
+            second
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn project_file_paths_reject_traversal() {
         assert_eq!(
             validated_project_file_path("./figures/chart.png")
@@ -7430,6 +7716,105 @@ mod tests {
                 "accepted {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn local_file_actions_rename_duplicate_and_delete() {
+        let root = std::env::temp_dir().join(format!("orx-file-actions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("reports")).unwrap();
+        std::fs::write(root.join("reports/result.md"), "result").unwrap();
+
+        let renamed = manage_local_file(
+            &root,
+            "reports/result.md",
+            FileAction::Rename,
+            Some("summary.md"),
+            true,
+        )
+        .map_err(|error| error.1)
+        .unwrap();
+        assert_eq!(renamed, "reports/summary.md");
+
+        let duplicated = manage_local_file(&root, &renamed, FileAction::Duplicate, None, true)
+            .map_err(|error| error.1)
+            .unwrap();
+        assert_eq!(duplicated, "reports/summary copy.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&duplicated)).unwrap(),
+            "result"
+        );
+
+        manage_local_file(&root, &duplicated, FileAction::Delete, None, true)
+            .map_err(|error| error.1)
+            .unwrap();
+        assert!(!root.join(duplicated).exists());
+        assert!(manage_local_file(
+            &root,
+            &renamed,
+            FileAction::Rename,
+            Some("../escape.md"),
+            true,
+        )
+        .is_err());
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "private").unwrap();
+        assert!(manage_local_file(&root, ".git/config", FileAction::Delete, None, true,).is_err());
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir()
+                .join(format!("orx-file-actions-outside-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("jump")).unwrap();
+            std::os::unix::fs::symlink(root.join(&renamed), outside.join("back")).unwrap();
+            assert!(
+                manage_local_file(&root, "jump/back", FileAction::Delete, None, true,).is_err()
+            );
+            assert!(outside.join("back").exists());
+            std::os::unix::fs::symlink(root.join(&renamed), root.join("reports/summary-link"))
+                .unwrap();
+            assert!(manage_local_file(
+                &root,
+                &renamed,
+                FileAction::Rename,
+                Some("summary-link"),
+                true,
+            )
+            .is_err());
+            assert!(root.join(&renamed).exists());
+            assert!(std::fs::symlink_metadata(root.join("reports/summary-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(manage_local_file(
+                &root,
+                "reports/summary-link",
+                FileAction::Duplicate,
+                None,
+                true,
+            )
+            .is_err());
+            std::os::unix::fs::symlink(root.join(".git"), root.join("git-link")).unwrap();
+            assert!(
+                manage_local_file(&root, "git-link/config", FileAction::Delete, None, true,)
+                    .is_err()
+            );
+            std::fs::remove_dir_all(outside).unwrap();
+        }
+        let case_renamed = manage_local_file(
+            &root,
+            &renamed,
+            FileAction::Rename,
+            Some("SUMMARY.md"),
+            true,
+        )
+        .map_err(|error| error.1)
+        .unwrap();
+        assert_eq!(case_renamed, "reports/SUMMARY.md");
+        assert!(root.join(case_renamed).exists());
+        assert!(std::fs::read_dir(root.join("reports"))
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == "SUMMARY.md"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // ApiError has no Debug, so `.unwrap()` on the Err path won't compile; drop
