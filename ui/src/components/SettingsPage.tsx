@@ -29,6 +29,7 @@ import {
   getTelemetry,
   getHarnesses,
   getHfSettings,
+  getTinkerSettings,
   getK8sSettings,
   getLocalMachine,
   getModalSettings,
@@ -42,12 +43,13 @@ import {
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
-  provisionModal,
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
   initializeProjectGit,
   saveHfToken,
+  saveTinkerKey,
+  saveModalToken,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
@@ -71,11 +73,10 @@ import {
   type Harness,
   type HarnessId,
   type HfSettings,
-  type HfTokenSource,
+  type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
-  type ModalTokenSource,
   type OpenResearchSettings,
   type RayPreflight,
   type RaySettings,
@@ -104,7 +105,7 @@ import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
-import { SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { OpenResearchSetupTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshConfigDialog } from "./SshConfigDialog";
 import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
 
@@ -365,7 +366,6 @@ function HarnessesTab() {
 // --- compute (kubernetes) -------------------------------------------------------
 
 function K8sHealthBadge({ s }: { s: K8sSettings }) {
-  if (!s.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
   const p = s.preflight;
   if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
   if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
@@ -373,12 +373,17 @@ function K8sHealthBadge({ s }: { s: K8sSettings }) {
   return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
-function K8sSection() {
+function K8sSection({
+  onEditState,
+}: {
+  onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
+}) {
   const [settings, setSettings] = useState<K8sSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [context, setContext] = useState("");
   const [namespace, setNamespace] = useState("");
   const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const apply = (s: K8sSettings) => {
@@ -397,10 +402,27 @@ function K8sSection() {
     settings !== null &&
     context === (settings.context ?? "") &&
     namespace.trim() === settings.namespace;
+  const dirty = settings !== null && !unchanged;
+
+  useEffect(() => {
+    onEditState?.({ dirty, saving });
+  }, [dirty, saving, onEditState]);
+
+  async function checkAgain() {
+    if (checking || saving || !unchanged) return;
+    setChecking(true);
+    try {
+      setSettings(await getK8sSettings());
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    if (saving || checking) return;
     setSaving(true);
     setError(null);
     try {
@@ -415,69 +437,71 @@ function K8sSection() {
   return (
     <>
       {loadError ? (
-        <div className="error">{loadError}</div>
+        <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError}</p>
       ) : !settings ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_checking_kubectl()}
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_cluster()}</span>
-            <span className="v">
-              <K8sHealthBadge s={settings} />
-            </span>
-          </div>
-          {settings.preflight.error && (
-            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.preflight.error}</p>
+          <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+            <dt className="text-subtext">{m.settings_page_status()}</dt>
+            <dd className="m-0">
+              {checking || saving ? (
+                <Badge>{m.common_checking()}</Badge>
+              ) : dirty ? (
+                <Badge>{m.file_viewer_unsaved()}</Badge>
+              ) : (
+                <K8sHealthBadge s={settings} />
+              )}
+            </dd>
+          </dl>
+          {unchanged && !checking && !saving && settings.preflight.error && (
+            <p className={`${COMPUTE_DIAGNOSTIC_CLASS_NAME} break-words`}>{settings.preflight.error}</p>
           )}
-          <form className={FORM_CLASS_NAME} onSubmit={submit}>
-            <div className="row2">
-              <label>
-                {m.settings_page_context()}
-                <OptionPicker
-                  choices={[
-                    {
-                      id: "",
-                        label: settings.currentContext ? m.settings_kubectl_default_context({ context: ltr(settings.currentContext) }) : m.settings_kubectl_default(),
-                    },
-                    ...(context && !settings.contexts.includes(context)
-                      ? [{ id: context, label: m.settings_not_in_kubeconfig({ context: ltr(context) }) }]
-                      : []),
-                    ...settings.contexts.map((item) => ({ id: item, label: item })),
-                  ]}
-                  value={context}
-                  variant="field"
-                  dropDown
-                  disabled={saving}
-                  onSelect={setContext}
-               />
-              </label>
-              <label>
-                {m.settings_page_namespace()}
-                <input
-                  type="text"
-                  value={namespace}
-                  onChange={(e) => setNamespace(e.target.value)}
-                  placeholder={m.settings_page_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-            </div>
-            {error && <div className="error">{error}</div>}
-            <div className="actions">
-              <Button variant="primary" type="submit" disabled={saving || unchanged}>
+          <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_page_context()}
+              <OptionPicker
+                choices={[
+                  {
+                    id: "",
+                    label: settings.currentContext ? m.settings_kubectl_default_context({ context: ltr(settings.currentContext) }) : m.settings_kubectl_default(),
+                  },
+                  ...(context && !settings.contexts.includes(context)
+                    ? [{ id: context, label: m.settings_not_in_kubeconfig({ context: ltr(context) }) }]
+                    : []),
+                  ...settings.contexts.map((item) => ({ id: item, label: item })),
+                ]}
+                value={context}
+                variant="field"
+                dropDown
+                disabled={saving || checking}
+                onSelect={setContext}
+             />
+            </label>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_page_namespace()}
+              <Input
+                type="text"
+                value={namespace}
+                disabled={saving || checking}
+                onChange={(e) => setNamespace(e.target.value)}
+                placeholder={m.settings_page_default()}
+                autoComplete="off"
+                spellCheck={false}
+             />
+            </label>
+            {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" onClick={() => void checkAgain()} disabled={saving || checking || !unchanged}>
+                <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+              </Button>
+              <Button variant="primary" type="submit" disabled={saving || checking || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
               </Button>
             </div>
           </form>
-          <section className="mt-7">
-            <h3 className="mt-0 mx-0 mb-1.5 text-base font-semibold text-text">{m.settings_page_run_manifest()}</h3>
-            <p className="m-0 font-sans text-sm leading-relaxed text-text">
-              {m.settings_manifest_description({ placeholder: ltr("{{ORX_RUN}}"), command: ltr("--manifest <path>") })}
-            </p>
-          </section>
         </>
       )}
     </>
@@ -486,92 +510,94 @@ function K8sSection() {
 
 // --- compute (modal) ------------------------------------------------------------
 
-const MODAL_TOKEN_LABELS: Record<ModalTokenSource, () => string> = {
-  env: m.settings_modal_token_env,
-  syncedEnv: m.settings_modal_token_synced,
-  modalToml: m.settings_modal_token_file,
-};
-
-function ModalBadge({ s }: { s: ModalSettings }) {
-  if (s.ready) return <Badge variant="success">{m.settings_page_connected()}</Badge>;
-  if (!s.tokenConfigured && !s.modalImportable) return <Badge>{m.settings_page_not_set_up()}</Badge>;
-  if (!s.modalImportable)
-    return <Badge variant="error">{s.envProvisioned ? m.settings_env_broken() : m.settings_env_not_built()}</Badge>;
-  if (!s.tokenConfigured) return <Badge variant="error">{m.settings_page_no_token()}</Badge>;
-  return <Badge>{m.settings_page_unknown()}</Badge>;
-}
-
 function ModalSection() {
   const [s, setS] = useState<ModalSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [provisioning, setProvisioning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [tokenId, setTokenId] = useState("");
+  const [tokenSecret, setTokenSecret] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    let active = true;
     getModalSettings()
-      .then(setS)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
+      .then((next) => { if (active) setS(next); })
+      .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
   }, []);
 
-  async function provision() {
-    if (provisioning) return;
-    setProvisioning(true);
+  async function refresh() {
+    if (loading || saving) return;
+    setLoading(true);
     setError(null);
     try {
-      setS(await provisionModal());
+      setS(await getModalSettings());
+    } catch (err) {
+      setS(null);
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv) return;
+    setSaving(true);
+    setError(null);
+    try {
+      setS(await saveModalToken(tokenId.trim(), tokenSecret.trim()));
+      setTokenId("");
+      setTokenSecret("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setProvisioning(false);
+      setSaving(false);
     }
   }
 
   return (
     <>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : !s ? (
+      {loading ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_checking_modal()}
         </LoadingRow>
-      ) : (
-        <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_status()}</span>
-            <span className="v">
-              <ModalBadge s={s} />
-            </span>
-            <span className="k">{m.settings_page_environment()}</span>
-            <span className="v">
-              {s.modalImportable
-                ? m.settings_page_ready()
-                : s.envProvisioned
-                  ? m.settings_modal_import_failing()
-                  : m.settings_not_built_yet()}
-            </span>
-            <span className="k">{m.settings_page_token()}</span>
-            <span className="v">
-              {s.tokenSource ? MODAL_TOKEN_LABELS[s.tokenSource]() : m.settings_page_not_configured()}
-            </span>
-          </div>
-          {!s.tokenConfigured && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_modal_token_help({ command: ltr("modal token new"), id: ltr("MODAL_TOKEN_ID"), secret: ltr("MODAL_TOKEN_SECRET") })}
-            </p>
-          )}
-          {s.error && s.envProvisioned && !s.modalImportable && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>
-          )}
-          {error && <div className="error">{error}</div>}
-          {!s.modalImportable && (
-            <div className="mt-6 flex justify-end">
-              <Button variant="primary" onClick={() => void provision()} disabled={provisioning}>
-                {provisioning ? m.settings_setting_up_environment() : m.settings_set_up_environment()}
-              </Button>
-            </div>
-          )}
-        </>
+      ) : s && (
+        <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+          <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+          <dd className="m-0">
+            <Badge variant={s.tokenConfigured ? "success" : "warning"}>
+              {s.tokenConfigured ? m.settings_page_ready_to_use() : m.settings_page_not_configured()}
+            </Badge>
+          </dd>
+        </dl>
       )}
+      {s?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_modal_env_override()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s?.tokenConfigured ? m.settings_modal_replace_id() : m.settings_modal_token_id()}
+          <Input type="password" value={tokenId} onChange={(event) => setTokenId(event.target.value)}
+            placeholder={s?.maskedTokenId ?? "ak-…"} autoComplete="new-password" disabled={s?.processEnv} />
+        </label>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s?.tokenConfigured ? m.settings_modal_replace_secret() : m.settings_modal_token_secret()}
+          <Input type="password" value={tokenSecret} onChange={(event) => setTokenSecret(event.target.value)}
+            placeholder={s?.maskedTokenSecret ?? "as-…"} autoComplete="new-password" disabled={s?.processEnv} />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://modal.com/docs/sdk/py/latest/config" target="_blank" rel="noreferrer">
+          {m.settings_modal_setup_help()}
+        </a>
+        {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={loading || saving} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {m.settings_page_refresh()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
     </>
   );
 }
@@ -913,14 +939,8 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
       ) : (
         <>
           {!connecting && test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
-          {test && test.partitions.length > 0 && (
-            <div className={COMPUTE_DETAILS_CLASS_NAME}>
-              <span className="k">{m.settings_page_partitions()}</span>
-              <span className="v">{test.partitions.join(", ")}</span>
-            </div>
-          )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
-            <div className="row2">
+            <div className="max-w-xl">
               <label>
                 {m.settings_page_login_node()}
                 <OptionPicker
@@ -943,51 +963,8 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                   }}
                />
               </label>
-              <label>
-                {m.settings_page_partition()}
-                <input
-                  type="text"
-                  list="slurm-partitions"
-                  value={partition}
-                  onChange={(e) => setPartition(e.target.value)}
-                  placeholder={m.settings_page_cluster_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-                <datalist id="slurm-partitions">
-                  {test?.partitions.map((p) => <option key={p} value={p} />)}
-                </datalist>
-              </label>
             </div>
-            <div className="row2">
-              <label>
-                {m.settings_page_account()}
-                <input
-                  type="text"
-                  value={account}
-                  onChange={(e) => setAccount(e.target.value)}
-                  placeholder={m.settings_page_cluster_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-              <label>
-                {m.settings_page_time_limit()}
-                <input
-                  type="text"
-                  value={timeLimit}
-                  onChange={(e) => setTimeLimit(e.target.value)}
-                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-            </div>
-            {error && <div className="error">{error}</div>}
             <div className="actions">
-              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
-                {saving ? m.common_saving() : m.common_save()}
-              </Button>
               {!remote && (
                 <Button
                   type="button"
@@ -1018,6 +995,53 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                   masterRunning={masterRunning[host]}
                 />
               </span>
+            </div>
+            <div className="mt-5 border-t border-border pt-5">
+              <div className="row2">
+                <label>
+                  {m.settings_page_partition()}
+                  <Input
+                    type="text"
+                    list="slurm-partitions"
+                    value={partition}
+                    onChange={(e) => setPartition(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                 />
+                  <datalist id="slurm-partitions">
+                    {test?.partitions.map((p) => <option key={p} value={p} />)}
+                  </datalist>
+                </label>
+                <label>
+                  {m.settings_page_account()}
+                  <Input
+                    type="text"
+                    value={account}
+                    onChange={(e) => setAccount(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                 />
+                </label>
+              </div>
+              <label className="mt-3 block max-w-xl">
+                {m.settings_page_time_limit()}
+                <Input
+                  type="text"
+                  value={timeLimit}
+                  onChange={(e) => setTimeLimit(e.target.value)}
+                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
+                  autoComplete="off"
+                  spellCheck={false}
+               />
+              </label>
+            </div>
+            {error && <div className="error">{error}</div>}
+            <div className="actions">
+              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
+                {saving ? m.common_saving() : m.common_save()}
+              </Button>
             </div>
           </form>
           {!remote && connecting && (
@@ -1110,23 +1134,11 @@ function RaySection() {
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_effective_url()}</span>
-            <span className="v">{settings.resolvedAddress}</span>
-            <span className="k">{m.settings_page_source()}</span>
-            <span className="v">{settings.source}</span>
-            {preflight?.reachable && preflight.rayVersion && (
-              <>
-                <span className="k">{m.settings_page_ray_version()}</span>
-                <span className="v">{preflight.rayVersion}</span>
-              </>
-            )}
-          </div>
           {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <label>
               {m.settings_page_jobs_dashboard_url()}
-              <input
+              <Input
                 type="text"
                 value={address}
                 onChange={(e) => {
@@ -1138,6 +1150,9 @@ function RaySection() {
                 spellCheck={false}
              />
             </label>
+            <p className="m-0 text-sm text-subtext">
+              {m.settings_page_effective_url()}: {ltr(settings.resolvedAddress)} · {m.settings_page_source()}: {settings.source}
+            </p>
             {error && <div className="error">{error}</div>}
             <div className="actions">
               <Button variant="primary" type="submit" disabled={saving || unchanged}>
@@ -1153,6 +1168,11 @@ function RaySection() {
               </Button>
               <RayTestBadge test={test} />
             </div>
+            {preflight?.reachable && preflight.rayVersion && (
+              <p className="m-0 text-sm text-subtext">
+                {m.settings_page_ray_version()}: {preflight.rayVersion}
+              </p>
+            )}
           </form>
         </>
       )}
@@ -1169,90 +1189,69 @@ function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
 
 // --- compute (local) --------------------------------------------------------------
 
-function LocalSection() {
-  const [hw, setHw] = useState<LocalMachine | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getLocalMachine()
-      .then(setHw)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  return (
-    <>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : !hw ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_detecting_hardware()}
-        </LoadingRow>
-      ) : (
-        <div className={COMPUTE_DETAILS_CLASS_NAME}>
-          <span className="k">{m.settings_page_hostname()}</span>
-          <span className="v">{hw.hostname}</span>
-          <span className="k">{m.settings_page_system()}</span>
-          <span className="v">
-            {hw.os}/{hw.arch}
-            {hw.chip ? ` — ${hw.chip}` : ""}
-          </span>
-          <span className="k">CPU</span>
-          <span className="v">{hw.cpuCount > 0 ? `${hw.cpuCount} cores` : "—"}</span>
-          <span className="k">RAM</span>
-          <span className="v">{hw.memBytes !== null ? fmtBytes(hw.memBytes) : "—"}</span>
-          <span className="k">GPUs</span>
-          <span className="v">
-            {hw.gpus.length === 0
-              ? "none detected (nvidia-smi)"
-              : hw.gpus
-                  .map(
-                    (g) =>
-                      `${g.name}${g.memMib !== null ? ` — ${fmtBytes(g.memMib * 1024 * 1024)}` : ""}`,
-                  )
-                  .join(", ")}
-          </span>
-        </div>
-      )}
-    </>
-  );
+function localMachineSummary(hw: LocalMachine) {
+  const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
+  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
+  return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 // --- compute (openresearch) ---------------------------------------------------------
 
-function OpenResearchSection() {
+function OpenResearchSection({ remote }: { remote: boolean }) {
   const [s, setS] = useState<OpenResearchSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [loginAttempt, setLoginAttempt] = useState(0);
+  const [terminalLogin, setTerminalLogin] = useState(true);
+  const [signingIn, setSigningIn] = useState(false);
+
+  async function refresh() {
+    setBusy(true);
+    setLoadError(null);
+    try {
+      setS(await getOpenResearchSettings());
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
-    getOpenResearchSettings()
-      .then(setS)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    void refresh();
+  }, [remote]);
 
   return (
     <>
-      {loadError ? (
+      {loadError && !s ? (
         <div className="error">{loadError}</div>
-      ) : !s ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_checking_credentials()}
-        </LoadingRow>
-      ) : !s.loggedIn ? (
-        <p className={SETTINGS_NOTE_CLASS_NAME}>
-          {m.settings_login_help({ command: ltr("orx login") })}
-        </p>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              <Badge variant="success">{m.settings_page_signed_in()}</Badge>
+              {busy || signingIn ? (
+                <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
+              ) : loadError ? (
+                <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
+              ) : !s ? null : !s.loggedIn ? (
+                <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
+              ) : s.sshKeyStatus === "matched" ? (
+                <Badge variant="success">{m.settings_page_ready()}</Badge>
+              ) : s.sshKeyStatus === "unknown" ? (
+                <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
+              ) : (
+                <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
+              )}
             </span>
             <span className="k">{m.settings_page_orgs()}</span>
-            <span className="v">{s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
+            <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {s.sshKeyStatus === "matched" ? (
+              {busy || !s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1263,7 +1262,27 @@ function OpenResearchSection() {
               )}
             </span>
           </div>
-          {s.sshKeyStatus === "none_registered" &&
+          {remote && s && !s.loggedIn && (
+            <p className="mt-4 mb-0 text-sm text-subtext">
+              {m.settings_login_help({ command: ltr("orx login") })}
+            </p>
+          )}
+          {!remote && loginAttempt > 0 && (
+            <OpenResearchSetupTerminal
+              key={loginAttempt}
+              login={terminalLogin}
+              onComplete={() => {
+                setSigningIn(false);
+                setLoginAttempt(0);
+                void refresh();
+              }}
+              onError={(error) => {
+                setSigningIn(false);
+                showAlert(error, "error");
+              }}
+            />
+          )}
+          {remote && s?.loggedIn && s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_page_add_one_with()} <code>orx ssh-key add {s.sshKeyPath}</code>.
@@ -1275,7 +1294,7 @@ function OpenResearchSection() {
                 <code>orx ssh-key add</code>.
               </p>
             ))}
-          {s.sshKeyStatus === "no_local_match" &&
+          {remote && s?.loggedIn && s.sshKeyStatus === "no_local_match" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_register_computer_help({ register: ltr(`orx ssh-key add ${s.sshKeyPath}`), load: ltr("ssh-add") })}
@@ -1287,9 +1306,23 @@ function OpenResearchSection() {
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {s.error && <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>}
+          {!busy && (loadError || s?.error) && <p dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError || s?.error}</p>}
         </>
       )}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button onClick={() => void refresh()} disabled={busy || signingIn}>
+          <RefreshCw size={13} /> {busy ? m.common_checking() : m.settings_check_again()}
+        </Button>
+        {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
+          <Button variant="primary" disabled={busy || signingIn} onClick={() => {
+            setTerminalLogin(!s.loggedIn);
+            setSigningIn(true);
+            setLoginAttempt((attempt) => attempt + 1);
+          }}>
+            {signingIn ? <Spinner /> : <SquareTerminal size={13} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+          </Button>
+        )}
+      </div>
     </>
   );
 }
@@ -1333,52 +1366,6 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   openresearch: "openresearch_job",
 };
 
-const TARGET_USAGE: Record<ComputeTargetId, () => string> = {
-  local: m.compute_usage_local,
-  ssh: m.compute_usage_ssh,
-  tinker: m.compute_usage_tinker,
-  hf: m.compute_usage_hf,
-  modal: m.compute_usage_modal,
-  k8s: m.compute_usage_k8s,
-  slurm: m.compute_usage_slurm,
-  ray: m.compute_usage_ray,
-  openresearch: m.compute_usage_openresearch,
-};
-
-function targetConnection(target: ComputeTargetSummary): string {
-  switch (target.id) {
-    case "local":
-      return m.compute_connection_local();
-    case "ssh":
-      return m.compute_connection_ssh({ summary: ltr(target.summary) });
-    case "tinker":
-      return m.compute_connection_tinker({ summary: ltr(target.summary) });
-    case "hf":
-      return m.compute_connection_hf({ summary: ltr(target.summary) });
-    case "modal":
-      return m.compute_connection_modal({ summary: ltr(target.summary) });
-    case "k8s":
-      return m.compute_connection_k8s({ summary: ltr(target.summary) });
-    case "slurm":
-      return m.compute_connection_slurm({ summary: ltr(target.summary) });
-    case "ray":
-      return m.compute_connection_ray({ summary: ltr(target.summary) });
-    case "openresearch":
-      return m.compute_connection_openresearch({ summary: ltr(target.summary) });
-  }
-}
-
-function BackendOverview({ target }: { target: ComputeTargetSummary }) {
-  return (
-    <dl className="m-0 mt-8 grid grid-cols-[9rem_minmax(0,1fr)] gap-x-5 gap-y-4 font-sans">
-      <dt className="text-sm font-medium text-subtext">{m.settings_page_how_it_connects()}</dt>
-      <dd className="m-0 text-base leading-relaxed text-text">{targetConnection(target)}</dd>
-      <dt className="text-sm font-medium text-subtext">{m.settings_page_what_happens()}</dt>
-      <dd className="m-0 text-base leading-relaxed text-text">{TARGET_USAGE[target.id]()}</dd>
-    </dl>
-  );
-}
-
 /** Backends whose launches take --flavor; mirrors the server's validation. */
 const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
 /** Of those, the ones where a launch *requires* a flavor. */
@@ -1390,6 +1377,15 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
+};
+
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+
+const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
+  tinker: m.compute_usage_tinker,
+  hf: m.compute_usage_hf,
+  modal: m.compute_usage_modal,
+  openresearch: m.compute_usage_openresearch,
 };
 
 const CUSTOM_FLAVOR_ID = "__custom__";
@@ -1424,6 +1420,7 @@ function DefaultDestinationEditor({
   const unchanged =
     backend === savedBackend && (!flavored || flavor.trim() === savedFlavor);
   const destination = TARGET_LABELS[backend]();
+  const usage = TARGET_USAGE[backend];
   const helperText =
     saving
       ? m.settings_updating_default_destination()
@@ -1578,6 +1575,7 @@ function DefaultDestinationEditor({
         )}
       </div>
       <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{helperText}</p>
+      {usage && <p className="mt-1 mb-0 text-sm leading-relaxed text-subtext">{usage()}</p>}
     </section>
   );
 }
@@ -1585,12 +1583,17 @@ function DefaultDestinationEditor({
 function TargetTile({
   target,
   isDefault,
+  summary,
   onOpen,
+  onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
-  onOpen: () => void;
+  summary?: string;
+  onOpen?: () => void;
+  onOpenEnvironment: () => void;
 }) {
+  const summaryId = `compute-${target.id}-summary`;
   const setupLabel = target.unverified
     ? m.settings_check_setup()
     : target.id === "openresearch"
@@ -1600,12 +1603,20 @@ function TargetTile({
         : m.settings_set_up();
 
   return (
-    <button
-      type="button"
-      className="group flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface disabled:cursor-default disabled:opacity-52"
-      onClick={onOpen}
-      disabled={!target.enabled}
+    <div
+      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-text hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
     >
+      {onOpen && (
+        <button
+          type="button"
+          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2 disabled:cursor-default"
+          onClick={onOpen}
+          disabled={!target.enabled}
+          aria-label={TARGET_LABELS[target.id]()}
+          aria-describedby={summaryId}
+          aria-haspopup={QUICK_SETUP_TARGETS.includes(target.id) ? "dialog" : undefined}
+        />
+      )}
       <span className="flex h-16 w-40 flex-none items-center justify-start">
         <BackendLogo kind={TARGET_KIND[target.id]} size={48} />
       </span>
@@ -1613,15 +1624,37 @@ function TargetTile({
       <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-text">
         {TARGET_CARD_DESCRIPTIONS[target.id]()}
       </span>
+      <span id={summaryId} className="mt-2 line-clamp-2 min-h-8 text-xs leading-normal text-subtext">
+        {target.fromEnvironmentTab ? (
+          <>
+            {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
+            <button
+              type="button"
+              className="relative z-20 text-primary underline-offset-2 hover:text-primary-hover hover:underline"
+              onClick={onOpenEnvironment}
+            >
+              {m.settings_environment_tab()}
+            </button>
+          </>
+        ) : summary ?? target.summary}
+      </span>
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
         <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
-          {isDefault ? m.settings_page_default_808d7dc() : target.configured ? m.settings_view_settings() : setupLabel}
+          {isDefault
+            ? m.settings_page_default_808d7dc()
+            : target.configured
+              ? !onOpen || QUICK_SETUP_TARGETS.includes(target.id)
+                ? m.settings_page_ready_to_use()
+                : m.settings_view_settings()
+              : setupLabel}
         </span>
-        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
-          <ArrowRight size={16} />
-        </span>
+        {onOpen && (
+          <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
+            <ArrowRight size={16} />
+          </span>
+        )}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -1640,17 +1673,17 @@ function BackendDetailPage({
     <>
       <button
         type="button"
-        className="settings-back mb-10 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text"
+        className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text"
         onClick={onBack}
       >
         <ArrowLeft size={16} /> {m.settings_page_back_to_compute()}
       </button>
       <div className="flex items-center justify-between gap-6">
-        <div className={`flex min-w-0 items-center ${target.id === "tinker" ? "gap-8" : "gap-5"}`}>
-          <span className="flex h-20 w-24 flex-none items-center justify-start">
-            <BackendLogo kind={TARGET_KIND[target.id]} size={72} />
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex h-10 w-10 flex-none items-center justify-center">
+            <BackendLogo kind={TARGET_KIND[target.id]} size={36} />
           </span>
-          <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]()}</h1>
+          <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
           <Badge className="flex-none border-primary bg-primary-subtle text-primary">
@@ -1658,36 +1691,85 @@ function BackendDetailPage({
           </Badge>
         )}
       </div>
-      <BackendOverview target={target} />
-      {target.id !== "tinker" && (
-        <div className="mt-8 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
-          {target.id === "local" && <LocalSection />}
-          {target.id === "hf" && <HfSection />}
-          {target.id === "modal" && <ModalSection />}
-          {target.id === "k8s" && <K8sSection />}
-          {target.id === "ssh" && <SshSection remote={remote} />}
-          {target.id === "slurm" && <SlurmSection remote={remote} />}
-          {target.id === "ray" && <RaySection />}
-          {target.id === "openresearch" && <OpenResearchSection />}
-        </div>
-      )}
+      <div className="mt-6 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
+        {target.id === "ssh" && <SshSection remote={remote} />}
+        {target.id === "slurm" && <SlurmSection remote={remote} />}
+        {target.id === "openresearch" && <OpenResearchSection remote={remote} />}
+      </div>
     </>
+  );
+}
+
+function QuickSetupDialog({ target, onClose }: { target: ComputeTargetSummary; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [editState, setEditState] = useState({ dirty: false, saving: false });
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+
+  const close = () => {
+    if (editState.saving) return;
+    if (editState.dirty && !window.confirm(m.settings_k8s_discard_changes())) return;
+    onClose();
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
+      aria-labelledby="compute-quick-setup-title"
+      // Escape on keydown (not just cancel) so a declined discard confirm can't be
+      // force-closed by the close watcher; an open OptionPicker swallows it first.
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        close();
+      }}
+      onCancel={(event) => {
+        event.preventDefault();
+        close();
+      }}
+    >
+      <div className="mb-5 flex items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <BackendLogo kind={TARGET_KIND[target.id]} size={32} />
+          <h2 id="compute-quick-setup-title" className="m-0 text-xl font-medium text-text">
+            {TARGET_LABELS[target.id]()}
+          </h2>
+        </div>
+        <IconButton title={m.app_close_panel()} aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
+          <X size={14} />
+        </IconButton>
+      </div>
+      {target.id === "tinker" && <TinkerSection target={target} />}
+      {target.id === "hf" && <HfSection />}
+      {target.id === "modal" && <ModalSection />}
+      {target.id === "ray" && <RaySection />}
+      {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
+    </dialog>
   );
 }
 
 function ComputeTab({
   project,
   onViewHistory,
+  onOpenEnvironment,
   remote,
 }: {
   project: Project | null;
   onViewHistory: () => void;
+  onOpenEnvironment: () => void;
   remote: boolean;
 }) {
   const [settings, setSettings] = useState<ComputeSettings | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedTarget, setSelectedTarget] = useState<ComputeTargetId | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [localMachine, setLocalMachine] = useState<LocalMachine | null>(null);
+  const [localMachineError, setLocalMachineError] = useState<string | null>(null);
   // Monotonic guard: a POST response applied via `apply` must not be
   // overwritten by a slower background GET that was already in flight.
   const seqRef = useRef(0);
@@ -1699,6 +1781,12 @@ function ComputeTab({
     setLoadError(null);
     setError(null);
   }, [project?.id]);
+
+  useEffect(() => {
+    getLocalMachine()
+      .then(setLocalMachine)
+      .catch((err) => setLocalMachineError(err instanceof Error ? err.message : String(err)));
+  }, []);
 
   // Returning to the directory refreshes summaries changed on a backend page.
   useEffect(() => {
@@ -1743,14 +1831,16 @@ function ComputeTab({
       key={`${project?.id ?? "none"}:${target.id}`}
       target={target}
       isDefault={defaultBackend === target.id}
-      onOpen={() => setSelectedTarget(target.id)}
+      summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
+      onOpen={target.id === "local" ? undefined : () => setSelectedTarget(target.id)}
+      onOpenEnvironment={onOpenEnvironment}
    />
   );
   const selected = selectedTarget
     ? settings?.targets.find((target) => target.id === selectedTarget)
     : null;
 
-  if (selected) {
+  if (selected && !QUICK_SETUP_TARGETS.includes(selected.id)) {
     return (
       <BackendDetailPage
         target={selected}
@@ -1796,33 +1886,122 @@ function ComputeTab({
               </div>
             </section>
           )}
+          {selected && <QuickSetupDialog target={selected} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
   );
 }
 
-// --- environment ---------------------------------------------------------------
+// --- compute (tinker) ----------------------------------------------------------
 
-const SOURCE_LABELS: Record<HfTokenSource, () => string> = {
-  env: m.settings_hf_source_env,
-  openresearchEnv: m.settings_hf_source_openresearch,
-  hfCache: m.settings_hf_source_cache,
-};
+function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-function HfStatusBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
-  if (!settings.valid) return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
-  return <Badge variant="success">{m.settings_page_connected()}</Badge>;
+  const [settings, setSettings] = useState<TinkerSettings | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    getTinkerSettings()
+      .then((next) => { if (active) setSettings(next); })
+      .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); })
+      .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; };
+  }, []);
+
+  async function refresh() {
+    if (checking || saving) return;
+    setChecking(true);
+    setError(null);
+    setSettings(null);
+    try {
+      setSettings(await getTinkerSettings());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!apiKey.trim() || saving || checking) return;
+    setSaving(true);
+    setError(null);
+    try {
+      setSettings(await saveTinkerKey(apiKey.trim()));
+      setApiKey("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      {checking ? <LoadingRow><Spinner /> {m.common_checking()}</LoadingRow> : settings && <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          <Badge variant={settings.validationStatus === "valid" ? "success" : settings.validationStatus === "invalid" ? "error" : "warning"}>
+            {settings.validationStatus === "valid" ? m.settings_page_ready()
+              : settings.validationStatus === "invalid" ? m.settings_tinker_invalid_key()
+              : settings.validationStatus === "billingRequired" ? m.settings_tinker_billing_required()
+              : m.settings_page_not_configured()}
+          </Badge>
+        </dd>
+      </dl>}
+      {settings?.validationStatus === "billingRequired" && (
+        <p className="mt-2 mb-0 text-sm text-subtext">
+          <a className="underline" href="https://tinker.thinkingmachines.ai/" target="_blank" rel="noreferrer">{m.settings_tinker_billing_help()}</a>
+        </p>
+      )}
+      {settings?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_tinker_env_override()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {target.configured || (settings !== null && settings.validationStatus !== "missing") ? m.settings_replace_key() : m.onboarding_api_key()}
+          <Input
+            type="password"
+            value={apiKey}
+            placeholder={settings?.maskedKey ?? ""}
+            onChange={(e) => setApiKey(e.target.value)}
+            autoComplete="new-password"
+          />
+        </label>
+        {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
+            {saving ? m.settings_validating() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
 }
 
-/** Jobs-permission detail only — configured/valid state is HfStatusBadge's job. */
-function HfJobsBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured || !settings.valid) return null;
-  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_jobs_write_ok()}</Badge>;
+// --- environment ---------------------------------------------------------------
+
+function HfStatusBadge({ settings }: { settings: HfSettings }) {
+  if (settings.validationStatus === "missing") return <Badge variant="warning">{m.settings_page_not_configured()}</Badge>;
+  if (settings.validationStatus === "invalid") return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
+  if (settings.validationStatus !== "valid") return null;
+  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_ready()}</Badge>;
   if (settings.jobsWrite === false)
-    return <Badge variant="error">{m.settings_page_no_job_write_permission()}</Badge>;
-  return <Badge>{m.settings_page_jobs_permission_unknown()}</Badge>;
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Badge variant="warning">{m.settings_page_no_job_write_permission()}</Badge>
+        <Tooltip content={m.settings_hf_write_permission_help()} className="text-subtext">
+          <Info size={15} />
+        </Tooltip>
+      </span>
+    );
+  return null;
 }
 
 function HfSection() {
@@ -1830,6 +2009,7 @@ function HfSection() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // A save that lands before the slow mount fetch resolves must win over it.
   const savedRef = useRef(false);
@@ -1846,9 +2026,23 @@ function HfSection() {
       });
   }, []);
 
+  async function refresh() {
+    if (saving || refreshing || (!settings && !loadError)) return;
+    setRefreshing(true);
+    setLoadError(null);
+    try {
+      setSettings(await getHfSettings());
+      savedRef.current = false;
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token.trim() || saving) return;
+    if (!token.trim() || saving || refreshing || (!settings && !loadError)) return;
     setSaving(true);
     setError(null);
     try {
@@ -1874,51 +2068,53 @@ function HfSection() {
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_status()}</span>
-            <span className="v">
-              <HfStatusBadge settings={settings} />
-            </span>
-            <span className="k">{m.settings_page_account()}</span>
-            <span className="v">{settings.username ?? "—"}</span>
-            <span className="k">{m.settings_page_token()}</span>
-            <span className="v">{settings.maskedToken ?? "—"}</span>
-            <span className="k">{m.settings_page_source()}</span>
-            <span className="v">
-              {settings.source ? SOURCE_LABELS[settings.source]() : m.settings_page_not_configured()}
-            </span>
-            <span className="k">{m.settings_page_jobs()}</span>
-            <span className="v">
-              <HfJobsBadge settings={settings} />
-              {(!settings.configured || !settings.valid) && "—"}
-            </span>
-          </div>
+          <dl className="m-0 flex flex-col gap-3 text-sm">
+            {settings.username && <div className="flex items-center justify-between gap-4">
+              <dt className="font-medium text-subtext">{m.settings_page_account()}</dt>
+              <dd className="m-0 text-text">
+                {settings.username}
+              </dd>
+            </div>}
+            {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
+              (settings.validationStatus === "valid" && settings.jobsWrite !== null)) && (
+              <div className="flex items-center justify-between gap-4">
+                <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+                <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
+              </div>
+            )}
+          </dl>
+          {settings.validationStatus === "unreachable" && settings.validationError && (
+            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
+          )}
           {settings.source === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
               {m.settings_page_hf_token_is_set_in_the_environment_and()}
             </p>
           )}
-          {settings.valid && settings.jobsWrite === null && (
+          {settings.validationStatus === "valid" && settings.jobsWrite === null && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
               {m.settings_hf_token_help({ login: ltr("hf auth login"), url: ltr("huggingface.co/settings/tokens") })}
             </p>
           )}
         </>
       )}
-      <form className={FORM_CLASS_NAME} onSubmit={submit}>
-        <label>
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
           {settings?.configured ? m.settings_replace_token() : m.settings_new_token()}
-          <input
+          <Input
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            placeholder={m.settings_page_hf()}
+            placeholder={settings?.maskedToken ?? m.settings_page_hf()}
             autoComplete="off"
          />
         </label>
         {error && <div className="error">{error}</div>}
-        <div className="actions">
-          <Button variant="primary" type="submit" disabled={!token.trim() || saving}>
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {refreshing ? m.common_checking() : m.settings_check_again()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
           </Button>
         </div>
@@ -3399,6 +3595,7 @@ export function SettingsView({
         <ComputeTab
           project={project}
           onViewHistory={() => onSelectTab("instances")}
+          onOpenEnvironment={() => onSelectTab("environment")}
           remote={remote}
        />
       )}

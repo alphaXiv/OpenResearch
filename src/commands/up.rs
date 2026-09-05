@@ -499,11 +499,17 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
+            "/api/settings/tinker",
+            get(tinker_settings).post(set_tinker_key),
+        )
+        .route(
             "/api/settings/k8s",
             get(k8s_settings).post(set_k8s_settings),
         )
-        .route("/api/settings/modal", get(modal_settings))
-        .route("/api/settings/modal/provision", post(provision_modal))
+        .route(
+            "/api/settings/modal",
+            get(modal_settings).post(set_modal_token),
+        )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -569,6 +575,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
+        .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route(
+            "/api/settings/openresearch/ssh-key",
+            get(openresearch_ssh_key),
+        )
         .route(
             "/api/settings/lit-sources",
             get(lit_sources_settings).post(set_lit_sources_settings),
@@ -687,6 +698,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/ssh/master"
             | "/api/settings/ssh/preflight"
             | "/api/settings/ssh/connect"
+            | "/api/settings/openresearch/ssh-key"
+            | "/api/settings/openresearch/login"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
 }
@@ -3539,7 +3552,8 @@ struct HfSettings {
     configured: bool,
     source: Option<&'static str>,
     masked_token: Option<String>,
-    valid: bool,
+    validation_status: &'static str,
+    validation_error: Option<String>,
     username: Option<String>,
     jobs_write: Option<bool>,
 }
@@ -3566,7 +3580,8 @@ async fn hf_token_status() -> HfSettings {
             configured: false,
             source: None,
             masked_token: None,
-            valid: false,
+            validation_status: "missing",
+            validation_error: None,
             username: None,
             jobs_write: None,
         };
@@ -3576,19 +3591,97 @@ async fn hf_token_status() -> HfSettings {
         TokenSource::OpenresearchEnv => "openresearchEnv",
         TokenSource::HfCache => "hfCache",
     };
-    let details = huggingface::whoami_details(&token).await.ok();
-    HfSettings {
-        configured: true,
-        source: Some(source),
-        masked_token: Some(mask_token(&token)),
-        valid: details.is_some(),
-        username: details.as_ref().map(|d| d.name.clone()),
-        jobs_write: details.and_then(|d| d.jobs_write),
+    match huggingface::whoami_details(&token).await {
+        Ok(details) => HfSettings {
+            configured: true,
+            source: Some(source),
+            masked_token: Some(mask_token(&token)),
+            validation_status: "valid",
+            validation_error: None,
+            username: Some(details.name),
+            jobs_write: details.jobs_write,
+        },
+        Err(error) => {
+            let validation_status = if error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.status() == Some(reqwest::StatusCode::UNAUTHORIZED))
+            {
+                "invalid"
+            } else {
+                "unreachable"
+            };
+            HfSettings {
+                configured: true,
+                source: Some(source),
+                masked_token: Some(mask_token(&token)),
+                validation_status,
+                validation_error: Some(error.to_string()),
+                username: None,
+                jobs_write: None,
+            }
+        }
     }
 }
 
 async fn hf_settings() -> Json<Value> {
     Json(json!(hf_token_status().await))
+}
+
+async fn tinker_settings() -> ApiResult {
+    use crate::jobs::tinker;
+    let Ok((key, source)) = tinker::resolve_api_key_with_source() else {
+        return Ok(Json(
+            json!({ "validationStatus": tinker::KeyStatus::Missing, "processEnv": false, "maskedKey": null }),
+        ));
+    };
+    let status = tinker::validate_api_key(&key).await.map_err(bad_request)?;
+    Ok(Json(json!({
+        "validationStatus": status,
+        "processEnv": source == tinker::ApiKeySource::Env,
+        "maskedKey": mask_token(&key),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SetTinkerKeyReq {
+    key: String,
+}
+
+async fn set_tinker_key(Json(req): Json<SetTinkerKeyReq>) -> ApiResult {
+    use crate::jobs::tinker;
+    let key = req.key.trim().to_string();
+    if key.is_empty() {
+        return Err(bad_request("API key is required"));
+    }
+    let status = tinker::validate_api_key(&key).await.map_err(bad_request)?;
+    if status == tinker::KeyStatus::Invalid {
+        return Err(bad_request(
+            "Invalid Tinker API key. The existing key was not changed.",
+        ));
+    }
+    let process_key = std::env::var(tinker::API_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let effective_status = if let Some(ref process_key) = process_key {
+        if process_key.trim() == key {
+            status
+        } else {
+            tinker::validate_api_key(process_key.trim())
+                .await
+                .map_err(bad_request)?
+        }
+    } else {
+        status
+    };
+    let masked_key = mask_token(process_key.as_deref().map(str::trim).unwrap_or(&key));
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_var(tinker::API_KEY_ENV, &key)
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(
+        json!({ "validationStatus": effective_status, "processEnv": process_key.is_some(), "maskedKey": masked_key }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3720,26 +3813,57 @@ fn spawn_claude_auth_monitor(
 
 use crate::jobs::modal;
 
-fn modal_settings_json(s: &modal::ModalStatus) -> Value {
-    json!({
-        "envProvisioned": s.env_provisioned,
-        "modalImportable": s.modal_importable,
-        "tokenConfigured": s.token_configured,
-        "tokenSource": s.token_source,
-        "ready": s.modal_importable && s.token_configured,
-        "error": s.error,
+fn modal_settings_json() -> crate::error::Result<Value> {
+    let token = modal::resolve_token()?;
+    Ok(json!({
+        "tokenConfigured": token.is_some(),
+        "tokenSource": token.as_ref().map(|token| token.source),
+        "maskedTokenId": token.as_ref().map(|token| mask_token(&token.id)),
+        "maskedTokenSecret": token.as_ref().map(|token| mask_token(&token.secret)),
+        "processEnv": std::env::var_os("MODAL_TOKEN_ID").is_some() || std::env::var_os("MODAL_TOKEN_SECRET").is_some(),
+    }))
+}
+
+async fn modal_settings() -> ApiResult {
+    Ok(Json(modal_settings_json().map_err(bad_request)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetModalTokenReq {
+    token_id: String,
+    token_secret: String,
+}
+
+async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiResult {
+    let id = req.token_id.trim().to_string();
+    let secret = req.token_secret.trim().to_string();
+    if id.is_empty() || secret.is_empty() {
+        return Err(bad_request(
+            "Both the Modal token ID and secret are required.",
+        ));
+    }
+    if std::env::var_os("MODAL_TOKEN_ID").is_some()
+        || std::env::var_os("MODAL_TOKEN_SECRET").is_some()
+    {
+        return Err(bad_request("Modal credentials are overridden by the process environment. Remove those overrides before replacing the token here."));
+    }
+    // Modal loads and validates its profile file even when credentials come from env.
+    modal::resolve_token().map_err(bad_request)?;
+    let masked_id = mask_token(&id);
+    let masked_secret = mask_token(&secret);
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_vars(&[
+            ("MODAL_TOKEN_ID", &id),
+            ("MODAL_TOKEN_SECRET", &secret),
+        ])
     })
-}
-
-async fn modal_settings() -> Json<Value> {
-    Json(modal_settings_json(&modal::detect().await))
-}
-
-/// Build the orx-managed Modal env (first run downloads the SDK, ~30–60s), then
-/// report status. Idempotent — a no-op once the env exists.
-async fn provision_modal() -> ApiResult {
-    modal::ensure_env().await.map_err(bad_request)?;
-    Ok(Json(modal_settings_json(&modal::detect().await)))
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(json!({
+        "tokenConfigured": true, "tokenSource": "syncedEnv", "processEnv": false,
+        "maskedTokenId": masked_id, "maskedTokenSecret": masked_secret,
+    })))
 }
 
 // --- kubernetes settings ------------------------------------------------------
@@ -4856,68 +4980,9 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let PtySession {
-        master,
-        input,
-        mut events,
-        kill,
-    } = session;
-    let mut child = PtyChildGuard {
-        kill,
-        running: true,
+    let Some(status) = relay_pty(&mut socket, session).await else {
+        return;
     };
-
-    let status = loop {
-        tokio::select! {
-            event = events.recv() => match event {
-                Some(PtyEvent::Output(bytes)) => {
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                        return;
-                    }
-                }
-                Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
-                Some(PtyEvent::Exit(status)) => break status,
-                None => break Err("SSH terminal ended without an exit status".into()),
-            },
-            message = socket.recv() => match message {
-                Some(Ok(Message::Binary(bytes))) => {
-                    if input.send(bytes.to_vec()).is_err() {
-                        break Err("SSH terminal input closed".into());
-                    }
-                }
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
-                        if cols > 0 && rows > 0 {
-                            let _ = master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                        }
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => {}
-            }
-        }
-    };
-    child.running = false;
-
-    // The waiter and PTY reader run on separate threads. Drain the final bytes
-    // briefly so a last SSH diagnostic reaches the terminal before completion.
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
-    {
-        match event {
-            PtyEvent::Output(bytes) => {
-                if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                    return;
-                }
-            }
-            PtyEvent::Eof | PtyEvent::Exit(_) => break,
-        }
-    }
 
     match status {
         Ok(status) if status.success() => {}
@@ -4961,6 +5026,125 @@ async fn ssh_connect_socket(
             record_ssh_host_test(&test).await;
         }
     }
+}
+
+async fn relay_pty(
+    socket: &mut WebSocket,
+    session: PtySession,
+) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
+    let PtySession {
+        master,
+        input,
+        mut events,
+        kill,
+    } = session;
+    let mut child = PtyChildGuard {
+        kill,
+        running: true,
+    };
+
+    let status = loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(PtyEvent::Output(bytes)) => {
+                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        return None;
+                    }
+                }
+                Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
+                Some(PtyEvent::Exit(status)) => {
+                    child.running = false;
+                    break status;
+                }
+                None => break Err("Terminal ended without an exit status".into()),
+            },
+            message = socket.recv() => match message {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if input.send(bytes.to_vec()).is_err() {
+                        break Err("Terminal input closed".into());
+                    }
+                }
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
+                        if cols > 0 && rows > 0 {
+                            let _ = master.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                Some(Ok(_)) => {}
+            }
+        }
+    };
+    // The waiter and PTY reader run on separate threads. Drain the final bytes
+    // briefly so the last diagnostic reaches the terminal before completion.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        match event {
+            PtyEvent::Output(bytes) => {
+                if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    return None;
+                }
+            }
+            PtyEvent::Eof | PtyEvent::Exit(_) => break,
+        }
+    }
+
+    Some(status)
+}
+
+async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["login".into()]).await
+}
+
+async fn openresearch_ssh_key(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["ssh-key".into(), "add".into()]).await
+}
+
+async fn openresearch_terminal(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    args: Vec<String>,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            "Login terminal origin rejected".into(),
+        )
+        .into_response();
+    }
+    ws.on_upgrade(move |mut socket| async move {
+        let result = async {
+            let session = tokio::task::spawn_blocking(move || {
+                let exe = std::env::current_exe()?;
+                start_pty(&exe.to_string_lossy(), args)
+            })
+            .await??;
+            let Some(status) = relay_pty(&mut socket, session).await else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            let status = status.map_err(|error| anyhow!(error))?;
+            anyhow::ensure!(
+                status.success(),
+                "Command exited with code {}",
+                status.exit_code()
+            );
+            Ok(Some(()))
+        }
+        .await;
+        let message = match result {
+            Ok(Some(())) => json!({ "type": "complete" }),
+            Ok(None) => return,
+            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        };
+        let _ = socket.send(Message::Text(message.to_string().into())).await;
+    })
 }
 
 /// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
@@ -5514,7 +5698,7 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     // same fact must not read two different ways.
     let source_label = |s: &crate::jobs::huggingface::TokenSource| match s {
         crate::jobs::huggingface::TokenSource::Env => "HF_TOKEN env var",
-        crate::jobs::huggingface::TokenSource::OpenresearchEnv => "Token from ~/.openresearch/env",
+        crate::jobs::huggingface::TokenSource::OpenresearchEnv => "Token from Environment tab",
         crate::jobs::huggingface::TokenSource::HfCache => "Token from ~/.cache/huggingface/token",
     };
     let mut targets = json!([
@@ -5535,15 +5719,17 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
         {
             "id": "tinker",
             "configured": tinker.is_some(),
+            "fromEnvironmentTab": matches!(tinker.as_ref().map(|(_, source)| source), Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv)),
             "summary": match tinker.map(|(_, source)| source) {
                 Some(crate::jobs::tinker::ApiKeySource::Env) => "TINKER_API_KEY env var",
-                Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from ~/.openresearch/env",
+                Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from Environment tab",
                 None => "No API key",
             },
         },
         {
             "id": "hf",
             "configured": hf.is_some(),
+            "fromEnvironmentTab": matches!(hf.as_ref().map(|(_, source)| source), Some(crate::jobs::huggingface::TokenSource::OpenresearchEnv)),
             "summary": hf.as_ref().map_or_else(
                 || "No token".to_string(),
                 |(_, s)| source_label(s).to_string(),
@@ -5552,9 +5738,10 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
         {
             "id": "modal",
             "configured": modal_source.is_some(),
+            "fromEnvironmentTab": modal_source == Some("syncedEnv"),
             "summary": match modal_source {
-                Some("env") => "MODAL_TOKEN_ID env var",
-                Some("syncedEnv") => "Token from ~/.openresearch/env",
+                Some("env") => "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET env vars",
+                Some("syncedEnv") => "Token from Environment tab",
                 Some("modalToml") => "Token from ~/.modal.toml",
                 _ => "No token",
             },
@@ -5576,7 +5763,10 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
             "configured": slurm_host.is_some(),
             "summary": slurm_host.as_ref().map_or_else(
                 || "No login node configured".to_string(),
-                |h| format!("Login node {h}"),
+                |h| match slurm_settings.as_ref().and_then(|s| s.partition.as_deref()) {
+                    Some(partition) => format!("Login node {h} / partition {partition}"),
+                    None => format!("Login node {h}"),
+                },
             ),
         },
         {
@@ -6887,6 +7077,8 @@ mod tests {
             "/api/settings/ssh/master",
             "/api/settings/ssh/preflight",
             "/api/settings/ssh/connect",
+            "/api/settings/openresearch/login",
+            "/api/settings/openresearch/ssh-key",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
         ] {

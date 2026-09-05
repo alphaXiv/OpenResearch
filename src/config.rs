@@ -329,31 +329,38 @@ pub fn remove_synced_env_var(key: &str) -> Result<()> {
 /// `synced_env_var` parses), replacing an existing line for `key` and keeping
 /// every other line. File is owner-only (0600) on create and rewrite.
 pub fn write_synced_env_var(key: &str, value: &str) -> Result<()> {
+    write_synced_env_vars(&[(key, value)])
+}
+
+pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
     use anyhow::anyhow;
     let dir = dirs::home_dir()
         .ok_or_else(|| anyhow!("no home directory"))?
         .join(".openresearch");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("env");
-    // Inverse of synced_env_var's unescaping: backslashes first, then quotes.
-    let escaped = value.replace('\\', r"\\").replace('\'', r"'\''");
-    let new_line = format!("export {key}='{escaped}'");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let prefix = format!("export {key}=");
-    let mut lines: Vec<&str> = Vec::new();
-    let mut replaced = false;
-    for line in existing.lines() {
-        if line.starts_with(&prefix) {
-            if !replaced {
-                lines.push(&new_line);
-                replaced = true;
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    for (key, value) in values {
+        // Inverse of synced_env_var's unescaping: backslashes first, then quotes.
+        let escaped = value.replace('\\', r"\\").replace('\'', r"'\''");
+        let new_line = format!("export {key}='{escaped}'");
+        let prefix = format!("export {key}=");
+        let mut replaced = false;
+        lines.retain_mut(|line| {
+            if !line.starts_with(&prefix) {
+                return true;
             }
-        } else {
-            lines.push(line);
+            if replaced {
+                return false;
+            }
+            *line = new_line.clone();
+            replaced = true;
+            true
+        });
+        if !replaced {
+            lines.push(new_line);
         }
-    }
-    if !replaced {
-        lines.push(&new_line);
     }
     let body = format!("{}\n", lines.join("\n"));
     {

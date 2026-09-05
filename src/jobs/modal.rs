@@ -521,14 +521,10 @@ pub async fn stream_logs(
     Ok(seen.max(skip))
 }
 
-/// Detected Modal readiness for the Settings/preflight surfaces.
+/// Detected Modal readiness for preflight.
 pub struct ModalStatus {
-    /// The orx-managed venv exists (whether or not `modal` imports cleanly).
-    pub env_provisioned: bool,
     pub modal_importable: bool,
     pub token_configured: bool,
-    /// Where the token came from: "env" | "syncedEnv" | "modalToml".
-    pub token_source: Option<&'static str>,
     pub error: Option<String>,
 }
 
@@ -551,8 +547,7 @@ pub async fn preflight() -> Result<()> {
     if !s.token_configured {
         return Err(anyhow!(
             "No Modal token configured. Run `modal token new`, or set MODAL_TOKEN_ID and \
-             MODAL_TOKEN_SECRET in the process or OpenResearch run environment, or \
-             `~/.openresearch/env`."
+             MODAL_TOKEN_SECRET in the process environment or Settings → Environment."
         ));
     }
     Ok(())
@@ -562,14 +557,87 @@ pub async fn preflight() -> Result<()> {
 /// env file, or `~/.modal.toml`. Sync and cheap (env + fs only) — safe for the
 /// compute-summary endpoint, which must not pay `detect()`'s python probe.
 pub fn token_source() -> Option<&'static str> {
-    if std::env::var("MODAL_TOKEN_ID").is_ok_and(|t| !t.trim().is_empty()) {
-        Some("env")
-    } else if crate::config::synced_env_var("MODAL_TOKEN_ID").is_some() {
-        Some("syncedEnv")
-    } else if dirs::home_dir().is_some_and(|h| h.join(".modal.toml").exists()) {
-        Some("modalToml")
-    } else {
-        None
+    resolve_token().ok().flatten().map(|token| token.source)
+}
+
+pub struct ModalToken {
+    pub id: String,
+    pub secret: String,
+    pub source: &'static str,
+}
+
+fn token_profile(config: &toml::Table, requested: Option<&str>) -> Result<toml::Table> {
+    let active: Vec<_> = config
+        .iter()
+        .filter(|(_, value)| value.get("active").and_then(toml::Value::as_bool) == Some(true))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    let profile = requested
+        .or_else(|| active.first().copied())
+        .unwrap_or("default");
+    if active.len() > 1 || (config.len() > 1 && active.is_empty() && profile == "default") {
+        return Err(anyhow!(
+            "Select an active Modal profile with `modal profile activate`."
+        ));
+    }
+    if config.values().any(|value| !value.is_table()) {
+        return Err(anyhow!(
+            "Modal configuration must contain a table for each profile."
+        ));
+    }
+    Ok(config
+        .get(profile)
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default())
+}
+
+pub fn resolve_token() -> Result<Option<ModalToken>> {
+    let path = std::env::var("MODAL_CONFIG_PATH")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".modal.toml")))
+        .ok_or_else(|| anyhow!("Could not locate the Modal configuration."))?;
+    let config = match std::fs::read_to_string(path) {
+        Ok(body) => body.parse::<toml::Table>().map_err(|_| {
+            anyhow!("Could not read Modal configuration. Check it with `modal profile list`.")
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(_) => {
+            return Err(anyhow!(
+                "Could not read Modal configuration. Check file permissions."
+            ))
+        }
+    };
+    let requested = std::env::var("MODAL_PROFILE")
+        .ok()
+        .filter(|p| !p.is_empty());
+    let profile = token_profile(&config, requested.as_deref())?;
+    let mut source = "modalToml";
+    let mut resolve = |key: &str, field: &str| {
+        if let Ok(value) = std::env::var(key) {
+            source = "env";
+            Some(value)
+        } else if let Some(value) = crate::config::synced_env_var(key) {
+            if source != "env" {
+                source = "syncedEnv";
+            }
+            Some(value)
+        } else {
+            profile
+                .get(field)
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        }
+    };
+    let id = resolve("MODAL_TOKEN_ID", "token_id");
+    let secret = resolve("MODAL_TOKEN_SECRET", "token_secret");
+    match (id, secret) {
+        (Some(id), Some(secret)) if !id.trim().is_empty() && !secret.trim().is_empty() => {
+            Ok(Some(ModalToken { id, secret, source }))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -578,12 +646,9 @@ pub fn token_source() -> Option<&'static str> {
 pub async fn detect() -> ModalStatus {
     let token_source = token_source();
     let token_configured = token_source.is_some();
-    let env_provisioned = managed_python().exists();
     let mk = |modal_importable, error| ModalStatus {
-        env_provisioned,
         modal_importable,
         token_configured,
-        token_source,
         error,
     };
     let probe = Command::new(python_bin())
@@ -610,5 +675,29 @@ pub async fn detect() -> ModalStatus {
                     .to_string(),
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn selects_active_or_explicit_profile_and_rejects_ambiguity() {
+        let config: toml::Table =
+            "[default]\ntoken_id = 'old'\n[work]\nactive = true\ntoken_id = 'current'"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            token_profile(&config, None).unwrap()["token_id"].as_str(),
+            Some("current")
+        );
+        assert_eq!(
+            token_profile(&config, Some("default")).unwrap()["token_id"].as_str(),
+            Some("old")
+        );
+        let ambiguous: toml::Table = "[one]\n[other]".parse().unwrap();
+        assert!(token_profile(&ambiguous, None).is_err());
+        assert!(token_profile(&toml::Table::new(), None).unwrap().is_empty());
     }
 }

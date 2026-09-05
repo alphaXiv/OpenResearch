@@ -294,7 +294,7 @@ pub enum SshKeyCommand {
 
 #[derive(Args, Debug)]
 pub struct SshKeyAddArgs {
-    /// Path to the PUBLIC key (defaults to `~/.ssh/id_ed25519.pub`).
+    /// Public key path. Without a path, reuse ~/.ssh/id_ed25519.pub or create a key pair.
     pub path: Option<String>,
 }
 
