@@ -157,24 +157,34 @@ pub async fn disk_response(
     cache_control: &'static str,
 ) -> Result<Response> {
     let mut file = tokio::fs::File::from_std(file);
-    let size = file
+    let metadata = file
         .metadata()
         .await
-        .map_err(|error| anyhow!("stat failed: {error}"))?
-        .len();
+        .map_err(|error| anyhow!("stat failed: {error}"))?;
+    let size = metadata.len();
     let range = match range_for(method, headers, size) {
         Ok(range) => range,
         Err(()) => return range_not_satisfiable(size),
     };
     if method == Method::HEAD || size == 0 {
-        return response(
+        let mut result = response(
             type_path,
             presentation,
             size,
             range,
             cache_control,
             Body::empty(),
-        );
+        )?;
+        if let Ok(modified) = metadata.modified() {
+            let nanos = modified
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            result
+                .headers_mut()
+                .insert(header::ETAG, format!("W/\"{size}-{nanos}\"").parse()?);
+        }
+        return Ok(result);
     }
     use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
     let selection = range.unwrap_or(ByteRange {
@@ -281,6 +291,36 @@ mod tests {
             .await
             .unwrap()
             .to_vec()
+    }
+
+    #[tokio::test]
+    async fn head_validator_changes_for_same_size_rewrites() {
+        let path = std::env::temp_dir().join(format!("orx-file-version-{}", uuid::Uuid::new_v4()));
+        let mut versions = Vec::new();
+        for (offset, content) in [(0, b"before"), (1, b"after!")] {
+            std::fs::write(&path, content).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(100 + offset))
+                .unwrap();
+            for _ in 0..2 {
+                let response = disk_response(
+                    "file.txt",
+                    std::fs::File::open(&path).unwrap(),
+                    FilePresentation::Text,
+                    &Method::HEAD,
+                    &HeaderMap::new(),
+                    "no-cache",
+                )
+                .await
+                .unwrap();
+                versions.push(response.headers()[header::ETAG].clone());
+                assert!(body(response).await.is_empty());
+            }
+        }
+        assert_eq!(versions[0], versions[1]);
+        assert_ne!(versions[1], versions[2]);
+        assert_eq!(versions[2], versions[3]);
+        std::fs::remove_file(path).unwrap();
     }
 
     /// The typing contract `type_path` states: a symlink named `logo.png` must

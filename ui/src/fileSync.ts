@@ -3,6 +3,18 @@ export interface FileConflict {
   exists: boolean;
 }
 
+// Native dialogs can blur the editor before the user chooses whether to discard.
+export let confirmingFileDiscard = false;
+
+export function confirmFileDiscard(message: string): boolean {
+  confirmingFileDiscard = true;
+  try {
+    return window.confirm(message);
+  } finally {
+    confirmingFileDiscard = false;
+  }
+}
+
 export interface FileBufferState {
   path: string;
   draft: string;
@@ -28,6 +40,12 @@ export const createFileBuffer = (path: string, content: string, version: string)
 
 export const isDirtyFileBuffer = (buffer: FileBufferState) =>
   buffer.draft !== buffer.baseline;
+
+export const updateFileDraft = (buffer: FileBufferState, draft: string): FileBufferState => ({
+  ...buffer,
+  draft,
+  conflict: draft === buffer.baseline ? null : buffer.conflict,
+});
 
 export const fileBufferContent = (buffer: FileBufferState) =>
   buffer.crlf ? buffer.draft.replace(/\n/g, "\r\n") : buffer.draft;

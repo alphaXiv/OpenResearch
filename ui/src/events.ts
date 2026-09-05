@@ -75,14 +75,13 @@ function emitChat(ev: ChatEvent) {
 export function useSessionBusyRefresh(
   projectId: string,
   sessionId: string | undefined,
-  enabled: boolean,
   refresh: () => void,
 ) {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
   useEffect(() => {
-    if (!enabled || !sessionId) return;
+    if (!sessionId) return;
     let disposed = false;
     let edgeSeen = false;
     let busy = false;
@@ -127,7 +126,7 @@ export function useSessionBusyRefresh(
       off();
       stop();
     };
-  }, [enabled, projectId, sessionId]);
+  }, [projectId, sessionId]);
 }
 
 const projectActivityListeners = new Set<() => void>();

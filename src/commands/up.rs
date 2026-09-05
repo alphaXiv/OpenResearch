@@ -2579,21 +2579,11 @@ fn file_version(bytes: &[u8]) -> String {
 }
 
 fn file_version_on_disk(path: &std::path::Path) -> std::result::Result<String, ApiError> {
-    use std::io::Read as _;
-
     let mut file = std::fs::File::open(path)
         .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -2920,6 +2910,9 @@ fn manage_local_file(
     }
     let destination = parent.join(&destination_name);
     match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(bad_request("a file with that name already exists"));
+        }
         Ok(_) => match std::fs::canonicalize(&destination) {
             Ok(path) if path == resolved => {}
             Ok(_) | Err(_) => return Err(bad_request("a file with that name already exists")),
@@ -7585,11 +7578,29 @@ mod tests {
                 manage_local_file(&root, "jump/back", FileAction::Delete, None, true,).is_err()
             );
             assert!(outside.join("back").exists());
-            std::os::unix::fs::symlink(root.join(&renamed), root.join("summary-link")).unwrap();
-            assert!(
-                manage_local_file(&root, "summary-link", FileAction::Duplicate, None, true,)
-                    .is_err()
-            );
+            std::os::unix::fs::symlink(root.join(&renamed), root.join("reports/summary-link"))
+                .unwrap();
+            assert!(manage_local_file(
+                &root,
+                &renamed,
+                FileAction::Rename,
+                Some("summary-link"),
+                true,
+            )
+            .is_err());
+            assert!(root.join(&renamed).exists());
+            assert!(std::fs::symlink_metadata(root.join("reports/summary-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(manage_local_file(
+                &root,
+                "reports/summary-link",
+                FileAction::Duplicate,
+                None,
+                true,
+            )
+            .is_err());
             std::os::unix::fs::symlink(root.join(".git"), root.join("git-link")).unwrap();
             assert!(
                 manage_local_file(&root, "git-link/config", FileAction::Delete, None, true,)

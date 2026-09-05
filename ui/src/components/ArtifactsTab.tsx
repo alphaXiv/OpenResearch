@@ -7,7 +7,6 @@ import {
   Copy,
   ExternalLink,
   Code,
-  FileText,
   MousePointerClick,
   Package,
   Settings2,
@@ -33,6 +32,7 @@ import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
+import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
 import {
   FileContextMenu,
@@ -211,7 +211,7 @@ function previewKind(entry: ArtifactEntry): PreviewKind {
 }
 
 /** Fetched body for kinds that need text: markdown or raw text. */
-function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind) {
+function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
   const [text, setText] = useState<string | null>(null);
   const [binary, setBinary] = useState(false);
   const [truncated, setTruncated] = useState(false);
@@ -252,7 +252,7 @@ function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind)
     return () => {
       cancelled = true;
     };
-  }, [projectId, entry.path, entry.modifiedAt, kind, wantsText]);
+  }, [projectId, entry.path, entry.modifiedAt, entry.size, kind, wantsText, version]);
 
   return { text, binary, truncated, error, wantsText };
 }
@@ -271,11 +271,12 @@ function PreviewPane({
   artifactEntries: ArtifactEntry[];
 }) {
   const kind = previewKind(entry);
-  const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind);
+  const version = useFileVersion(artifactUrl(projectId, entry.path));
+  const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind, version);
   const [showSource, setShowSource] = useState(false);
   const isDoc = kind === "markdown";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
-  const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${entry.modifiedAt}`;
+  const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${encodeURIComponent(version ?? `${entry.modifiedAt}:${entry.size}`)}`;
 
   let body: ReactNode;
   if (kind === "image" || kind === "audio" || kind === "video" || kind === "pdf") {
@@ -313,11 +314,11 @@ function PreviewPane({
   return (
     // `file-view` scopes the shared syntax-token colors onto the code view.
     <div className="fpreview flex-1 min-w-0 bg-background file-view flex flex-col h-full min-h-0 [@container((max-width:_720px))]:hidden">
-      <div className="fpreview-head h-10 flex items-center gap-2 py-0 px-3.5 border-b border-b-border-variant text-subtext shrink-0">
-        <FileText size={13} className="shrink-0" />
-        <code className="fpreview-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={ltr(entry.path)}>
-          {entry.path}
-        </code>
+      <div className="fpreview-head flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-subtext shrink-0">
+        <FileTypeIcon name={entry.name} />
+        <span className="fpreview-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(entry.path)}>
+          {entry.name}
+        </span>
         <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
           {m.artifacts_tab_modified()}{" "}
           {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
@@ -330,6 +331,7 @@ function PreviewPane({
         )}
         {isDoc && (
           <IconButton
+            size="small"
             active={showSource}
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
@@ -340,6 +342,7 @@ function PreviewPane({
           </IconButton>
         )}
         <IconButtonLink
+          size="small"
           href={rawUrl}
           target="_blank"
           rel="noopener noreferrer"
@@ -350,6 +353,7 @@ function PreviewPane({
           <ExternalLink size={13} />
         </IconButtonLink>
         <IconButton
+          size="small"
           data-tip={m.artifacts_tab_delete_artifact()}
           data-tip-align="end"
           aria-label={m.artifacts_tab_delete_artifact()}

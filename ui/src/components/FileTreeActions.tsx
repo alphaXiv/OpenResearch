@@ -142,6 +142,7 @@ export function FileContextMenu({
     };
     const keydown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Tab") {
+        event.preventDefault();
         onCloseRef.current();
         return;
       }
@@ -169,7 +170,7 @@ export function FileContextMenu({
     action();
   };
   const item = (label: string, action: () => void, danger = false) => (
-    <MenuItem role="menuitem" danger={danger} onClick={() => run(action)}>
+    <MenuItem size="compact" role="menuitem" danger={danger} onClick={() => run(action)}>
       <span>{label}</span>
     </MenuItem>
   );
@@ -179,7 +180,7 @@ export function FileContextMenu({
       ref={menuRef}
       role="menu"
       aria-label={m.file_tree_file_actions({ path: ltr(target.path) })}
-      className="option-menu fixed z-100 min-w-44 overflow-hidden rounded-lg border border-border bg-background p-1.5 shadow-menu"
+      className="option-menu fixed z-100 min-w-44 overflow-hidden rounded-md border border-border bg-background p-1 shadow-menu"
       style={{ left: position.x, top: position.y }}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {

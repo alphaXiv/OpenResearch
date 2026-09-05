@@ -50,7 +50,6 @@ export interface OverleafSync {
   linkProject: (project: string) => Promise<void>;
   unlink: () => Promise<void>;
   sync: (resolve?: Record<string, OverleafResolution>) => void;
-  dismiss: () => void;
 }
 
 export function useOverleafSync({
@@ -140,7 +139,7 @@ export function useOverleafSync({
 
   const sync = useCallback(
     (resolve?: Record<string, OverleafResolution>) => {
-      if (syncingRef.current || dirtyRef.current) return false;
+      if (!hasToken || !link || syncingRef.current || dirtyRef.current) return false;
       syncingRef.current = true;
       setSyncing(true);
       setError(null);
@@ -166,7 +165,7 @@ export function useOverleafSync({
         });
       return true;
     },
-    [projectId, filePath, sessionId],
+    [projectId, filePath, sessionId, hasToken, link],
   );
 
   // Once a paper is linked it stays in step on its own: linking syncs, and so
@@ -174,18 +173,18 @@ export function useOverleafSync({
   // a sync actually started, so one refused mid-flight is not forgotten.
   const syncedMarker = useRef<string | null>(null);
   useEffect(() => {
-    if (!enabled || !loaded || !link || dirty) return;
+    if (!enabled || !loaded || !hasToken || !link || dirty) return;
     const marker = `${filePath}:${link.projectId}:${savedSource}`;
     if (syncedMarker.current === marker) return;
     if (sync()) syncedMarker.current = marker;
     // `syncing` is a dependency so a sync refused while another was in flight
     // is retried when that one finishes, rather than waiting for an edit.
-  }, [enabled, loaded, link, filePath, savedSource, dirty, syncing, sync]);
+  }, [enabled, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync]);
 
   // And the other direction: ask whether Overleaf has moved, and sync when it
   // has. The marker is left alone — this is not a change on our side.
   useEffect(() => {
-    if (!enabled || !loaded || !link || dirty) return;
+    if (!enabled || !loaded || !hasToken || !link || dirty) return;
     const timer = setInterval(() => {
       if (syncingRef.current || failedRef.current) return;
       getOverleafStatus(projectId, filePath, { sessionId })
@@ -198,7 +197,7 @@ export function useOverleafSync({
         });
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [enabled, loaded, link, dirty, projectId, filePath, sessionId, sync]);
+  }, [enabled, loaded, hasToken, link, dirty, projectId, filePath, sessionId, sync]);
 
   return {
     hasToken,
@@ -213,6 +212,9 @@ export function useOverleafSync({
     uploadUrl: overleafUploadUrl(projectId, filePath, { sessionId }),
     saveToken: async (token: string) => {
       const result = await saveOverleafToken(token);
+      syncedMarker.current = null;
+      failedRef.current = false;
+      setError(null);
       setHasToken(result.hasToken);
     },
     linkProject: async (project: string) => {
@@ -228,12 +230,6 @@ export function useOverleafSync({
     sync: (resolve?: Record<string, OverleafResolution>) => {
       failedRef.current = false;
       sync(resolve);
-    },
-    dismiss: () => {
-      // Clearing the message without clearing the failure would leave the poll
-      // parked while the panel claimed to be in step.
-      failedRef.current = false;
-      setError(null);
     },
   };
 }

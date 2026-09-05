@@ -9,7 +9,6 @@ import { ltr } from "../i18n";
 
 import {
   Check,
-  CloudUpload,
   Code,
   Copy,
   Download,
@@ -17,7 +16,6 @@ import {
   FileOutput,
   FileText,
   GitBranch,
-  RotateCw,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -37,13 +35,15 @@ import {
   type CheckoutRoot,
   type ProjectFile,
 } from "../api";
-import { useSessionBusyRefresh } from "../events";
+import { useFileVersion } from "../useFileVersion";
 import {
   conflictAfterRefresh,
+  confirmingFileDiscard,
   createFileBuffer,
   fileBufferContent,
   isDirtyFileBuffer,
   normalizedFileContent,
+  updateFileDraft,
   type FileBufferState,
 } from "../fileSync";
 import { useLatexCompile } from "../useLatexCompile";
@@ -57,9 +57,9 @@ import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
-import { isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { FileTypeIcon, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
 import { HtmlPreview } from "./HtmlPreview";
-import { OverleafPanel } from "./OverleafPanel";
+import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner } from "./ui";
@@ -188,7 +188,6 @@ export function FileViewer({
 }) {
   const [loaded, setLoaded] = useState<LoadedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
   const isArtifacts = source === "artifacts";
   const isAbsolute = source === "abs";
@@ -207,6 +206,10 @@ export function FileViewer({
   const editStateRef = useRef(editState);
   const onBufferStateChangeRef = useRef(onBufferStateChange);
   onBufferStateChangeRef.current = onBufferStateChange;
+  useEffect(() => {
+    onBufferStateChangeRef.current = onBufferStateChange;
+    return () => { onBufferStateChangeRef.current = undefined; };
+  }, [onBufferStateChange]);
   const updateEditState = (next: FileBufferState | null) => {
     editStateRef.current = next;
     setEditState(next);
@@ -217,7 +220,6 @@ export function FileViewer({
   const [saving, setSaving] = useState(false);
   const savingRef = useRef(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [reloadPrompt, setReloadPrompt] = useState(false);
   const loadRequestRef = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const scrollPositionRef = useRef(scrollPosition);
@@ -318,7 +320,6 @@ export function FileViewer({
       });
       const current = editStateRef.current ?? savingState;
       loadRequestRef.current++;
-      setLoading(false);
       updateEditState({
         ...current,
         baseline: savedDraft,
@@ -379,28 +380,6 @@ export function FileViewer({
       [filePath],
     ),
   });
-  const [showOverleaf, setShowOverleaf] = useState(false);
-  const overleafConflicts = overleaf.last?.conflicts.length ?? 0;
-  // A conflict is the one outcome the user has to act on, and an automatic sync
-  // can produce it with the panel closed.
-  useEffect(() => {
-    if (overleafConflicts > 0) setShowOverleaf(true);
-  }, [overleafConflicts]);
-  const overleafTip = overleaf.error
-    ? m.overleaf_sync_failed()
-    : overleafConflicts > 0
-      ? m.overleaf_conflict_tip()
-      : overleaf.blocked
-        ? m.overleaf_save_to_sync()
-        : overleaf.link
-          ? m.overleaf_in_sync()
-          : m.overleaf_send_paper();
-  const overleafColor =
-    overleaf.error || overleafConflicts > 0
-      ? "text-accent-red"
-      : overleaf.link
-        ? "text-accent-green"
-        : undefined;
 
   // A .tex shows its compiled PDF or its source — nothing in between.
   const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
@@ -456,31 +435,26 @@ export function FileViewer({
   }, []);
   const discardAndReload = () => {
     updateEditState(null);
-    setReloadPrompt(false);
     setSaveError(null);
     reload();
   };
 
-  useSessionBusyRefresh(
-    projectId,
-    sessionId,
-    !gitRef && loaded?.source === "checkout",
-    reload,
-  );
+  const diskVersion = useFileVersion(rawFileUrl(filePath), !gitRef && !saving);
 
   useEffect(() => {
-    if (gitRef || !loaded || loaded.source === "artifact") return;
-    window.addEventListener("focus", reload);
-    return () => window.removeEventListener("focus", reload);
-  }, [gitRef, loaded?.source, reload]);
+    if (!error || gitRef) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") reload();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [error, gitRef, reload]);
 
   // filePath is `path` in every store but the checkout, so this covers all four.
-  const rawUrl = `${rawFileUrl(filePath)}&v=${artifactsMode ? artifactVersion ?? nonce : nonce}`;
+  const rawUrl = `${rawFileUrl(filePath)}&v=${encodeURIComponent(diskVersion ?? artifactVersion ?? "")}&reload=${nonce}`;
 
   useEffect(() => {
     let cancelled = false;
     const request = ++loadRequestRef.current;
-    setLoading(true);
     // Artifacts come from the compatibility /files endpoint (no session/branch);
     // repo files from the checkout-aware /file endpoint. All paths normalize
     // into the same ProjectFile-shaped `data` so the render body is shared.
@@ -553,24 +527,18 @@ export function FileViewer({
           ) {
             updateEditState({ ...current, conflict });
           }
-          else if (current.conflict) updateEditState({ ...current, conflict: null });
-          setLoaded(next);
-          setError(null);
-          return;
+          else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
         }
         setLoaded(next);
         setError(null);
       })
       .catch((e: Error) => {
         if (!cancelled && request === loadRequestRef.current) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled && request === loadRequestRef.current) setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [projectId, path, source, sessionId, gitRef, nonce, artifactVersion]);
+  }, [projectId, path, source, sessionId, gitRef, nonce, artifactVersion, diskVersion]);
 
   // Stays a layout effect: the code views scroll to a `file:line` target in
   // passive effects, which run after this and so win over the restore.
@@ -594,12 +562,12 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view flex flex-col h-full min-h-0">
-      <div className="file-view-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant text-text shrink-0">
-        <FileText size={13} className="shrink-0" />
-        <code className="file-view-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={filePath}>
-          {filePath}
-        </code>
+    <div className="file-view flex flex-col h-full min-h-0 min-w-0">
+      <div className="file-view-header flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
+        <FileTypeIcon name={filePath} />
+        <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
+          {filePath.split("/").pop() || filePath}
+        </span>
         {branchLabel && (
           <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
@@ -624,6 +592,7 @@ export function FileViewer({
         )}
         {isLatex && latex.compiled && (
           <IconButton
+            size="small"
             active={!latex.showPdf}
             data-tip={
               latex.stale && latex.showPdf
@@ -645,6 +614,7 @@ export function FileViewer({
         )}
         {isLatex && compiledPdfUrl && compiledPdfName && (
           <IconButtonLink
+            size="small"
             data-tip={
               latex.stale
                 ? m.file_viewer_download_stale_pdf({ name: ltr(compiledPdfName) })
@@ -658,24 +628,10 @@ export function FileViewer({
             <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
           </IconButtonLink>
         )}
-        {liveTex && (
-          <IconButton
-            active={showOverleaf}
-            data-tip={overleafTip}
-            data-tip-align="end"
-            aria-label={m.a11y_overleaf_status({ status: overleafTip })}
-            aria-expanded={showOverleaf}
-            onClick={() => setShowOverleaf((open) => !open)}
-          >
-            {overleaf.syncing ? (
-              <Spinner />
-            ) : (
-              <CloudUpload size={13} className={overleafColor} />
-            )}
-          </IconButton>
-        )}
+        {liveTex && <OverleafButton overleaf={overleaf} />}
         {isLatex && onDisk && (
           <IconButton
+            size="small"
             data-tip={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             data-tip-align="end"
             aria-label={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
@@ -687,6 +643,7 @@ export function FileViewer({
         )}
         {rendersByDefault && (
           <IconButton
+            size="small"
             active={showSource}
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
@@ -698,6 +655,7 @@ export function FileViewer({
         )}
         {onDisk && !remote && (
           <IconButton
+            size="small"
             data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
             data-tip-align="end"
             aria-label={m.file_viewer_open_in_default_editor()}
@@ -705,19 +663,6 @@ export function FileViewer({
             onClick={() => void openInEditor()}
           >
             {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
-          </IconButton>
-        )}
-        {!gitRef && loaded?.source !== "artifact" && (
-          <IconButton
-            data-tip={m.file_viewer_reload_file()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_reload_file()}
-            onPointerDown={(event) => {
-              if (dirty) event.preventDefault();
-            }}
-            onClick={() => dirty ? setReloadPrompt(true) : reload()}
-          >
-            {loading ? <Spinner /> : <RotateCw size={13} />}
           </IconButton>
         )}
       </div>
@@ -733,16 +678,19 @@ export function FileViewer({
           {m.file_viewer_update_remote_to_edit_safely()}
         </div>
       )}
-      {(editState?.conflict || reloadPrompt) && (
+      {error && data !== null && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-accent-red">
+          {m.file_viewer_failed_to_load_file()} {ltr(error)}
+        </div>
+      )}
+      {editState?.conflict && (
         <div
           className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 flex items-center flex-wrap gap-2 text-sm text-accent-amber"
         >
           <span className="flex-1 min-w-0" role="status">
-            {reloadPrompt && !editState?.conflict
-              ? m.file_viewer_reload_discards_edits()
-              : editState?.conflict?.exists
-                ? m.file_viewer_changed_on_disk()
-                : m.file_viewer_deleted_on_disk()}
+            {editState.conflict.exists
+              ? m.file_viewer_changed_on_disk()
+              : m.file_viewer_deleted_on_disk()}
           </span>
           {editState?.conflict?.exists && editState.conflict.currentVersion && (
             <Button
@@ -751,11 +699,6 @@ export function FileViewer({
               onClick={() => void save(editState.conflict?.currentVersion ?? undefined)}
             >
               {m.file_viewer_overwrite_disk_file()}
-            </Button>
-          )}
-          {reloadPrompt && !editState?.conflict && (
-            <Button onPointerDown={(event) => event.preventDefault()} onClick={() => setReloadPrompt(false)}>
-              {m.chat_panel_cancel()}
             </Button>
           )}
           <Button disabled={saving} onPointerDown={(event) => event.preventDefault()} onClick={discardAndReload}>
@@ -807,26 +750,6 @@ export function FileViewer({
           </Button>
         </div>
       )}
-      {liveTex && overleaf.error && (
-        <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4 flex items-start gap-2">
-          <span className="flex-1 min-w-0 text-sm text-accent-red whitespace-pre-wrap">
-            {overleaf.error}
-          </span>
-          <IconButton
-            data-tip={m.file_viewer_dismiss()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_dismiss_overleaf_message()}
-            onClick={overleaf.dismiss}
-          >
-            <X size={13} />
-          </IconButton>
-        </div>
-      )}
-      {liveTex && showOverleaf && overleaf.loaded && (
-        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4">
-          <OverleafPanel overleaf={overleaf} />
-        </div>
-      )}
       {isLatex && onDisk && latex.engine === null && latex.installHint && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-subtext">
           {latex.installHint}
@@ -865,7 +788,7 @@ export function FileViewer({
             {m.file_viewer_artifact_fallback({ root: loaded.checkoutRoot === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
           </div>
         )}
-        {error ? (
+        {error && data === null ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_failed_to_load_file()} {ltr(error)}</div>
         ) : data === null ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_loading()}</div>
@@ -879,12 +802,12 @@ export function FileViewer({
                   ? createFileBuffer(data.path, data.content, data.version)
                   : null
               );
-              if (current) updateEditState({ ...current, draft: next });
+              if (current) updateEditState(updateFileDraft(current, next));
               onEdit?.();
               if (saveError) setSaveError(null);
             }}
             onSave={() => void saveAndCompile()}
-            onBlur={() => void saveAndCompile()}
+            onBlur={() => { if (!confirmingFileDiscard) void saveAndCompile(); }}
             readOnly={showingUnsafeDraft}
             path={path}
             highlightLine={line}

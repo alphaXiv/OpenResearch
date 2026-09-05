@@ -122,7 +122,7 @@ export function WorktreeTab({
     };
   }, [load]);
 
-  useSessionBusyRefresh(projectId, sessionId, true, load);
+  useSessionBusyRefresh(projectId, sessionId, load);
 
   const filesTree = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree]);
 
@@ -149,7 +149,7 @@ export function WorktreeTab({
     liveWorktree
       ? onOpenFile(path, sessionId, undefined, intent)
       : onOpenFile(path, undefined, project.baselineBranch, intent);
-  const canManageFiles = tree?.root === "worktree" || (tree?.root === "clone" && !sessionId);
+  const canManageFiles = tree?.root === "worktree";
   const manage = async (path: string, action: Parameters<typeof manageProjectFile>[2]) => {
     try {
       await manageProjectFile(projectId, path, action, {

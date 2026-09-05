@@ -54,7 +54,7 @@ import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
-import type { FileBufferState } from "./fileSync";
+import { confirmFileDiscard, type FileBufferState } from "./fileSync";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -578,8 +578,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     setCodeTabs((prev) => withoutTab(prev, key));
     const project = projectIdRef.current;
     if (project && "path" in tab) {
-      const fileKey = fileScrollKey(project, activeSessionIdRef.current, tab);
-      fileScrollPositionsRef.current.delete(fileKey);
+      fileScrollPositionsRef.current.delete(fileScrollKey(project, activeSessionIdRef.current, tab));
     }
     const next = tabHistoryRef.current.filter((item) => rightTabKey(item) !== key);
     tabHistoryRef.current = next;
@@ -1240,7 +1239,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       const idx = fileTabs.findIndex((t) => sameFileTab(t, tab));
       if (idx === -1) return;
       const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
-      if (key && fileBuffersRef.current.has(key) && !window.confirm(m.file_viewer_discard_unsaved_changes())) return;
+      if (key && fileBuffersRef.current.has(key) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
       setFileTabs((prev) => prev.filter((_, i) => i !== idx));
       if (key) {
         fileScrollPositionsRef.current.delete(key);
