@@ -58,7 +58,7 @@ import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
-import { confirmFileDiscard, type FileBufferState } from "./fileSync";
+import { confirmFileDiscard, FileBufferSession } from "./fileSync";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
@@ -321,7 +321,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
-  const fileBuffersRef = useRef(new Map<string, FileBufferState>());
+  const fileBuffersRef = useRef(new Map<string, FileBufferSession>());
+  const getFileBufferSession = (key: string) => {
+    let buffer = fileBuffersRef.current.get(key);
+    if (!buffer) {
+      buffer = new FileBufferSession();
+      fileBuffersRef.current.set(key, buffer);
+    }
+    return buffer;
+  };
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
@@ -369,6 +377,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (project && "path" in tab) {
       const fileKey = fileScrollKey(project, activeSessionIdRef.current, tab);
       fileScrollPositionsRef.current.delete(fileKey);
+      fileBuffersRef.current.delete(fileKey);
       intentionalFilesRef.current.delete(fileKey);
       restoredFilesRef.current.delete(fileKey);
     }
@@ -585,8 +594,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [workspaceReady, destination?.kind, workspaceRef, sessions]);
   useBlocker({
     shouldBlockFn: ({ next }) => parseDestination(next.pathname)?.projectId !== projectId
-      && fileBuffersRef.current.size > 0 && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
-    enableBeforeUnload: () => fileBuffersRef.current.size > 0,
+      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
+    enableBeforeUnload: () => [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection),
   });
   const lastGlobalLocation = useRef<string | null>(null);
   useEffect(() => {
@@ -1055,7 +1064,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       const idx = fileTabs.findIndex((t) => sameFileTab(t, tab));
       if (idx === -1) return;
       const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
-      if (key && fileBuffersRef.current.has(key) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
+      if (key && fileBuffersRef.current.get(key)?.needsProtection && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
       setFileTabs((prev) => prev.filter((_, i) => i !== idx));
       if (key) {
         fileScrollPositionsRef.current.delete(key);
@@ -1668,9 +1677,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   artifacts={artifacts}
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
-                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                  canRenameFile={(path) => !fileBuffersRef.current.get(
                     fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
-                  )}
+                  )?.needsProtection}
                   onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                />
               )}
@@ -1801,13 +1810,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   toggled={filesToggled}
                   onViewChange={setFilesView}
                   onToggledChange={setFilesToggled}
-                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                  canRenameFile={(path) => !fileBuffersRef.current.get(
                     fileScrollKey(activeProject.id, activeSessionId, {
                       path,
                       source: "repo",
                       sessionId: activeSessionId ?? undefined,
                     }),
-                  )}
+                  )?.needsProtection}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFileTab(
                       path,
@@ -1862,14 +1871,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
                   artifactVersion={artifactVersion}
                   artifactEntries={fileTab.source === "artifacts" ? artifacts?.entries : undefined}
-                  initialBuffer={fileBuffersRef.current.get(
-                    fileScrollKey(projectId, activeSessionId, fileTab),
-                  )}
-                  onBufferStateChange={(buffer) => {
-                    const key = fileScrollKey(projectId, activeSessionId, fileTab);
-                    if (buffer) fileBuffersRef.current.set(key, buffer);
-                    else fileBuffersRef.current.delete(key);
-                  }}
+                  bufferSession={getFileBufferSession(fileScrollKey(projectId, activeSessionId, fileTab))}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFromRightTab(fileTab, () =>
                       openFileTab(

@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
   deleteOverleafToken,
@@ -3546,6 +3546,24 @@ export function SettingsView({
   remote?: boolean;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
+  const sectionRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const section = sectionRef.current;
+    const stack = section?.parentElement;
+    if (!section || !stack) return;
+    const reveal = () => section.scrollIntoView({ block: "start" });
+    // Earlier sections load asynchronously; keep the target visible until the user interacts.
+    const observer = new ResizeObserver(reveal);
+    observer.observe(stack);
+    reveal();
+    const stop = () => observer.disconnect();
+    const events = ["wheel", "touchstart", "pointerdown", "keydown"];
+    for (const event of events) window.addEventListener(event, stop, { passive: true });
+    return () => {
+      stop();
+      for (const event of events) window.removeEventListener(event, stop);
+    };
+  }, [tab, project?.id]);
 
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
@@ -3556,14 +3574,14 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <ProjectDefaultsTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <HarnessesTab />
             </section>
             {!remote && (
-              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
                 <StorageTab />
               </section>
             )}
