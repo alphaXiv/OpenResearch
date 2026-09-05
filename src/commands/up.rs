@@ -41,6 +41,7 @@ use crate::store::{
     log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
 use crate::updates;
+use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -547,6 +548,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/auto", post(set_auto_update))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+        .route(
+            "/api/projects/{id}/ui-state",
+            get(project_ui_state).post(set_project_ui_state),
+        )
         .route("/api/settings/ssh", get(ssh_settings))
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
@@ -4904,6 +4909,33 @@ async fn ui_state() -> ApiResult {
     .map_err(ApiError::from)
 }
 
+async fn project_ui_state(Path(id): Path<String>) -> ApiResult {
+    tokio::task::spawn_blocking(move || -> ApiResult {
+        let store = Store::open()?;
+        store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        Ok(Json(json!(store.project_workspace_state(&id)?)))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("workspace task failed: {error}")))?
+}
+
+async fn set_project_ui_state(
+    Path(id): Path<String>,
+    Json(workspace): Json<WorkspaceState>,
+) -> ApiResult {
+    workspace.validate().map_err(bad_request)?;
+    tokio::task::spawn_blocking(move || -> ApiResult {
+        if !Store::open()?.set_project_workspace_state(&id, &workspace)? {
+            return Err(not_found("project"));
+        }
+        Ok(Json(json!(workspace)))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("workspace task failed: {error}")))?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetUiStateReq {
@@ -4911,6 +4943,7 @@ struct SetUiStateReq {
     tour_completed: Option<bool>,
     #[serde(default)]
     preferred_agent: Option<StoredAgentSelectionReq>,
+    workspace: Option<GlobalWorkspaceState>,
 }
 
 #[derive(Deserialize)]
@@ -4924,6 +4957,9 @@ struct StoredAgentSelectionReq {
 }
 
 async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
+    if let Some(workspace) = &req.workspace {
+        workspace.validate().map_err(bad_request)?;
+    }
     tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
         let store = Store::open()?;
         let selection = req
@@ -4959,6 +4995,9 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         }
         if let Some(selection) = selection {
             store.set_preferred_agent(&selection)?;
+        }
+        if let Some(workspace) = req.workspace {
+            store.set_global_workspace_state(&workspace)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -7326,6 +7365,44 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn workspace_requests_validate_metadata_and_allow_independent_preferences() {
+        let preferences: SetUiStateReq =
+            serde_json::from_value(json!({"tourCompleted":true})).unwrap();
+        assert!(preferences.workspace.is_none());
+        let workspace: SetUiStateReq = serde_json::from_value(json!({"workspace":{
+            "lastLocation":"/projects/project/tasks/new", "railOpen":true,
+            "panelWidth":500, "experimentsView":"tree"
+        }}))
+        .unwrap();
+        assert!(workspace.preferred_agent.is_none());
+        workspace.workspace.unwrap().validate().unwrap();
+        assert!(serde_json::from_value::<SetUiStateReq>(json!({"workspace":{
+            "lastLocation":null, "railOpen":true, "panelWidth":500,
+            "experimentsView":"grid"
+        }}))
+        .is_err());
+        let invalid: GlobalWorkspaceState = serde_json::from_value(json!({
+            "lastLocation":"/projects/project", "railOpen":true,
+            "panelWidth":500, "experimentsView":"tree"
+        }))
+        .unwrap();
+        assert!(invalid.validate().is_err());
+        let result = set_ui_state(Json(SetUiStateReq {
+            tour_completed: Some(true),
+            preferred_agent: None,
+            workspace: Some(invalid),
+        }))
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+        let unsupported: WorkspaceState = serde_json::from_value(json!({
+            "version":2, "lastLocation":null, "tasks":{}
+        }))
+        .unwrap();
+        let result = set_project_ui_state(Path("project".into()), Json(unsupported)).await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn ssh_workspace_blocks_local_machine_actions_but_keeps_config_editing() {

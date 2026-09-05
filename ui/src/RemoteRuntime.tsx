@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import App from "./App";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { Outlet, useLocation } from "@tanstack/react-router";
 import {
   disconnectCurrentRemote,
   getRuntime,
@@ -20,10 +20,24 @@ import { setThemePreference } from "./theme";
 import { Button, Input, showAlert, Spinner } from "./components/ui";
 import { RemoteStopDialog } from "./components/RemoteStopDialog";
 import { SshConnectTerminal } from "./components/SshConnectTerminal";
+import { resetGlobalWorkspace } from "./workspacePersistence";
+import { clearProjectWorkspaceCache } from "./useProjectWorkspace";
 
 const REMOTE_FAVICON =
   "data:image/svg+xml," +
   encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="8" fill="#3b82f6"/><path d="M15.375 16.782v63.843a4 4 0 0 0 4 4h63.843c3.564 0 5.348-4.309 2.829-6.828L22.203 13.953c-2.52-2.52-6.828-.735-6.828 2.829" fill="#fff"/></svg>');
+
+const RuntimeContext = createContext<RuntimeInfo | null>(null);
+
+function workspaceKey(runtime: RuntimeInfo): string {
+  return runtime.kind === "local" ? "local" : `${runtime.session.id}:${runtime.session.installPaths?.database ?? ""}`;
+}
+
+export function useRuntime(): RuntimeInfo {
+  const runtime = useContext(RuntimeContext);
+  if (!runtime) throw new Error("Runtime is not connected");
+  return runtime;
+}
 
 function setFavicon(remote: boolean) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
@@ -354,12 +368,13 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 }
 
 export function RuntimeRoot() {
-  const launchPlaceholder = location.pathname === "/remote-launch";
+  const launchPlaceholder = useLocation({ select: (location) => location.pathname === "/remote-launch" });
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const everConnected = useRef(false);
   const workspaceMounted = useRef(false);
   const preferencesApplied = useRef(false);
+  const previousWorkspace = useRef<string | null>(null);
   const [retriedInteractiveError, setRetriedInteractiveError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -370,6 +385,15 @@ export function RuntimeRoot() {
       try {
         const next = await getRuntime();
         if (!active) return;
+        const nextWorkspace = workspaceKey(next);
+        if (previousWorkspace.current !== null && previousWorkspace.current !== nextWorkspace) {
+          resetGlobalWorkspace();
+          clearProjectWorkspaceCache();
+          everConnected.current = false;
+          workspaceMounted.current = false;
+          preferencesApplied.current = false;
+        }
+        previousWorkspace.current = nextWorkspace;
         if (next.kind === "ssh") {
           if (!preferencesApplied.current) {
             preferencesApplied.current = true;
@@ -424,7 +448,7 @@ export function RuntimeRoot() {
       </main>
     );
   }
-  if (runtime.kind === "local") return <App runtime={runtime} />;
+  if (runtime.kind === "local") return <RuntimeContext key={workspaceKey(runtime)} value={runtime}><Outlet /></RuntimeContext>;
   const keepWorkspace = workspaceMounted.current &&
     (runtime.session.status !== "disconnected" || runtime.session.error !== null);
   if (!keepWorkspace && runtime.session.status !== "connected") {
@@ -440,7 +464,7 @@ export function RuntimeRoot() {
   return (
     <div className="relative h-full">
       <div className="h-full" inert={showOverlay}>
-        <App runtime={runtime} />
+        <RuntimeContext key={workspaceKey(runtime)} value={runtime}><Outlet /></RuntimeContext>
       </div>
       {showOverlay && (
         <RemoteOverlay>

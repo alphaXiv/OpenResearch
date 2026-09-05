@@ -55,7 +55,6 @@ import {
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
-  DEMO_MAIN_SESSION_ID,
   DEMO_PROJECT_ID,
   forkChatTurn,
   fmtNumber,
@@ -4285,6 +4284,7 @@ export function ChatPanel({
   runtime,
   onOpenDemoWelcome,
   composerPrefill = null,
+  activeSessionId,
   onActiveSessionChange,
   preferredAgent,
   onPreferredAgentChange,
@@ -4347,8 +4347,8 @@ export function ChatPanel({
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
   composerPrefill?: string | null;
-  /** The open chat session, surfaced so the shell can scope panes to it. */
-  onActiveSessionChange?: (sessionId: string | null) => void;
+  activeSessionId: string | null;
+  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
@@ -4358,14 +4358,22 @@ export function ChatPanel({
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
   const [sshConfigOpen, setSshConfigOpen] = useState(false);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  const activeId = activeSessionId;
+  const onActiveSessionChangeRef = useRef(onActiveSessionChange);
+  onActiveSessionChangeRef.current = onActiveSessionChange;
+  const projectVisitRef = useRef({ projectId });
+  if (projectVisitRef.current.projectId !== projectId) projectVisitRef.current = { projectId };
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [draft, setDraft] = useState("");
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
   const annotationId = useRef(0);
-  const composerScopeRef = useRef({ projectId, activeId });
-  composerScopeRef.current = { projectId, activeId };
+  const composerScopeRef = useRef({ projectId, activeId, mainView });
+  if (composerScopeRef.current.projectId !== projectId
+    || composerScopeRef.current.activeId !== activeId
+    || composerScopeRef.current.mainView !== mainView) {
+    composerScopeRef.current = { projectId, activeId, mainView };
+  }
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
   const [attachments, setAttachments] = useState<
     { dataUrl: string; mediaType: string; name?: string; size: number }[]
@@ -4806,11 +4814,13 @@ export function ChatPanel({
     // flight is absent from the response but also absent here, so it can
     // never be mistaken for deleted (forgetSession tombstones — a false
     // positive would kill a live session for good).
+    const visit = projectVisitRef.current;
+    if (visit.projectId !== projectId) return null;
     const before = sessionsRef.current.map((s) => s.id);
     try {
-      const list = (await listChatSessions(projectId)).filter(
-        (s) => !deletedIds.current.has(s.id),
-      );
+      const response = await listChatSessions(projectId);
+      if (projectVisitRef.current !== visit) return null;
+      const list = response.filter((s) => !deletedIds.current.has(s.id));
       const ids = new Set(list.map((s) => s.id));
       // Forget BEFORE seeding busy: forget drops the ghost's busy flag, so
       // the known-scoped seed below can't carry it forward as if the session
@@ -4839,6 +4849,8 @@ export function ChatPanel({
 
   const reseedSession = useCallback(
     async (sessionId: string) => {
+      const visit = projectVisitRef.current;
+      if (visit.projectId !== projectId) return;
       const leafBefore = composerScopeRef.current.activeId === sessionId
         ? activeLeafRef.current
         : undefined;
@@ -4846,6 +4858,7 @@ export function ChatPanel({
         getChatMessages(sessionId),
         syncSessionList(),
       ]);
+      if (projectVisitRef.current !== visit) return;
       const localLeafMoved = leafBefore !== undefined
         && composerScopeRef.current.activeId === sessionId
         && activeLeafRef.current !== leafBefore;
@@ -4857,7 +4870,7 @@ export function ChatPanel({
         activeLeafId: localLeafMoved ? activeLeafRef.current : activeLeafId,
       });
     },
-    [syncSessionList, dispatch],
+    [projectId, syncSessionList, dispatch],
   );
 
   // Reset everything when the project changes.
@@ -4867,7 +4880,6 @@ export function ChatPanel({
     // snapshots it, and the old project's rows would all read as "deleted"
     // against the new project's list — tombstoning the entire old project.
     sessionsRef.current = [];
-    setActiveId(null);
     const readDemoSessions = loadReadDemoSessions();
     setUnreadSessionIds(
       projectId === DEMO_PROJECT_ID
@@ -4884,19 +4896,11 @@ export function ChatPanel({
     loadedSessions.current = new Set();
     setTitleReveals(new Map());
     seenTitles.current = new Map();
-    void syncSessionList().then((list) => {
-      // Prefer the newest non-archived session; archived ones stay hidden.
-      if (list)
-        setActiveId(
-          (cur) =>
-            cur ??
-            (projectId === DEMO_PROJECT_ID
-              ? list.find((session) => session.id === DEMO_MAIN_SESSION_ID)?.id
-              : undefined) ??
-            list.find((session) => !session.archived)?.id ??
-            null,
-        );
-    });
+    void syncSessionList();
+    const visit = projectVisitRef.current;
+    return () => {
+      if (projectVisitRef.current === visit) projectVisitRef.current = { projectId };
+    };
   }, [projectId, syncSessionList]);
 
   // Load message history when a session becomes active.
@@ -4907,12 +4911,15 @@ export function ChatPanel({
 
   useEffect(() => {
     if (!activeId || loadedSessions.current.has(activeId)) return;
+    const visit = projectVisitRef.current;
     loadedSessions.current.add(activeId);
     getChatMessages(activeId)
-      .then(({ messages, queued, activeLeafId }) =>
-        dispatch({ type: "seed", sessionId: activeId, messages, queued, activeLeafId }),
-      )
+      .then(({ messages, queued, activeLeafId }) => {
+        if (projectVisitRef.current !== visit) return;
+        dispatch({ type: "seed", sessionId: activeId, messages, queued, activeLeafId });
+      })
       .catch(() => {
+        if (projectVisitRef.current !== visit) return;
         // Recover from a failed fetch to a usable state rather than a stuck
         // "Loading conversation…" spinner: seed an empty transcript (clears
         // historyLoading, falls through to the empty state) unless messages
@@ -4921,7 +4928,7 @@ export function ChatPanel({
         dispatch({ type: "seed", sessionId: activeId, messages: [], onlyIfAbsent: true });
         loadedSessions.current.delete(activeId);
       });
-  }, [activeId]);
+  }, [activeId, projectId]);
 
   // Chat events from the shared /api/events stream.
   useEffect(() => {
@@ -5009,10 +5016,12 @@ export function ChatPanel({
       // One retry is sufficient: flush persists to the store BEFORE it emits,
       // so a refetch issued after observing a raced event already reads that
       // event's content.
+      const visit = projectVisitRef.current;
       const reseed = (allowRetry: boolean) => {
         const gen = msgGen.current;
         getChatMessages(activeId)
           .then(({ messages, queued, activeLeafId }) => {
+            if (projectVisitRef.current !== visit) return;
             dispatch({ type: "seed", sessionId: activeId, messages, queued, activeLeafId });
             if (allowRetry && msgGen.current !== gen) reseed(false);
           })
@@ -5232,11 +5241,6 @@ export function ChatPanel({
     setSettingsError(null);
   }, [activeId]);
 
-  // Surface the open session to the shell (Agent-scoped panes key off it).
-  useEffect(() => {
-    onActiveSessionChange?.(activeId);
-  }, [activeId, onActiveSessionChange]);
-
   // Opening a session or returning from settings starts pinned at the latest messages.
   const threadMounted = mainView === "chat" && (messages.length > 0 || busy);
 
@@ -5357,10 +5361,13 @@ export function ChatPanel({
       text: annotation.text,
     }));
     const sourceProjectId = projectId;
+    const sourceView = mainView;
     let sourceSessionId = activeId;
     const inSourceScope = () => {
       const current = composerScopeRef.current;
-      return current.projectId === sourceProjectId && current.activeId === sourceSessionId;
+      return current.projectId === sourceProjectId
+        && current.activeId === sourceSessionId
+        && current.mainView === sourceView;
     };
     const restoreComposer = () => {
       if (!inSourceScope()) return;
@@ -5400,7 +5407,8 @@ export function ChatPanel({
       setPlanModeOverride(toggledPlanMode);
     }
     const clearFailedPlanCommand = () => {
-      if (planCommandMutation === null || planMutationSeq.current !== planCommandMutation) return;
+      if (!inSourceScope() || planCommandMutation === null
+        || planMutationSeq.current !== planCommandMutation) return;
       planModeOverrideRef.current = previousPlanModeOverride;
       setPlanModeOverride(previousPlanModeOverride);
     };
@@ -5480,7 +5488,7 @@ export function ChatPanel({
             reasoningLevel: effective.reasoningLevel,
           }
         : {};
-      setSessionOverride({});
+      if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
@@ -5499,7 +5507,7 @@ export function ChatPanel({
           );
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        setRecoveryOverrides({});
+        if (inSourceScope()) setRecoveryOverrides({});
         if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
       } catch {
         // Never reached the turn — restore the composer so a retry is one keypress.
@@ -5537,11 +5545,11 @@ export function ChatPanel({
         annotations: pendingAnnotations,
       });
       dispatch({ type: "busy", sessionId: sid, busy: true });
-      pinTranscriptToBottom();
+      if (inSourceScope()) pinTranscriptToBottom();
       // The session being sent to is never archived after this turn (new ones
       // start active; existing ones are unarchived server-side by activity) —
       // leave the Archived-only view so its row stays visible.
-      if (sessionFilter === "archived") setSessionFilter("active");
+      if (inSourceScope() && sessionFilter === "archived") setSessionFilter("active");
       // `effective.harness` is always the target session's harness (locked once
       // it exists), so these overrides are always valid — the backend persists
       // them as the session's sticky settings. Clear the unsent tweak now.
@@ -5554,7 +5562,7 @@ export function ChatPanel({
             reasoningLevel: effective.reasoningLevel,
           }
         : {};
-      setSessionOverride({});
+      if (inSourceScope()) setSessionOverride({});
       const images: ChatImageAttachment[] = pending.map((a) => ({
         mediaType: a.mediaType,
         dataBase64: a.dataUrl.slice(a.dataUrl.indexOf(",") + 1),
@@ -5573,7 +5581,7 @@ export function ChatPanel({
         );
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      setRecoveryOverrides({});
+      if (inSourceScope()) setRecoveryOverrides({});
       if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
     } catch (err) {
       // The message never reached a turn — put it back in the composer so a
@@ -5609,6 +5617,8 @@ export function ChatPanel({
 
   /** Create the session a first message (or `!` command) lands in and open it. */
   async function openNewSession(selection: ModelSelection, planMode: boolean | undefined) {
+    const scope = composerScopeRef.current;
+    const visit = projectVisitRef.current;
     const session = await createChatSession(projectId, selection.harness, {
       model: selection.model,
       serviceTier: selection.serviceTier,
@@ -5616,10 +5626,14 @@ export function ChatPanel({
       planMode,
       reasoningLevel: selection.reasoningLevel,
     });
-    loadedSessions.current.add(session.id);
-    setSessions((cur) => [session, ...cur]);
-    setActiveId(session.id);
-    composerScopeRef.current = { projectId, activeId: session.id };
+    if (projectVisitRef.current === visit) {
+      loadedSessions.current.add(session.id);
+      setSessions((cur) => [session, ...cur.filter((row) => row.id !== session.id)]);
+    }
+    if (projectVisitRef.current === visit && composerScopeRef.current === scope) {
+      onActiveSessionChangeRef.current(session.id, { replace: true });
+      composerScopeRef.current = { ...scope, activeId: session.id };
+    }
     return session;
   }
 
@@ -5645,9 +5659,15 @@ export function ChatPanel({
     }
     const originalDraft = draft;
     const sourceScope = composerScopeRef.current;
-    const restoreDraft = () => {
+    let sourceSessionId = activeId;
+    const inSourceScope = () => {
       const current = composerScopeRef.current;
-      if (current.projectId !== sourceScope.projectId || current.activeId !== sourceScope.activeId) return;
+      return current.projectId === sourceScope.projectId
+        && current.activeId === sourceSessionId
+        && current.mainView === sourceScope.mainView;
+    };
+    const restoreDraft = () => {
+      if (!inSourceScope()) return;
       setDraft((value) => value || originalDraft);
     };
     setDraft("");
@@ -5666,18 +5686,19 @@ export function ChatPanel({
           planModeOverrideRef.current,
         );
         sid = (await openNewSession(composerSelection, planMode)).id;
-        setSessionOverride({});
+        sourceSessionId = sid;
+        if (inSourceScope()) setSessionOverride({});
       } catch (err) {
         restoreDraft();
         const detail = err instanceof Error ? err.message : String(err);
-        setSettingsError(m.chat_bash_failed({ error: ltr(detail) }));
+        if (inSourceScope()) setSettingsError(m.chat_bash_failed({ error: ltr(detail) }));
         return;
       }
     }
-    if (sessionFilter === "archived") setSessionFilter("active");
+    if (inSourceScope() && sessionFilter === "archived") setSessionFilter("active");
     const localId = `${LOCAL_PREFIX}shell-${Date.now()}`;
     dispatch({ type: "localShell", sessionId: sid, id: localId, command });
-    pinTranscriptToBottom();
+    if (inSourceScope()) pinTranscriptToBottom();
     try {
       const { message } = await runShellCommand(sid, command);
       dispatch({ type: "upsertMessage", sessionId: sid, message });
@@ -5824,7 +5845,11 @@ export function ChatPanel({
   function forgetSession(sessionId: string) {
     deletedIds.current.add(sessionId);
     setSessions((cur) => cur.filter((s) => s.id !== sessionId));
-    setActiveId((cur) => (cur === sessionId ? null : cur));
+    if (composerScopeRef.current.projectId === projectId
+      && composerScopeRef.current.activeId === sessionId
+      && composerScopeRef.current.mainView === "chat") {
+      onActiveSessionChangeRef.current(null, { replace: true });
+    }
     setUnreadSessionIds((current) => {
       if (!current.has(sessionId)) return current;
       const next = new Set(current);
@@ -5842,11 +5867,6 @@ export function ChatPanel({
     // which could undo a concurrent authoritative update).
     const prev = session.archived;
     setSessions((cur) => cur.map((s) => (s.id === session.id ? { ...s, archived } : s)));
-    // Deselect only when the row leaves the rail's current filter — keeping it
-    // selected would leave the thread (and Agent-scoped panes) keyed to an
-    // invisible session. Kept even if the request fails; it's a no-op then.
-    if (!matchesFilter(sessionFilter, archived))
-      setActiveId((cur) => (cur === session.id ? null : cur));
     void setChatSessionArchived(session.id, archived).catch(() => {
       setSessions((cur) =>
         cur.map((s) => (s.id === session.id ? { ...s, archived: prev } : s)),
@@ -5884,6 +5904,7 @@ export function ChatPanel({
     (answer: PromptAnswer): Promise<boolean> => {
       if (!activeId) return Promise.resolve(false);
       const sid = activeId;
+      const visit = projectVisitRef.current;
       // The resumed turn streams over SSE; optimistically mark busy.
       dispatch({ type: "busy", sessionId: sid, busy: true });
       return queueSessionMutation(() => respondChat(sid, answer))
@@ -5899,18 +5920,20 @@ export function ChatPanel({
           // just-started optimistic flag), so the optimistic dispatch above
           // can't wedge true after a no-op or failure.
           getChatMessages(sid)
-            .then(({ messages, queued, activeLeafId }) =>
-              dispatch({ type: "seed", sessionId: sid, messages, queued, activeLeafId }),
-            )
+            .then(({ messages, queued, activeLeafId }) => {
+              if (projectVisitRef.current !== visit) return;
+              dispatch({ type: "seed", sessionId: sid, messages, queued, activeLeafId });
+            })
             .catch(() => {});
           listChatSessions(projectId)
-            .then((list) =>
+            .then((list) => {
+              if (projectVisitRef.current !== visit) return;
               dispatch({
                 type: "busy",
                 sessionId: sid,
                 busy: !!list.find((s) => s.id === sid)?.busy,
-              }),
-            )
+              });
+            })
             // On a failed fetch keep the optimistic flag: clearing busy while a
             // Handled resume is still streaming would hide Working…/Stop for
             // the rest of the turn (nothing re-asserts busy mid-stream).
@@ -5926,21 +5949,16 @@ export function ChatPanel({
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
   const startNewTask = useCallback(() => {
     setSessionFilter("active");
-    setActiveId(null);
-    onSelectMainView("chat");
-  }, [onSelectMainView]);
+    onActiveSessionChange(null);
+  }, [onActiveSessionChange]);
 
-  /** Follow a spawn card into the session it started. Spawned sessions are
-   * ordinary top-level sessions, so this is just a switch in the rail — via
-   * "All", because selecting a row the active filter hides would leave the
-   * thread keyed to a session with no row (see `setArchived`). */
+  /** Follow a spawn card and reveal its session in the rail. */
   const openSpawnedSession = useCallback(
     (sessionId: string) => {
       setSessionFilter("all");
-      setActiveId(sessionId);
-      onSelectMainView("chat");
+      onActiveSessionChange(sessionId);
     },
-    [onSelectMainView],
+    [onActiveSessionChange],
   );
 
   useEffect(() => {
@@ -6035,7 +6053,7 @@ export function ChatPanel({
             waiting={waitingSessions.has(s.id)}
             revealTitle={titleReveals.get(s.id)}
             onOpen={() => {
-              setActiveId(s.id);
+              onActiveSessionChange(s.id);
               if (projectId === DEMO_PROJECT_ID) markDemoSessionRead(s.id);
               setUnreadSessionIds((current) => {
                 if (!current.has(s.id)) return current;
@@ -6043,7 +6061,6 @@ export function ChatPanel({
                 next.delete(s.id);
                 return next;
               });
-              onSelectMainView("chat");
             }}
             onRename={(title) => rename(s, title)}
             onSetArchived={(archived) => setArchived(s, archived)}

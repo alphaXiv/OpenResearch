@@ -1,3 +1,8 @@
+import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
+import { getTaskWorkspace, parseDestination, safeLocation, taskLocation, type Pane, type TaskWorkspace } from "./workspaceState";
+import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
+import { type ExpViewDef, sameExpTab, type FileViewDef, sameFileTab, fileTabKey, fileScrollKey, persistentFileTab, persistentRightTab, type PlanViewDef, type SubagentViewDef, type CodeTabDef, sameCodeTab, type RightTab, type ContentTab, rightTabKey, withoutTab, isPresent, type RightPaneSessionState, initialRightPaneSessionState, tabPane, paneTab, defaultTaskWorkspace } from "./workspaceTabs";
+import { getCachedProjectWorkspace, inheritNewTaskWorkspace, useProjectWorkspace } from "./useProjectWorkspace";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { useLocale } from "./locale";
@@ -21,14 +26,13 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   cancelRun,
-  DEMO_FIGURE_SESSION_ID,
-  DEMO_LITERATURE_SESSION_ID,
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
   DEMO_RUN_EXPERIMENT_PROMPT,
   getArtifacts,
   getChatMessages,
   getUiState,
+  listChatSessions,
   isDemoProjectId,
   listExperiments,
   listProjects,
@@ -54,21 +58,19 @@ import { SkillsTab } from "./components/SkillsTab";
 import { ClosableTab } from "./components/ClosableTab";
 import { DetailDrawer, type ExperimentView } from "./components/DetailDrawer";
 import { FileViewer, type FileScrollPosition } from "./components/FileViewer";
-import { confirmFileDiscard, type FileBufferState } from "./fileSync";
+import { confirmFileDiscard, FileBufferSession } from "./fileSync";
 import { RailHeader } from "./components/Header";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { OfflineBanner } from "./components/OfflineBanner";
-import { Onboarding } from "./components/Onboarding";
-import { NewProjectDialog, ProjectsHome } from "./components/ProjectsHome";
+import { NewProjectDialog } from "./components/ProjectsHome";
 import { ExperimentsTable } from "./components/ExperimentsTable";
 import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
-import { clearReadDemoSessions } from "./demoSessionState";
 import { TreeView } from "./components/TreeView";
 import { onChatEvent, useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
-import { Button, IconButton, MenuItem, Spinner } from "./components/ui";
+import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
 
@@ -80,232 +82,6 @@ const EMPTY_STATE_CLASS_NAME = [
   "[&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text",
   "[&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext",
 ].join(" ");
-
-/** An experiment view open as a right-panel tab. */
-interface ExpViewDef {
-  id: string;
-  view: ExperimentView;
-}
-
-const sameExpTab = (a: ExpViewDef, b: ExpViewDef) => a.id === b.id && a.view === b.view;
-
-/** A project file open as a right-panel tab (clicked in chat tool rows or the
- * code browser). */
-interface FileViewDef {
-  path: string;
-  /** Which backend serves this file. Absent/"repo" → the repo `/file`
-   * endpoint (worktree/clone/branch), falling back to artifacts when a
-   * non-ref path misses the checkout; "artifacts" → the project's durable
-   * output directory through the compatibility `/files/file` endpoint;
-   * "abs" → an absolute path on disk outside both (the `/files/abs`
-   * endpoint), for files an agent references anywhere on the machine. */
-  source?: "repo" | "artifacts" | "abs";
-  /** Chat session whose worktree holds the file (absent → hub clone).
-   * Artifact and absolute-path tabs never carry this. */
-  sessionId?: string;
-  /** Branch whose committed copy to show (code browser in branch mode);
-   * overrides the live checkout. */
-  ref?: string;
-  /** Branch to show in the header chip when the file is read from a checkout
-   * (no `ref`) whose branch isn't the baseline — e.g. an experiment's worktree.
-   * Display-only, so it's kept out of tab identity. */
-  branchLabel?: string;
-  /** 1-based line to scroll to and highlight on open (from a `file:line`
-   * evidence chip). Not part of tab identity — reopening at a new line updates
-   * the same tab. */
-  line?: number;
-  /** One-shot generation for explicit line navigation; omitted on stored tabs. */
-  lineScrollRequest?: number;
-}
-
-const sameFileTab = (a: FileViewDef, b: FileViewDef) =>
-  a.path === b.path &&
-  (a.source ?? "repo") === (b.source ?? "repo") &&
-  a.sessionId === b.sessionId &&
-  a.ref === b.ref;
-
-const fileTabKey = (t: FileViewDef) =>
-  `${t.source ?? "repo"}:${t.sessionId ?? ""}:${t.ref ?? ""}:${t.path}`;
-
-const fileScrollKey = (projectId: string, ownerSessionId: string | null, tab: FileViewDef) =>
-  `${projectId}:${ownerSessionId ?? ""}:${fileTabKey(tab)}`;
-
-const persistentFileTab = (tab: FileViewDef): FileViewDef => ({
-  ...tab,
-  lineScrollRequest: undefined,
-});
-
-function persistentRightTab(tab: RightTab): RightTab {
-  return typeof tab === "object" && "path" in tab
-    ? persistentFileTab(tab)
-    : tab;
-}
-
-/** A proposed plan open as a right-panel tab (from the chat plan strip/card).
- * The markdown is already client-side (it rode the prompt part), so the tab
- * renders it directly — no fetch. Deliberately has neither a `view` nor a
- * `path` field: the other tab kinds discriminate on those. */
-interface PlanViewDef {
-  kind: "plan";
-  sessionId: string;
-  /** The prompt part the plan came from — one tab per plan card. */
-  promptId: string;
-  plan: string;
-}
-
-/** A sub-agent's transcript, opened from a chat spawn row's "view" button. One
- * tab per spawn part; its parts stream live off the session's chat message. */
-interface SubagentViewDef {
-  kind: "subagent";
-  sessionId: string;
-  /** The `subagent` spawn part whose `children` are the sub-agent transcript. */
-  spawnPartId: string;
-  /** The spawn row's activity label at open time — the tab title. */
-  label?: string;
-}
-
-/** One committed code-browser tab per experiment branch. Source, selected
- * view, and expansion state live here so they survive tab switches. */
-interface CodeTabDef {
-  code: true;
-  experimentId: string;
-  branch: string;
-  view: CodeView;
-  /** Dirs the user flipped away from their depth default. */
-  toggled: ReadonlySet<string>;
-}
-
-const sameCodeTab = (a: CodeTabDef, b: CodeTabDef) => a.branch === b.branch;
-
-type RightTab =
-  | "experiments"
-  | "files"
-  | "artifacts"
-  | ExpViewDef
-  | FileViewDef
-  | PlanViewDef
-  | SubagentViewDef
-  | CodeTabDef;
-
-type ContentTab = Exclude<RightTab, string>;
-
-function rightTabKey(tab: RightTab): string {
-  if (typeof tab === "string") return `home:${tab}`;
-  if ("code" in tab) return `code:${tab.branch}`;
-  if ("kind" in tab) {
-    return tab.kind === "plan" ? `plan:${tab.promptId}` : `subagent:${tab.spawnPartId}`;
-  }
-  if ("path" in tab) return `file:${fileTabKey(tab)}`;
-  return `experiment:${tab.id}:${tab.view}`;
-}
-
-/** Drop `key`'s tab from one strip list, keeping the array identity (and so the
- * effects keyed on it) when the tab doesn't live in this list. */
-function withoutTab<T extends RightTab>(tabs: T[], key: string): T[] {
-  const next = tabs.filter((tab) => rightTabKey(tab) !== key);
-  return next.length === tabs.length ? tabs : next;
-}
-
-function isPresent<T>(value: T | undefined): value is T {
-  return value !== undefined;
-}
-
-interface RightPaneSessionState {
-  rightTab: RightTab;
-  tabHistory: RightTab[];
-  experimentsTabOpen: boolean;
-  filesTabOpen: boolean;
-  artifactsTabOpen: boolean;
-  expTabs: ExpViewDef[];
-  fileTabs: FileViewDef[];
-  planTabs: PlanViewDef[];
-  subagentTabs: SubagentViewDef[];
-  codeTabs: CodeTabDef[];
-  /** Stable strip order for content tabs; home tabs keep their fixed leading slots. */
-  contentTabOrder: string[];
-  /** The reusable preview tab, replaced by the next preview open. */
-  previewTab: RightTab | null;
-  filesView: WorktreeView;
-  filesToggled: ReadonlySet<string>;
-  selectedRunId: string | null;
-  scope: "agent" | "project";
-  panelOpen: boolean;
-  panelMax: boolean;
-}
-
-function initialRightPaneSessionState(
-  sessionId?: string,
-  openDemoOverview = false,
-): RightPaneSessionState {
-  const initial: RightPaneSessionState = {
-    rightTab: "experiments",
-    tabHistory: [],
-    experimentsTabOpen: false,
-    filesTabOpen: false,
-    artifactsTabOpen: false,
-    expTabs: [],
-    fileTabs: [],
-    planTabs: [],
-    subagentTabs: [],
-    codeTabs: [],
-    contentTabOrder: [],
-    previewTab: null,
-    filesView: "files",
-    filesToggled: new Set(),
-    selectedRunId: null,
-    scope: "project",
-    panelOpen: false,
-    panelMax: false,
-  };
-  if (sessionId === DEMO_MAIN_SESSION_ID && openDemoOverview) {
-    const demoOverviewTab: FileViewDef = {
-      path: DEMO_OVERVIEW_ARTIFACT,
-      source: "artifacts",
-    };
-    // First demo open leads with the experiments tab so the idle follow-ups
-    // are visible next to the prefilled prompt that runs one of them.
-    const experimentsTab: RightTab = "experiments";
-    return {
-      ...initial,
-      rightTab: experimentsTab,
-      tabHistory: [demoOverviewTab, experimentsTab],
-      experimentsTabOpen: true,
-      fileTabs: [demoOverviewTab],
-      contentTabOrder: [rightTabKey(demoOverviewTab)],
-      panelOpen: true,
-    };
-  }
-  if (sessionId === DEMO_FIGURE_SESSION_ID) {
-    const fileTabs: FileViewDef[] = [
-      { path: "nanochat-base-training-curves.svg", source: "artifacts" },
-      { path: "nanochat-sft-training-curves.svg", source: "artifacts" },
-      { path: "nanochat-training-throughput.svg", source: "artifacts" },
-      { path: "nanochat-core-evaluation.svg", source: "artifacts" },
-    ];
-    return {
-      ...initial,
-      rightTab: fileTabs[0],
-      tabHistory: [...fileTabs.slice(1), fileTabs[0]],
-      fileTabs,
-      contentTabOrder: fileTabs.map(rightTabKey),
-      panelOpen: true,
-    };
-  }
-  if (sessionId === DEMO_LITERATURE_SESSION_ID) {
-    const fileTabs: FileViewDef[] = [
-      { path: "nanochat-bottleneck-diagnosis.md", source: "artifacts" },
-    ];
-    return {
-      ...initial,
-      rightTab: fileTabs[0],
-      tabHistory: [fileTabs[0]],
-      fileTabs,
-      contentTabOrder: fileTabs.map(rightTabKey),
-      panelOpen: true,
-    };
-  }
-  return initial;
-}
 
 /** Escape a string for literal use inside a RegExp. */
 function escapeRegExp(s: string): string {
@@ -395,18 +171,7 @@ function fileBranchLabel(tab: FileViewDef, baselineBranch?: string): string | un
   return tab.ref ?? tab.branchLabel ?? baselineBranch;
 }
 
-const PANEL_WIDTH_KEY = "orx:panel-width";
-const EXPERIMENTS_VIEW_KEY = "orx:experiments-view";
-
 type ExperimentsView = "tree" | "table";
-
-function initialExperimentsView(): ExperimentsView {
-  try {
-    return localStorage.getItem(EXPERIMENTS_VIEW_KEY) === "tree" ? "tree" : "table";
-  } catch {
-    return "table";
-  }
-}
 
 /** Floating panel sizing: keep both the panel and the chat column usable. */
 const PANEL_MIN_WIDTH = 360;
@@ -430,12 +195,6 @@ function panelMaxWidth(): number {
 
 function initialPanelWidth(): number {
   const max = panelMaxWidth();
-  try {
-    const saved = Number(localStorage.getItem(PANEL_WIDTH_KEY));
-    if (Number.isFinite(saved) && saved >= PANEL_MIN_WIDTH) return Math.min(saved, max);
-  } catch {
-    // storage unavailable — fall through to the default
-  }
   return Math.max(PANEL_MIN_WIDTH, Math.min(760, max, Math.round(window.innerWidth * 0.4)));
 }
 
@@ -455,18 +214,66 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
   return current.current;
 }
 
-export default function App({ runtime }: { runtime: RuntimeInfo }) {
+export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
+  const router = useRouter();
+  const location = useRouterState({ select: (state) => state.location });
+  const destination = parseDestination(location.pathname);
+  const mainView = destination?.kind === "skills" ? "skills" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
+  const rememberedSessionRef = useRef<string | null>(null);
+  const activeSessionId = destination?.kind === "task" ? destination.sessionId ?? null : rememberedSessionRef.current;
+  if (destination?.kind === "task") rememberedSessionRef.current = activeSessionId;
+  const panelOpen = pane !== undefined;
+  const selectedRunId = pane?.kind === "experiment" ? pane.runId ?? null : null;
+  const [consumedLine, setConsumedLine] = useState<number | null>(null);
+  const [lineJump, setLineJump] = useState(0);
+  const lineVisit = useRef({ href: "", jump: 0, value: 0 });
+  if (lineVisit.current.href !== location.href || lineVisit.current.jump !== lineJump) lineVisit.current = { href: location.href, jump: lineJump, value: lineVisit.current.value + 1 };
+  const rightTab = useMemo<RightTab>(() => {
+    const tab = pane ? paneTab(pane) : "experiments";
+    return typeof tab === "object" && "path" in tab && tab.line && consumedLine !== lineVisit.current.value
+      ? { ...tab, lineScrollRequest: lineVisit.current.value } : tab;
+  }, [pane, consumedLine, location.href, lineJump]);
+  const [sessions, setSessions] = useState<string[] | null>(null);
+  const restoredFilesRef = useRef(new Set<string>());
+  const intentionalFilesRef = useRef(new Set<string>());
+  const sourceModesRef = useRef<Record<string, boolean>>({});
+  const [metadataRevision, setMetadataRevision] = useState(0);
+  const navigationRef = useRef({ projectId, activeSessionId, pane, isTask: destination?.kind === "task" });
+  navigationRef.current = { projectId, activeSessionId, pane, isTask: destination?.kind === "task" };
+  const navigatePane = useCallback((next: Pane | undefined, replace = false) => {
+    const current = navigationRef.current;
+    if (current.projectId) void router.navigate({ href: taskLocation(current.projectId, current.activeSessionId, next), replace });
+  }, [router]);
+  const setRightTab = useCallback((tab: RightTab) => {
+    const next = tabPane(tab);
+    navigatePane(next.kind === "file" ? { ...next, line: undefined } : next);
+  }, [navigatePane]);
+  const closePanel = useCallback(() => navigatePane(undefined), [navigatePane]);
+  const setSelectedRunId = useCallback((runId: string | null) => {
+    if (pane?.kind === "experiment") navigatePane({ ...pane, runId: runId ?? undefined });
+  }, [pane, navigatePane]);
+  const setProjectId = useCallback((id: string | null) => {
+    void router.navigate({ href: id ? `/projects/${encodeURIComponent(id)}` : "/projects" });
+  }, [router]);
+  const setMainView = useCallback((view: "chat" | "skills" | SettingsTab) => {
+    if (!projectId) return;
+    if (view === "chat") {
+      const id = rememberedSessionRef.current;
+      void router.navigate({ href: taskLocation(projectId, id, getTaskWorkspace(workspaceRef.current, id ?? "new")?.active) });
+    } else void router.navigate({ href: `/projects/${encodeURIComponent(projectId)}/${view === "skills" ? "skills" : `settings/${view}`}` });
+  }, [router, projectId]);
+
   const locale = useLocale();
   const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [uiState, setUiState] = useState<UiState | null>(null);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
-  const demoOverviewSeededRef = useRef(false);
   const [startupError, setStartupError] = useState<string | null>(null);
   const persistedPreferredAgent = useRef<AgentSelection | null>(null);
-  const [projectId, setProjectId] = useState<string | null>(null);
   const [experiments, setExperiments] = useState<Experiment[]>([]);
+  const [experimentDataReady, setExperimentDataReady] = useState(false);
+  const [runDataReady, setRunDataReady] = useState(false);
   const [runs, setRuns] = useState<Run[]>([]);
   // Latest runs/experiments, read by the stable openRunLogs/openFileTab so
   // evidence chips resolve ids without re-creating the callbacks on every poll
@@ -484,14 +291,13 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const experimentsRef = useRef(experiments);
   experimentsRef.current = experiments;
   const [artifacts, setArtifacts] = useState<ProjectArtifacts | null>(null);
-  const [view, setView] = useState<ExperimentsView>(initialExperimentsView);
+  const [view, setView] = useState<ExperimentsView>("table");
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
   const [scope, setScope] = useState<"agent" | "project">("project");
   const scopeTriggerRef = useRef<HTMLButtonElement>(null);
   const { open: scopeMenuOpen, setOpen: setScopeMenuOpen, ref: scopeMenuRef } =
     usePopover(scopeTriggerRef);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [demoOverviewLeading, setDemoOverviewLeading] = useState(false);
   const allExperimentsAttributed = experiments.every((experiment) => experiment.chatSessionId);
   const effectiveScope = activeSessionId && allExperimentsAttributed ? scope : "project";
@@ -505,17 +311,9 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     const mine = new Set(scopedExperiments.map((experiment) => experiment.id));
     return runs.filter((r) => mine.has(r.experimentId));
   }, [runs, scopedExperiments, effectiveScope]);
-  useEffect(() => {
-    try {
-      localStorage.setItem(EXPERIMENTS_VIEW_KEY, view);
-    } catch {
-      // The preference remains sticky for this app session when storage is unavailable.
-    }
-  }, [view]);
-  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
+
   // Right-panel tab strip: closable home and working tabs. The same experiment
   // can keep both its overview and terminal open.
-  const [rightTab, setRightTab] = useState<RightTab>("experiments");
   const [tabHistory, setTabHistory] = useState<RightTab[]>([]);
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
@@ -523,8 +321,15 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
-  const fileBuffersRef = useRef(new Map<string, FileBufferState>());
-  const fileLineScrollRequestRef = useRef(0);
+  const fileBuffersRef = useRef(new Map<string, FileBufferSession>());
+  const getFileBufferSession = (key: string) => {
+    let buffer = fileBuffersRef.current.get(key);
+    if (!buffer) {
+      buffer = new FileBufferSession();
+      fileBuffersRef.current.set(key, buffer);
+    }
+    return buffer;
+  };
   const [planTabs, setPlanTabs] = useState<PlanViewDef[]>([]);
   const [subagentTabs, setSubagentTabs] = useState<SubagentViewDef[]>([]);
   const [codeTabs, setCodeTabs] = useState<CodeTabDef[]>([]);
@@ -534,22 +339,14 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   const [filesToggled, setFilesToggled] = useState<ReadonlySet<string>>(new Set());
   // The right pane is a floating panel: closable, edge-resizable, expandable
   // to (nearly) full screen. Width persists across sessions.
-  const [panelOpen, setPanelOpen] = useState(false);
   const [panelMax, setPanelMax] = useState(false);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
   // The agents rail is a floating panel too: fixed-width, collapsible.
   const [railOpen, setRailOpen] = useState(true);
-  const [homeOpen, setHomeOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [mainView, setMainView] = useState<"chat" | "skills" | SettingsTab>("chat");
-  const [githubPublicationError, setGithubPublicationError] = useState<{
-    projectId: string;
-    message: string;
-  } | null>(null);
-  const rightPaneStatesRef = useRef(new Map<string, RightPaneSessionState>());
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
-  const activeSessionIdRef = useRef<string | null>(null);
-  const pendingExperimentsAutoOpenRef = useRef(false);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  activeSessionIdRef.current = activeSessionId;
   const tabHistoryRef = useRef(tabHistory);
   tabHistoryRef.current = tabHistory;
   const contentTabOrderRef = useRef(contentTabOrder);
@@ -578,7 +375,11 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     setCodeTabs((prev) => withoutTab(prev, key));
     const project = projectIdRef.current;
     if (project && "path" in tab) {
-      fileScrollPositionsRef.current.delete(fileScrollKey(project, activeSessionIdRef.current, tab));
+      const fileKey = fileScrollKey(project, activeSessionIdRef.current, tab);
+      fileScrollPositionsRef.current.delete(fileKey);
+      fileBuffersRef.current.delete(fileKey);
+      intentionalFilesRef.current.delete(fileKey);
+      restoredFilesRef.current.delete(fileKey);
     }
     const next = tabHistoryRef.current.filter((item) => rightTabKey(item) !== key);
     tabHistoryRef.current = next;
@@ -586,7 +387,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   }, []);
 
   const selectRightTab = useCallback((tab: RightTab) => {
-    pendingExperimentsAutoOpenRef.current = false;
     const key = rightTabKey(tab);
     const next = [
       ...tabHistoryRef.current.filter((item) => rightTabKey(item) !== key),
@@ -595,10 +395,9 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     tabHistoryRef.current = next;
     setTabHistory(next);
     setRightTab(tab);
-  }, []);
+  }, [setRightTab]);
 
-  const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent) => {
-    pendingExperimentsAutoOpenRef.current = false;
+  const openRightTab = useCallback((tab: ContentTab, intent: TabOpenIntent, runId?: string) => {
     const key = rightTabKey(tab);
     const outgoing = previewTabRef.current;
     const transition = openTab(
@@ -627,8 +426,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     ];
     tabHistoryRef.current = next;
     setTabHistory(next);
-    setRightTab(tab);
-  }, [retireRightTab, setContentTabOrder, setPreviewTab]);
+    navigatePane(tabPane(tab, runId));
+  }, [retireRightTab, setContentTabOrder, setPreviewTab, navigatePane]);
 
   const promoteRightTab = useCallback((tab: RightTab) => {
     const current = previewTabRef.current;
@@ -682,7 +481,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   }, [promoteRightTab]);
 
   const forgetRightTab = useCallback((tab: RightTab, selectFallback: boolean) => {
-    pendingExperimentsAutoOpenRef.current = false;
     const key = rightTabKey(tab);
     const preview = previewTabRef.current;
     if (preview && rightTabKey(preview) === key) setPreviewTab(null);
@@ -704,17 +502,14 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       : undefined;
     if (fallback) setRightTab(fallback);
     else {
-      setPanelOpen(false);
+      closePanel();
       setPanelMax(false);
     }
-  }, [setContentTabOrder, setPreviewTab]);
+  }, [setContentTabOrder, setPreviewTab, setRightTab, closePanel]);
 
-  const selectMainView = useCallback((view: "chat" | "skills" | SettingsTab) => {
-    if (view !== "chat") pendingExperimentsAutoOpenRef.current = false;
-    setMainView(view);
-  }, []);
+  const selectMainView = setMainView;
 
-  currentRightPaneStateRef.current = {
+  const rightPaneState = useMemo<RightPaneSessionState>(() => ({
     rightTab: persistentRightTab(rightTab),
     tabHistory,
     experimentsTabOpen,
@@ -733,63 +528,82 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     scope,
     panelOpen,
     panelMax,
-  };
-  const onActiveSessionChange = useCallback((nextSessionId: string | null) => {
-    const previousSessionId = activeSessionIdRef.current;
-    if (previousSessionId === nextSessionId) return;
-    if (previousSessionId) {
-      rightPaneStatesRef.current.set(previousSessionId, currentRightPaneStateRef.current);
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, expTabs, fileTabs, planTabs, subagentTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax]);
+  currentRightPaneStateRef.current = rightPaneState;
+  const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
+  const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const recordScroll = useCallback(() => {
+    clearTimeout(scrollSaveTimer.current);
+    scrollSaveTimer.current = setTimeout(() => setMetadataRevision((value) => value + 1), 200);
+  }, []);
+  useEffect(() => () => clearTimeout(scrollSaveTimer.current), []);
+  const applyWorkspace = useCallback((state: RightPaneSessionState, saved: TaskWorkspace | undefined, restored: boolean) => {
+    setTabHistory(state.tabHistory);
+    tabHistoryRef.current = state.tabHistory;
+    setExperimentsTabOpen(state.experimentsTabOpen);
+    setFilesTabOpen(state.filesTabOpen);
+    setArtifactsTabOpen(state.artifactsTabOpen);
+    setExpTabs(state.expTabs);
+    setFileTabs(state.fileTabs);
+    setPlanTabs((current) => current === state.planTabs ? current : state.planTabs.map((tab) => ({ ...tab, plan: current.find((item) => item.sessionId === tab.sessionId && item.promptId === tab.promptId)?.plan ?? "" })));
+    setSubagentTabs(state.subagentTabs);
+    setCodeTabs(state.codeTabs);
+    setContentTabOrder(state.contentTabOrder);
+    setPreviewTab(state.previewTab);
+    setFilesView(state.filesView);
+    setFilesToggled(state.filesToggled);
+    setScope(state.scope);
+    setPanelMax(state.panelMax);
+    setDemoOverviewLeading(navigationRef.current.activeSessionId === DEMO_MAIN_SESSION_ID && state.fileTabs.some((tab) => sameFileTab(tab, { path: DEMO_OVERVIEW_ARTIFACT, source: "artifacts" })));
+    if (restored) {
+      for (const [key, position] of Object.entries(saved?.scroll ?? {})) fileScrollPositionsRef.current.set(key, position);
+      Object.assign(sourceModesRef.current, saved?.sourceModes);
     }
-    let nextState = nextSessionId ? rightPaneStatesRef.current.get(nextSessionId) : undefined;
-    if (!nextState) {
-      const openDemoOverview =
-        nextSessionId === DEMO_MAIN_SESSION_ID &&
-        tourCompletedRef.current === false &&
-        !demoOverviewSeededRef.current;
-      if (openDemoOverview) {
-        demoOverviewSeededRef.current = true;
-        setDemoOverviewLeading(true);
-      }
-      nextState = initialRightPaneSessionState(nextSessionId ?? undefined, openDemoOverview);
+    const current = navigationRef.current;
+    if (current.projectId) for (const tab of state.fileTabs) {
+      const key = fileScrollKey(current.projectId, current.activeSessionId, tab);
+      if (!intentionalFilesRef.current.has(key)) restoredFilesRef.current.add(key);
     }
-    if (nextSessionId && pendingExperimentsAutoOpenRef.current) {
-      pendingExperimentsAutoOpenRef.current = false;
-      const experimentsTab: RightTab = "experiments";
-      nextState = {
-        ...nextState,
-        rightTab: experimentsTab,
-        tabHistory: [
-          ...nextState.tabHistory.filter(
-            (tab) => rightTabKey(tab) !== rightTabKey(experimentsTab),
-          ),
-          experimentsTab,
-        ],
-        experimentsTabOpen: true,
-        panelOpen: true,
-      };
-    }
-    setRightTab(nextState.rightTab);
-    tabHistoryRef.current = nextState.tabHistory;
-    setTabHistory(nextState.tabHistory);
-    setExperimentsTabOpen(nextState.experimentsTabOpen);
-    setFilesTabOpen(nextState.filesTabOpen);
-    setArtifactsTabOpen(nextState.artifactsTabOpen);
-    setExpTabs(nextState.expTabs);
-    setFileTabs(nextState.fileTabs);
-    setPlanTabs(nextState.planTabs);
-    setSubagentTabs(nextState.subagentTabs);
-    setCodeTabs(nextState.codeTabs);
-    setContentTabOrder(nextState.contentTabOrder);
-    setPreviewTab(nextState.previewTab);
-    setFilesView(nextState.filesView);
-    setFilesToggled(nextState.filesToggled);
-    setSelectedRunId(nextState.selectedRunId);
-    setScope(nextState.scope);
-    setPanelOpen(nextState.panelOpen);
-    setPanelMax(nextState.panelMax);
-    activeSessionIdRef.current = nextSessionId;
-    setActiveSessionId(nextSessionId);
   }, [setContentTabOrder, setPreviewTab]);
+  const { ready: workspaceReady, loaded: workspaceLoaded, error: workspaceError, retry: retryWorkspace, capture: captureWorkspace, workspace: workspaceRef } = useProjectWorkspace({
+    projectId: uiState && sessions !== null && (destination?.kind !== "task" || !activeSessionId || sessions.includes(activeSessionId)) ? projectId : null, taskKey: activeSessionId ?? "new", location: location.href, pane,
+    isTask: destination?.kind === "task", demoOverview: uiState?.tourCompleted === false, state: rightPaneState,
+    apply: applyWorkspace, getScroll: getFileScroll,
+    sourceModes: sourceModesRef.current, revision: metadataRevision,
+  });
+  const onActiveSessionChange = useCallback((sessionId: string | null, options?: { replace?: boolean }) => {
+    if (!projectId) return;
+    if (sessionId) {
+      sessionLoadRef.current?.set(sessionId, true);
+      setSessions((current) => current && current.includes(sessionId) ? current : [...(current ?? []), sessionId]);
+      if (options?.replace && activeSessionId === null) {
+        captureWorkspace();
+        inheritNewTaskWorkspace(projectId, sessionId);
+      }
+    }
+    const saved = getTaskWorkspace(getCachedProjectWorkspace(projectId), sessionId ?? "new");
+    const remembered = saved ? saved.active : (isDemoProjectId(projectId) ? defaultTaskWorkspace(sessionId ?? undefined, tourCompletedRef.current === false)?.active : undefined);
+    const nextPane = options?.replace && sessionId && activeSessionId === null ? navigationRef.current.pane : remembered;
+    void router.navigate({ href: taskLocation(projectId, sessionId, nextPane), replace: options?.replace });
+  }, [router, projectId, activeSessionId, captureWorkspace]);
+  useEffect(() => {
+    if (workspaceReady && destination?.kind !== "task" && !rememberedSessionRef.current && workspaceRef.current.lastTaskId && sessions?.includes(workspaceRef.current.lastTaskId)) {
+      rememberedSessionRef.current = workspaceRef.current.lastTaskId;
+      setMetadataRevision((value) => value + 1);
+    }
+  }, [workspaceReady, destination?.kind, workspaceRef, sessions]);
+  useBlocker({
+    shouldBlockFn: ({ next }) => parseDestination(next.pathname)?.projectId !== projectId
+      && [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes()),
+    enableBeforeUnload: () => [...fileBuffersRef.current.values()].some((buffer) => buffer.needsProtection),
+  });
+  const lastGlobalLocation = useRef<string | null>(null);
+  useEffect(() => {
+    const savedLocation = safeLocation(location.href);
+    if (!uiState || !workspaceReady || !savedLocation) return;
+    globalWorkspaceWriter.queue({ lastLocation: savedLocation, railOpen, panelWidth, experimentsView: view }, lastGlobalLocation.current === savedLocation ? 250 : 0);
+    lastGlobalLocation.current = savedLocation;
+  }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
@@ -806,48 +620,65 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   // Show the welcome once the bundled demo is first visible. User projects
   // never open it automatically.
   useEffect(() => {
-    if (!projectId || !isDemoProjectId(projectId) || homeOpen || !onboarded) return;
+    if (!projectId || !isDemoProjectId(projectId) || !onboarded) return;
     if (uiState?.tourCompleted) return;
     openDemoWelcome();
-  }, [projectId, homeOpen, onboarded, openDemoWelcome, uiState?.tourCompleted]);
+  }, [projectId, onboarded, openDemoWelcome, uiState?.tourCompleted]);
 
   const activeProject = projects?.find((p) => p.id === projectId) ?? null;
 
   // The home, error, and loading screens leave projects populated but show no project.
   useEffect(() => {
-    const name = homeOpen || startupError || uiState === null ? null : activeProject?.name;
+    const name = startupError || uiState === null ? null : activeProject?.name;
     document.title = name ? `${autoDir(name)} — OpenResearch` : "OpenResearch";
-  }, [homeOpen, startupError, uiState, activeProject]);
+  }, [startupError, uiState, activeProject]);
 
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
 
-  const openExperimentsTab = useCallback(() => {
-    setMainView("chat");
+  const openExperimentsTab = useCallback((replace = false) => {
+    if (replace && (!navigationRef.current.isTask || navigationRef.current.pane)) return;
     setExperimentsTabOpen(true);
-    selectRightTab("experiments");
-    setPanelOpen(true);
-    if (!activeSessionIdRef.current) pendingExperimentsAutoOpenRef.current = true;
-  }, [selectRightTab]);
+    navigatePane({ kind: "home", view: "experiments" }, replace);
+  }, [navigatePane]);
+
+  const sessionLoadRef = useRef<Map<string, boolean> | null>(null);
+  const loadSessionIds = useCallback(async () => {
+    const changes = new Map<string, boolean>();
+    sessionLoadRef.current = changes;
+    const loaded = await listChatSessions(projectId);
+    if (sessionLoadRef.current !== changes) return;
+    const ids = new Set(loaded.map((session) => session.id));
+    for (const [id, present] of changes) {
+      if (present) ids.add(id);
+      else ids.delete(id);
+    }
+    sessionLoadRef.current = null;
+    setSessions([...ids]);
+    if (rememberedSessionRef.current && !ids.has(rememberedSessionRef.current)) rememberedSessionRef.current = null;
+  }, [projectId]);
 
   const loadInitialState = useCallback(() => {
     setStartupError(null);
     setProjects(null);
     setUiState(null);
-    void Promise.allSettled([listProjects(), getUiState()]).then(([projectsResult, uiStateResult]) => {
+    void Promise.allSettled([listProjects(), getUiState(), loadSessionIds()]).then(([projectsResult, uiStateResult, sessionsResult]) => {
       const errors: string[] = [];
+      if (sessionsResult.status === "rejected") errors.push(m.chat_all_sessions());
       if (projectsResult.status === "fulfilled") {
         setProjects(projectsResult.value);
-        setProjectId((current) =>
-          current && projectsResult.value.some((project) => project.id === current)
-            ? current
-            : projectsResult.value[0]?.id ?? null,
-        );
+
       } else {
         errors.push(m.app_projects());
       }
       if (uiStateResult.status === "fulfilled") {
         persistedPreferredAgent.current = uiStateResult.value.preferredAgent;
+        const prefs = getRememberedGlobalWorkspace() ?? uiStateResult.value.workspace;
+        if (prefs) {
+          setRailOpen(prefs.railOpen);
+          setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
+          setView(prefs.experimentsView);
+        }
         setUiState(uiStateResult.value);
       } else {
         errors.push(m.app_settings());
@@ -856,10 +687,26 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
         setStartupError(m.app_startup_load_failed({ items: new Intl.ListFormat(getLocale()).format(errors) }));
       }
     });
-  }, []);
+  }, [loadSessionIds]);
   useEffect(() => {
     loadInitialState();
   }, [loadInitialState]);
+
+  useEffect(() => {
+    const off = onChatEvent((event) => {
+      if (event.type === "reconnected") {
+        void loadSessionIds().catch(() => {});
+      } else if (event.type === "session" && event.session.projectId === projectId) {
+        sessionLoadRef.current?.set(event.session.id, true);
+        setSessions((current) => current?.includes(event.session.id) ? current : [...(current ?? []), event.session.id]);
+      } else if (event.type === "sessionDeleted") {
+        sessionLoadRef.current?.set(event.sessionId, false);
+        setSessions((current) => current?.filter((id) => id !== event.sessionId) ?? null);
+        if (rememberedSessionRef.current === event.sessionId) rememberedSessionRef.current = null;
+      }
+    });
+    return () => { off(); sessionLoadRef.current = null; };
+  }, [projectId, loadSessionIds]);
 
   const preferredAgentWrite = useRef<Promise<void>>(Promise.resolve());
   const preferredAgentSaveSeq = useRef(0);
@@ -934,57 +781,33 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
           return [...merged.values()];
         });
         runsBaselineReadyRef.current = true;
-        if (shouldAutoOpen) openExperimentsTab();
+        setRunDataReady(true);
+        if (shouldAutoOpen) openExperimentsTab(true);
       })
       .catch(() => {
-        if (runsVisitRef.current === runsVisit) pendingFirstRunningRunsRef.current.clear();
+        if (runsVisitRef.current === runsVisit) {
+          pendingFirstRunningRunsRef.current.clear();
+          setRunDataReady(true);
+        }
       });
   }, [openExperimentsTab]);
 
   // Per-project data. Harness agents spawn lazily on the first chat message.
   useEffect(() => {
     if (!projectId) return;
-    const previousSessionId = activeSessionIdRef.current;
-    if (previousSessionId) {
-      rightPaneStatesRef.current.set(previousSessionId, currentRightPaneStateRef.current);
-    }
-    activeSessionIdRef.current = null;
-    pendingExperimentsAutoOpenRef.current = false;
-    setActiveSessionId(null);
+    let active = true;
     observedRunsProjectRef.current = projectId;
     observedRunsRef.current.clear();
     liveRunIdsRef.current.clear();
-    // Record the visit for persisted project-level UI recency.
     openProject(projectId).catch(() => {});
     setExperiments([]);
     setRuns([]);
     setArtifacts(null);
-    setSelectedRunId(null);
-    setExpTabs([]);
-    setFileTabs([]);
-    setDemoOverviewLeading(false);
-    setPlanTabs([]);
-    setSubagentTabs([]);
-    setCodeTabs([]);
-    setContentTabOrder([]);
-    setPreviewTab(null);
-    setFilesView("files");
-    setFilesToggled(new Set());
-    tabHistoryRef.current = [];
-    setTabHistory([]);
-    setRightTab("experiments");
-    setExperimentsTabOpen(false);
-    setFilesTabOpen(false);
-    setArtifactsTabOpen(false);
-    setPanelOpen(false);
-    setPanelMax(false);
-    // Scoping is an explicit per-project choice — don't let Current task scope
-    // re-bind to whichever session ChatPanel auto-selects in the next project.
-    setScope("project");
-    listExperiments(projectId).then(setExperiments).catch(() => {});
+    listExperiments(projectId).then((items) => { if (active) { setExperiments(items); setExperimentDataReady(true); } }).catch(() => { if (active) setExperimentDataReady(true); });
     loadRunsBaseline(projectId);
-    getArtifacts(projectId).then(setArtifacts).catch(() => {});
-  }, [loadRunsBaseline, projectId, setContentTabOrder, setPreviewTab]);
+    getArtifacts(projectId).then((items) => { if (active) setArtifacts(items); }).catch(() => {});
+    return () => { active = false; runsVisitRef.current++; };
+  }, [loadRunsBaseline, projectId]);
 
   // Refetch artifacts on open and whenever the directory changes.
   const refreshArtifacts = useCallback(() => {
@@ -994,10 +817,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
 
   const openArtifactsTab = useCallback(() => {
     refreshArtifacts();
-    setMainView("chat");
     setArtifactsTabOpen(true);
     selectRightTab("artifacts");
-    setPanelOpen(true);
   }, [refreshArtifacts, selectRightTab]);
 
   // Live store updates.
@@ -1027,7 +848,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
         runsBaselineReadyRef.current &&
         (!baselineRun ||
           (baselineRun.status !== "running" && baselineRun.updatedAt <= run.updatedAt));
-      if ((previouslyLive && previous) || newSinceBaseline) openExperimentsTab();
+      if ((previouslyLive && previous) || newSinceBaseline) openExperimentsTab(true);
       else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
     },
     onExperiment: (experiment) => {
@@ -1052,11 +873,11 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     id: string,
     view: ExperimentView = "overview",
     intent: TabOpenIntent = "preview",
+    runId?: string,
   ) => {
     const tab = { id, view };
     setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
-    openRightTab(tab, intent);
-    setPanelOpen(true);
+    openRightTab(tab, intent, runId);
   }, [openRightTab]);
 
   // A `<run>` evidence chip in chat opens that run's logs — the only evidence
@@ -1067,8 +888,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       const matches = runsRef.current.filter((run) => run.id === runId || run.id.startsWith(runId));
       const run = matches.length === 1 ? matches[0] : null;
       if (!run) return;
-      setSelectedRunId(run.id);
-      openExperimentTab(run.experimentId, "terminal", intent);
+      openExperimentTab(run.experimentId, "terminal", intent, run.id);
     },
     [openExperimentTab],
   );
@@ -1123,6 +943,13 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
 
   const openResolvedFileTab = useCallback(
     (tab: FileViewDef, intent: TabOpenIntent = "preview") => {
+      if (tab.line != null) setLineJump((value) => value + 1);
+      const project = projectIdRef.current;
+      if (project) {
+        const key = fileScrollKey(project, activeSessionIdRef.current, tab);
+        if (!currentRightPaneStateRef.current.fileTabs.some((item) => sameFileTab(item, tab))) restoredFilesRef.current.delete(key);
+        intentionalFilesRef.current.add(key);
+      }
       const persistentTab = persistentFileTab(tab);
       setFileTabs((prev) => {
         const idx = prev.findIndex((item) => sameFileTab(item, tab));
@@ -1132,7 +959,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
         return next;
       });
       openRightTab(tab, intent);
-      setPanelOpen(true);
     },
     [openRightTab],
   );
@@ -1179,7 +1005,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       // viewer re-scrolls.
       if (line != null) {
         tab.line = line;
-        tab.lineScrollRequest = ++fileLineScrollRequestRef.current;
       }
       return tab;
     },
@@ -1239,11 +1064,14 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       const idx = fileTabs.findIndex((t) => sameFileTab(t, tab));
       if (idx === -1) return;
       const key = projectId ? fileScrollKey(projectId, activeSessionId, tab) : null;
-      if (key && fileBuffersRef.current.has(key) && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
+      if (key && fileBuffersRef.current.get(key)?.needsProtection && !confirmFileDiscard(m.file_viewer_discard_unsaved_changes())) return;
       setFileTabs((prev) => prev.filter((_, i) => i !== idx));
       if (key) {
         fileScrollPositionsRef.current.delete(key);
         fileBuffersRef.current.delete(key);
+        intentionalFilesRef.current.delete(key);
+        restoredFilesRef.current.delete(key);
+        delete sourceModesRef.current[key];
       }
       if (
         activeSessionId === DEMO_MAIN_SESSION_ID &&
@@ -1258,15 +1086,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
 
   const consumeFileLineScrollRequest = useCallback((tab: FileViewDef) => {
     if (tab.lineScrollRequest === undefined) return;
-    setRightTab((current) => {
-      if (
-        typeof current !== "object" ||
-        !("path" in current) ||
-        !sameFileTab(current, tab) ||
-        current.lineScrollRequest !== tab.lineScrollRequest
-      ) return current;
-      return persistentRightTab(current);
-    });
+    setConsumedLine(tab.lineScrollRequest);
   }, []);
 
   // Open a proposed plan as a right-panel tab (the chat plan strip's "View
@@ -1287,7 +1107,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       return next;
     });
     openRightTab(tab, intent);
-    setPanelOpen(true);
   }, [openRightTab]);
 
   const closePlanTab = useCallback(
@@ -1314,7 +1133,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       prev.some((t) => t.spawnPartId === spawnPartId) ? prev : [...prev, tab],
     );
     openRightTab(tab, intent);
-    setPanelOpen(true);
   }, [openRightTab]);
 
   const closeSubagentTab = useCallback(
@@ -1422,7 +1240,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
           : [...prev, opened],
       );
       openRightTab(opened, intent);
-      setPanelOpen(true);
     },
     [openRightTab],
   );
@@ -1432,6 +1249,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       setCodeTabs((prev) =>
         prev.map((item) => (sameCodeTab(item, tab) ? { ...item, ...patch } : item)),
       );
+      if (patch.view) navigatePane(tabPane({ ...tab, ...patch }));
     },
     [],
   );
@@ -1447,10 +1265,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   );
 
   const openWorktreeTab = useCallback(() => {
-    setMainView("chat");
     setFilesTabOpen(true);
     selectRightTab("files");
-    setPanelOpen(true);
   }, [selectRightTab]);
 
   const closeHomeTab = useCallback(
@@ -1493,11 +1309,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
           panelMaxWidth(),
         );
         setPanelWidth(width);
-        try {
-          localStorage.setItem(PANEL_WIDTH_KEY, String(width));
-        } catch {
-          // best-effort persistence
-        }
         window.removeEventListener("pointermove", onMove);
         return;
       }
@@ -1512,11 +1323,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
       setPanelMax(false);
       const clamped = Math.min(Math.max(w, PANEL_MIN_WIDTH), max);
       setPanelWidth(clamped);
-      try {
-        localStorage.setItem(PANEL_WIDTH_KEY, String(clamped));
-      } catch {
-        // best-effort persistence
-      }
     }
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", stop);
@@ -1525,17 +1331,10 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
 
   const onProjectCreated = (project: Project, publicationError: string | null) => {
     setProjects((cur) => (cur ? upsert(cur, project) : [project]));
-    setProjectId(project.id);
-    setHomeOpen(false);
+    void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/git" : ""}` });
     if (publicationError) {
-      setGithubPublicationError({ projectId: project.id, message: publicationError });
-      selectMainView("git");
+      showAlert(publicationError, "error");
     }
-  };
-
-  const onProjectDeleted = (id: string) => {
-    setProjects((cur) => (cur ? cur.filter((p) => p.id !== id) : cur));
-    if (projectId === id) setProjectId(null);
   };
 
   const expTab =
@@ -1565,6 +1364,28 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "plan"
       ? rightTab
       : null;
+  const [planContent, setPlanContent] = useState<{ key: string; text: string | null } | null>(null);
+  const planSessionId = planTab?.sessionId;
+  const planPromptId = planTab?.promptId;
+  useEffect(() => {
+    if (!planSessionId || !planPromptId || !sessions?.includes(planSessionId)) return;
+    let active = true;
+    const key = `${planSessionId}:${planPromptId}`;
+    const apply = (messages: ChatMessage[]) => {
+      const part = messages.flatMap((message) => {
+        const found = findPartById(message.parts, planPromptId);
+        return found ? [found] : [];
+      })[0];
+      if (active) setPlanContent({ key, text: part?.prompt?.plan ?? null });
+    };
+    const load = () => void getChatMessages(planSessionId).then(({ messages }) => apply(messages)).catch(() => { if (active) setPlanContent({ key, text: null }); });
+    load();
+    const off = onChatEvent((event) => {
+      if (event.type === "reconnected") load();
+      if (event.type === "message" && event.sessionId === planSessionId && findPartById(event.message.parts, planPromptId)) apply([event.message]);
+    });
+    return () => { active = false; off(); };
+  }, [planSessionId, planPromptId, sessions]);
   const subagentTab =
     typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "subagent"
       ? rightTab
@@ -1601,7 +1422,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
   );
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
   const codeExperiment = codeTab
-    ? (experiments.find((experiment) => experiment.id === codeTab.experimentId) ?? null)
+    ? (experiments.find((experiment) => experiment.id === codeTab.experimentId && experiment.branchName === codeTab.branch) ?? null)
     : null;
   const renderContentTab = (tab: ContentTab) => {
     if ("path" in tab) return renderFileTab(tab);
@@ -1670,6 +1491,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     );
   };
 
+  if (!destination || destination.kind === "resume") return null;
+
   if (startupError) {
     return (
       <div className="app flex flex-col h-full">
@@ -1682,7 +1505,15 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     );
   }
 
-  if (projects === null || uiState === null) {
+  if (projects && !activeProject) {
+    return <div className={EMPTY_STATE_CLASS_NAME}>{m.model_picker_unavailable()}<Button onClick={() => setProjectId(null)}>{m.app_projects()}</Button></div>;
+  }
+
+  if (workspaceError && !workspaceReady) {
+    return <div className={EMPTY_STATE_CLASS_NAME}><p role="alert">{workspaceError}</p><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>;
+  }
+
+  if (projects === null || uiState === null || !workspaceLoaded || sessions === null) {
     return (
       <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
@@ -1693,45 +1524,14 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     );
   }
 
-  // First boot: the walkthrough installs and opens the embedded demo project.
-  if (projects.length === 0) {
-    return (
-      <div className="app flex flex-col h-full">
-        {runtime.kind === "local" && <OfflineBanner />}
-        {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
-        {onboarded ? (
-          <ProjectsHome
-            remote={runtime.kind === "ssh"}
-            projects={projects}
-            onOpen={setProjectId}
-            onCreated={onProjectCreated}
-            onDeleted={onProjectDeleted}
-         />
-        ) : (
-          <Onboarding
-            preferredAgent={uiState.preferredAgent}
-            onDone={(project, selection) => {
-              clearReadDemoSessions();
-              persistedPreferredAgent.current = selection;
-              setProjects([project]);
-              setProjectId(project.id);
-              setUiState((current) => ({
-                ...(current ?? { tourCompleted: false }),
-                onboardingCompleted: true,
-                preferredAgent: selection,
-              }));
-            }}
-         />
-        )}
-        {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
-      </div>
-    );
+  if (!activeProject || (destination?.kind === "task" && activeSessionId && !sessions?.includes(activeSessionId))) {
+    return <div className={EMPTY_STATE_CLASS_NAME}>{m.model_picker_unavailable()}<Button onClick={() => setProjectId(null)}>{m.app_projects()}</Button></div>;
   }
 
   const railHeader = (
     <RailHeader
       projectName={projects.find((p) => p.id === projectId)?.name ?? ""}
-      onHome={() => setHomeOpen(true)}
+      onHome={() => void router.navigate({ to: "/projects" })}
       onNewProject={() => setNewProjectOpen(true)}
       onRepository={() => selectMainView("git")}
       onCollapse={() => setRailOpen(false)}
@@ -1742,21 +1542,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
     <div className="app flex flex-col h-full">
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
-      {homeOpen ? (
-        <>
-          <ProjectsHome
-            remote={runtime.kind === "ssh"}
-            projects={projects}
-            onOpen={(id) => {
-              setProjectId(id);
-              setHomeOpen(false);
-            }}
-            onCreated={onProjectCreated}
-            onDeleted={onProjectDeleted}
-         />
-          {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
-        </>
-      ) : (
+      {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
         {projectId && (
           <ChatPanel
@@ -1772,7 +1558,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
             }
             filesActive={mainView === "chat" && panelOpen && rightTab === "files"}
             artifactsActive={mainView === "chat" && panelOpen && rightTab === "artifacts"}
-            onOpenExperiments={openExperimentsTab}
+            onOpenExperiments={() => openExperimentsTab()}
             onOpenArtifacts={openArtifactsTab}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
@@ -1793,6 +1579,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
             }
+            activeSessionId={activeSessionId}
             onActiveSessionChange={onActiveSessionChange}
             preferredAgent={uiState.preferredAgent}
             onPreferredAgentChange={persistPreferredAgent}
@@ -1804,14 +1591,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                 remote={runtime.kind === "ssh"}
                 tab={mainView}
                 project={activeProject}
-                githubPublicationError={
-                  githubPublicationError && githubPublicationError.projectId === activeProject?.id
-                    ? githubPublicationError.message
-                    : null
-                }
                 onProjectUpdate={(project) => {
                   setProjects((current) => (current ? upsert(current, project) : [project]));
-                  if (project.githubEnabled) setGithubPublicationError(null);
                 }}
                 onSelectTab={selectMainView}
              />
@@ -1873,8 +1654,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                 title={m.app_close_panel()}
                 aria-label={m.app_close_panel()}
                 onClick={() => {
-                  pendingExperimentsAutoOpenRef.current = false;
-                  setPanelOpen(false);
+                  closePanel();
                   setPanelMax(false);
                 }}
               >
@@ -1882,7 +1662,13 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
               </IconButton>
             </div>
           </div>
-          {rightTab === "artifacts" ? (
+          {!workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
+            <TabBody><Spinner /></TabBody>
+          ) : (expTab && (!tabExperiment || (selectedRunId && !runs.some((run) => run.id === selectedRunId && run.experimentId === expTab.id))))
+            || (requestedCodeTab && !codeExperiment)
+            || (pane && "sessionId" in pane && pane.sessionId && !sessions?.includes(pane.sessionId)) ? (
+            <TabBody><div className="p-6 text-subtext">{m.model_picker_unavailable()}</div></TabBody>
+          ) : rightTab === "artifacts" ? (
             <TabBody>
               {activeProject && (
                 <ArtifactsTab
@@ -1891,9 +1677,9 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   artifacts={artifacts}
                   onChanged={refreshArtifacts}
                   onOpenFile={openArtifactFileTab}
-                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                  canRenameFile={(path) => !fileBuffersRef.current.get(
                     fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
-                  )}
+                  )?.needsProtection}
                   onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                />
               )}
@@ -1996,8 +1782,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                       openExperimentTab(experiment.id, "overview", intent);
                     }}
                     onOpenLogs={(experimentId, runId, intent) => {
-                      setSelectedRunId(runId);
-                      openExperimentTab(experimentId, "terminal", intent);
+                      openExperimentTab(experimentId, "terminal", intent, runId);
                     }}
                     onOpenCode={(experimentId, intent) => {
                       const experiment = experiments.find((item) => item.id === experimentId);
@@ -2025,13 +1810,13 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   toggled={filesToggled}
                   onViewChange={setFilesView}
                   onToggledChange={setFilesToggled}
-                  canRenameFile={(path) => !fileBuffersRef.current.has(
+                  canRenameFile={(path) => !fileBuffersRef.current.get(
                     fileScrollKey(activeProject.id, activeSessionId, {
                       path,
                       source: "repo",
                       sessionId: activeSessionId ?? undefined,
                     }),
-                  )}
+                  )?.needsProtection}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFileTab(
                       path,
@@ -2060,6 +1845,17 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
               {projectId && (
                 <FileViewer
                   remote={runtime.kind === "ssh"}
+                  restored={restoredFilesRef.current.has(fileScrollKey(projectId, activeSessionId, fileTab))}
+                  onRestoreActivated={() => {
+                    const key = fileScrollKey(projectId, activeSessionId, fileTab);
+                    restoredFilesRef.current.delete(key);
+                    intentionalFilesRef.current.add(key);
+                  }}
+                  showSource={sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] ?? false}
+                  onShowSourceChange={(showSource) => {
+                    sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] = showSource;
+                    setMetadataRevision((value) => value + 1);
+                  }}
                   key={fileScrollKey(projectId, activeSessionId, fileTab)}
                   projectId={projectId}
                   path={fileTab.path}
@@ -2075,14 +1871,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
                   artifactVersion={artifactVersion}
                   artifactEntries={fileTab.source === "artifacts" ? artifacts?.entries : undefined}
-                  initialBuffer={fileBuffersRef.current.get(
-                    fileScrollKey(projectId, activeSessionId, fileTab),
-                  )}
-                  onBufferStateChange={(buffer) => {
-                    const key = fileScrollKey(projectId, activeSessionId, fileTab);
-                    if (buffer) fileBuffersRef.current.set(key, buffer);
-                    else fileBuffersRef.current.delete(key);
-                  }}
+                  bufferSession={getFileBufferSession(fileScrollKey(projectId, activeSessionId, fileTab))}
                   onOpenFile={(path, sessionId, ref, intent) =>
                     openFromRightTab(fileTab, () =>
                       openFileTab(
@@ -2104,6 +1893,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                       fileScrollKey(projectId, activeSessionId, fileTab),
                       position,
                     );
+                    recordScroll();
                   }}
                   lineScrollRequest={fileTab.lineScrollRequest}
                   onLineScrollRequestHandled={() => consumeFileLineScrollRequest(fileTab)}
@@ -2117,7 +1907,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                   file links resolve against the plan's session worktree. */}
               <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
                 <Md
-                  text={planTab.plan}
+                  text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
                   onOpenFile={(path, line, exp, ref, intent) =>
                     openFromRightTab(planTab, () =>
                       openFileTab(
@@ -2204,9 +1994,8 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
                     ) ?? null
                   }
                   onOpenView={(view, runId, intent) => {
-                    if (runId) setSelectedRunId(runId);
                     openFromRightTab(expTab, () =>
-                      openExperimentTab(tabExperiment.id, view, intent),
+                      openExperimentTab(tabExperiment.id, view, intent, runId),
                     );
                   }}
                   onOpenCode={(view, intent) =>
@@ -2226,7 +2015,6 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
         </aside>
         )}
       </div>
-      )}
       {newProjectOpen && (
         <NewProjectDialog
           remote={runtime.kind === "ssh"}
@@ -2237,7 +2025,7 @@ export default function App({ runtime }: { runtime: RuntimeInfo }) {
           }}
        />
       )}
-      {demoWelcomeOpen && !homeOpen && activeProject && isDemoProjectId(activeProject.id) && (
+      {demoWelcomeOpen && activeProject && isDemoProjectId(activeProject.id) && (
         <DemoWelcomeModal
           onClose={closeDemoWelcome}
           onCreateProject={createProjectFromDemoWelcome}

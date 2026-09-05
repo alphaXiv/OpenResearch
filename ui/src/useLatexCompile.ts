@@ -49,6 +49,8 @@ export function useLatexCompile({
   filePath,
   sessionId,
   enabled,
+  autoRun = true,
+  onManualAction,
   ready,
   source,
 }: {
@@ -58,6 +60,8 @@ export function useLatexCompile({
   sessionId?: string;
   /** This is a .tex file the compiler can actually reach (live checkout). */
   enabled: boolean;
+  autoRun?: boolean;
+  onManualAction?: () => void;
   /** The file has loaded, so `source` is real and not the empty initial buffer. */
   ready: boolean;
   /** The live edit buffer, which is what a compile should reflect. */
@@ -105,8 +109,10 @@ export function useLatexCompile({
   // double-invokes updaters under StrictMode, so a guard inside one lets two
   // compiles of the same file race each other's aux and output files.
   const compilingRef = useRef(false);
+  const autoCompiled = useRef<string | null>(null);
   const compile = useCallback(() => {
     if (compilingRef.current) return;
+    autoCompiled.current = filePath;
     compilingRef.current = true;
     setCompiling(true);
     const built = sourceRef.current;
@@ -151,13 +157,11 @@ export function useLatexCompile({
 
   // Render the real document on open. Once per file: a compile that fails must
   // not spin, and the user can retry from the header.
-  const autoCompiled = useRef<string | null>(null);
   useEffect(() => {
-    if (!enabled || !ready || !engine) return;
+    if (!enabled || !autoRun || !ready || !engine) return;
     if (autoCompiled.current === filePath) return;
-    autoCompiled.current = filePath;
     compile();
-  }, [enabled, ready, engine, filePath, compile]);
+  }, [enabled, autoRun, ready, engine, filePath, compile]);
 
   return {
     engine,
@@ -173,7 +177,10 @@ export function useLatexCompile({
     showPdf,
     setShowPdf: showPdfPane,
     viewNonce,
-    compile,
+    compile: () => {
+      onManualAction?.();
+      compile();
+    },
     dismiss: () => {
       setError(null);
       setLog(null);
