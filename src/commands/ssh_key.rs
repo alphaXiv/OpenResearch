@@ -18,6 +18,100 @@ const DEFAULT_KEY: &str = "~/.ssh/id_ed25519.pub";
 /// courtesy registration after it has already printed success.
 const REGISTER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+async fn ensure_default_registered(creds: &Credentials) -> Result<()> {
+    tokio::time::timeout(REGISTER_TIMEOUT, async {
+        let ssh_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow!("Couldn't locate your home directory."))?
+            .join(".ssh");
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&ssh_dir)?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(ssh_dir.join(".orx-key-setup.lock"))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        let _guard = lock
+            .try_write()
+            .map_err(|_| anyhow!("SSH key setup is already running. Try again shortly."))?;
+        let existing = list_ssh_keys(creds).await?;
+        let line = ensure_default_public_key(&ssh_dir).await?;
+        let fp =
+            fingerprint(&line).ok_or_else(|| anyhow!("{DEFAULT_KEY} isn't an SSH public key."))?;
+        if existing
+            .ssh_keys
+            .iter()
+            .any(|key| fingerprint(&key.public_key).as_deref() == Some(fp.as_str()))
+        {
+            println!("\u{2713} {DEFAULT_KEY} is already registered.");
+            return Ok(());
+        }
+        create_ssh_key(creds, &device_name(&line), &line).await?;
+        println!("\u{2713} Registered {DEFAULT_KEY}. Your private key stays on this computer.");
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow!("SSH key setup timed out. Try again."))?
+}
+
+async fn ensure_default_public_key(ssh_dir: &std::path::Path) -> Result<String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    let private = ssh_dir.join("id_ed25519");
+    let public = ssh_dir.join("id_ed25519.pub");
+    if !public.try_exists()? {
+        let mut command = tokio::process::Command::new("ssh-keygen");
+        if private.try_exists()? {
+            println!("Restoring the public-key file from the existing private key\u{2026}");
+            command.args(["-y", "-P", "", "-f"]).arg(&private);
+        } else {
+            println!("Creating ~/.ssh/id_ed25519 and its public-key file\u{2026}");
+            command
+                .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                .arg(&private);
+        }
+        let output = command
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        if !output.status.success() {
+            return Err(anyhow!("Couldn't prepare ~/.ssh/id_ed25519.pub. Existing keys were preserved. If the private key is passphrase-protected, restore its public-key file manually."));
+        }
+        if !public.try_exists()? {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&public)
+                .await?;
+            file.write_all(&output.stdout).await?;
+        }
+    }
+    if !private.is_file() {
+        return Err(anyhow!("~/.ssh/id_ed25519.pub exists, but its private key is missing. Restore ~/.ssh/id_ed25519; no keys were overwritten."));
+    }
+    let body = tokio::fs::read_to_string(&public).await?;
+    let line = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if line.starts_with("-----BEGIN") || fingerprint(line).is_none() {
+        return Err(anyhow!(
+            "~/.ssh/id_ed25519.pub is not an SSH public key. Nothing was uploaded."
+        ));
+    }
+    Ok(line.to_string())
+}
+
 fn expand(path: &str) -> std::path::PathBuf {
     match path.strip_prefix("~/") {
         Some(rest) => dirs::home_dir()
@@ -44,15 +138,14 @@ fn device_name(line: &str) -> String {
 
 pub async fn add(path: Option<String>) -> Result<()> {
     let creds = crate::error::require_credentials().await;
-    add_with_creds(&creds, path).await
+    match path {
+        Some(path) => add_with_creds(&creds, path).await,
+        None => ensure_default_registered(&creds).await,
+    }
 }
 
-/// The body of `add`, taking credentials the caller already holds — the
-/// post-login offer must not re-read them, since `require_credentials` exits the
-/// process and would turn a successful login into exit 1.
-async fn add_with_creds(creds: &Credentials, path: Option<String>) -> Result<()> {
-    let raw = path.unwrap_or_else(|| DEFAULT_KEY.to_string());
-    let resolved = expand(&raw);
+async fn add_with_creds(creds: &Credentials, path: String) -> Result<()> {
+    let resolved = expand(&path);
 
     let shown = ssh_identity::tilde(&resolved);
     let body = tokio::fs::read_to_string(&resolved).await.map_err(|_| {
@@ -172,46 +265,60 @@ pub async fn verify_after_login(creds: &Credentials) {
         return;
     }
 
-    let (registered, local) = match ssh_identity::check(creds).await {
-        KeyStatus::Matched | KeyStatus::Unknown { .. } => return,
-        KeyStatus::NoLocalMatch { registered, local } => (registered, local),
-        KeyStatus::NoneRegistered { local } => (Vec::new(), local),
+    let registered = match ssh_identity::check(creds).await {
+        KeyStatus::Matched => return,
+        KeyStatus::Unknown { reason } => {
+            eprintln!("Couldn't check SSH keys: {reason}\nRetry with: orx ssh-key add");
+            return;
+        }
+        KeyStatus::NoLocalMatch { registered, .. } => registered,
+        KeyStatus::NoneRegistered { .. } => Vec::new(),
     };
 
     println!("\n{}", ssh_identity::diagnosis(&registered));
 
-    let Some(key) = ssh_identity::preferred_local(&local) else {
-        println!("\n{}", ssh_identity::remediation(&registered, &local));
-        return;
-    };
-    // `~`-shortened so the prompt and the fallback command fit a terminal line.
-    let path = key
-        .path
-        .as_deref()
-        .map(ssh_identity::tilde)
-        .unwrap_or_default();
-
-    // Name the key, not just the file — the account syncs it to every box in
-    // the user's orgs, so registering the wrong one has real reach.
-    let label = key_comment(&key.line)
-        .map(|c| format!("\u{201c}{c}\u{201d} "))
-        .unwrap_or_default();
-    print!("\nRegister this computer's key {label}({path})? [Y/n] ");
+    println!("Registering this computer's public SSH key lets it connect to OpenResearch");
+    println!("compute instances in your organizations, including ones already running.");
+    println!("We'll use {DEFAULT_KEY}, creating a key pair if needed.");
+    print!("Register this computer's public key with your OpenResearch account? [Y/n] ");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut answer = String::new();
     if std::io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
         return;
     }
     if !matches!(answer.trim().to_lowercase().as_str(), "" | "y" | "yes") {
-        println!("Skipped. You can register it any time with:\n  orx ssh-key add {path}");
+        println!("Skipped. You can set it up any time with:\n  orx ssh-key add");
         return;
     }
-    // Bounded like the check above: registering is a courtesy, and login has
-    // already succeeded by the time we get here.
-    let manually = format!("Register it manually with:\n  orx ssh-key add {path}");
-    match tokio::time::timeout(REGISTER_TIMEOUT, add_with_creds(creds, Some(path.clone()))).await {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => eprintln!("Couldn't register the key: {err}\n{manually}"),
-        Err(_) => eprintln!("Registering the key timed out.\n{manually}"),
+    if let Err(err) = ensure_default_registered(creds).await {
+        eprintln!("Couldn't set up SSH access: {err}\nRetry with: orx ssh-key add");
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn default_key_setup_preserves_existing_keys() {
+        let dir = std::env::temp_dir().join(format!("orx-key-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let public = ensure_default_public_key(&dir).await.unwrap();
+        let private = std::fs::read(dir.join("id_ed25519")).unwrap();
+        assert!(public.starts_with("ssh-ed25519 "));
+        assert_eq!(ensure_default_public_key(&dir).await.unwrap(), public);
+        std::fs::remove_file(dir.join("id_ed25519.pub")).unwrap();
+        let restored = ensure_default_public_key(&dir).await.unwrap();
+        assert_eq!(fingerprint(&restored), fingerprint(&public));
+        assert_eq!(std::fs::read(dir.join("id_ed25519")).unwrap(), private);
+        std::fs::remove_file(dir.join("id_ed25519")).unwrap();
+        assert!(ensure_default_public_key(&dir).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("id_ed25519.pub"))
+                .unwrap()
+                .trim(),
+            restored
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

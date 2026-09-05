@@ -611,12 +611,14 @@ export const githubBranchUrl = (owner: string, repo: string, branch: string) =>
     .join("/")}`;
 
 export type HfTokenSource = "env" | "openresearchEnv" | "hfCache";
+export type HfValidationStatus = "missing" | "valid" | "invalid" | "unreachable";
 
 export interface HfSettings {
   configured: boolean;
   source: HfTokenSource | null;
   maskedToken: string | null;
-  valid: boolean;
+  validationStatus: HfValidationStatus;
+  validationError: string | null;
   username: string | null;
   jobsWrite: boolean | null;
 }
@@ -624,6 +626,15 @@ export interface HfSettings {
 export const getHfSettings = () => get<HfSettings>("/api/settings/hf");
 
 export const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
+
+export interface TinkerSettings {
+  maskedKey: string | null;
+  validationStatus: "missing" | "valid" | "invalid" | "billingRequired";
+  processEnv: boolean;
+}
+
+export const getTinkerSettings = () => get<TinkerSettings>("/api/settings/tinker");
+export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
 // --- updates ------------------------------------------------------------------
 
@@ -704,21 +715,16 @@ export const saveK8sSettings = (body: { context?: string; namespace?: string }) 
 export type ModalTokenSource = "env" | "syncedEnv" | "modalToml";
 
 export interface ModalSettings {
-  /** The orx-managed venv exists on disk. */
-  envProvisioned: boolean;
-  /** `import modal` succeeds with the resolved interpreter. */
-  modalImportable: boolean;
   tokenConfigured: boolean;
   tokenSource: ModalTokenSource | null;
-  /** modalImportable && tokenConfigured. */
-  ready: boolean;
-  error: string | null;
+  maskedTokenId: string | null;
+  maskedTokenSecret: string | null;
+  processEnv: boolean;
 }
 
 export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
-
-/** Build the orx-managed Modal env (first run downloads the SDK, ~30–60s). */
-export const provisionModal = () => post<ModalSettings>("/api/settings/modal/provision");
+export const saveModalToken = (tokenId: string, tokenSecret: string) =>
+  post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
 // --- settings: env vars / git / harnesses ------------------------------------
 
@@ -962,10 +968,11 @@ export type ComputeTargetId =
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
- * in each backend's own settings endpoint, fetched when its row is expanded. */
+ * in each backend's own settings endpoint, fetched when its setup surface opens. */
 export interface ComputeTargetSummary {
   id: ComputeTargetId;
   configured: boolean;
+  fromEnvironmentTab?: boolean;
   /**
    * The readiness check couldn't run (offline, unreadable ~/.ssh), so
    * `configured` is a guess rather than an answer. Absent for backends whose

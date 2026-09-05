@@ -208,12 +208,14 @@ async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> 
     if status.is_success() {
         return Ok(res);
     }
-    let body = res.text().await.unwrap_or_default();
     if status.as_u16() == 401 {
-        return Err(anyhow!(
-            "Hugging Face rejected the token (HTTP 401) during {what}. Check HF_TOKEN."
-        ));
+        res.error_for_status_ref().map_err(|error| {
+            anyhow!(error).context(format!(
+                "Hugging Face rejected the token (HTTP 401) during {what}. Check HF_TOKEN."
+            ))
+        })?;
     }
+    let body = res.text().await.unwrap_or_default();
     Err(anyhow!(
         "Hugging Face {} failed ({}): {}",
         what,
@@ -251,6 +253,7 @@ pub async fn whoami_details(token: &str) -> Result<WhoamiDetails> {
     let res = http()
         .get(format!("{}/api/whoami-v2", endpoint()))
         .bearer_auth(token)
+        .timeout(Duration::from_secs(15))
         .send()
         .await
         .map_err(|e| anyhow!("Could not reach Hugging Face: {}", e))?;
@@ -479,4 +482,26 @@ pub fn parse_timeout(value: &str) -> Result<u64> {
 /// Where to watch the job on huggingface.co.
 pub fn job_url(namespace: &str, job_id: &str) -> String {
     format!("{}/jobs/{}/{}", endpoint(), namespace, job_id)
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_token_retains_http_status() {
+        for status in [401, 503] {
+            let response = axum::http::Response::builder()
+                .status(status)
+                .body("")
+                .unwrap();
+            let error = check(response.into(), "whoami").await.unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<reqwest::Error>()
+                    .and_then(|e| e.status()),
+                (status == 401).then_some(reqwest::StatusCode::UNAUTHORIZED)
+            );
+        }
+    }
 }
