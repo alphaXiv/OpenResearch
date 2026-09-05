@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
+use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 
 pub fn data_dir() -> PathBuf {
     // Resolution order (most to least authoritative):
@@ -515,6 +516,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN missing_tools TEXT NOT NULL DEFAULT ''",
@@ -528,6 +530,7 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
+            "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
@@ -748,7 +751,7 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
-                    preferred_permission_mode, preferred_reasoning_level
+                    preferred_permission_mode, preferred_reasoning_level, workspace_state_json
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -757,6 +760,7 @@ impl Store {
                 let service_tier = row.get::<_, Option<String>>(4)?;
                 let permission_mode = row.get::<_, Option<String>>(5)?;
                 let reasoning_level = row.get::<_, Option<String>>(6)?;
+                let workspace_json = row.get::<_, Option<String>>(7)?;
                 Ok(StoredUiState {
                     onboarding_completed: row.get(0)?,
                     tour_completed: row.get(1)?,
@@ -767,6 +771,9 @@ impl Store {
                         permission_mode,
                         reasoning_level,
                     }),
+                    workspace: workspace_json
+                        .as_deref()
+                        .and_then(GlobalWorkspaceState::from_stored),
                 })
             },
         )?)
@@ -778,6 +785,36 @@ impl Store {
             params![completed],
         )?;
         Ok(())
+    }
+
+    pub fn set_global_workspace_state(&self, workspace: &GlobalWorkspaceState) -> Result<()> {
+        workspace.validate()?;
+        self.conn.execute(
+            "UPDATE ui_state SET workspace_state_json = ?1 WHERE id = 1",
+            params![serde_json::to_string(workspace)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn project_workspace_state(&self, id: &str) -> Result<Option<WorkspaceState>> {
+        let json: Option<String> = self.conn.query_row(
+            "SELECT workspace_state_json FROM local_projects WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(json.as_deref().and_then(WorkspaceState::from_stored))
+    }
+
+    pub fn set_project_workspace_state(
+        &self,
+        id: &str,
+        workspace: &WorkspaceState,
+    ) -> Result<bool> {
+        workspace.validate()?;
+        Ok(self.conn.execute(
+            "UPDATE local_projects SET workspace_state_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(workspace)?],
+        )? > 0)
     }
 
     pub fn set_tour_completed(&self, completed: bool) -> Result<()> {
@@ -2701,12 +2738,13 @@ pub struct StoredAgentSelection {
     pub reasoning_level: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredUiState {
     pub onboarding_completed: bool,
     pub tour_completed: bool,
     pub preferred_agent: Option<StoredAgentSelection>,
+    pub workspace: Option<GlobalWorkspaceState>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -2951,6 +2989,115 @@ mod tests {
     }
 
     #[test]
+    fn workspace_state_roundtrips_without_touching_project_activity_or_preferences() {
+        let dir = std::env::temp_dir().join(format!("orx-workspace-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["first", "second"] {
+            store
+                .create_local_project(&LocalProject {
+                    id: id.into(),
+                    name: id.into(),
+                    slug: id.into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: dir.join(id).to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 2,
+                })
+                .unwrap();
+        }
+        let value = serde_json::json!({
+            "version": 1,
+            "lastLocation": "/projects/first/tasks/new",
+            "lastTaskId": null,
+            "tasks": {"new": {
+                "tabs": [
+                    {"kind":"home", "view":"files"},
+                    {"kind":"experiment", "experimentId":"experiment", "view":"terminal", "runId":"run"},
+                    {"kind":"file", "path":"paper.tex", "source":"repo", "sessionId":"session", "ref":"main", "line":12},
+                    {"kind":"code", "experimentId":"experiment", "branch":"main", "view":"changes"},
+                    {"kind":"plan", "sessionId":"session", "promptId":"prompt"},
+                    {"kind":"subagent", "sessionId":"session", "spawnPartId":"part"}
+                ],
+                "active":{"kind":"home", "view":"files"}, "previewKey":"file:paper.tex",
+                "history":["home", "file:paper.tex"], "expanded":{"files":["src"]},
+                "scroll":{"file:paper.tex":{"top":23.5,"left":2.0}}, "sourceModes":{"file:paper.tex":true},
+                "filesView":"changes", "scope":"agent", "panelMax":true
+            }}
+        });
+        let workspace: WorkspaceState = serde_json::from_value(value.clone()).unwrap();
+        assert!(store.project_workspace_state("first").unwrap().is_none());
+        assert!(store
+            .set_project_workspace_state("first", &workspace)
+            .unwrap());
+        assert!(!store
+            .set_project_workspace_state("missing", &workspace)
+            .unwrap());
+        assert!(store.project_workspace_state("second").unwrap().is_none());
+        assert_eq!(
+            store
+                .get_local_project("first")
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            2
+        );
+        let preferences = store.ui_state().unwrap();
+        let global: GlobalWorkspaceState = serde_json::from_value(serde_json::json!({
+            "lastLocation":"/projects/first/settings/storage", "railOpen":false,
+            "panelWidth":620, "experimentsView":"table"
+        }))
+        .unwrap();
+        store.set_global_workspace_state(&global).unwrap();
+        assert_eq!(
+            store.ui_state().unwrap().preferred_agent,
+            preferences.preferred_agent
+        );
+        assert_eq!(
+            store.ui_state().unwrap().onboarding_completed,
+            preferences.onboarding_completed
+        );
+        store.set_tour_completed(true).unwrap();
+        store.set_onboarding_completed(true).unwrap();
+        store
+            .set_preferred_agent(&StoredAgentSelection {
+                harness: "codex".into(),
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            })
+            .unwrap();
+        assert_eq!(store.ui_state().unwrap().workspace, Some(global.clone()));
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.project_workspace_state("first").unwrap()).unwrap(),
+            value
+        );
+        assert_eq!(store.ui_state().unwrap().workspace, Some(global));
+        for corrupt in [
+            "not json",
+            "{\"version\":2,\"lastLocation\":null,\"tasks\":{}}",
+        ] {
+            store
+                .conn
+                .execute(
+                    "UPDATE local_projects SET workspace_state_json = ?1 WHERE id = 'first'",
+                    params![corrupt],
+                )
+                .unwrap();
+            assert!(store.project_workspace_state("first").unwrap().is_none());
+        }
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn ui_state_roundtrips_functional_preferences() {
         let dir = std::env::temp_dir().join(format!("orx-store-ui-state-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -2960,6 +3107,7 @@ mod tests {
                 onboarding_completed: false,
                 tour_completed: false,
                 preferred_agent: None,
+                workspace: None,
             }
         );
 
@@ -2980,6 +3128,7 @@ mod tests {
                 onboarding_completed: true,
                 tour_completed: true,
                 preferred_agent: Some(selection),
+                workspace: None,
             }
         );
         let _ = std::fs::remove_dir_all(&dir);

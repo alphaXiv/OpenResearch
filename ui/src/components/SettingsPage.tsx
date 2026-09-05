@@ -248,15 +248,7 @@ const SETTINGS_STACK_SECTION_CLASS_NAME = [
   "[&_>_h2]:mt-0 [&_>_h2]:mx-0 [&_>_h2]:mb-1.5 [&_>_h2]:text-xl",
 ].join(" ");
 
-export type SettingsTab =
-  | "settings"
-  | "harnesses"
-  | "projects"
-  | "compute"
-  | "instances"
-  | "environment"
-  | "git"
-  | "storage";
+export type SettingsTab = import("../workspaceState").SettingsSection;
 type Tab = SettingsTab;
 
 // --- harnesses ---------------------------------------------------------------
@@ -2932,11 +2924,9 @@ function OverleafCard() {
 
 function GitTab({
   project,
-  publicationError,
   onProjectUpdate,
 }: {
   project: Project | null;
-  publicationError: string | null;
   onProjectUpdate: (project: Project) => void;
 }) {
   const [status, setStatus] = useState<ProjectGitStatus | null>(null);
@@ -3074,7 +3064,6 @@ function GitTab({
             )}
           </div>
           <OverleafCard />
-          {publicationError && <div className="error">{syncErrorMessage(publicationError)}</div>}
           {error && <div className="error">{syncErrorMessage(error)}</div>}
         </>
       )}
@@ -3546,14 +3535,12 @@ function isSettingsSection(tab: Tab): boolean {
 export function SettingsView({
   tab,
   project,
-  githubPublicationError,
   onProjectUpdate,
   onSelectTab,
   remote = false,
 }: {
   tab: Tab;
   project: Project | null;
-  githubPublicationError: string | null;
   onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
   remote?: boolean;
@@ -3611,7 +3598,6 @@ export function SettingsView({
       {tab === "git" && (
         <GitTab
           project={project}
-          publicationError={githubPublicationError}
           onProjectUpdate={onProjectUpdate}
        />
       )}

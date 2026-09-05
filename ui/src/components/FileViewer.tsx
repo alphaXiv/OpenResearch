@@ -147,6 +147,10 @@ export function FileViewer({
   initialBuffer,
   onBufferStateChange,
   remote = false,
+  restored = false,
+  onRestoreActivated,
+  showSource = false,
+  onShowSourceChange,
 }: {
   projectId: string;
   path: string;
@@ -185,6 +189,10 @@ export function FileViewer({
   initialBuffer?: FileBufferState;
   onBufferStateChange?: (buffer: FileBufferState | null) => void;
   remote?: boolean;
+  restored?: boolean;
+  onRestoreActivated?: () => void;
+  showSource?: boolean;
+  onShowSourceChange?: (showSource: boolean) => void;
 }) {
   const [loaded, setLoaded] = useState<LoadedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -199,7 +207,12 @@ export function FileViewer({
   // .html likewise, and its scripts run — see HtmlPreview.
   const isHtml = isHtmlFile(path);
   const rendersByDefault = isMarkdown || isHtml;
-  const [showSource, setShowSource] = useState(false);
+  const [activated, setActivated] = useState(false);
+  const autoRun = !restored || activated;
+  const activate = () => {
+    setActivated(true);
+    onRestoreActivated?.();
+  };
   // Live edit buffer for the code file. It IS the view for editable files (no
   // edit mode); it tracks the loaded content and diverges as the user types.
   const [editState, setEditState] = useState<FileBufferState | null>(initialBuffer ?? null);
@@ -358,6 +371,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     ready: data != null && !data.notFound,
     source: editable ? draft : (data?.content ?? ""),
   });
@@ -369,6 +384,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     savedSource: baseline,
     dirty,
     // A pull rewrote the file underneath this view; refetch so the editor shows
@@ -412,7 +429,8 @@ export function FileViewer({
   // Blur and ⌘S only rebuild when there was an edit to save.
   const saveAndCompile = async () => {
     if (!dirty) return;
-    await compileFromDisk();
+    if (autoRun) await compileFromDisk();
+    else await save();
   };
 
   const [openingEditor, setOpeningEditor] = useState(false);
@@ -648,7 +666,7 @@ export function FileViewer({
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
             aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
-            onClick={() => setShowSource((s) => !s)}
+            onClick={() => onShowSourceChange?.(!showSource)}
           >
             <Code size={13} />
           </IconButton>
@@ -771,8 +789,8 @@ export function FileViewer({
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
         onScroll={(event) => {
           const position = {
-            top: event.currentTarget.scrollTop,
-            left: event.currentTarget.scrollLeft,
+            top: Math.max(0, event.currentTarget.scrollTop),
+            left: Math.max(0, event.currentTarget.scrollLeft),
           };
           scrollPositionRef.current = position;
           onScrollPositionChange?.(position);
@@ -813,6 +831,11 @@ export function FileViewer({
             highlightLine={line}
             scrollRequest={lineScrollRequest}
             onScrollRequestHandled={onLineScrollRequestHandled}
+            scrollPosition={scrollPositionRef.current}
+            onScrollPositionChange={(position) => {
+              scrollPositionRef.current = position;
+              onScrollPositionChange?.(position);
+            }}
          />
         ) : data.notFound ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">

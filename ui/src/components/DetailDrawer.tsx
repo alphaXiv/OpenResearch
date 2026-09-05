@@ -90,8 +90,9 @@ function TerminalView({
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
 
-  const selectedRun =
-    (selectedRunId && expRuns.find((r) => r.id === selectedRunId)) || expRuns[0] || null;
+  const selectedRun = selectedRunId
+    ? expRuns.find((run) => run.id === selectedRunId) ?? null
+    : expRuns[0] ?? null;
   const live = selectedRun?.status === "running" || selectedRun?.status === "starting";
   const cancelling = Boolean(
     selectedRun && live && (selectedRun.cancelRequested || pendingRunId === selectedRun.id),
@@ -102,18 +103,6 @@ function TerminalView({
     const idx = expRuns.findIndex((r) => r.id === id);
     return idx === -1 ? expRuns.length : expRuns.length - idx;
   };
-
-  // When a new run starts while the tab is open, follow it live.
-  const seenRunIds = useRef<Set<string> | null>(null);
-  useEffect(() => {
-    if (seenRunIds.current === null) {
-      seenRunIds.current = new Set(expRuns.map((r) => r.id));
-      return;
-    }
-    const fresh = expRuns.find((r) => !seenRunIds.current!.has(r.id));
-    for (const r of expRuns) seenRunIds.current.add(r.id);
-    if (fresh) onSelectRun(fresh.id);
-  }, [expRuns, onSelectRun]);
 
   // Close the history dropdown on outside click.
   useEffect(() => {
@@ -197,7 +186,7 @@ function TerminalView({
           // the terminal with the selected run's output.
           <LogTerminal key={selectedRun.id} runId={selectedRun.id} />
         ) : (
-          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
+          <div className="term-empty h-full flex items-center justify-center p-6 text-center text-sm text-muted">{selectedRunId ? m.model_picker_unavailable() : m.detail_drawer_no_runs_yet_ask_the_agent_to_launch()}</div>
         )}
       </div>
     </div>

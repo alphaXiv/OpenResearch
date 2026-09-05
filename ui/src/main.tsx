@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { RuntimeRoot } from "./RemoteRuntime";
+import { RouterProvider } from "@tanstack/react-router";
+import { router } from "./router";
 import { Toaster } from "./components/ui";
 import { getLocale } from "./paraglide/runtime.js";
 import "./tailwind.css";
@@ -11,7 +12,7 @@ document.documentElement.dir = "ltr";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <RuntimeRoot />
+    <RouterProvider router={router} />
     <Toaster />
   </StrictMode>,
 );

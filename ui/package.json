@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && tsc --noEmit && vite build",
+    "build": "pnpm lint:i18n && paraglide-js compile --silent --emit-ts-declarations && pnpm typecheck && vite build",
+    "routes:generate": "tsr generate",
+    "typecheck": "pnpm routes:generate && tsc --noEmit",
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.mjs",
@@ -14,6 +16,7 @@
   "dependencies": {
     "@clo/react-markdown": "jsr:1.1.1",
     "@inlang/paraglide-js": "^2.25.0",
+    "@tanstack/react-router": "^1.170.32",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -36,6 +39,8 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "4.3.3",
+    "@tanstack/router-cli": "^1.167.33",
+    "@tanstack/router-plugin": "^1.168.35",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
