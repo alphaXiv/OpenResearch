@@ -57,6 +57,8 @@ export function useOverleafSync({
   filePath,
   sessionId,
   enabled,
+  autoRun = true,
+  onManualAction,
   savedSource,
   dirty,
   onPulled,
@@ -66,6 +68,8 @@ export function useOverleafSync({
   sessionId?: string;
   /** This is a .tex in the live checkout, so there is a file to sync. */
   enabled: boolean;
+  autoRun?: boolean;
+  onManualAction?: () => void;
   /** The file as it stands on disk. A push carries the file, not the compile,
    * so this — not the compiled source — is what says our side has moved: a
    * machine with no LaTeX engine never compiles, and is exactly the one this
@@ -173,18 +177,18 @@ export function useOverleafSync({
   // a sync actually started, so one refused mid-flight is not forgotten.
   const syncedMarker = useRef<string | null>(null);
   useEffect(() => {
-    if (!enabled || !loaded || !hasToken || !link || dirty) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty) return;
     const marker = `${filePath}:${link.projectId}:${savedSource}`;
     if (syncedMarker.current === marker) return;
     if (sync()) syncedMarker.current = marker;
     // `syncing` is a dependency so a sync refused while another was in flight
     // is retried when that one finishes, rather than waiting for an edit.
-  }, [enabled, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync]);
+  }, [enabled, autoRun, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync]);
 
   // And the other direction: ask whether Overleaf has moved, and sync when it
   // has. The marker is left alone — this is not a change on our side.
   useEffect(() => {
-    if (!enabled || !loaded || !hasToken || !link || dirty) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty) return;
     const timer = setInterval(() => {
       if (syncingRef.current || failedRef.current) return;
       getOverleafStatus(projectId, filePath, { sessionId })
@@ -197,7 +201,7 @@ export function useOverleafSync({
         });
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [enabled, loaded, hasToken, link, dirty, projectId, filePath, sessionId, sync]);
+  }, [enabled, autoRun, loaded, hasToken, link, dirty, projectId, filePath, sessionId, sync]);
 
   return {
     hasToken,
@@ -219,6 +223,7 @@ export function useOverleafSync({
     },
     linkProject: async (project: string) => {
       apply(await linkOverleaf(projectId, filePath, { project, sessionId }));
+      onManualAction?.();
     },
     unlink: async () => {
       apply(await unlinkOverleaf(projectId, filePath, { sessionId }));
@@ -229,7 +234,10 @@ export function useOverleafSync({
     },
     sync: (resolve?: Record<string, OverleafResolution>) => {
       failedRef.current = false;
-      sync(resolve);
+      if (sync(resolve)) {
+        syncedMarker.current = `${filePath}:${link?.projectId}:${savedSource}`;
+        onManualAction?.();
+      }
     },
   };
 }

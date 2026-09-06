@@ -58,3 +58,44 @@ export function conflictAfterRefresh(
   if (!isDirtyFileBuffer(buffer) || (exists && currentVersion === buffer.version)) return null;
   return { currentVersion, exists };
 }
+
+// A tab owns its buffer and pending save even while its viewer is unmounted.
+export class FileBufferSession {
+  private buffer: FileBufferState | null = null;
+  private listeners = new Set<() => void>();
+  saving = false;
+  saveError: string | null = null;
+  private revision = 0;
+  saveRevision = 0;
+
+  getSnapshot = () => this.buffer;
+  getRevision = () => this.revision;
+  subscribe = (listener: () => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
+  set = (buffer: FileBufferState | null) => {
+    this.buffer = buffer;
+    this.notify();
+  };
+  setSaving = (saving: boolean) => {
+    this.saving = saving;
+    if (saving) this.saveRevision++;
+    this.notify();
+  };
+  saved = (draft: string, version: string) => {
+    if (!this.buffer) return;
+    this.set({ ...this.buffer, baseline: draft, version, conflict: null });
+  };
+  setSaveError = (error: string | null) => {
+    this.saveError = error;
+    this.notify();
+  };
+  private notify() {
+    this.revision++;
+    for (const listener of this.listeners) listener();
+  }
+  get needsProtection() {
+    return this.saving || (this.buffer !== null && (isDirtyFileBuffer(this.buffer) || this.buffer.conflict !== null));
+  }
+}

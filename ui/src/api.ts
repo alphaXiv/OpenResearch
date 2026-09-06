@@ -1,5 +1,6 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
@@ -127,9 +128,10 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 const get = <T>(url: string) => fetch(url).then((r) => json<T>(r));
-const post = <T>(url: string, body?: unknown) =>
+const post = <T>(url: string, body?: unknown, keepalive = false) =>
   fetch(url, {
     method: "POST",
+    keepalive,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then((r) => json<T>(r));
@@ -173,6 +175,7 @@ export interface OnboardingSelection {
 export type AgentSelection = OnboardingSelection;
 
 export interface UiState {
+  workspace: GlobalWorkspace | null;
   onboardingCompleted: boolean;
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
@@ -180,7 +183,16 @@ export interface UiState {
 
 export const getUiState = () => get<UiState>("/api/settings/ui-state");
 
+export const getProjectUiState = (projectId: string) =>
+  get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`);
+
+export const saveProjectUiState = (projectId: string, state: ProjectWorkspace, keepalive = false) =>
+  post<ProjectWorkspace>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, state, keepalive);
+export const saveGlobalWorkspace = (workspace: GlobalWorkspace, keepalive = false) =>
+  post<UiState>("/api/settings/ui-state", { workspace }, keepalive);
+
 export const updateUiState = (body: {
+  workspace?: GlobalWorkspace;
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
 }) => post<UiState>("/api/settings/ui-state", body);

@@ -18,7 +18,7 @@ import {
   GitBranch,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   absoluteFileUrl,
   artifactUrl,
@@ -44,7 +44,7 @@ import {
   isDirtyFileBuffer,
   normalizedFileContent,
   updateFileDraft,
-  type FileBufferState,
+  type FileBufferSession,
 } from "../fileSync";
 import { useLatexCompile } from "../useLatexCompile";
 import { useOverleafSync } from "../useOverleafSync";
@@ -144,9 +144,12 @@ export function FileViewer({
   onEdit,
   artifactVersion,
   artifactEntries = [],
-  initialBuffer,
-  onBufferStateChange,
+  bufferSession,
   remote = false,
+  restored = false,
+  onRestoreActivated,
+  showSource = false,
+  onShowSourceChange,
 }: {
   projectId: string;
   path: string;
@@ -182,9 +185,12 @@ export function FileViewer({
   /** Selected artifact metadata changes only when this path changes. */
   artifactVersion?: string | null;
   artifactEntries?: ArtifactEntry[];
-  initialBuffer?: FileBufferState;
-  onBufferStateChange?: (buffer: FileBufferState | null) => void;
+  bufferSession: FileBufferSession;
   remote?: boolean;
+  restored?: boolean;
+  onRestoreActivated?: () => void;
+  showSource?: boolean;
+  onShowSourceChange?: (showSource: boolean) => void;
 }) {
   const [loaded, setLoaded] = useState<LoadedFile | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -199,27 +205,22 @@ export function FileViewer({
   // .html likewise, and its scripts run — see HtmlPreview.
   const isHtml = isHtmlFile(path);
   const rendersByDefault = isMarkdown || isHtml;
-  const [showSource, setShowSource] = useState(false);
+  const [activated, setActivated] = useState(false);
+  const autoRun = !restored || activated;
+  const activate = () => {
+    setActivated(true);
+    onRestoreActivated?.();
+  };
   // Live edit buffer for the code file. It IS the view for editable files (no
   // edit mode); it tracks the loaded content and diverges as the user types.
-  const [editState, setEditState] = useState<FileBufferState | null>(initialBuffer ?? null);
-  const editStateRef = useRef(editState);
-  const onBufferStateChangeRef = useRef(onBufferStateChange);
-  onBufferStateChangeRef.current = onBufferStateChange;
-  useEffect(() => {
-    onBufferStateChangeRef.current = onBufferStateChange;
-    return () => { onBufferStateChangeRef.current = undefined; };
-  }, [onBufferStateChange]);
-  const updateEditState = (next: FileBufferState | null) => {
-    editStateRef.current = next;
-    setEditState(next);
-    onBufferStateChangeRef.current?.(
-      next && (isDirtyFileBuffer(next) || next.conflict) ? next : null,
-    );
-  };
-  const [saving, setSaving] = useState(false);
-  const savingRef = useRef(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  useSyncExternalStore(bufferSession.subscribe, bufferSession.getRevision);
+  const editState = bufferSession.getSnapshot();
+  const updateEditState = bufferSession.set;
+  const saving = bufferSession.saving;
+  const setSaving = bufferSession.setSaving;
+  const saveRevision = bufferSession.saveRevision;
+  const saveError = bufferSession.saveError;
+  const setSaveError = bufferSession.setSaveError;
   const loadRequestRef = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const scrollPositionRef = useRef(scrollPosition);
@@ -288,20 +289,10 @@ export function FileViewer({
   const baseline = editState?.baseline ?? normalizedFileContent(data?.content ?? "");
   const dirty = editable && editState !== null && isDirtyFileBuffer(editState);
 
-  // Clean loads seed the editor. Dirty buffers survive tab switches and any
-  // incoming disk version is handled by the guarded loader below.
-  useEffect(() => {
-    if (!editable || loaded?.source !== "checkout" || typeof data?.version !== "string") return;
-    const current = editStateRef.current;
-    if (current && isDirtyFileBuffer(current)) return;
-    updateEditState(createFileBuffer(data.path, data.content, data.version));
-    setSaveError(null);
-  }, [data?.content, data?.version, editable, loaded?.source, path]);
-
   const save = async (expectedVersion?: string): Promise<boolean> => {
-    const savingState = editStateRef.current;
+    const savingState = bufferSession.getSnapshot();
     if (!editable || !savingState || !isDirtyFileBuffer(savingState)) return true;
-    if (savingRef.current) return false;
+    if (bufferSession.saving) return false;
     if (savingState.conflict && expectedVersion === undefined) {
       setSaveError(savingState.conflict.exists
         ? m.file_viewer_changed_on_disk()
@@ -310,7 +301,6 @@ export function FileViewer({
     }
     const savedDraft = savingState.draft;
     const content = fileBufferContent(savingState);
-    savingRef.current = true;
     setSaving(true);
     setSaveError(null);
     try {
@@ -318,14 +308,10 @@ export function FileViewer({
         sessionId,
         expectedVersion: expectedVersion ?? savingState.version,
       });
-      const current = editStateRef.current ?? savingState;
+      const current = bufferSession.getSnapshot();
+      if (!current) return false;
       loadRequestRef.current++;
-      updateEditState({
-        ...current,
-        baseline: savedDraft,
-        version: result.version,
-        conflict: null,
-      });
+      bufferSession.saved(savedDraft, result.version);
       setLoaded((prev) =>
         prev && prev.source === "checkout"
           ? { source: "checkout", file: { ...prev.file, content, version: result.version } }
@@ -334,7 +320,8 @@ export function FileViewer({
       return true;
     } catch (e) {
       if (e instanceof FileChangedError) {
-        const current = editStateRef.current ?? savingState;
+        const current = bufferSession.getSnapshot();
+        if (!current) return false;
         if (!isDirtyFileBuffer(current)) return false;
         updateEditState({
           ...current,
@@ -345,7 +332,6 @@ export function FileViewer({
       setSaveError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
-      savingRef.current = false;
       setSaving(false);
     }
   };
@@ -358,6 +344,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     ready: data != null && !data.notFound,
     source: editable ? draft : (data?.content ?? ""),
   });
@@ -369,6 +357,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     savedSource: baseline,
     dirty,
     // A pull rewrote the file underneath this view; refetch so the editor shows
@@ -412,7 +402,8 @@ export function FileViewer({
   // Blur and ⌘S only rebuild when there was an edit to save.
   const saveAndCompile = async () => {
     if (!dirty) return;
-    await compileFromDisk();
+    if (autoRun) await compileFromDisk();
+    else await save();
   };
 
   const [openingEditor, setOpeningEditor] = useState(false);
@@ -431,8 +422,8 @@ export function FileViewer({
     }
   };
   const reload = useCallback(() => {
-    if (!savingRef.current) setNonce((value) => value + 1);
-  }, []);
+    if (!bufferSession.saving) setNonce((value) => value + 1);
+  }, [bufferSession]);
   const discardAndReload = () => {
     updateEditState(null);
     setSaveError(null);
@@ -455,6 +446,7 @@ export function FileViewer({
   useEffect(() => {
     let cancelled = false;
     const request = ++loadRequestRef.current;
+    if (saving) return;
     // Artifacts come from the compatibility /files endpoint (no session/branch);
     // repo files from the checkout-aware /file endpoint. All paths normalize
     // into the same ProjectFile-shaped `data` so the render body is shared.
@@ -508,8 +500,8 @@ export function FileViewer({
         );
     load
       .then((next) => {
-        if (cancelled || request !== loadRequestRef.current) return;
-        const current = editStateRef.current;
+        if (cancelled || request !== loadRequestRef.current || bufferSession.saving || saveRevision !== bufferSession.saveRevision) return;
+        const current = bufferSession.getSnapshot();
         if (current && isDirtyFileBuffer(current)) {
           const checkout = next.source === "checkout" ? next.file : null;
           const sameTarget = checkout !== null &&
@@ -529,6 +521,11 @@ export function FileViewer({
           }
           else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
         }
+        if ((!current || !isDirtyFileBuffer(current)) && next.source === "checkout" &&
+            !next.file.notFound && !next.file.binary && !next.file.truncated && typeof next.file.version === "string") {
+          updateEditState(createFileBuffer(next.file.path, next.file.content, next.file.version));
+          setSaveError(null);
+        }
         setLoaded(next);
         setError(null);
       })
@@ -538,7 +535,7 @@ export function FileViewer({
     return () => {
       cancelled = true;
     };
-  }, [projectId, path, source, sessionId, gitRef, nonce, artifactVersion, diskVersion]);
+  }, [projectId, path, source, sessionId, gitRef, nonce, artifactVersion, diskVersion, saving, saveRevision]);
 
   // Stays a layout effect: the code views scroll to a `file:line` target in
   // passive effects, which run after this and so win over the restore.
@@ -648,7 +645,7 @@ export function FileViewer({
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
             aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
-            onClick={() => setShowSource((s) => !s)}
+            onClick={() => onShowSourceChange?.(!showSource)}
           >
             <Code size={13} />
           </IconButton>
@@ -771,8 +768,8 @@ export function FileViewer({
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
         onScroll={(event) => {
           const position = {
-            top: event.currentTarget.scrollTop,
-            left: event.currentTarget.scrollLeft,
+            top: Math.max(0, event.currentTarget.scrollTop),
+            left: Math.max(0, event.currentTarget.scrollLeft),
           };
           scrollPositionRef.current = position;
           onScrollPositionChange?.(position);
@@ -797,7 +794,7 @@ export function FileViewer({
           <CodeEditor
             value={draft}
             onChange={(next) => {
-              const current = editStateRef.current ?? (
+              const current = bufferSession.getSnapshot() ?? (
                 data && typeof data.version === "string"
                   ? createFileBuffer(data.path, data.content, data.version)
                   : null
@@ -813,6 +810,11 @@ export function FileViewer({
             highlightLine={line}
             scrollRequest={lineScrollRequest}
             onScrollRequestHandled={onLineScrollRequestHandled}
+            scrollPosition={scrollPositionRef.current}
+            onScrollPositionChange={(position) => {
+              scrollPositionRef.current = position;
+              onScrollPositionChange?.(position);
+            }}
          />
         ) : data.notFound ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">

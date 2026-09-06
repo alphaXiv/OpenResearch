@@ -47,7 +47,7 @@ jobs:
 
       - name: UI typecheck
         working-directory: ui
-        run: pnpm exec tsc --noEmit
+        run: pnpm typecheck
 
       - name: UI unit tests
         run: node --test --experimental-strip-types ui/tests/*.test.mjs
