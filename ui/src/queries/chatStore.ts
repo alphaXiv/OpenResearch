@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import { useQuery, type QueryCacheNotifyEvent } from "@tanstack/react-query";
-import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds, cancelAndRemove } from "./client";
+import { queryClient, workspaceScope, isCurrentScope, deletedSessionIds } from "./client";
 import { getChatMessagesQuery, listChatSessionsQuery } from "./chat";
 import { markLiveUpdate } from "./live";
 import { reducer, type Action, type ChatState } from "./chatState";
@@ -38,10 +38,6 @@ export function dispatchChat(projectId: string, action: Action, existingOnly = f
     return;
   }
   const options = getChatMessagesQuery(action.sessionId);
-  if (action.type === "forget") {
-    void cancelAndRemove(options);
-    return;
-  }
   if (deletedSessionIds.has(action.sessionId)) return;
   markLiveUpdate(queryClient, options.queryKey, action.type === "upsertMessage" ? `message:${action.message.id}` : action.type === "setQueued" ? "queued" : action.type === "activeLeaf" ? "branch" : "local");
   const previous = queryClient.getQueryData(options.queryKey);

@@ -340,13 +340,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
     : null;
   const persistedPreferredAgent = useRef<AgentSelection | null>(null);
-  const experimentsOptions = useMemo(() => listExperimentsQuery(projectId), [projectId]);
-  const experimentsQuery = useQuery(experimentsOptions);
+  const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
   const [runDataReady, setRunDataReady] = useState(false);
-  const runsOptions = useMemo(() => listRunsQuery(projectId), [projectId]);
-  const runsQuery = useQuery(runsOptions);
+  const runsQuery = useQuery(listRunsQuery(projectId));
   const runs = runsQuery.data ?? [];
   // Latest runs/experiments, read by the stable openRunLogs/openFileTab so
   // evidence chips resolve ids without re-creating the callbacks on every poll
@@ -363,8 +361,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const runsVisitRef = useRef(0);
   const experimentsRef = useRef(experiments);
   experimentsRef.current = experiments;
-  const artifactsOptions = useMemo(() => getArtifactsQuery(projectId), [projectId]);
-  const artifactsQuery = useQuery(artifactsOptions);
+  const artifactsQuery = useQuery(getArtifactsQuery(projectId));
   const artifacts = artifactsQuery.data ?? null;
 
   const [view, setView] = useState<ExperimentsView>("table");

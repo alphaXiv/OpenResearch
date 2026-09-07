@@ -29,8 +29,7 @@ export type Action =
     annotations: { text: string }[];
   }
   | { type: "busy"; sessionId: string; busy: boolean }
-  | { type: "setQueued"; sessionId: string; items: QueuedMessage[] }
-  | { type: "forget"; sessionId: string };
+  | { type: "setQueued"; sessionId: string; items: QueuedMessage[] };
 
 export const LOCAL_PREFIX = "local-";
 /** Server-side `USER_SHELL_TOOL`: a composer `!` command on a user message. */
@@ -48,7 +47,7 @@ function upsertMessage(list: ChatMessage[], message: ChatMessage): ChatMessage[]
   return [...list.filter((m) => !m.id.startsWith(LOCAL_PREFIX)), message];
 }
 
-export function reducer(state: ChatState, action: Exclude<Action, { type: "busy" | "forget" }>): ChatState {
+export function reducer(state: ChatState, action: Exclude<Action, { type: "busy" }>): ChatState {
   switch (action.type) {
     case "upsertMessage": {
       const list = state.messagesBySession[action.sessionId] ?? [];

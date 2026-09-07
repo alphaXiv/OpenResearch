@@ -3544,7 +3544,7 @@ const Transcript = memo(function Transcript({
   messages,
   scrollRef,
   scrollToEndRef,
-  onBottomChange,
+  onPinToBottom,
   allMessages,
   canFork,
   onFork,
@@ -3567,7 +3567,7 @@ const Transcript = memo(function Transcript({
   messages: ChatMessage[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   scrollToEndRef: React.RefObject<(() => void) | null>;
-  onBottomChange: (atBottom: boolean) => void;
+  onPinToBottom: () => void;
   /** Every branch, for counting the forks of each turn. */
   allMessages: ChatMessage[];
   /** False greys out the edit control (busy turn, harness not ready). */
@@ -3630,10 +3630,9 @@ const Transcript = memo(function Transcript({
   useLayoutEffect(() => {
     const scroll = () => virtualizer.scrollToEnd();
     scrollToEndRef.current = scroll;
-    scroll();
-    onBottomChange(true);
+    onPinToBottom();
     return () => { scrollToEndRef.current = null; };
-  }, [virtualizer, scrollToEndRef, onBottomChange]);
+  }, [virtualizer, scrollToEndRef, onPinToBottom]);
   useEffect(() => {
     const retainSelection = () => {
       const selection = window.getSelection();
@@ -5959,7 +5958,7 @@ export function ChatPanel({
                 key={activeId}
                 scrollRef={threadRef}
                 scrollToEndRef={scrollToEndRef}
-                onBottomChange={setTranscriptAtBottom}
+                onPinToBottom={pinTranscriptToBottom}
                 messages={messages}
                 allMessages={allMessages}
                 canFork={canFork}

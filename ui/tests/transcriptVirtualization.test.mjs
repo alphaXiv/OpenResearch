@@ -86,3 +86,23 @@ test("viewport and footer resizing preserve bottom pin without moving a reader",
   cleanup();
   assert.equal(disconnected, true);
 });
+
+test("mounting a different conversation resets both bottom-pin representations", () => {
+  const expression = find(node => ts.isVariableDeclaration(node) && node.name.getText(file) === "pinTranscriptToBottom").initializer;
+  const effect = find(node => ts.isCallExpression(node) && node.expression.getText(file) === "useLayoutEffect" && node.getText(file).includes("onPinToBottom()")).arguments[0];
+  const stickToBottom = { current: false }, scrollToEndRef = { current: null };
+  let atBottom = false, scrolls = 0;
+  const pin = evaluate(`return ${expression.getText(file)}`, {
+    useCallback: callback => callback, stickToBottom, scrollToEndRef,
+    setTranscriptAtBottom: value => { atBottom = value; },
+  });
+  const mount = evaluate(`return ${effect.getText(file)}`, {
+    virtualizer: { scrollToEnd: () => { scrolls++; } }, scrollToEndRef, onPinToBottom: pin,
+  });
+  const cleanup = mount();
+  assert.equal(stickToBottom.current, true);
+  assert.equal(atBottom, true);
+  assert.equal(scrolls, 1);
+  cleanup();
+  assert.equal(scrollToEndRef.current, null);
+});
