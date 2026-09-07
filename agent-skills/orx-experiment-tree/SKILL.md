@@ -13,17 +13,10 @@ everything below assumes them.
 
 ## Before the first launch
 
-Inspect user instructions, the existing run command, project manifests, README,
-and CI for environment setup and execution. Follow
-the session playbook's Python defaults where no workflow is established; do
-not replace an existing manager. Ask only about an unresolved train/evaluation
-command, conflicting workflows, or compute-specific requirements.
-
-Encode the durable setup and execution recipe in the project's run command,
-following the playbook's Python policy. Runs execute committed snapshots (see
-`orx-compute`), so the recipe must recreate dependencies on the execution host
-from committed inputs without relying on the session's environment. Preserve
-established experiments' fixed run contracts.
+Follow the session playbook's Python policy. Before launching, resolve the
+train/evaluation command and compute-specific requirements; ask only if the
+project setup leaves these or the chosen workflow unclear. Record the durable
+setup and execution recipe in the project's run command.
 
 ## Provisional until it answers — repair, don't branch
 
