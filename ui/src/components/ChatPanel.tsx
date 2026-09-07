@@ -739,6 +739,7 @@ const PROMPT_ACTIONS_CLASS_NAME = "prompt-actions flex flex-wrap gap-2";
 
 const NO_MESSAGES: ChatMessage[] = [];
 const EMPTY_SESSIONS: ChatSession[] = [];
+const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
 
@@ -2267,6 +2268,7 @@ function TurnStatusRow({
  * raw command/output, because that detail is useful for diagnosis. */
 function ToolRow({
   part,
+  activity,
   repeatCount = 1,
   onOpenFile,
   onOpenRun,
@@ -2276,6 +2278,7 @@ function ToolRow({
   experimentName,
 }: {
   part: ChatPart;
+  activity: ToolActivity;
   repeatCount?: number;
   onOpenFile?: OpenTranscriptFile;
   onOpenRun?: OpenTranscriptTarget;
@@ -2285,7 +2288,6 @@ function ToolRow({
   experimentName?: (experimentId: string) => string;
 }) {
   const state = part.state;
-  const activity = toolActivity(part);
   const failed = state?.status === "error";
   const errorMessage = cleanToolError(state?.error || state?.output || "");
   const hasDetail = failed && Boolean(errorMessage);
@@ -2372,6 +2374,11 @@ function ToolGroup({
   experimentName?: (experimentId: string) => string;
 }) {
   const [open, setOpen] = useState(false);
+  const [hasOpened, setHasOpened] = useState(false);
+  const toggle = () => {
+    setHasOpened(true);
+    setOpen((value) => !value);
+  };
   const displayParts = squashToolParts(parts);
   const activities = displayParts.map(({ activity }) => activity);
   const tail = pendingTail ? displayParts.at(-1) : undefined;
@@ -2419,6 +2426,7 @@ function ToolGroup({
       <div className="tool-group my-3.5 mx-0">
         <ToolRow
           part={parts[0]}
+          activity={displayParts[0].activity}
           onOpenFile={onOpenFile}
           onOpenRun={onOpenRun}
           onOpenSpawnedSession={onOpenSpawnedSession}
@@ -2453,7 +2461,7 @@ function ToolGroup({
           <button
             type="button"
             className="tool-group-label min-w-0 whitespace-normal break-words cursor-pointer text-start"
-            onClick={() => setOpen((value) => !value)}
+            onClick={toggle}
             aria-expanded={open}
           >
             {summaryLabel}
@@ -2462,7 +2470,7 @@ function ToolGroup({
         <button
           type="button"
           className="tool-group-chevron-button inline-flex h-6 shrink-0 items-center justify-center p-px cursor-pointer rounded-sm"
-          onClick={() => setOpen((value) => !value)}
+          onClick={toggle}
           aria-expanded={open}
           aria-label={open ? m.chat_collapse_tool_activity() : m.chat_expand_tool_activity()}
         >
@@ -2476,11 +2484,12 @@ function ToolGroup({
       >
         <div className="tool-group-disclosure-inner">
           <div className="tool-group-rows flex flex-col gap-px mt-0.5 me-0 mb-1 ms-6">
-            {displayParts.map(({ part, count }) => (
+            {hasOpened && displayParts.map(({ part, count, activity }) => (
               <ToolRow
                 key={part.id}
                 part={part}
                 repeatCount={count}
+                activity={activity}
                 onOpenFile={onOpenFile}
                 onOpenRun={onOpenRun}
                 onOpenSpawnedSession={onOpenSpawnedSession}
@@ -4190,7 +4199,7 @@ export function ChatPanel({
   const [sessionOverride, setSessionOverride] = useState<Partial<ModelSelection>>({});
   const [recoveryOverrides, setRecoveryOverrides] = useState<
     Partial<ModelSelection> & { planMode?: boolean }
-  >({});
+  >(EMPTY_RECOVERY_OVERRIDES);
   const [recoveringTurnId, setRecoveringTurnId] = useState<string | null>(null);
   const recoveringTurnRef = useRef(false);
   const activeLeafRef = useRef<string | null>(null);
@@ -4634,7 +4643,7 @@ export function ChatPanel({
 
   // Load message history when a session becomes active.
   useEffect(() => {
-    setRecoveryOverrides({});
+    setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
     pendingClientTurn.current = null;
   }, [activeId]);
 
@@ -5142,7 +5151,7 @@ export function ChatPanel({
           );
         const response = await queueSessionMutation(sendBusy);
         if (response.turn?.existing) await reseedSession(sid);
-        if (inSourceScope()) setRecoveryOverrides({});
+        if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
         if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
       } catch {
         // Never reached the turn — restore the composer so a retry is one keypress.
@@ -5231,7 +5240,7 @@ export function ChatPanel({
         );
       const response = await queueSessionMutation(sendTurn);
       if (response.turn?.existing) await reseedSession(targetSessionId);
-      if (inSourceScope()) setRecoveryOverrides({});
+      if (inSourceScope()) setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
       if (pendingClientTurn.current?.id === clientTurnId) pendingClientTurn.current = null;
     } catch (err) {
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
@@ -5389,7 +5398,7 @@ export function ChatPanel({
         const sessionId = activeId;
         const response = await recoverChatTurn(sessionId, turnId, action, turnOpts);
         if (response.turn.existing) await reseedSession(sessionId);
-        setRecoveryOverrides({});
+        setRecoveryOverrides(EMPTY_RECOVERY_OVERRIDES);
       } catch {
         setSettingsError(m.chat_recover_failed());
       } finally {
