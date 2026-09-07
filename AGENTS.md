@@ -15,3 +15,8 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 - `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets.
 - Prefer canonical Tailwind utilities (`flex flex-col h-full min-h-0`) and project theme aliases (`bg-background`, `text-subtext`, `border-border`). Use arbitrary values only when no project utility exists, and preserve semantic marker classes when selectors or runtime behavior depend on them.
 - Before shipping, follow the checks in `.github/workflows/ci.yml`.
+
+## CI and release gates
+
+- GitHub branch protection for `main` must require `fmt, clippy, test` and `version sanity` from GitHub Actions, require branches to be up to date, and apply to administrators. These settings are managed in GitHub, not by this file.
+- CI runs on PR merge candidates and again on `main`. Releases also call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.
