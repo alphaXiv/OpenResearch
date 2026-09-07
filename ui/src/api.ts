@@ -1,5 +1,6 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
@@ -15,6 +16,22 @@ export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
 export const DEMO_RUN_EXPERIMENT_PROMPT =
   "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+
+export class FileChangedError extends Error {
+  readonly currentVersion: string | null;
+  readonly exists: boolean;
+
+  constructor(
+    message: string,
+    currentVersion: string | null,
+    exists: boolean,
+  ) {
+    super(message);
+    this.name = "FileChangedError";
+    this.currentVersion = currentVersion;
+    this.exists = exists;
+  }
+}
 
 export interface Project {
   id: string;
@@ -84,9 +101,25 @@ async function json<T>(res: Response): Promise<T> {
     const text = await res.text().catch(() => "");
     let message = text;
     try {
-      const parsed = JSON.parse(text) as { error?: string };
-      if (parsed.error) message = parsed.error;
-    } catch {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed === "object" && parsed !== null) {
+        if ("error" in parsed && typeof parsed.error === "string") message = parsed.error;
+        if (
+          res.status === 409 &&
+          "code" in parsed &&
+          parsed.code === "fileChanged" &&
+          "exists" in parsed &&
+          typeof parsed.exists === "boolean"
+        ) {
+          const currentVersion =
+            "currentVersion" in parsed && typeof parsed.currentVersion === "string"
+              ? parsed.currentVersion
+              : null;
+          throw new FileChangedError(message, currentVersion, parsed.exists);
+        }
+      }
+    } catch (error) {
+      if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
     throw new Error(message || `HTTP ${res.status}`);
@@ -95,9 +128,10 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 const get = <T>(url: string) => fetch(url).then((r) => json<T>(r));
-const post = <T>(url: string, body?: unknown) =>
+const post = <T>(url: string, body?: unknown, keepalive = false) =>
   fetch(url, {
     method: "POST",
+    keepalive,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then((r) => json<T>(r));
@@ -141,6 +175,7 @@ export interface OnboardingSelection {
 export type AgentSelection = OnboardingSelection;
 
 export interface UiState {
+  workspace: GlobalWorkspace | null;
   onboardingCompleted: boolean;
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
@@ -148,7 +183,16 @@ export interface UiState {
 
 export const getUiState = () => get<UiState>("/api/settings/ui-state");
 
+export const getProjectUiState = (projectId: string) =>
+  get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`);
+
+export const saveProjectUiState = (projectId: string, state: ProjectWorkspace, keepalive = false) =>
+  post<ProjectWorkspace>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, state, keepalive);
+export const saveGlobalWorkspace = (workspace: GlobalWorkspace, keepalive = false) =>
+  post<UiState>("/api/settings/ui-state", { workspace }, keepalive);
+
 export const updateUiState = (body: {
+  workspace?: GlobalWorkspace;
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
 }) => post<UiState>("/api/settings/ui-state", body);
@@ -356,6 +400,9 @@ export interface ProjectFile {
   notFound: boolean;
   root: CheckoutRoot;
   presentation: FilePresentation;
+  /** Exact live-checkout bytes; null for read-only/incomplete sources and
+   * absent when connected to an older remote server. */
+  version?: string | null;
 }
 
 /** One file from the project — a branch's committed copy when `ref` is given,
@@ -389,36 +436,37 @@ export const absoluteFileUrl = (path: string) =>
 /** Overwrite a text file in the project's live checkout (worktree when
  * `sessionId` is given, else the hub clone). Committed branch trees are
  * read-only, so pass no `ref`. */
-export interface SaveResult {
-  ok: boolean;
-  root?: CheckoutRoot;
-  bytesWritten?: number;
-  /** The file no longer matches what the editor loaded, so nothing was
-   * written — Overleaf's live channel rewrites files as collaborators type. */
-  changedOnDisk?: boolean;
-}
-
-/** `expectedSha256` is the hash of the loaded bytes; a file that has since
- * changed is left alone and reported rather than overwritten. */
 export const saveProjectFile = (
   projectId: string,
   path: string,
   content: string,
-  opts: { sessionId?: string; expectedSha256?: string } = {},
+  opts: { sessionId?: string; expectedVersion: string },
 ) =>
-  put<SaveResult>(`/api/projects/${projectId}/file`, {
-    path,
-    content,
-    sessionId: opts.sessionId,
-    expectedSha256: opts.expectedSha256,
-  });
+  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number; version: string }>(
+    `/api/projects/${projectId}/file`,
+    { path, content, sessionId: opts.sessionId, expectedVersion: opts.expectedVersion },
+  );
 
-/** Hex SHA-256 of a string's UTF-8 bytes, or null where the API is missing. */
-export async function sha256Hex(text: string): Promise<string | null> {
-  if (!globalThis.crypto?.subtle) return null;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+export type FileAction =
+  | { action: "rename"; newName: string }
+  | { action: "duplicate" | "delete" };
+
+export interface FileActionResult {
+  ok: boolean;
+  path: string;
 }
+
+export const manageProjectFile = (
+  projectId: string,
+  path: string,
+  action: FileAction,
+  opts: { sessionId?: string } = {},
+) =>
+  patch<FileActionResult>(`/api/projects/${projectId}/file`, {
+    path,
+    ...action,
+    sessionId: opts.sessionId,
+  });
 
 /** Open a checkout file on the machine running `orx up`, in the OS default app
  * for its type (the user's editor for source files). */
@@ -632,6 +680,8 @@ export const overleafUploadUrl = (
 
 export interface CodeTree {
   root: CheckoutRoot;
+  /** Absolute live checkout path; absent for committed branch listings. */
+  path?: string;
   /** The listed branch (`ref` mode), else the checked-out branch, else null
    * (detached HEAD). */
   branch: string | null;
@@ -690,12 +740,14 @@ export const githubBranchUrl = (owner: string, repo: string, branch: string) =>
     .join("/")}`;
 
 export type HfTokenSource = "env" | "openresearchEnv" | "hfCache";
+export type HfValidationStatus = "missing" | "valid" | "invalid" | "unreachable";
 
 export interface HfSettings {
   configured: boolean;
   source: HfTokenSource | null;
   maskedToken: string | null;
-  valid: boolean;
+  validationStatus: HfValidationStatus;
+  validationError: string | null;
   username: string | null;
   jobsWrite: boolean | null;
 }
@@ -703,6 +755,15 @@ export interface HfSettings {
 export const getHfSettings = () => get<HfSettings>("/api/settings/hf");
 
 export const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
+
+export interface TinkerSettings {
+  maskedKey: string | null;
+  validationStatus: "missing" | "valid" | "invalid" | "billingRequired";
+  processEnv: boolean;
+}
+
+export const getTinkerSettings = () => get<TinkerSettings>("/api/settings/tinker");
+export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
 // --- updates ------------------------------------------------------------------
 
@@ -725,6 +786,10 @@ export interface UpdateStatus {
    *  land between the install and the restart. */
   installedVersion: string | null;
   restartRequired: boolean;
+  /** Whether this platform supports `restartApp`; pair with `restartRequired`. */
+  canRestart: boolean;
+  /** Per-process id: changes when the server has relaunched. */
+  instance: string;
 }
 
 export interface InstalledCli {
@@ -739,6 +804,11 @@ export interface InstalledCli {
 export const getUpdateStatus = () => get<UpdateStatus>("/api/update");
 
 export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
+
+/** Relaunch the server into the copy the updater installed. The old server
+ *  answers and then goes away; poll `getUpdateStatus` for the new one. */
+export const restartApp = () =>
+  post<{ restarting: boolean; version: string }>("/api/update/restart");
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
@@ -774,21 +844,16 @@ export const saveK8sSettings = (body: { context?: string; namespace?: string }) 
 export type ModalTokenSource = "env" | "syncedEnv" | "modalToml";
 
 export interface ModalSettings {
-  /** The orx-managed venv exists on disk. */
-  envProvisioned: boolean;
-  /** `import modal` succeeds with the resolved interpreter. */
-  modalImportable: boolean;
   tokenConfigured: boolean;
   tokenSource: ModalTokenSource | null;
-  /** modalImportable && tokenConfigured. */
-  ready: boolean;
-  error: string | null;
+  maskedTokenId: string | null;
+  maskedTokenSecret: string | null;
+  processEnv: boolean;
 }
 
 export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
-
-/** Build the orx-managed Modal env (first run downloads the SDK, ~30–60s). */
-export const provisionModal = () => post<ModalSettings>("/api/settings/modal/provision");
+export const saveModalToken = (tokenId: string, tokenSecret: string) =>
+  post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
 // --- settings: env vars / git / harnesses ------------------------------------
 
@@ -1032,10 +1097,11 @@ export type ComputeTargetId =
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
- * in each backend's own settings endpoint, fetched when its row is expanded. */
+ * in each backend's own settings endpoint, fetched when its setup surface opens. */
 export interface ComputeTargetSummary {
   id: ComputeTargetId;
   configured: boolean;
+  fromEnvironmentTab?: boolean;
   /**
    * The readiness check couldn't run (offline, unreadable ~/.ssh), so
    * `configured` is a guess rather than an answer. Absent for backends whose
@@ -1135,6 +1201,9 @@ export const deleteArtifact = (projectId: string, path: string) =>
   fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean }>(r));
+
+export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
+  patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>

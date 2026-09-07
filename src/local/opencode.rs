@@ -712,6 +712,14 @@ mod tests {
     }
 
     #[test]
+    fn playbook_carries_python_environment_policy() {
+        let md = sample_playbook();
+        assert!(md.contains("## Python environments"));
+        assert!(md.contains("use `uv run --locked`"));
+        assert!(md.contains("Without uv"));
+    }
+
+    #[test]
     fn playbook_short_circuits_orientation_for_a_fresh_project() {
         let md = sample_playbook();
         assert!(md.contains("## Project state"));
@@ -766,8 +774,11 @@ mod tests {
     fn reports_skill_owns_artifact_output_policy() {
         let md = sample_playbook();
         let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
-        assert!(reports.content.contains("descriptive filename"));
-        assert!(reports.content.contains("artifacts root"));
+        assert!(md.contains("`orx-reports` before creating or organizing artifacts"));
+        assert!(reports.content.contains("Reuse the relevant folder"));
+        assert!(reports
+            .content
+            .contains("<file path=\"artifacts/transformer-sweep/figures/patch-size.svg\" />"));
         assert!(!md.contains("PROJECT.md"));
     }
 

@@ -1,21 +1,95 @@
 import { m } from "../paraglide/messages.js";
-// Overleaf controls for a .tex tab, shown as a note strip under the file header
-// like the compile log and the install hint beside it.
-//
 // The shape follows what Overleaf allows: syncing needs a Git authentication
 // token and a project that already exists (its bridge cannot create one), and
 // the bridge is a paid feature. So the upload route — which creates a new
 // project and works on any account — is offered in every state, not only after
 // a refusal.
 
-import { useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { CloudUpload, ExternalLink, X } from "lucide-react";
 import type { OverleafLiveStatus } from "../api";
 import type { OverleafSync } from "../useOverleafSync";
 import { getLocale } from "../paraglide/runtime.js";
 import { autoDir, ltr } from "../i18n";
-import { TokenForm } from "./GitTokenForm";
-import { Button, Spinner } from "./ui";
+import { Button, ButtonLink, IconButton, Input, showAlert, Spinner } from "./ui";
+import { usePopover } from "./ModelPicker";
+
+export function OverleafButton({ overleaf }: { overleaf: OverleafSync }) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const { open, setOpen, ref } = usePopover(triggerRef);
+  const id = useId();
+  const [position, setPosition] = useState({ top: 0, left: 0, maxHeight: 0 });
+  const conflicts = overleaf.last?.conflicts.length ?? 0;
+  const failed = overleaf.hasToken && Boolean(overleaf.error);
+  const tip = failed ? m.overleaf_sync_failed()
+    : conflicts ? m.overleaf_conflict_tip()
+    : !overleaf.hasToken || !overleaf.link ? m.overleaf_send_paper()
+    : overleaf.syncing ? m.overleaf_syncing()
+    : overleaf.blocked ? m.overleaf_save_to_sync()
+    : m.overleaf_in_sync();
+
+  useEffect(() => {
+    if (conflicts) setOpen(true);
+  }, [conflicts, setOpen]);
+
+  useEffect(() => {
+    if (failed) showAlert(m.overleaf_sync_failed(), "error", { id, duration: 5000 });
+  }, [failed, overleaf.error, id]);
+
+  useLayoutEffect(() => {
+    if (!open || !triggerRef.current || !ref.current) return;
+    const anchor = triggerRef.current.getBoundingClientRect();
+    const width = Math.min(384, window.innerWidth - 16);
+    const top = Math.min(anchor.bottom + 6, window.innerHeight - 80);
+    setPosition({ top, left: Math.max(8, Math.min(anchor.right - width, window.innerWidth - width - 8)), maxHeight: window.innerHeight - top - 8 });
+    (ref.current.querySelector<HTMLElement>("input") ?? ref.current).focus();
+    const close = () => setOpen(false);
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && !ref.current?.contains(event.target)) close();
+    };
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [open, ref, setOpen]);
+
+  return (
+    <>
+      <IconButton
+        ref={triggerRef}
+        size="small"
+        active={open}
+        disabled={!overleaf.loaded}
+        data-tip={tip}
+        data-tip-align="end"
+        aria-label={m.a11y_overleaf_status({ status: tip })}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen(!open)}
+      >
+        {overleaf.syncing ? <Spinner /> : <CloudUpload size={13} className={failed || conflicts ? "text-accent-red" : overleaf.hasToken && overleaf.link ? "text-accent-green" : undefined} />}
+      </IconButton>
+      {open && createPortal(
+        <div ref={ref} id={id} role="dialog" aria-label={m.settings_page_overleaf()} tabIndex={-1}
+          className="fixed z-100 w-96 max-w-[calc(100vw-1rem)] overflow-auto rounded-lg border border-border bg-background p-4 text-text shadow-popover"
+          style={position}
+          onBlur={(event) => {
+            if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget) && !triggerRef.current?.contains(event.relatedTarget)) setOpen(false);
+          }}
+        >
+          <div className="absolute end-3 top-3">
+            <IconButton size="small" aria-label={m.file_viewer_dismiss_overleaf_message()} onClick={() => { setOpen(false); triggerRef.current?.focus(); }}><X size={13} /></IconButton>
+          </div>
+          <OverleafPanel overleaf={overleaf} />
+        </div>, document.body,
+      )}
+    </>
+  );
+}
 
 const list = (paths: string[]) => autoDir(new Intl.ListFormat(getLocale()).format(paths.map(ltr)));
 
@@ -34,37 +108,92 @@ function status(overleaf: OverleafSync): string {
   return last.conflicts.length ? m.overleaf_nothing_synced() : m.overleaf_in_sync();
 }
 
+function UploadLink({ href }: { href: string }) {
+  return (
+    <a className="text-sm text-subtext whitespace-nowrap" href={href} target="_blank" rel="noreferrer">
+      {m.overleaf_panel_upload_a_copy_as_a_new_project()}
+    </a>
+  );
+}
+
 function liveText(live: OverleafLiveStatus): string {
   if (live.state === "live") return m.overleaf_live_on();
   if (live.state === "connecting") return m.overleaf_live_connecting();
   return live.error ?? m.overleaf_live_stopped();
 }
 
-/** Whether the last sync has nothing of its own to report, so the action row
- * is free to say the channel is live instead. */
-function quiet(overleaf: OverleafSync): boolean {
-  if (overleaf.error || overleaf.syncing || overleaf.blocked) return false;
-  const last = overleaf.last;
-  return !last || (!last.pulled.length && !last.pushed.length && !last.conflicts.length);
+/** Read the session cookie from a signed-in browser, or paste it. Import is
+ * the offer; the paste is what an unreadable browser falls back to. */
+function SessionForm({ overleaf }: { overleaf: OverleafSync }) {
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [pasting, setPasting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = (act: () => Promise<unknown>) => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void act()
+      .then(() => setPasting(false))
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e));
+        setPasting(true);
+      })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <p className="text-sm text-subtext">
+        {pasting ? m.overleaf_session_instructions() : m.overleaf_go_live_prompt()}
+      </p>
+      {pasting && (
+        <Input
+          className="basis-full min-w-0"
+          aria-label={m.overleaf_session_cookie()}
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder={m.overleaf_session_cookie()}
+          autoComplete="off"
+        />
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        {busy && <Spinner />}
+        {pasting ? (
+          <Button
+            type="button"
+            disabled={busy || !value.trim()}
+            onClick={() => run(() => overleaf.saveSession(value.trim()))}
+          >
+            {busy ? m.common_saving() : m.overleaf_add_cookie()}
+          </Button>
+        ) : (
+          <Button type="button" disabled={busy} onClick={() => run(overleaf.importSession)}>
+            {m.overleaf_import_cookie()}
+          </Button>
+        )}
+        <Button variant="ghost" type="button" disabled={busy} onClick={() => setPasting(!pasting)}>
+          {pasting ? m.overleaf_panel_cancel() : m.overleaf_add_cookie()}
+        </Button>
+      </div>
+      {error && (
+        <div role="alert" className="text-sm text-accent-red whitespace-pre-wrap break-words">{error}</div>
+      )}
+    </div>
+  );
 }
 
-function Dot({ className }: { className: string }) {
-  return <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${className}`} />;
-}
-
-/** The live channel's line, for the states the action row does not carry
- * itself: waiting, connecting, or stopped with the way back in. A channel
- * that is simply up rides beside the buttons instead (`hideState`), so the
- * panel does not spend a whole row saying so. */
-function LiveRow({ overleaf, hideState }: { overleaf: OverleafSync; hideState: boolean }) {
+/** How the editor channel is doing, under the sync status. A channel that is
+ * simply up is one quiet line; the rest carry a way back in. */
+function LiveSection({ overleaf }: { overleaf: OverleafSync }) {
+  if (!overleaf.hasSession) return <SessionForm overleaf={overleaf} />;
   const live = overleaf.live;
-  // Not asked for yet: the git sync has to bring the paper into step first,
-  // and a conflict or a failure keeps it that way.
-  if (!live) return hideState ? null : <div className="text-sm text-subtext">{m.overleaf_live_waiting()}</div>;
-  // The cookie is the problem (expired, or for another site): the way back
-  // in is a fresh one, not a retry with the same.
+  if (!live) return <p className="text-sm text-subtext">{m.overleaf_live_waiting()}</p>;
+  // The cookie is the problem (expired, or for another site): the way back in
+  // is a fresh one, not a retry with the same.
   const cookieRefused = live.state === "stopped" && !!live.error?.includes("session cookie");
-  if (hideState && !live.note && !cookieRefused) return null;
   const dot =
     live.state === "live"
       ? "bg-accent-green"
@@ -72,80 +201,19 @@ function LiveRow({ overleaf, hideState }: { overleaf: OverleafSync; hideState: b
         ? "bg-accent-amber"
         : "bg-accent-red";
   return (
-    <div className="flex flex-col gap-1">
-      {!hideState && (
-        <div className={`flex items-center flex-wrap gap-2 text-sm ${live.error ? "text-accent-red" : "text-subtext"}`}>
-          <Dot className={dot} />
-          <span className="flex-1 min-w-0">{liveText(live)}</span>
-          {live.state === "stopped" && !cookieRefused && (
-            <Button onClick={overleaf.retryLive}>{m.overleaf_live_retry()}</Button>
-          )}
+    <div className="flex flex-col gap-1.5">
+      <div className={`flex items-center gap-2 text-sm ${live.error ? "text-accent-red" : "text-subtext"}`}>
+        <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${dot}`} />
+        <span className="min-w-0 break-words">{liveText(live)}</span>
+      </div>
+      {live.note && <p className="text-sm text-accent-amber">{live.note}</p>}
+      {live.state === "stopped" && !cookieRefused && (
+        <div>
+          <Button onClick={overleaf.retryLive}>{m.overleaf_live_retry()}</Button>
         </div>
       )}
-      {live.note && <div className="text-sm text-accent-amber">{live.note}</div>}
       {cookieRefused && <SessionForm overleaf={overleaf} />}
     </div>
-  );
-}
-
-/** Paste the browser session cookie that opens the live channel. A line and
- * a button until asked for: the paper already syncs, and a password field on
- * every linked tab would nag. */
-function SessionForm({ overleaf }: { overleaf: OverleafSync }) {
-  const [open, setOpen] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  // Import reads a signed-in browser's cookie; pasting is the fallback the
-  // error points to, so a failed import opens the paste form.
-  const runImport = () => {
-    if (importing) return;
-    setImporting(true);
-    setError(null);
-    void overleaf
-      .importSession()
-      .catch((e: unknown) => {
-        setError(e instanceof Error ? e.message : String(e));
-        setOpen(true);
-      })
-      .finally(() => setImporting(false));
-  };
-
-  if (!open) {
-    return (
-      <div className="flex items-center flex-wrap gap-2 text-sm text-subtext">
-        <span className="flex-1 min-w-0">{m.overleaf_go_live_prompt()}</span>
-        {importing && <Spinner />}
-        <Button type="button" disabled={importing} onClick={runImport}>
-          {m.overleaf_import_cookie()}
-        </Button>
-        <Button variant="ghost" type="button" disabled={importing} onClick={() => setOpen(true)}>
-          {m.overleaf_add_cookie()}
-        </Button>
-      </div>
-    );
-  }
-  return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-sm text-subtext">{m.overleaf_session_instructions()}</div>
-      {error && <div className="text-sm text-accent-red whitespace-pre-wrap">{error}</div>}
-      <TokenForm
-        save={overleaf.saveSession}
-        onSaved={() => setOpen(false)}
-        placeholder={m.overleaf_session_cookie()}
-        createHref={overleaf.link?.url ?? ""}
-        createLabel={m.overleaf_open_overleaf()}
-        onCancel={() => setOpen(false)}
-      />
-    </div>
-  );
-}
-
-function UploadLink({ href }: { href: string }) {
-  return (
-    <a className="text-sm text-subtext whitespace-nowrap" href={href} target="_blank" rel="noreferrer">
-      {m.overleaf_panel_upload_a_copy_as_a_new_project()}
-    </a>
   );
 }
 
@@ -182,105 +250,100 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
     }
   }
 
-  if (overleaf.link && !replacingToken) {
+  if (overleaf.link && !needsToken) {
     const conflicts = overleaf.last?.conflicts ?? [];
-    // A channel that is simply up is a one-line fact; it shares the action
-    // row. When a sync has news of its own — files moved, a conflict — that
-    // takes the row and the channel drops to its own line.
-    const liveInline =
-      overleaf.hasSession && overleaf.live?.state === "live" && quiet(overleaf);
     return (
-      <div className="flex flex-col gap-1.5">
-        <div className="flex items-center flex-wrap gap-2 text-sm text-subtext">
-          {/* A channel that is up says so here rather than on a row of its
-              own, which would leave this one blank beside the buttons. */}
-          <span className="flex-1 min-w-0 flex items-center gap-2">
-            {liveInline && <Dot className="bg-accent-green" />}
-            <span className="min-w-0">{liveInline ? m.overleaf_live_on() : status(overleaf)}</span>
-          </span>
-          {overleaf.syncing && <Spinner />}
-          <a
-            className="inline-flex items-center gap-1 text-sm text-subtext whitespace-nowrap"
-            href={overleaf.link.url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {m.overleaf_panel_open_in_overleaf()}
-            <ExternalLink size={11} />
-          </a>
+      <div className="flex flex-col gap-3">
+        <div className="space-y-1.5 pe-8" role={overleaf.error ? "alert" : "status"}>
+          <div className={`flex items-center gap-2 text-sm font-medium ${overleaf.error ? "text-accent-red" : "text-text"}`}>
+            {overleaf.syncing && <Spinner />}
+            {overleaf.error ? m.overleaf_sync_failed() : status(overleaf)}
+          </div>
+          {overleaf.error && <p className="text-sm text-text whitespace-pre-wrap break-words">{overleaf.error}</p>}
+        </div>
+        <LiveSection overleaf={overleaf} />
+        <div className="flex flex-wrap items-center gap-2">
           <Button
+            variant={overleaf.error ? "primary" : "default"}
             disabled={overleaf.syncing || overleaf.blocked}
             data-tip={overleaf.blocked ? m.overleaf_save_first() : m.overleaf_sync_files_tip()}
             onClick={() => overleaf.sync()}
           >
-            {m.overleaf_panel_sync_now()}
+            {overleaf.error ? m.app_retry() : m.overleaf_panel_sync_now()}
           </Button>
-          <Button variant="ghost"
-            disabled={overleaf.syncing}
-            onClick={() =>
-              void overleaf.unlink().catch((err: unknown) => {
-                setFormError(err instanceof Error ? err.message : String(err));
-              })
-            }
+          <ButtonLink
+            variant="ghost"
+            href={overleaf.link.url}
+            target="_blank"
+            rel="noreferrer"
           >
-            {m.overleaf_panel_unlink()}
-          </Button>
-          {/* A stale token is the usual reason a sync stops working, so the
-              way to replace it appears when one has failed — not as a
-              standing row on a paper that is syncing fine. */}
-          {overleaf.error && (
-            <Button variant="ghost" type="button" onClick={replaceToken}>
-              {m.overleaf_panel_replace_the_overleaf_token()}
-            </Button>
-          )}
+            {m.overleaf_panel_open_in_overleaf()} <ExternalLink size={12} />
+          </ButtonLink>
         </div>
-        {overleaf.hasSession ? (
-          <LiveRow overleaf={overleaf} hideState={liveInline} />
-        ) : (
-          <SessionForm overleaf={overleaf} />
-        )}
         {conflicts.map((path) => (
-          <div key={path} className="flex items-center flex-wrap gap-2 text-sm text-accent-red">
-            <span className="flex-1 min-w-0">
+          <div key={path} className="space-y-2 text-sm">
+            <p className="break-words text-accent-red">
               <code className="font-mono">{path}</code> {m.overleaf_panel_changed_here_and_on_overleaf_both_copies_are()}
-            </span>
-            <Button
-              disabled={overleaf.syncing || overleaf.blocked}
-              onClick={() => overleaf.sync({ [path]: "keep-local" })}
-            >
-              {m.overleaf_panel_keep_this_copy()}
-            </Button>
-            <Button
-              disabled={overleaf.syncing || overleaf.blocked}
-              onClick={() => overleaf.sync({ [path]: "take-overleaf" })}
-            >
-              {m.overleaf_panel_use_overleaf_apos_s()}
-            </Button>
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                disabled={overleaf.syncing || overleaf.blocked}
+                onClick={() => overleaf.sync({ [path]: "keep-local" })}
+              >
+                {m.overleaf_panel_keep_this_copy()}
+              </Button>
+              <Button
+                disabled={overleaf.syncing || overleaf.blocked}
+                onClick={() => overleaf.sync({ [path]: "take-overleaf" })}
+              >
+                {m.overleaf_panel_use_overleaf_apos_s()}
+              </Button>
+            </div>
           </div>
         ))}
         {overleaf.last?.note && (
           <div className="text-sm text-accent-amber">{overleaf.last.note}</div>
         )}
         {formError && (
-          <div className="text-sm text-accent-red whitespace-pre-wrap">{formError}</div>
+          <div role="alert" className="text-sm text-accent-red whitespace-pre-wrap break-words">{formError}</div>
         )}
-        {/* Neither the upload link nor the token form lives here: uploading
-            makes a *new* project, and the token is machine-wide and belongs to
-            Settings. Both are for a paper that has no project yet. */}
+        <details className="border-t border-border pt-3">
+          <summary className="cursor-pointer text-sm font-semibold text-text focus-visible:outline-2 focus-visible:outline-text"><span className="ms-2">{m.settings_page_settings()}</span></summary>
+          <div className="mt-2 flex flex-col items-start gap-1">
+            <Button variant="ghost" className="font-normal" type="button" onClick={replaceToken}>
+              {m.overleaf_panel_replace_the_overleaf_token()}
+            </Button>
+            <ButtonLink variant="ghost" className="font-normal" href={overleaf.uploadUrl} target="_blank" rel="noreferrer">
+              {m.overleaf_panel_upload_a_copy_as_a_new_project()}
+            </ButtonLink>
+            <Button variant="ghost" className="font-normal"
+              disabled={overleaf.syncing}
+              onClick={() =>
+                void overleaf.unlink().catch((err: unknown) => {
+                  setFormError(err instanceof Error ? err.message : String(err));
+                })
+              }
+            >
+              {m.overleaf_panel_unlink()}
+            </Button>
+          </div>
+        </details>
       </div>
     );
   }
 
   return (
     <form className="flex flex-col gap-1.5" onSubmit={submit}>
-      <div className="text-sm text-subtext">
+      <div className="pe-8 text-sm text-subtext">
         {needsToken
           ? m.overleaf_token_instructions()
           : m.overleaf_url_instructions()}
       </div>
       <div className="flex items-center flex-wrap gap-2">
-        <input
-          className="flex-1 min-w-55 text-sm"
+        <Input
+          className="basis-full min-w-0"
+          aria-label={needsToken ? m.overleaf_git_token() : m.overleaf_my_projects()}
+          aria-invalid={Boolean(formError)}
           type={needsToken ? "password" : "text"}
           value={value}
           onChange={(e) => setValue(e.target.value)}
@@ -303,7 +366,7 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
           {needsToken ? m.overleaf_create_token() : m.overleaf_my_projects()}
         </a>
       </div>
-      {formError && <div className="text-sm text-accent-red whitespace-pre-wrap">{formError}</div>}
+      {(formError || overleaf.error) && <div role="alert" className="text-sm text-accent-red whitespace-pre-wrap break-words">{formError || overleaf.error}</div>}
       <div className="flex items-center flex-wrap gap-3">
         <UploadLink href={overleaf.uploadUrl} />
         {replacingToken ? (

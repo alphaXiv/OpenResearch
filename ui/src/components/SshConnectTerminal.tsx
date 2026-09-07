@@ -8,7 +8,7 @@ export type SshConnectResult =
   | { backend: "ssh"; result: SshPreflight }
   | { backend: "slurm"; result: SlurmPreflight };
 
-const TERMINAL_CLASS_NAME = "h-40 overflow-hidden rounded-md bg-terminal p-2";
+const TERMINAL_CLASS_NAME = "overflow-hidden rounded-md bg-terminal p-2";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -72,6 +72,47 @@ export function SshConnectTerminal({
   onComplete: (result: SshConnectResult) => void;
   onError?: (error: string) => void;
 }) {
+  const query = new URLSearchParams({ host, backend });
+  return <CommandTerminal
+    path={`${path}?${query}`}
+    label={m.settings_ssh_connection_terminal({ host: ltr(host) })}
+    active={active}
+    onError={onError}
+    onComplete={(value) => {
+      const result = connectionResult(value);
+      if (!result) return false;
+      onComplete(result);
+      return true;
+    }}
+  />;
+}
+
+export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
+  login: boolean;
+  onComplete: () => void;
+  onError: (error: string) => void;
+}) {
+  return <CommandTerminal
+    path={login ? "/api/settings/openresearch/login" : "/api/settings/openresearch/ssh-key"}
+    label={login ? "orx login" : "orx ssh-key add"}
+    heightClass="h-80"
+    onError={onError}
+    onComplete={(value) => {
+      if (!isRecord(value) || value.type !== "complete") return false;
+      onComplete();
+      return true;
+    }}
+  />;
+}
+
+function CommandTerminal({ path, label, heightClass = "h-40", active = true, onComplete, onError }: {
+  path: string;
+  label: string;
+  heightClass?: string;
+  active?: boolean;
+  onComplete: (value: unknown) => boolean;
+  onError?: (error: string) => void;
+}) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
   const completeRef = useRef(onComplete);
@@ -88,8 +129,6 @@ export function SshConnectTerminal({
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(path, `${protocol}//${location.host}`);
-    url.searchParams.set("host", host);
-    url.searchParams.set("backend", backend);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     let completed = false;
@@ -129,19 +168,17 @@ export function SshConnectTerminal({
       } catch {
         return;
       }
-      const result = connectionResult(value);
-      if (result) {
+      if (completeRef.current(value)) {
         completed = true;
-        completeRef.current(result);
         socket.close();
         return;
       }
       const message = serverError(value);
       if (message) fail(message);
     };
-    socket.onerror = () => fail(m.settings_ssh_connection_closed());
+    socket.onerror = () => fail(m.settings_terminal_closed());
     socket.onclose = () => {
-      if (!completed && !failed) fail(m.settings_ssh_connection_closed());
+      if (!completed && !failed) fail(m.settings_terminal_closed());
     };
 
     return () => {
@@ -155,7 +192,7 @@ export function SshConnectTerminal({
       terminalRef.current = null;
       dispose();
     };
-  }, [backend, host, path]);
+  }, [path]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -168,9 +205,9 @@ export function SshConnectTerminal({
   return (
     <div className="mt-3">
       <div
-        className={TERMINAL_CLASS_NAME}
+        className={`${heightClass} ${TERMINAL_CLASS_NAME}`}
         role="group"
-        aria-label={m.settings_ssh_connection_terminal({ host: ltr(host) })}
+        aria-label={label}
       >
         <div ref={wrapRef} className="h-full overflow-hidden" />
       </div>
@@ -192,7 +229,7 @@ export function SshTerminalTranscript({ host, transcript }: { host: string; tran
 
   return (
     <div
-      className={`mt-3 ${TERMINAL_CLASS_NAME}`}
+      className={`mt-3 h-40 ${TERMINAL_CLASS_NAME}`}
       role="group"
       aria-label={m.settings_ssh_connection_terminal({ host: ltr(host) })}
     >

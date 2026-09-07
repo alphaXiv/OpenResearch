@@ -13,12 +13,10 @@ everything below assumes them.
 
 ## Before the first launch
 
-If the project has no completed runs, ask the user how they run the code before
-launching. Ask for the environment setup (conda, venv, uv, modules), dependency
-installation, the exact train or evaluation command they use today, and any
-compute-specific requirements. Do not reverse-engineer or guess this setup from
-the repository. Encode the durable recipe in the project's run command so later
-sessions do not need to ask again.
+Follow the session playbook's Python policy. Before launching, resolve the
+train/evaluation command and compute-specific requirements; ask only if the
+project setup leaves these or the chosen workflow unclear. Record the durable
+setup and execution recipe in the project's run command.
 
 ## Provisional until it answers — repair, don't branch
 
@@ -190,7 +188,7 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 
 Stop when the goal is met, or after ~3 consecutive failed or regressed runs.
 When you stop, write up the tree as a descriptively named project artifact — see
-the `orx-reports` skill for naming and optional folder guidance.
+the `orx-reports` skill for naming and folder guidance.
 
 Close any turn that ran or changed experiments with a short experiment summary:
 one line per relevant node with what it tested, its status, and the headline

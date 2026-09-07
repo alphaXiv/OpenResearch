@@ -41,6 +41,7 @@ use crate::store::{
     log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
 use crate::updates;
+use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
 pub async fn run(args: UpArgs) -> Result<()> {
@@ -100,6 +101,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         remote_instance_id: remote_instance_id.clone(),
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
+        restart: Arc::new(tokio::sync::Notify::new()),
     };
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
@@ -184,6 +186,8 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // over SSH by `orx up --remote`, closing that tunnel (the launcher's Ctrl-C)
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
+    let restart = state.restart.clone();
+    let mut restarting = false;
     let explicit_stop = if persistent_host {
         tokio::select! {
             r = axum::serve(listener, app) => {
@@ -191,11 +195,13 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 false
             }
             changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
+            _ = restart.notified() => { restarting = true; false }
             _ = persistent_shutdown_signal() => false,
         }
     } else {
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
+            _ = restart.notified() => restarting = true,
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
         false
@@ -214,6 +220,11 @@ pub async fn run(args: UpArgs) -> Result<()> {
         server.shutdown().await;
     }
     state.dashboard_lock.lock().unwrap().take();
+    if restarting {
+        eprintln!("orx up: restarting into the updated orx");
+        let err = updates::relaunch(actual_port);
+        return Err(anyhow!("orx up: could not restart: {err}"));
+    }
     Ok(())
 }
 
@@ -293,6 +304,8 @@ struct AppState {
     remote_instance_id: Option<String>,
     stopping: Arc<AtomicBool>,
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
+    /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
+    restart: Arc<tokio::sync::Notify>,
 }
 
 async fn project_publication_lock(
@@ -451,7 +464,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/projects/{id}/code-tree", get(project_code_tree))
         .route(
             "/api/projects/{id}/file",
-            get(project_file).put(write_project_file),
+            get(project_file)
+                .put(write_project_file)
+                .patch(manage_project_file),
         )
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
@@ -497,17 +512,25 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route(
             "/api/projects/{id}/files",
-            get(list_artifacts).delete(delete_artifact),
+            get(list_artifacts)
+                .patch(manage_artifact_file)
+                .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
+            "/api/settings/tinker",
+            get(tinker_settings).post(set_tinker_key),
+        )
+        .route(
             "/api/settings/k8s",
             get(k8s_settings).post(set_k8s_settings),
         )
-        .route("/api/settings/modal", get(modal_settings))
-        .route("/api/settings/modal/provision", post(provision_modal))
+        .route(
+            "/api/settings/modal",
+            get(modal_settings).post(set_modal_token),
+        )
         .route("/api/settings/env", get(env_settings).post(set_env_var))
         .route(
             "/api/settings/env/{key}",
@@ -537,9 +560,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/update", get(update_status))
         .route("/api/update/apply", post(apply_update))
+        .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
         .route("/api/update/install-cli", post(install_cli))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
+        .route(
+            "/api/projects/{id}/ui-state",
+            get(project_ui_state).post(set_project_ui_state),
+        )
         .route("/api/settings/ssh", get(ssh_settings))
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
@@ -572,6 +600,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
+        .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route(
+            "/api/settings/openresearch/ssh-key",
+            get(openresearch_ssh_key),
+        )
         .route(
             "/api/settings/lit-sources",
             get(lit_sources_settings).post(set_lit_sources_settings),
@@ -682,6 +715,7 @@ fn remote_route_forbidden(path: &str) -> bool {
         "/api/project-path/pick"
             | "/api/update"
             | "/api/update/apply"
+            | "/api/update/restart"
             | "/api/update/auto"
             | "/api/update/install-cli"
             | "/api/settings/data-dir"
@@ -689,6 +723,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/ssh/master"
             | "/api/settings/ssh/preflight"
             | "/api/settings/ssh/connect"
+            | "/api/settings/openresearch/ssh-key"
+            | "/api/settings/openresearch/login"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
 }
@@ -2458,6 +2494,9 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         // for a live listing the session's worktree is the live view when given
         // (its untracked files the clone never sees), else the hub clone.
         let (root, root_kind) = resolve_checkout_root(&store, &project, session_id)?;
+        let path = ref_name
+            .is_none()
+            .then(|| root.to_string_lossy().into_owned());
         let (root_kind, branch, mut entries) = match ref_name {
             Some(name) => {
                 let sha = local::git::resolve_branch_commit(&root, name)?
@@ -2479,6 +2518,7 @@ async fn project_code_tree(Path(id): Path<String>, Query(q): Query<CodeTreeQuery
         entries.truncate(CODE_TREE_LIMIT);
         Ok(Json(json!({
             "root": root_kind,
+            "path": path,
             "branch": branch,
             "entries": entries,
             "truncated": truncated,
@@ -2508,6 +2548,7 @@ struct ProjectFileResponse {
     not_found: bool,
     root: &'static str,
     presentation: local::files::FilePresentation,
+    version: Option<String>,
 }
 
 impl ProjectFileResponse {
@@ -2524,6 +2565,7 @@ impl ProjectFileResponse {
             not_found: true,
             root,
             presentation,
+            version: None,
         }
     }
 
@@ -2540,6 +2582,7 @@ impl ProjectFileResponse {
             not_found: false,
             root,
             presentation,
+            version: None,
         }
     }
 
@@ -2550,6 +2593,7 @@ impl ProjectFileResponse {
         truncated: bool,
         binary: bool,
         presentation: local::files::FilePresentation,
+        version: Option<String>,
     ) -> Self {
         Self {
             path,
@@ -2559,8 +2603,22 @@ impl ProjectFileResponse {
             not_found: false,
             root,
             presentation,
+            version,
         }
     }
+}
+
+fn file_version(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn file_version_on_disk(path: &std::path::Path) -> std::result::Result<String, ApiError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)
+        .map_err(|error| ApiError::from(anyhow!("save failed: {error}")))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn validated_project_file_path(
@@ -2657,6 +2715,7 @@ async fn project_file(
                         truncated,
                         binary,
                         presentation,
+                        None,
                     )))
                 }
                 None => Ok(Json(ProjectFileResponse::missing(
@@ -2713,6 +2772,7 @@ async fn project_file(
         let truncated = buf.len() as u64 > FILE_READ_LIMIT;
         buf.truncate(FILE_READ_LIMIT as usize);
         let (content, binary) = decode_project_file_text(buf, truncated);
+        let version = (!truncated && !binary).then(|| file_version(content.as_bytes()));
         let presentation = if binary {
             local::files::FilePresentation::Download
         } else {
@@ -2725,6 +2785,7 @@ async fn project_file(
             truncated,
             binary,
             presentation,
+            version,
         )))
     })
     .await
@@ -2751,10 +2812,181 @@ struct WriteProjectFileReq {
     content: String,
     /// Chat session whose worktree owns the file; absent writes the hub clone.
     session_id: Option<String>,
-    /// SHA-256 of the bytes the editor loaded; a file that no longer hashes to
-    /// it (the Overleaf live channel writes as collaborators type) refuses the save.
-    #[serde(default)]
-    expected_sha256: Option<String>,
+    /// Exact version returned by the read endpoint. Older clients may omit it.
+    expected_version: Option<String>,
+}
+
+enum WriteProjectFileOutcome {
+    Saved(Value),
+    Conflict {
+        current_version: Option<String>,
+        exists: bool,
+    },
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FileAction {
+    Rename,
+    Duplicate,
+    Delete,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageFileReq {
+    path: String,
+    action: FileAction,
+    new_name: Option<String>,
+    session_id: Option<String>,
+}
+
+fn validated_file_name(name: Option<&str>) -> std::result::Result<&str, ApiError> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    match name {
+        Some(name)
+            if name != "." && name != ".." && name.len() <= 255 && !name.contains(['/', '\\']) =>
+        {
+            Ok(name)
+        }
+        _ => Err(bad_request("invalid file name")),
+    }
+}
+
+fn duplicate_file_name(name: &str, number: usize) -> String {
+    let suffix = if number == 1 {
+        " copy".to_string()
+    } else {
+        format!(" copy {number}")
+    };
+    match name.rsplit_once('.') {
+        Some((stem, extension)) if !stem.is_empty() => format!("{stem}{suffix}.{extension}"),
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+fn manage_local_file(
+    root: &std::path::Path,
+    rel: &str,
+    action: FileAction,
+    new_name: Option<&str>,
+    protect_git_dir: bool,
+) -> std::result::Result<String, ApiError> {
+    let (rel, rel_path) = validated_project_file_path(rel)?;
+    if protect_git_dir && touches_git_dir(&rel_path) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    let root = std::fs::canonicalize(root)
+        .map_err(|e| ApiError::from(anyhow!("file root unavailable: {e}")))?;
+    let source = root.join(&rel_path);
+    let resolved = std::fs::canonicalize(&source).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => not_found("file"),
+        _ => ApiError::from(anyhow!("file unavailable: {e}")),
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err(bad_request("path escapes file root"));
+    }
+    if protect_git_dir && resolved.strip_prefix(&root).is_ok_and(touches_git_dir) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    if resolved.is_dir() {
+        return Err(bad_request("path is a directory"));
+    }
+
+    let parent = source.parent().ok_or_else(|| bad_request("invalid path"))?;
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| ApiError::from(anyhow!("parent directory unavailable: {e}")))?;
+    if !parent.starts_with(&root) {
+        return Err(bad_request("path escapes file root"));
+    }
+    if matches!(action, FileAction::Delete) {
+        std::fs::remove_file(&source).map_err(|e| ApiError::from(anyhow!("delete failed: {e}")))?;
+        return Ok(rel);
+    }
+
+    if matches!(action, FileAction::Duplicate)
+        && std::fs::symlink_metadata(&source)
+            .map_err(|e| ApiError::from(anyhow!("file unavailable: {e}")))?
+            .file_type()
+            .is_symlink()
+    {
+        return Err(bad_request("cannot duplicate a symbolic link"));
+    }
+    let old_name = rel_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| bad_request("invalid file name"))?;
+    let destination_name = match action {
+        FileAction::Rename => validated_file_name(new_name)?.to_string(),
+        FileAction::Duplicate => {
+            let mut number = 1;
+            loop {
+                let candidate = duplicate_file_name(old_name, number);
+                match std::fs::symlink_metadata(parent.join(&candidate)) {
+                    Ok(_) => number += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break candidate,
+                    Err(error) => {
+                        return Err(ApiError::from(anyhow!(
+                            "could not choose a copy name: {error}"
+                        )))
+                    }
+                }
+            }
+        }
+        FileAction::Delete => unreachable!(),
+    };
+    let destination_rel = rel_path.with_file_name(&destination_name);
+    if protect_git_dir && touches_git_dir(&destination_rel) {
+        return Err(bad_request("cannot manage files under .git"));
+    }
+    if destination_rel == rel_path {
+        return Ok(rel);
+    }
+    let destination = parent.join(&destination_name);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(bad_request("a file with that name already exists"));
+        }
+        Ok(_) => match std::fs::canonicalize(&destination) {
+            Ok(path) if path == resolved => {}
+            Ok(_) | Err(_) => return Err(bad_request("a file with that name already exists")),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ApiError::from(anyhow!("destination unavailable: {error}"))),
+    }
+    match action {
+        FileAction::Rename => std::fs::rename(&source, &destination)
+            .map_err(|e| ApiError::from(anyhow!("rename failed: {e}")))?,
+        FileAction::Duplicate => {
+            std::fs::copy(&source, &destination)
+                .map_err(|e| ApiError::from(anyhow!("copy failed: {e}")))?;
+        }
+        FileAction::Delete => unreachable!(),
+    }
+    Ok(destination_rel.to_string_lossy().into_owned())
+}
+
+async fn manage_project_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ManageFileReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let (root, root_kind) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+        if req.session_id.is_some() && root_kind == "clone" {
+            return Err(bad_request(
+                "this session's worktree is no longer available — reload the files",
+            ));
+        }
+        let path = manage_local_file(&root, &req.path, req.action, req.new_name.as_deref(), true)?;
+        Ok(Json(json!({ "ok": true, "path": path })))
+    })
+    .await
 }
 
 /// Overwrite an existing text file in the project's live checkout with edited
@@ -2762,10 +2994,12 @@ struct WriteProjectFileReq {
 /// `ref` path here and stay read-only. Traversal and symlink escapes are
 /// rejected by canonicalizing the target and confirming it stays under the root.
 async fn write_project_file(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<WriteProjectFileReq>,
-) -> ApiResult {
-    blocking_api(move || {
+) -> std::result::Result<Response, ApiError> {
+    reject_if_moving(&state)?;
+    let outcome = tokio::task::spawn_blocking(move || {
         let (rel, rel_path) = validated_project_file_path(&req.path)?;
         if touches_git_dir(&rel_path) {
             return Err(bad_request("cannot edit files under .git"));
@@ -2795,7 +3029,15 @@ async fn write_project_file(
         // checkout; a missing file means the editor's copy is stale.
         let full = match std::fs::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if req.expected_version.is_some() {
+                    return Ok(WriteProjectFileOutcome::Conflict {
+                        current_version: None,
+                        exists: false,
+                    });
+                }
+                return Err(not_found("file"));
+            }
             Err(e) => return Err(ApiError::from(anyhow!("save failed: {e}"))),
         };
         if !full.starts_with(&root) {
@@ -2804,23 +3046,47 @@ async fn write_project_file(
         if full.is_dir() {
             return Err(bad_request("path is a directory"));
         }
-        if let Some(expected) = &req.expected_sha256 {
-            let current =
-                std::fs::read(&full).map_err(|e| ApiError::from(anyhow!("save failed: {e}")))?;
-            if local::overleaf::hash(&current) != *expected {
-                return Ok(Json(json!({ "ok": false, "changedOnDisk": true })));
+        // ponytail: external writers do not share a lock; add platform file coordination if this race becomes observable.
+        if let Some(expected) = req.expected_version.as_deref() {
+            let current = file_version_on_disk(&full)?;
+            if current != expected {
+                return Ok(WriteProjectFileOutcome::Conflict {
+                    current_version: Some(current),
+                    exists: true,
+                });
             }
         }
         std::fs::write(&full, req.content.as_bytes())
             .map_err(|e| ApiError::from(anyhow!("save failed: {e}")))?;
+        // The live channel polls on a tick; a save through the dashboard is
+        // told at once so a collaborator sees it without the wait.
         local::overleaf_live::nudge(&full);
-        Ok(Json(json!({
+        Ok(WriteProjectFileOutcome::Saved(json!({
             "ok": true,
             "root": root_kind,
             "bytesWritten": req.content.len(),
+            "version": file_version(req.content.as_bytes()),
         })))
     })
     .await
+    .map_err(|e| ApiError::from(anyhow!("file task failed: {e}")))??;
+
+    Ok(match outcome {
+        WriteProjectFileOutcome::Saved(value) => Json(value).into_response(),
+        WriteProjectFileOutcome::Conflict {
+            current_version,
+            exists,
+        } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "file changed on disk",
+                "code": "fileChanged",
+                "currentVersion": current_version,
+                "exists": exists,
+            })),
+        )
+            .into_response(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -3579,6 +3845,7 @@ async fn absolute_file(
             truncated,
             binary,
             presentation,
+            None,
         )))
     })
     .await
@@ -3640,6 +3907,24 @@ async fn list_artifacts(Path(id): Path<String>) -> ApiResult {
             .ok_or_else(|| not_found("project"))?;
         let listing = local::files::list(&project)?;
         Ok(Json(json!(listing)))
+    })
+    .await
+}
+
+async fn manage_artifact_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ManageFileReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    blocking_api(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let root = local::files::ensure_dir(&project)?;
+        let path = manage_local_file(&root, &req.path, req.action, req.new_name.as_deref(), false)?;
+        Ok(Json(json!({ "ok": true, "path": path })))
     })
     .await
 }
@@ -3714,7 +3999,8 @@ struct HfSettings {
     configured: bool,
     source: Option<&'static str>,
     masked_token: Option<String>,
-    valid: bool,
+    validation_status: &'static str,
+    validation_error: Option<String>,
     username: Option<String>,
     jobs_write: Option<bool>,
 }
@@ -3741,7 +4027,8 @@ async fn hf_token_status() -> HfSettings {
             configured: false,
             source: None,
             masked_token: None,
-            valid: false,
+            validation_status: "missing",
+            validation_error: None,
             username: None,
             jobs_write: None,
         };
@@ -3751,19 +4038,97 @@ async fn hf_token_status() -> HfSettings {
         TokenSource::OpenresearchEnv => "openresearchEnv",
         TokenSource::HfCache => "hfCache",
     };
-    let details = huggingface::whoami_details(&token).await.ok();
-    HfSettings {
-        configured: true,
-        source: Some(source),
-        masked_token: Some(mask_token(&token)),
-        valid: details.is_some(),
-        username: details.as_ref().map(|d| d.name.clone()),
-        jobs_write: details.and_then(|d| d.jobs_write),
+    match huggingface::whoami_details(&token).await {
+        Ok(details) => HfSettings {
+            configured: true,
+            source: Some(source),
+            masked_token: Some(mask_token(&token)),
+            validation_status: "valid",
+            validation_error: None,
+            username: Some(details.name),
+            jobs_write: details.jobs_write,
+        },
+        Err(error) => {
+            let validation_status = if error
+                .downcast_ref::<reqwest::Error>()
+                .is_some_and(|error| error.status() == Some(reqwest::StatusCode::UNAUTHORIZED))
+            {
+                "invalid"
+            } else {
+                "unreachable"
+            };
+            HfSettings {
+                configured: true,
+                source: Some(source),
+                masked_token: Some(mask_token(&token)),
+                validation_status,
+                validation_error: Some(error.to_string()),
+                username: None,
+                jobs_write: None,
+            }
+        }
     }
 }
 
 async fn hf_settings() -> Json<Value> {
     Json(json!(hf_token_status().await))
+}
+
+async fn tinker_settings() -> ApiResult {
+    use crate::jobs::tinker;
+    let Ok((key, source)) = tinker::resolve_api_key_with_source() else {
+        return Ok(Json(
+            json!({ "validationStatus": tinker::KeyStatus::Missing, "processEnv": false, "maskedKey": null }),
+        ));
+    };
+    let status = tinker::validate_api_key(&key).await.map_err(bad_request)?;
+    Ok(Json(json!({
+        "validationStatus": status,
+        "processEnv": source == tinker::ApiKeySource::Env,
+        "maskedKey": mask_token(&key),
+    })))
+}
+
+#[derive(Deserialize)]
+struct SetTinkerKeyReq {
+    key: String,
+}
+
+async fn set_tinker_key(Json(req): Json<SetTinkerKeyReq>) -> ApiResult {
+    use crate::jobs::tinker;
+    let key = req.key.trim().to_string();
+    if key.is_empty() {
+        return Err(bad_request("API key is required"));
+    }
+    let status = tinker::validate_api_key(&key).await.map_err(bad_request)?;
+    if status == tinker::KeyStatus::Invalid {
+        return Err(bad_request(
+            "Invalid Tinker API key. The existing key was not changed.",
+        ));
+    }
+    let process_key = std::env::var(tinker::API_KEY_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let effective_status = if let Some(ref process_key) = process_key {
+        if process_key.trim() == key {
+            status
+        } else {
+            tinker::validate_api_key(process_key.trim())
+                .await
+                .map_err(bad_request)?
+        }
+    } else {
+        status
+    };
+    let masked_key = mask_token(process_key.as_deref().map(str::trim).unwrap_or(&key));
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_var(tinker::API_KEY_ENV, &key)
+    })
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(
+        json!({ "validationStatus": effective_status, "processEnv": process_key.is_some(), "maskedKey": masked_key }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3895,26 +4260,57 @@ fn spawn_claude_auth_monitor(
 
 use crate::jobs::modal;
 
-fn modal_settings_json(s: &modal::ModalStatus) -> Value {
-    json!({
-        "envProvisioned": s.env_provisioned,
-        "modalImportable": s.modal_importable,
-        "tokenConfigured": s.token_configured,
-        "tokenSource": s.token_source,
-        "ready": s.modal_importable && s.token_configured,
-        "error": s.error,
+fn modal_settings_json() -> crate::error::Result<Value> {
+    let token = modal::resolve_token()?;
+    Ok(json!({
+        "tokenConfigured": token.is_some(),
+        "tokenSource": token.as_ref().map(|token| token.source),
+        "maskedTokenId": token.as_ref().map(|token| mask_token(&token.id)),
+        "maskedTokenSecret": token.as_ref().map(|token| mask_token(&token.secret)),
+        "processEnv": std::env::var_os("MODAL_TOKEN_ID").is_some() || std::env::var_os("MODAL_TOKEN_SECRET").is_some(),
+    }))
+}
+
+async fn modal_settings() -> ApiResult {
+    Ok(Json(modal_settings_json().map_err(bad_request)?))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetModalTokenReq {
+    token_id: String,
+    token_secret: String,
+}
+
+async fn set_modal_token(Json(req): Json<SetModalTokenReq>) -> ApiResult {
+    let id = req.token_id.trim().to_string();
+    let secret = req.token_secret.trim().to_string();
+    if id.is_empty() || secret.is_empty() {
+        return Err(bad_request(
+            "Both the Modal token ID and secret are required.",
+        ));
+    }
+    if std::env::var_os("MODAL_TOKEN_ID").is_some()
+        || std::env::var_os("MODAL_TOKEN_SECRET").is_some()
+    {
+        return Err(bad_request("Modal credentials are overridden by the process environment. Remove those overrides before replacing the token here."));
+    }
+    // Modal loads and validates its profile file even when credentials come from env.
+    modal::resolve_token().map_err(bad_request)?;
+    let masked_id = mask_token(&id);
+    let masked_secret = mask_token(&secret);
+    tokio::task::spawn_blocking(move || {
+        crate::config::write_synced_env_vars(&[
+            ("MODAL_TOKEN_ID", &id),
+            ("MODAL_TOKEN_SECRET", &secret),
+        ])
     })
-}
-
-async fn modal_settings() -> Json<Value> {
-    Json(modal_settings_json(&modal::detect().await))
-}
-
-/// Build the orx-managed Modal env (first run downloads the SDK, ~30–60s), then
-/// report status. Idempotent — a no-op once the env exists.
-async fn provision_modal() -> ApiResult {
-    modal::ensure_env().await.map_err(bad_request)?;
-    Ok(Json(modal_settings_json(&modal::detect().await)))
+    .await
+    .map_err(|e| anyhow!("env write task failed: {e}"))??;
+    Ok(Json(json!({
+        "tokenConfigured": true, "tokenSource": "syncedEnv", "processEnv": false,
+        "maskedTokenId": masked_id, "maskedTokenSecret": masked_secret,
+    })))
 }
 
 // --- kubernetes settings ------------------------------------------------------
@@ -4579,6 +4975,33 @@ async fn apply_update() -> ApiResult {
     Ok(Json(json!(updates::status())))
 }
 
+/// Relaunch into the copy the updater already installed. Answers first, then
+/// restarts, so the dashboard learns the request landed before the connection
+/// drops; it reloads once the new server is up.
+async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
+    let status = tokio::task::spawn_blocking(updates::status)
+        .await
+        .map_err(|e| ApiError::from(anyhow!("update status task failed: {e}")))?;
+    if !status.can_restart {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "orx cannot restart itself on this platform".into(),
+        ));
+    }
+    let Some(version) = status.installed_version else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "no newer orx is installed to restart into".into(),
+        ));
+    };
+    let restart = state.restart.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        restart.notify_one();
+    });
+    Ok(Json(json!({ "restarting": true, "version": version })))
+}
+
 #[derive(Deserialize)]
 struct InstallCliReq {
     /// Replace an `orx` that is already on PATH. The card only sends this after
@@ -4666,6 +5089,33 @@ async fn ui_state() -> ApiResult {
     .map_err(ApiError::from)
 }
 
+async fn project_ui_state(Path(id): Path<String>) -> ApiResult {
+    tokio::task::spawn_blocking(move || -> ApiResult {
+        let store = Store::open()?;
+        store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        Ok(Json(json!(store.project_workspace_state(&id)?)))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("workspace task failed: {error}")))?
+}
+
+async fn set_project_ui_state(
+    Path(id): Path<String>,
+    Json(workspace): Json<WorkspaceState>,
+) -> ApiResult {
+    workspace.validate().map_err(bad_request)?;
+    tokio::task::spawn_blocking(move || -> ApiResult {
+        if !Store::open()?.set_project_workspace_state(&id, &workspace)? {
+            return Err(not_found("project"));
+        }
+        Ok(Json(json!(workspace)))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow!("workspace task failed: {error}")))?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SetUiStateReq {
@@ -4673,6 +5123,7 @@ struct SetUiStateReq {
     tour_completed: Option<bool>,
     #[serde(default)]
     preferred_agent: Option<StoredAgentSelectionReq>,
+    workspace: Option<GlobalWorkspaceState>,
 }
 
 #[derive(Deserialize)]
@@ -4686,6 +5137,9 @@ struct StoredAgentSelectionReq {
 }
 
 async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
+    if let Some(workspace) = &req.workspace {
+        workspace.validate().map_err(bad_request)?;
+    }
     tokio::task::spawn_blocking(move || -> Result<Json<Value>> {
         let store = Store::open()?;
         let selection = req
@@ -4721,6 +5175,9 @@ async fn set_ui_state(Json(req): Json<SetUiStateReq>) -> ApiResult {
         }
         if let Some(selection) = selection {
             store.set_preferred_agent(&selection)?;
+        }
+        if let Some(workspace) = req.workspace {
+            store.set_global_workspace_state(&workspace)?;
         }
         Ok(Json(json!(store.ui_state()?)))
     })
@@ -5004,68 +5461,9 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let PtySession {
-        master,
-        input,
-        mut events,
-        kill,
-    } = session;
-    let mut child = PtyChildGuard {
-        kill,
-        running: true,
+    let Some(status) = relay_pty(&mut socket, session).await else {
+        return;
     };
-
-    let status = loop {
-        tokio::select! {
-            event = events.recv() => match event {
-                Some(PtyEvent::Output(bytes)) => {
-                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                        return;
-                    }
-                }
-                Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
-                Some(PtyEvent::Exit(status)) => break status,
-                None => break Err("SSH terminal ended without an exit status".into()),
-            },
-            message = socket.recv() => match message {
-                Some(Ok(Message::Binary(bytes))) => {
-                    if input.send(bytes.to_vec()).is_err() {
-                        break Err("SSH terminal input closed".into());
-                    }
-                }
-                Some(Ok(Message::Text(text))) => {
-                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
-                        if cols > 0 && rows > 0 {
-                            let _ = master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                        }
-                    }
-                }
-                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return,
-                Some(Ok(_)) => {}
-            }
-        }
-    };
-    child.running = false;
-
-    // The waiter and PTY reader run on separate threads. Drain the final bytes
-    // briefly so a last SSH diagnostic reaches the terminal before completion.
-    while let Ok(Some(event)) =
-        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
-    {
-        match event {
-            PtyEvent::Output(bytes) => {
-                if socket.send(Message::Binary(bytes.into())).await.is_err() {
-                    return;
-                }
-            }
-            PtyEvent::Eof | PtyEvent::Exit(_) => break,
-        }
-    }
 
     match status {
         Ok(status) if status.success() => {}
@@ -5109,6 +5507,125 @@ async fn ssh_connect_socket(
             record_ssh_host_test(&test).await;
         }
     }
+}
+
+async fn relay_pty(
+    socket: &mut WebSocket,
+    session: PtySession,
+) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
+    let PtySession {
+        master,
+        input,
+        mut events,
+        kill,
+    } = session;
+    let mut child = PtyChildGuard {
+        kill,
+        running: true,
+    };
+
+    let status = loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(PtyEvent::Output(bytes)) => {
+                    if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                        return None;
+                    }
+                }
+                Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
+                Some(PtyEvent::Exit(status)) => {
+                    child.running = false;
+                    break status;
+                }
+                None => break Err("Terminal ended without an exit status".into()),
+            },
+            message = socket.recv() => match message {
+                Some(Ok(Message::Binary(bytes))) => {
+                    if input.send(bytes.to_vec()).is_err() {
+                        break Err("Terminal input closed".into());
+                    }
+                }
+                Some(Ok(Message::Text(text))) => {
+                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
+                        if cols > 0 && rows > 0 {
+                            let _ = master.resize(PtySize {
+                                rows,
+                                cols,
+                                pixel_width: 0,
+                                pixel_height: 0,
+                            });
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
+                Some(Ok(_)) => {}
+            }
+        }
+    };
+    // The waiter and PTY reader run on separate threads. Drain the final bytes
+    // briefly so the last diagnostic reaches the terminal before completion.
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(100), events.recv()).await
+    {
+        match event {
+            PtyEvent::Output(bytes) => {
+                if socket.send(Message::Binary(bytes.into())).await.is_err() {
+                    return None;
+                }
+            }
+            PtyEvent::Eof | PtyEvent::Exit(_) => break,
+        }
+    }
+
+    Some(status)
+}
+
+async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["login".into()]).await
+}
+
+async fn openresearch_ssh_key(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    openresearch_terminal(headers, ws, vec!["ssh-key".into(), "add".into()]).await
+}
+
+async fn openresearch_terminal(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    args: Vec<String>,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            "Login terminal origin rejected".into(),
+        )
+        .into_response();
+    }
+    ws.on_upgrade(move |mut socket| async move {
+        let result = async {
+            let session = tokio::task::spawn_blocking(move || {
+                let exe = std::env::current_exe()?;
+                start_pty(&exe.to_string_lossy(), args)
+            })
+            .await??;
+            let Some(status) = relay_pty(&mut socket, session).await else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            let status = status.map_err(|error| anyhow!(error))?;
+            anyhow::ensure!(
+                status.success(),
+                "Command exited with code {}",
+                status.exit_code()
+            );
+            Ok(Some(()))
+        }
+        .await;
+        let message = match result {
+            Ok(Some(())) => json!({ "type": "complete" }),
+            Ok(None) => return,
+            Err(error) => json!({ "type": "error", "error": error.to_string() }),
+        };
+        let _ = socket.send(Message::Text(message.to_string().into())).await;
+    })
 }
 
 /// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
@@ -5662,7 +6179,7 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     // same fact must not read two different ways.
     let source_label = |s: &crate::jobs::huggingface::TokenSource| match s {
         crate::jobs::huggingface::TokenSource::Env => "HF_TOKEN env var",
-        crate::jobs::huggingface::TokenSource::OpenresearchEnv => "Token from ~/.openresearch/env",
+        crate::jobs::huggingface::TokenSource::OpenresearchEnv => "Token from Environment tab",
         crate::jobs::huggingface::TokenSource::HfCache => "Token from ~/.cache/huggingface/token",
     };
     let mut targets = json!([
@@ -5683,15 +6200,17 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
         {
             "id": "tinker",
             "configured": tinker.is_some(),
+            "fromEnvironmentTab": matches!(tinker.as_ref().map(|(_, source)| source), Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv)),
             "summary": match tinker.map(|(_, source)| source) {
                 Some(crate::jobs::tinker::ApiKeySource::Env) => "TINKER_API_KEY env var",
-                Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from ~/.openresearch/env",
+                Some(crate::jobs::tinker::ApiKeySource::OpenresearchEnv) => "Key from Environment tab",
                 None => "No API key",
             },
         },
         {
             "id": "hf",
             "configured": hf.is_some(),
+            "fromEnvironmentTab": matches!(hf.as_ref().map(|(_, source)| source), Some(crate::jobs::huggingface::TokenSource::OpenresearchEnv)),
             "summary": hf.as_ref().map_or_else(
                 || "No token".to_string(),
                 |(_, s)| source_label(s).to_string(),
@@ -5700,9 +6219,10 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
         {
             "id": "modal",
             "configured": modal_source.is_some(),
+            "fromEnvironmentTab": modal_source == Some("syncedEnv"),
             "summary": match modal_source {
-                Some("env") => "MODAL_TOKEN_ID env var",
-                Some("syncedEnv") => "Token from ~/.openresearch/env",
+                Some("env") => "MODAL_TOKEN_ID + MODAL_TOKEN_SECRET env vars",
+                Some("syncedEnv") => "Token from Environment tab",
                 Some("modalToml") => "Token from ~/.modal.toml",
                 _ => "No token",
             },
@@ -5724,7 +6244,10 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
             "configured": slurm_host.is_some(),
             "summary": slurm_host.as_ref().map_or_else(
                 || "No login node configured".to_string(),
-                |h| format!("Login node {h}"),
+                |h| match slurm_settings.as_ref().and_then(|s| s.partition.as_deref()) {
+                    Some(partition) => format!("Login node {h} / partition {partition}"),
+                    None => format!("Login node {h}"),
+                },
             ),
         },
         {
@@ -7023,17 +7546,58 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn workspace_requests_validate_metadata_and_allow_independent_preferences() {
+        let preferences: SetUiStateReq =
+            serde_json::from_value(json!({"tourCompleted":true})).unwrap();
+        assert!(preferences.workspace.is_none());
+        let workspace: SetUiStateReq = serde_json::from_value(json!({"workspace":{
+            "lastLocation":"/projects/project/tasks/new", "railOpen":true,
+            "panelWidth":500, "experimentsView":"tree"
+        }}))
+        .unwrap();
+        assert!(workspace.preferred_agent.is_none());
+        workspace.workspace.unwrap().validate().unwrap();
+        assert!(serde_json::from_value::<SetUiStateReq>(json!({"workspace":{
+            "lastLocation":null, "railOpen":true, "panelWidth":500,
+            "experimentsView":"grid"
+        }}))
+        .is_err());
+        let invalid: GlobalWorkspaceState = serde_json::from_value(json!({
+            "lastLocation":"/projects/project", "railOpen":true,
+            "panelWidth":500, "experimentsView":"tree"
+        }))
+        .unwrap();
+        assert!(invalid.validate().is_err());
+        let result = set_ui_state(Json(SetUiStateReq {
+            tour_completed: Some(true),
+            preferred_agent: None,
+            workspace: Some(invalid),
+        }))
+        .await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+        let unsupported: WorkspaceState = serde_json::from_value(json!({
+            "version":2, "lastLocation":null, "tasks":{}
+        }))
+        .unwrap();
+        let result = set_project_ui_state(Path("project".into()), Json(unsupported)).await;
+        assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
+
     #[test]
     fn ssh_workspace_blocks_local_machine_actions_but_keeps_config_editing() {
         for path in [
             "/api/project-path/pick",
             "/api/update",
             "/api/update/apply",
+            "/api/update/restart",
             "/api/settings/data-dir",
             "/api/settings/data-dir/move",
             "/api/settings/ssh/master",
             "/api/settings/ssh/preflight",
             "/api/settings/ssh/connect",
+            "/api/settings/openresearch/login",
+            "/api/settings/openresearch/ssh-key",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
         ] {
@@ -7371,6 +7935,30 @@ mod tests {
     }
 
     #[test]
+    fn project_file_versions_track_exact_bytes() {
+        let first = file_version(b"same-size-a");
+        let second = file_version(b"same-size-b");
+        assert_ne!(first, second);
+
+        let path = std::env::temp_dir().join(format!("orx-file-version-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"same-size-a").unwrap();
+        assert_eq!(
+            file_version_on_disk(&path)
+                .map_err(|error| error.1)
+                .unwrap(),
+            first
+        );
+        std::fs::write(&path, b"same-size-b").unwrap();
+        assert_eq!(
+            file_version_on_disk(&path)
+                .map_err(|error| error.1)
+                .unwrap(),
+            second
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn project_file_paths_reject_traversal() {
         assert_eq!(
             validated_project_file_path("./figures/chart.png")
@@ -7385,6 +7973,105 @@ mod tests {
                 "accepted {path:?}"
             );
         }
+    }
+
+    #[test]
+    fn local_file_actions_rename_duplicate_and_delete() {
+        let root = std::env::temp_dir().join(format!("orx-file-actions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("reports")).unwrap();
+        std::fs::write(root.join("reports/result.md"), "result").unwrap();
+
+        let renamed = manage_local_file(
+            &root,
+            "reports/result.md",
+            FileAction::Rename,
+            Some("summary.md"),
+            true,
+        )
+        .map_err(|error| error.1)
+        .unwrap();
+        assert_eq!(renamed, "reports/summary.md");
+
+        let duplicated = manage_local_file(&root, &renamed, FileAction::Duplicate, None, true)
+            .map_err(|error| error.1)
+            .unwrap();
+        assert_eq!(duplicated, "reports/summary copy.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join(&duplicated)).unwrap(),
+            "result"
+        );
+
+        manage_local_file(&root, &duplicated, FileAction::Delete, None, true)
+            .map_err(|error| error.1)
+            .unwrap();
+        assert!(!root.join(duplicated).exists());
+        assert!(manage_local_file(
+            &root,
+            &renamed,
+            FileAction::Rename,
+            Some("../escape.md"),
+            true,
+        )
+        .is_err());
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/config"), "private").unwrap();
+        assert!(manage_local_file(&root, ".git/config", FileAction::Delete, None, true,).is_err());
+        #[cfg(unix)]
+        {
+            let outside = std::env::temp_dir()
+                .join(format!("orx-file-actions-outside-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("jump")).unwrap();
+            std::os::unix::fs::symlink(root.join(&renamed), outside.join("back")).unwrap();
+            assert!(
+                manage_local_file(&root, "jump/back", FileAction::Delete, None, true,).is_err()
+            );
+            assert!(outside.join("back").exists());
+            std::os::unix::fs::symlink(root.join(&renamed), root.join("reports/summary-link"))
+                .unwrap();
+            assert!(manage_local_file(
+                &root,
+                &renamed,
+                FileAction::Rename,
+                Some("summary-link"),
+                true,
+            )
+            .is_err());
+            assert!(root.join(&renamed).exists());
+            assert!(std::fs::symlink_metadata(root.join("reports/summary-link"))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+            assert!(manage_local_file(
+                &root,
+                "reports/summary-link",
+                FileAction::Duplicate,
+                None,
+                true,
+            )
+            .is_err());
+            std::os::unix::fs::symlink(root.join(".git"), root.join("git-link")).unwrap();
+            assert!(
+                manage_local_file(&root, "git-link/config", FileAction::Delete, None, true,)
+                    .is_err()
+            );
+            std::fs::remove_dir_all(outside).unwrap();
+        }
+        let case_renamed = manage_local_file(
+            &root,
+            &renamed,
+            FileAction::Rename,
+            Some("SUMMARY.md"),
+            true,
+        )
+        .map_err(|error| error.1)
+        .unwrap();
+        assert_eq!(case_renamed, "reports/SUMMARY.md");
+        assert!(root.join(case_renamed).exists());
+        assert!(std::fs::read_dir(root.join("reports"))
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name() == "SUMMARY.md"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // ApiError has no Debug, so `.unwrap()` on the Err path won't compile; drop

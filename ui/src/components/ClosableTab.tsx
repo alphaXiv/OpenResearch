@@ -50,6 +50,8 @@ export function ClosableTab({
         role="button"
         className="tab-close"
         title={m.closable_tab_close_tab()}
+        // Keep the editor focused until the close handler can confirm dirty drafts.
+        onPointerDown={(event) => event.preventDefault()}
         onClick={(e) => {
           e.stopPropagation();
           onClose();

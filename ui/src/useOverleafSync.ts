@@ -69,8 +69,6 @@ export interface OverleafSync {
    * the stale draft back to Overleaf, which is why the viewer has to say so. */
   staleOnDisk: boolean;
   reloaded: () => void;
-  /** The viewer reloaded and found the buffer had moved on in the same place. */
-  stale: () => void;
   /** The page that creates a new Overleaf project from this paper — the way in
    * for an account whose plan has no Git integration. */
   uploadUrl: string;
@@ -83,7 +81,6 @@ export interface OverleafSync {
   linkProject: (project: string) => Promise<void>;
   unlink: () => Promise<void>;
   sync: (resolve?: Record<string, OverleafResolution>) => void;
-  dismiss: () => void;
 }
 
 export function useOverleafSync({
@@ -91,6 +88,8 @@ export function useOverleafSync({
   filePath,
   sessionId,
   enabled,
+  autoRun = true,
+  onManualAction,
   savedSource,
   dirty,
   onPulled,
@@ -100,6 +99,8 @@ export function useOverleafSync({
   sessionId?: string;
   /** This is a .tex in the live checkout, so there is a file to sync. */
   enabled: boolean;
+  autoRun?: boolean;
+  onManualAction?: () => void;
   /** The file as it stands on disk. A push carries the file, not the compile,
    * so this — not the compiled source — is what says our side has moved: a
    * machine with no LaTeX engine never compiles, and is exactly the one this
@@ -178,7 +179,7 @@ export function useOverleafSync({
 
   const sync = useCallback(
     (resolve?: Record<string, OverleafResolution>) => {
-      if (syncingRef.current || dirtyRef.current) return false;
+      if (!hasToken || !link || syncingRef.current || dirtyRef.current) return false;
       syncingRef.current = true;
       setSyncing(true);
       setError(null);
@@ -186,9 +187,12 @@ export function useOverleafSync({
         .then((result) => {
           failedRef.current = false;
           setLast(result);
-          // The viewer reloads and folds the change into whatever the user
-          // typed meanwhile, or says it could not.
-          if (result.pulled.includes(filePath)) pulledRef.current(result.pulled);
+          // The sync began on a clean file, but a clone takes seconds and the
+          // user may have started typing since; reloading now would replace
+          // that draft with no way back, so the choice goes to them instead.
+          if (!result.pulled.includes(filePath)) return;
+          if (dirtyRef.current) setStaleOnDisk(true);
+          else pulledRef.current(result.pulled);
         })
         .catch((e: unknown) => {
           failedRef.current = true;
@@ -201,7 +205,7 @@ export function useOverleafSync({
         });
       return true;
     },
-    [projectId, filePath, sessionId],
+    [projectId, filePath, sessionId, hasToken, link],
   );
 
   // Once a paper is linked it stays in step on its own: linking syncs, and so
@@ -215,13 +219,13 @@ export function useOverleafSync({
   const liveActive = live?.state === "live";
   const liveOpening = liveActive || live?.state === "connecting";
   useEffect(() => {
-    if (!enabled || !loaded || !link || dirty || liveOpening) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty || liveOpening) return;
     const marker = `${filePath}:${link.projectId}:${savedSource}`;
     if (syncedMarker.current === marker) return;
     if (sync()) syncedMarker.current = marker;
     // `syncing` is a dependency so a sync refused while another was in flight
     // is retried when that one finishes, rather than waiting for an edit.
-  }, [enabled, loaded, link, filePath, savedSource, dirty, syncing, sync, liveOpening]);
+  }, [enabled, autoRun, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync, liveOpening]);
 
   // The live channel opens once a git sync has brought the two into step with
   // nothing left to resolve; the server starts from what that sync agreed on.
@@ -297,14 +301,18 @@ export function useOverleafSync({
         setLive(ev.status);
         return;
       }
-      if (ev.paths.includes(filePath)) pulledRef.current(ev.paths);
+      // Same care as a git pull: a draft in the editor is not replaced
+      // underneath the user, it is flagged for them to settle.
+      if (!ev.paths.includes(filePath)) return;
+      if (dirtyRef.current) setStaleOnDisk(true);
+      else pulledRef.current(ev.paths);
     });
   }, [filePath]);
 
   // And the other direction: ask whether Overleaf has moved, and sync when it
   // has. The marker is left alone — this is not a change on our side.
   useEffect(() => {
-    if (!enabled || !loaded || !link || dirty || liveActive) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty || liveActive) return;
     const timer = setInterval(() => {
       if (syncingRef.current || failedRef.current) return;
       getOverleafStatus(projectId, filePath, { sessionId })
@@ -317,17 +325,17 @@ export function useOverleafSync({
         });
     }, POLL_MS);
     return () => clearInterval(timer);
-  }, [enabled, loaded, link, dirty, projectId, filePath, sessionId, sync, liveActive]);
+  }, [enabled, autoRun, loaded, hasToken, link, dirty, projectId, filePath, sessionId, sync, liveActive]);
 
   // The live channel carries Overleaf's documents, not its figures. A slow
   // git sync alongside it keeps those moving on their own; slow because each
   // one is a clone, and the bridge rate-limits a client that asks often.
   // `sync` refuses while one is in flight or the editor is dirty.
   useEffect(() => {
-    if (!enabled || !loaded || !link || !liveActive) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || !liveActive) return;
     const timer = setInterval(sync, LIVE_FILE_SYNC_MS);
     return () => clearInterval(timer);
-  }, [enabled, loaded, link, liveActive, sync]);
+  }, [enabled, autoRun, loaded, hasToken, link, liveActive, sync]);
 
   return {
     hasToken,
@@ -345,10 +353,12 @@ export function useOverleafSync({
     blocked: dirty,
     staleOnDisk,
     reloaded: () => setStaleOnDisk(false),
-    stale: () => setStaleOnDisk(true),
     uploadUrl: overleafUploadUrl(projectId, filePath, { sessionId }),
     saveToken: async (token: string) => {
       const result = await saveOverleafToken(token);
+      syncedMarker.current = null;
+      failedRef.current = false;
+      setError(null);
       setHasToken(result.hasToken);
     },
     saveSession: async (session: string) => {
@@ -372,6 +382,7 @@ export function useOverleafSync({
       setLive(null);
       syncedMarker.current = null;
       apply(await linkOverleaf(projectId, filePath, { project, sessionId }));
+      onManualAction?.();
     },
     unlink: async () => {
       apply(await unlinkOverleaf(projectId, filePath, { sessionId }));
@@ -382,13 +393,10 @@ export function useOverleafSync({
     },
     sync: (resolve?: Record<string, OverleafResolution>) => {
       failedRef.current = false;
-      sync(resolve);
-    },
-    dismiss: () => {
-      // Clearing the message without clearing the failure would leave the poll
-      // parked while the panel claimed to be in step.
-      failedRef.current = false;
-      setError(null);
+      if (sync(resolve)) {
+        syncedMarker.current = `${filePath}:${link?.projectId}:${savedSource}`;
+        onManualAction?.();
+      }
     },
   };
 }

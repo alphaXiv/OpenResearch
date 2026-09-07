@@ -185,7 +185,7 @@ const S_CREATE: AgentSkill = AgentSkill {
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Write durable outputs into the artifacts directory. Use when a line of work concludes or the user asks for a write-up, summary, comparison, figures, or exported data.",
+    description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, comparisons, figures, and exported data, or when a line of work concludes.",
     content: REPORTS,
     resources: &[],
 };
@@ -662,7 +662,7 @@ mod tests {
             .contains(r#"<file path="figs/loss_curve.pdf" />"#));
         assert!(figures
             .content
-            .contains(r#"<file path="artifacts/loss_curve.pdf" />"#));
+            .contains(r#"<file path="artifacts/transformer-sweep/figures/loss_curve.pdf" />"#));
         assert!(figures
             .content
             .contains("The tag must match the destination"));
