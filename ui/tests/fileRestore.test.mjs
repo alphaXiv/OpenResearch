@@ -57,7 +57,7 @@ function viewerHooks(restored) {
       calls.compile++;
       return { ok: true, pdfPath: "paper.pdf", hadErrors: false, note: null };
     },
-    getOverleafState: async () => ({ hasToken: true, link }),
+    getOverleafState: async () => ({ hasToken: true, hasSession: false, link }),
     getOverleafStatus: async () => { calls.status++; return { remoteChanged: true }; },
     syncOverleaf: async () => {
       calls.sync++;
@@ -66,6 +66,10 @@ function viewerHooks(restored) {
     overleafUploadUrl: () => "https://overleaf.com/upload",
     linkOverleaf: async () => ({ hasToken: true, link }),
     saveOverleafToken: async () => ({ hasToken: true }),
+    saveOverleafSession: async () => ({ hasSession: true }),
+    importOverleafSession: async () => ({ hasSession: true, source: "Firefox" }),
+    startOverleafLive: async () => ({ key: "k", status: null }),
+    stopOverleafLive: async () => ({ key: "k", status: null }),
   };
   const queries = queryModules(api);
   const queryHooks = {
@@ -95,6 +99,9 @@ function viewerHooks(restored) {
         if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
         if (id === "./api") return api;
         if (id === "./paraglide/messages.js") return { m: {} };
+        // The Overleaf hook listens for live-channel events; no channel opens
+        // here, so the subscription is a no-op.
+        if (id === "./events") return { onOverleafEvent: () => () => {} };
         throw new Error(`Unexpected dependency: ${id}`);
       },
       exports,

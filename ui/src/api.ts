@@ -544,6 +544,8 @@ export const compileLatex = (
 /** The Overleaf project a `.tex` pushes to. */
 export interface OverleafLink {
   projectId: string;
+  /** The Overleaf site the project lives on: www.overleaf.com, or a Server Pro host. */
+  host: string;
   /** The project on overleaf.com, for opening it. */
   url: string;
 }
@@ -551,13 +553,22 @@ export interface OverleafLink {
 export interface OverleafState {
   /** A Git authentication token is stored on this machine. */
   hasToken: boolean;
+  /** A browser session cookie is stored, so a linked paper can follow
+   * Overleaf live rather than by polling. */
+  hasSession: boolean;
   /** Null until this paper is pointed at a project. */
   link: OverleafLink | null;
 }
 
+export interface OverleafSettings {
+  hasToken: boolean;
+  hasSession: boolean;
+}
+
 /** Whether a Git authentication token is stored — the machine-wide half of the
  * Overleaf state, for Settings. */
-export const getOverleafSettings = (signal?: AbortSignal) => get<{ hasToken: boolean }>("/api/overleaf/settings", signal);
+export const getOverleafSettings = (signal?: AbortSignal) =>
+  get<OverleafSettings>("/api/overleaf/settings", signal);
 
 /** Store an Overleaf Git authentication token. Not validated here: only the Git
  * bridge can judge a token, and it needs a project to judge it against, so a
@@ -567,6 +578,57 @@ export const saveOverleafToken = (token: string) =>
 
 export const deleteOverleafToken = () =>
   writeResponse("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+/** Store the Overleaf browser session cookie the live channel signs in with.
+ * Accepts the bare value or `name=value`; only a connection can say whether it
+ * works, so a stale cookie surfaces from `startOverleafLive`. */
+export const saveOverleafSession = (session: string, opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean }>("/api/overleaf/session", { session, host: opts.host });
+
+export const deleteOverleafSession = () =>
+  fetch("/api/overleaf/session", { method: "DELETE" }).then((r) => json<{ hasSession: boolean }>(r));
+
+/** Read the session cookie from a browser signed in to Overleaf on this
+ * machine, so it need not be pasted. macOS only; reading Chrome/Edge/Brave/Arc
+ * asks the Keychain for their cookie key. Rejects when no browser holds one. */
+export const importOverleafSession = (opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean; source: string }>("/api/overleaf/session/import", { host: opts.host });
+
+export interface OverleafLiveStatus {
+  state: "connecting" | "live" | "stopped";
+  /** Why the channel stopped and will not reconnect on its own. */
+  error: string | null;
+  /** The cookie is what it stopped over, so a fresh one is the way back in. */
+  needsSession: boolean;
+  /** Why some documents are not moving: read-only access, a conflict held
+   * for the git sync, a format this client cannot follow. */
+  note: string | null;
+}
+
+export interface OverleafLive {
+  /** Identifies this session in `overleaf.live` and `overleaf.pulled` events. */
+  key: string;
+  /** Null in a stop's reply; a start always reports the channel's state. */
+  status: OverleafLiveStatus | null;
+}
+
+/** Open the live channel, or keep it open: a tab calls this while it stays on
+ * the file. One Overleaf refused stays refused unless `retry` is set. */
+export const startOverleafLive = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; retry?: boolean } = {},
+) =>
+  post<OverleafLive>(`/api/projects/${projectId}/file/overleaf/live`, {
+    path,
+    sessionId: opts.sessionId,
+    retry: opts.retry,
+  });
+
+export const stopOverleafLive = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf/live?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafLive>(r));
 
 export const getOverleafState = (
   projectId: string,

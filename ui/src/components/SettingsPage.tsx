@@ -49,6 +49,7 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
   fmtDuration,
@@ -56,6 +57,7 @@ import {
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
+  saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
@@ -78,6 +80,7 @@ import {
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
+  type OverleafSettings,
   type Project,
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
@@ -2844,15 +2847,24 @@ function GitHubCliHelp({
   );
 }
 
-/** The Overleaf Git authentication token is machine-wide. Which Overleaf
- * *project* a paper pushes to is per-paper, and lives on the .tex tab. */
+/** The Overleaf Git authentication token and session cookie are machine-wide.
+ * Which Overleaf *project* a paper pushes to is per-paper, and lives on the
+ * .tex tab. */
 function OverleafCard() {
   const deleteOverleafTokenMutation = useMutation({ mutationFn: deleteOverleafToken });
+  const deleteOverleafSessionMutation = useMutation({ mutationFn: deleteOverleafSession });
 
   const tokenOptions = getOverleafSettingsQuery();
   const settings = useQuery(tokenOptions);
   const hasToken = settings.data?.hasToken ?? null;
-  const setHasToken = (value: boolean) => setScopedQueryData(tokenOptions.queryKey, { hasToken: value });
+  const hasSession = settings.data?.hasSession ?? null;
+  const patch = (next: Partial<OverleafSettings>) =>
+    setScopedQueryData(tokenOptions.queryKey, {
+      hasToken: hasToken ?? false,
+      hasSession: hasSession ?? false,
+      ...next,
+    });
+  const setHasToken = (value: boolean) => patch({ hasToken: value });
   const [saving, setSaving] = useState(false);
   const [actionError, setError] = useState<string | null>(null);
 
@@ -2894,6 +2906,42 @@ function OverleafCard() {
           onSaved={(result) => setHasToken(result.hasToken)}
           placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
+        />
+      )}
+      <div className={KV_CLASS_NAME}>
+        <span className="k">{m.settings_page_session_cookie()}</span>
+        <span className="v">
+          <Badge variant={hasSession ? "success" : "default"}>
+            {hasSession === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasSession ? m.settings_saved() : m.settings_not_set()}
+          </Badge>
+        </span>
+      </div>
+      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
+        {m.settings_page_session_cookie_help()}
+      </p>
+      {hasSession ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button
+            disabled={saving}
+            onClick={() => {
+              setSaving(true);
+              setError(null);
+              void deleteOverleafSessionMutation.mutateAsync()
+                .then((s) => patch({ hasSession: s.hasSession }))
+                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                .finally(() => setSaving(false));
+            }}
+          >
+            {saving ? m.settings_removing() : m.settings_remove_session()}
+          </Button>
+        </div>
+      ) : (
+        <TokenForm
+          save={(session) => saveOverleafSession(session)}
+          onSaved={(result) => patch({ hasSession: result.hasSession })}
+          placeholder={m.overleaf_session_cookie()}
+          createHref="https://www.overleaf.com/project"
+          createLabel={m.overleaf_open_overleaf()}
         />
       )}
       {error && <div className="error">{error}</div>}

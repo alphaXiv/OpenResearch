@@ -138,6 +138,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
     ));
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
     spawn_background_tasks(remote_auth.is_none());
+    let live_events = state.chat.clone();
+    local::overleaf_live::set_event_sink(Box::new(move |name, data| {
+        live_events.emit_event(name, data)
+    }));
 
     let app = router(state.clone(), remote_auth.clone());
     let url = format!("http://127.0.0.1:{actual_port}");
@@ -487,6 +491,18 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route(
             "/api/overleaf/token",
             post(set_overleaf_token).delete(delete_overleaf_token),
+        )
+        .route(
+            "/api/overleaf/session",
+            post(set_overleaf_session).delete(delete_overleaf_session),
+        )
+        .route(
+            "/api/overleaf/session/import",
+            post(import_overleaf_session),
+        )
+        .route(
+            "/api/projects/{id}/file/overleaf/live",
+            post(start_overleaf_live).delete(stop_overleaf_live),
         )
         .route("/api/files/abs", get(absolute_file))
         .route("/api/files/abs/raw", get(absolute_raw_file))
@@ -3042,6 +3058,9 @@ async fn write_project_file(
         }
         std::fs::write(&full, req.content.as_bytes())
             .map_err(|e| ApiError::from(anyhow!("save failed: {e}")))?;
+        // The live channel polls on a tick; a save through the dashboard is
+        // told at once so a collaborator sees it without the wait.
+        local::overleaf_live::nudge(&full);
         Ok(WriteProjectFileOutcome::Saved(json!({
             "ok": true,
             "root": root_kind,
@@ -3147,18 +3166,19 @@ struct OverleafFileReq {
     /// the checkout-relative path the panel showed them.
     #[serde(default)]
     resolve: std::collections::BTreeMap<String, String>,
+    /// Only on live: open the channel again after Overleaf refused it.
+    #[serde(default)]
+    retry: bool,
 }
 
 fn overleaf_link_json(link: Option<&crate::store::OverleafLink>) -> Value {
     let Some(link) = link else {
         return Value::Null;
     };
-    let project = local::overleaf::Project {
-        id: link.overleaf_project_id.clone(),
-        host: link.host.clone(),
-    };
+    let project = link.project();
     json!({
         "projectId": project.id,
+        "host": project.live_host(),
         "url": project.web_url(),
     })
 }
@@ -3166,15 +3186,17 @@ fn overleaf_link_json(link: Option<&crate::store::OverleafLink>) -> Value {
 fn overleaf_state_json(link: Option<&crate::store::OverleafLink>) -> Value {
     json!({
         "hasToken": local::overleaf::token().is_some(),
+        "hasSession": local::overleaf_live::session().is_some(),
         "link": overleaf_link_json(link),
     })
 }
 
 async fn overleaf_settings() -> ApiResult {
     blocking_api(move || {
-        Ok(Json(
-            json!({ "hasToken": local::overleaf::token().is_some() }),
-        ))
+        Ok(Json(json!({
+            "hasToken": local::overleaf::token().is_some(),
+            "hasSession": local::overleaf_live::session().is_some(),
+        })))
     })
     .await
 }
@@ -3217,6 +3239,159 @@ async fn delete_overleaf_token() -> ApiResult {
     .await
 }
 
+#[derive(Deserialize)]
+struct SetOverleafSessionReq {
+    session: String,
+    /// The Overleaf site the cookie is for: the paper's linked host when the
+    /// panel asks, www.overleaf.com from Settings.
+    #[serde(default)]
+    host: Option<String>,
+}
+
+/// The browser session cookie the live channel signs in with. Like the token,
+/// only a connection can say whether it works; `start_overleaf_live` is where
+/// a stale one surfaces.
+async fn set_overleaf_session(Json(req): Json<SetOverleafSessionReq>) -> ApiResult {
+    blocking_api(move || {
+        let host = req.host.as_deref().unwrap_or(local::overleaf::CLOUD_HOST);
+        local::overleaf_live::set_session(host, &req.session).map_err(bad_request)?;
+        Ok(Json(json!({ "hasSession": true })))
+    })
+    .await
+}
+
+async fn delete_overleaf_session() -> ApiResult {
+    blocking_api(move || {
+        local::overleaf_live::clear_session()?;
+        Ok(Json(json!({ "hasSession": false })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct ImportOverleafSessionReq {
+    /// The site to find a cookie for; the paper's linked host, or the cloud.
+    #[serde(default)]
+    host: Option<String>,
+}
+
+/// Read the session cookie from a signed-in browser on this machine, so the
+/// user need not paste it. Reading a Chromium store asks the Keychain for its
+/// key, which is the one prompt the user sees; a store with no Overleaf cookie
+/// is a 400 that tells them to sign in there or paste instead.
+async fn import_overleaf_session(Json(req): Json<ImportOverleafSessionReq>) -> ApiResult {
+    blocking_api(move || {
+        let host = req
+            .host
+            .as_deref()
+            .unwrap_or(local::overleaf::CLOUD_HOST)
+            .to_string();
+        if !local::browser_cookies::SUPPORTED {
+            return Err(bad_request(
+                "Importing from a browser works on macOS only. Paste the cookie instead.",
+            ));
+        }
+        let imported = local::browser_cookies::import_session(&host)
+            .map_err(bad_request)?
+            .ok_or_else(|| {
+                bad_request(
+                    "No Overleaf session was found in a browser on this machine. Sign in to Overleaf in your browser, or paste the cookie.",
+                )
+            })?;
+        local::overleaf_live::set_session(&host, &imported.cookie).map_err(bad_request)?;
+        Ok(Json(json!({ "hasSession": true, "source": imported.source })))
+    })
+    .await
+}
+
+fn overleaf_live_json(key: &str, status: Option<local::overleaf_live::Status>) -> Value {
+    json!({
+        "key": key,
+        "status": status.map(|status| status.json()),
+    })
+}
+
+/// The live session a paper tab would use. Building it is also the
+/// permission check: a paper that is not linked, or a path that is not a
+/// paper, gets the same 400 the sync would.
+struct LiveTarget {
+    project: local::overleaf::Project,
+    /// The paper's folder, canonical, as `resolve_project_tex` hands it out.
+    dir: std::path::PathBuf,
+    scope: local::overleaf_live::Scope,
+}
+
+impl LiveTarget {
+    fn key(&self) -> String {
+        local::overleaf_live::key_for(&self.project, &self.dir, &self.scope)
+    }
+}
+
+/// The paper's folder — the Overleaf project's root, on disk.
+fn paper_dir(full: &std::path::Path) -> std::result::Result<&std::path::Path, ApiError> {
+    full.parent()
+        .ok_or_else(|| ApiError::from(anyhow!("{} has no parent directory", full.display())))
+}
+
+fn overleaf_live_target(
+    id: &str,
+    path: &str,
+    session_id: Option<&str>,
+) -> std::result::Result<LiveTarget, ApiError> {
+    let (rel, _, full) = resolve_project_tex(id, path, session_id)?;
+    let link = Store::open()?
+        .overleaf_link(id, &rel)?
+        .ok_or_else(|| bad_request("This paper is not linked to an Overleaf project yet."))?;
+    let dir = paper_dir(&full)?.to_path_buf();
+    Ok(LiveTarget {
+        project: link.project(),
+        dir,
+        scope: local::overleaf_live::Scope {
+            project_id: id.to_string(),
+            session_id: session_id.map(str::to_string),
+            folder: local::overleaf::folder_of(&rel),
+        },
+    })
+}
+
+/// Open the live channel for this paper, or keep it open: the tab calls this
+/// again while it stays on the file, and a session nobody asks after closes.
+async fn start_overleaf_live(
+    Path(id): Path<String>,
+    Json(req): Json<OverleafFileReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let target = overleaf_live_target(&id, &req.path, req.session_id.as_deref())?;
+        let (host, cookie) = local::overleaf_live::session()
+            .ok_or_else(|| bad_request("Add an Overleaf session cookie in Settings first."))?;
+        // The cookie signs in to one site; it goes nowhere else.
+        if host != target.project.live_host() {
+            return Err(bad_request(format!(
+                "The saved session cookie is for {host}, but this paper is linked to a project on {}. Add one for that site.",
+                target.project.live_host()
+            )));
+        }
+        let config = local::overleaf_live::Config {
+            project: target.project,
+            dir: target.dir,
+            cookie,
+            scope: target.scope,
+        };
+        let (key, status) = local::overleaf_live::start(config, req.retry);
+        Ok(Json(overleaf_live_json(&key, Some(status))))
+    })
+    .await
+}
+
+async fn stop_overleaf_live(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
+    blocking_api(move || {
+        let key = overleaf_live_target(&id, &q.path, q.session_id.as_deref())?.key();
+        local::overleaf_live::stop(&key);
+        Ok(Json(overleaf_live_json(&key, None)))
+    })
+    .await
+}
+
 async fn overleaf_link(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
     blocking_api(move || {
         let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
@@ -3232,7 +3407,7 @@ async fn overleaf_link(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -
 /// here, once, rather than on every later push.
 async fn link_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>) -> ApiResult {
     blocking_api(move || {
-        let (rel, ..) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
+        let (rel, _, full) = resolve_project_tex(&id, &req.path, req.session_id.as_deref())?;
         let token = local::overleaf::token()
             .ok_or_else(|| bad_request("Add an Overleaf Git authentication token first."))?;
         let raw = req.project.unwrap_or_default();
@@ -3247,6 +3422,9 @@ async fn link_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>)
             root: String::new(),
         };
         store.set_overleaf_link(&id, &rel, &link)?;
+        // Relinked: nothing may keep writing the folder on the old project's
+        // behalf, and what was agreed with it says nothing about the new one.
+        local::overleaf_live::stop_dir(paper_dir(&full)?);
         Ok(Json(overleaf_state_json(Some(&link))))
     })
     .await
@@ -3258,6 +3436,11 @@ async fn link_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>)
 async fn unlink_overleaf(Path(id): Path<String>, Query(q): Query<OverleafFileQ>) -> ApiResult {
     blocking_api(move || {
         let (rel, _) = validated_project_file_path(&q.path)?;
+        // An unlinked folder must stop following; the target only resolves
+        // while the paper still exists, which is the only time it could be.
+        if let Ok(target) = overleaf_live_target(&id, &rel, q.session_id.as_deref()) {
+            local::overleaf_live::stop_dir(&target.dir);
+        }
         let store = Store::open()?;
         store.clear_overleaf_link(&id, &rel)?;
         Ok(Json(overleaf_state_json(None)))
@@ -3281,11 +3464,7 @@ async fn sync_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>)
         } else {
             Default::default()
         };
-        let project = local::overleaf::Project {
-            id: link.overleaf_project_id.clone(),
-            host: link.host.clone(),
-        };
-        let payload = local::overleaf::collect(&full)?;
+        let project = link.project();
         let folder = local::overleaf::folder_of(&rel);
         let mut resolutions = std::collections::BTreeMap::new();
         for (path, how) in &req.resolve {
@@ -3298,8 +3477,19 @@ async fn sync_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>)
                 resolutions.insert(path, how);
             }
         }
-        let outcome = local::overleaf::sync(&payload, &project, &token, &baseline, &resolutions)
-            .map_err(|e| bad_request(e.to_string()))?;
+        // The live channel writes the same files; it waits while the sync
+        // does, then starts again from what the sync agreed on.
+        // Held so the channel is let go even if the sync unwinds; a folder
+        // left paused would look live while syncing nothing.
+        let paused = local::overleaf_live::pause(paper_dir(&full)?);
+        let outcome = local::overleaf::collect(&full).and_then(|payload| {
+            local::overleaf::sync(&payload, &project, &token, &baseline, &resolutions)
+        });
+        if let Ok(outcome) = &outcome {
+            paused.synced(&outcome.baseline);
+        }
+        drop(paused);
+        let outcome = outcome.map_err(|e| bad_request(e.to_string()))?;
         let store = Store::open()?;
         store.set_overleaf_link(
             &id,
@@ -3329,11 +3519,7 @@ async fn overleaf_status(Path(id): Path<String>, Query(q): Query<OverleafFileQ>)
     blocking_api(move || {
         let (rel, ..) = resolve_project_tex(&id, &q.path, q.session_id.as_deref())?;
         let (token, link) = linked(&id, &rel)?;
-        let project = local::overleaf::Project {
-            id: link.overleaf_project_id,
-            host: link.host,
-        };
-        let head = local::overleaf::remote_head(&project, &token)
+        let head = local::overleaf::remote_head(&link.project(), &token)
             .map_err(|e| bad_request(e.to_string()))?;
         Ok(Json(json!({ "remoteChanged": head != link.head })))
     })
