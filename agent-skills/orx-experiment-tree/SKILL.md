@@ -190,7 +190,7 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 
 Stop when the goal is met, or after ~3 consecutive failed or regressed runs.
 When you stop, write up the tree as a descriptively named project artifact — see
-the `orx-reports` skill for naming and optional folder guidance.
+the `orx-reports` skill for naming and folder guidance.
 
 Close any turn that ran or changed experiments with a short experiment summary:
 one line per relevant node with what it tested, its status, and the headline

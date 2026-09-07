@@ -25,6 +25,7 @@ private to this chat session.
 {paper_line}{compute_bullet}
 - Artifacts directory: `{artifacts}` — durable project outputs such as reports,
   figures, images, CSVs, and PDFs are stored as project artifacts. Load
+  `orx-reports` before creating or organizing artifacts. Load
   `orx-figures` before writing plotting code; default matplotlib output is not
   publishable
 
