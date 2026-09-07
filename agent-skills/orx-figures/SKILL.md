@@ -62,14 +62,17 @@ under the artifacts directory needs its own copy there, or the import fails.
 (That works from any directory. Check the file is non-empty before importing
 it — the redirect creates the target before the lookup runs.)
 
-Then find an interpreter that has matplotlib, in this order — do not install
-into the project's environment without asking:
+Follow the session playbook's Python policy. The Python plotting templates
+use `matplotlib` and `numpy`. For independent plots using uv:
 
 ```sh
-python -c "import matplotlib"                      # the project env already has it
-uv run --with matplotlib --with numpy python figs/loss_curve.py
-python3 -m venv .venv-figs && .venv-figs/bin/pip install matplotlib numpy
+uv run --no-project --with matplotlib --with numpy python figs/loss_curve.py
 ```
+
+For saved scripts with inline dependency metadata, use
+`uv run --no-project figs/loss_curve.py` so uv reads that metadata.
+Plots importing project code must run in the project environment, not the
+isolated environment above.
 
 ## Where the figure goes, and how to cite it
 
