@@ -1,10 +1,62 @@
+import {
+  setScopedQueryData,
+  queryClient,
+} from "./queries/client";
+import { useMutation, useQuery } from "@tanstack/react-query";
+
+import {
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
+import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
+import { getArtifactsQuery } from "./queries/files";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
-import { getTaskWorkspace, parseDestination, safeLocation, taskLocation, type Pane, type TaskWorkspace } from "./workspaceState";
+import {
+  getTaskWorkspace,
+  parseDestination,
+  safeLocation,
+  taskLocation,
+  type Pane,
+  type TaskWorkspace,
+} from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
-import { type ExpViewDef, sameExpTab, type FileViewDef, sameFileTab, fileTabKey, fileScrollKey, persistentFileTab, persistentRightTab, type PlanViewDef, type SubagentViewDef, type CodeTabDef, sameCodeTab, type RightTab, type ContentTab, rightTabKey, withoutTab, isPresent, type RightPaneSessionState, initialRightPaneSessionState, tabPane, paneTab, defaultTaskWorkspace } from "./workspaceTabs";
-import { getCachedProjectWorkspace, inheritNewTaskWorkspace, useProjectWorkspace } from "./useProjectWorkspace";
+import {
+  type ExpViewDef,
+  sameExpTab,
+  type FileViewDef,
+  sameFileTab,
+  fileTabKey,
+  fileScrollKey,
+  persistentFileTab,
+  persistentRightTab,
+  type PlanViewDef,
+  type SubagentViewDef,
+  type CodeTabDef,
+  sameCodeTab,
+  type RightTab,
+  type ContentTab,
+  rightTabKey,
+  withoutTab,
+  isPresent,
+  type RightPaneSessionState,
+  initialRightPaneSessionState,
+  tabPane,
+  paneTab,
+  defaultTaskWorkspace,
+} from "./workspaceTabs";
+import {
+  getCachedProjectWorkspace,
+  inheritNewTaskWorkspace,
+  useProjectWorkspace,
+} from "./useProjectWorkspace";
 import { m } from "./paraglide/messages.js";
-import { getLocale } from "./paraglide/runtime.js";
+
 import { useLocale } from "./locale";
 import { autoDir } from "./i18n";
 import {
@@ -23,25 +75,16 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
 import {
   cancelRun,
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
   DEMO_RUN_EXPERIMENT_PROMPT,
-  getArtifacts,
-  getChatMessages,
-  getUiState,
-  listChatSessions,
   isDemoProjectId,
-  listExperiments,
-  listProjects,
-  listRuns,
   openProject,
   updateUiState,
   type AgentSelection,
-  type Experiment,
-  type ProjectArtifacts,
   type Project,
   type RuntimeInfo,
   type Run,
@@ -215,6 +258,8 @@ function useStableStringMap(next: Map<string, string>): Map<string, string> {
 }
 
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
+  const updateUiStateMutation = useMutation({ mutationFn: updateUiState });
+
   const router = useRouter();
   const location = useRouterState({ select: (state) => state.location });
   const destination = parseDestination(location.pathname);
@@ -233,7 +278,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     return typeof tab === "object" && "path" in tab && tab.line && consumedLine !== lineVisit.current.value
       ? { ...tab, lineScrollRequest: lineVisit.current.value } : tab;
   }, [pane, consumedLine, location.href, lineJump]);
-  const [sessions, setSessions] = useState<string[] | null>(null);
+  const sessionsQuery = useQuery(listChatSessionsQuery(projectId));
+  const sessions = useMemo(() => sessionsQuery.data?.map((session) => session.id) ?? null, [sessionsQuery.data]);
   const restoredFilesRef = useRef(new Set<string>());
   const intentionalFilesRef = useRef(new Set<string>());
   const sourceModesRef = useRef<Record<string, boolean>>({});
@@ -265,16 +311,43 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const locale = useLocale();
   const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
-  const [projects, setProjects] = useState<Project[] | null>(null);
-  const [uiState, setUiState] = useState<UiState | null>(null);
+  const projectsOptions = useMemo(() => listProjectsQuery(), [projectId]);
+  const projectsQuery = useQuery(projectsOptions);
+  const projects = projectsQuery.data ?? null;
+  const setProjects = useCallback((value: SetStateAction<Project[] | null>) => {
+    setScopedQueryData(projectsOptions.queryKey, (current) => {
+      const next = typeof value === "function" ? value(current ?? null) : value;
+      return next ?? undefined;
+    });
+  }, [projectsOptions]);
+  const uiStateOptions = useMemo(() => getUiStateQuery(), [projectId]);
+  const uiStateQuery = useQuery(uiStateOptions);
+  const uiState = uiStateQuery.data ?? null;
+  const setUiState = useCallback((value: SetStateAction<UiState | null>) => {
+    setScopedQueryData(uiStateOptions.queryKey, (current) => {
+      const next = typeof value === "function" ? value(current ?? null) : value;
+      return next ?? undefined;
+    });
+  }, [uiStateOptions]);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
-  const [startupError, setStartupError] = useState<string | null>(null);
+  const failedStartupItems = [
+    !sessionsQuery.data && sessionsQuery.error ? m.chat_all_sessions() : null,
+    !projectsQuery.data && projectsQuery.error ? m.app_projects() : null,
+    !uiStateQuery.data && uiStateQuery.error ? m.app_settings() : null,
+  ].filter((item) => item !== null);
+  const startupError = failedStartupItems.length
+    ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
+    : null;
   const persistedPreferredAgent = useRef<AgentSelection | null>(null);
-  const [experiments, setExperiments] = useState<Experiment[]>([]);
-  const [experimentDataReady, setExperimentDataReady] = useState(false);
+  const experimentsOptions = useMemo(() => listExperimentsQuery(projectId), [projectId]);
+  const experimentsQuery = useQuery(experimentsOptions);
+  const experiments = experimentsQuery.data ?? [];
+  const experimentDataReady = !experimentsQuery.isPending;
   const [runDataReady, setRunDataReady] = useState(false);
-  const [runs, setRuns] = useState<Run[]>([]);
+  const runsOptions = useMemo(() => listRunsQuery(projectId), [projectId]);
+  const runsQuery = useQuery(runsOptions);
+  const runs = runsQuery.data ?? [];
   // Latest runs/experiments, read by the stable openRunLogs/openFileTab so
   // evidence chips resolve ids without re-creating the callbacks on every poll
   // (they feed the memoized transcript, which needs stable props).
@@ -290,7 +363,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const runsVisitRef = useRef(0);
   const experimentsRef = useRef(experiments);
   experimentsRef.current = experiments;
-  const [artifacts, setArtifacts] = useState<ProjectArtifacts | null>(null);
+  const artifactsOptions = useMemo(() => getArtifactsQuery(projectId), [projectId]);
+  const artifactsQuery = useQuery(artifactsOptions);
+  const artifacts = artifactsQuery.data ?? null;
+
   const [view, setView] = useState<ExperimentsView>("table");
   // Experiments pane scope: "agent" narrows to the open chat session's work.
   // Falls back to "project" whenever there is no usable experiment attribution.
@@ -574,8 +650,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const onActiveSessionChange = useCallback((sessionId: string | null, options?: { replace?: boolean }) => {
     if (!projectId) return;
     if (sessionId) {
-      sessionLoadRef.current?.set(sessionId, true);
-      setSessions((current) => current && current.includes(sessionId) ? current : [...(current ?? []), sessionId]);
       if (options?.replace && activeSessionId === null) {
         captureWorkspace();
         inheritNewTaskWorkspace(projectId, sessionId);
@@ -608,7 +682,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
   const closeDemoWelcome = useCallback(async () => {
-    const saved = await updateUiState({ tourCompleted: true });
+    const saved = await updateUiStateMutation.mutateAsync({ tourCompleted: true });
     setUiState((current) => current && { ...current, tourCompleted: saved.tourCompleted });
     setDemoWelcomeOpen(false);
   }, []);
@@ -642,71 +716,26 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     navigatePane({ kind: "home", view: "experiments" }, replace);
   }, [navigatePane]);
 
-  const sessionLoadRef = useRef<Map<string, boolean> | null>(null);
-  const loadSessionIds = useCallback(async () => {
-    const changes = new Map<string, boolean>();
-    sessionLoadRef.current = changes;
-    const loaded = await listChatSessions(projectId);
-    if (sessionLoadRef.current !== changes) return;
-    const ids = new Set(loaded.map((session) => session.id));
-    for (const [id, present] of changes) {
-      if (present) ids.add(id);
-      else ids.delete(id);
+  const loadInitialState = () => {
+    void projectsQuery.refetch();
+    void uiStateQuery.refetch();
+    void sessionsQuery.refetch();
+  };
+  const preferencesLoaded = useRef(false);
+  useEffect(() => {
+    if (!uiState || preferencesLoaded.current) return;
+    preferencesLoaded.current = true;
+    persistedPreferredAgent.current = uiState.preferredAgent;
+    const prefs = getRememberedGlobalWorkspace() ?? uiState.workspace;
+    if (prefs) {
+      setRailOpen(prefs.railOpen);
+      setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
+      setView(prefs.experimentsView);
     }
-    sessionLoadRef.current = null;
-    setSessions([...ids]);
-    if (rememberedSessionRef.current && !ids.has(rememberedSessionRef.current)) rememberedSessionRef.current = null;
-  }, [projectId]);
-
-  const loadInitialState = useCallback(() => {
-    setStartupError(null);
-    setProjects(null);
-    setUiState(null);
-    void Promise.allSettled([listProjects(), getUiState(), loadSessionIds()]).then(([projectsResult, uiStateResult, sessionsResult]) => {
-      const errors: string[] = [];
-      if (sessionsResult.status === "rejected") errors.push(m.chat_all_sessions());
-      if (projectsResult.status === "fulfilled") {
-        setProjects(projectsResult.value);
-
-      } else {
-        errors.push(m.app_projects());
-      }
-      if (uiStateResult.status === "fulfilled") {
-        persistedPreferredAgent.current = uiStateResult.value.preferredAgent;
-        const prefs = getRememberedGlobalWorkspace() ?? uiStateResult.value.workspace;
-        if (prefs) {
-          setRailOpen(prefs.railOpen);
-          setPanelWidth(Math.min(prefs.panelWidth, panelMaxWidth()));
-          setView(prefs.experimentsView);
-        }
-        setUiState(uiStateResult.value);
-      } else {
-        errors.push(m.app_settings());
-      }
-      if (errors.length > 0) {
-        setStartupError(m.app_startup_load_failed({ items: new Intl.ListFormat(getLocale()).format(errors) }));
-      }
-    });
-  }, [loadSessionIds]);
+  }, [uiState]);
   useEffect(() => {
-    loadInitialState();
-  }, [loadInitialState]);
-
-  useEffect(() => {
-    const off = onChatEvent((event) => {
-      if (event.type === "reconnected") {
-        void loadSessionIds().catch(() => {});
-      } else if (event.type === "session" && event.session.projectId === projectId) {
-        sessionLoadRef.current?.set(event.session.id, true);
-        setSessions((current) => current?.includes(event.session.id) ? current : [...(current ?? []), event.session.id]);
-      } else if (event.type === "sessionDeleted") {
-        sessionLoadRef.current?.set(event.sessionId, false);
-        setSessions((current) => current?.filter((id) => id !== event.sessionId) ?? null);
-        if (rememberedSessionRef.current === event.sessionId) rememberedSessionRef.current = null;
-      }
-    });
-    return () => { off(); sessionLoadRef.current = null; };
-  }, [projectId, loadSessionIds]);
+    if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
+  }, [sessions]);
 
   const preferredAgentWrite = useRef<Promise<void>>(Promise.resolve());
   const preferredAgentSaveSeq = useRef(0);
@@ -714,7 +743,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const saveSeq = ++preferredAgentSaveSeq.current;
     setUiState((current) => current && { ...current, preferredAgent: selection });
     const write = preferredAgentWrite.current
-      .then(() => updateUiState({ preferredAgent: selection }))
+      .then(() => updateUiStateMutation.mutateAsync({ preferredAgent: selection }))
       .then((saved) => {
         persistedPreferredAgent.current = saved.preferredAgent;
         if (saveSeq === preferredAgentSaveSeq.current) {
@@ -746,7 +775,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     baselineRunsRef.current.clear();
     pendingFirstRunningRunsRef.current.clear();
     const runsVisit = ++runsVisitRef.current;
-    listRuns(baselineProjectId)
+    queryClient.fetchQuery(listRunsQuery(baselineProjectId))
       .then((loadedRuns) => {
         if (
           projectIdRef.current !== baselineProjectId ||
@@ -770,16 +799,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             observedRunsRef.current.set(run.id, run);
           }
         }
-        setRuns((current) => {
-          const merged = new Map(loadedRuns.map((run) => [run.id, run]));
-          for (const liveRun of current) {
-            const fetchedRun = merged.get(liveRun.id);
-            if (!fetchedRun || fetchedRun.updatedAt <= liveRun.updatedAt) {
-              merged.set(liveRun.id, liveRun);
-            }
-          }
-          return [...merged.values()];
-        });
         runsBaselineReadyRef.current = true;
         setRunDataReady(true);
         if (shouldAutoOpen) openExperimentsTab(true);
@@ -795,31 +814,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // Per-project data. Harness agents spawn lazily on the first chat message.
   useEffect(() => {
     if (!projectId) return;
-    let active = true;
     observedRunsProjectRef.current = projectId;
     observedRunsRef.current.clear();
     liveRunIdsRef.current.clear();
     openProject(projectId).catch(() => {});
-    setExperiments([]);
-    setRuns([]);
-    setArtifacts(null);
-    listExperiments(projectId).then((items) => { if (active) { setExperiments(items); setExperimentDataReady(true); } }).catch(() => { if (active) setExperimentDataReady(true); });
     loadRunsBaseline(projectId);
-    getArtifacts(projectId).then((items) => { if (active) setArtifacts(items); }).catch(() => {});
-    return () => { active = false; runsVisitRef.current++; };
+    return () => { runsVisitRef.current++; };
   }, [loadRunsBaseline, projectId]);
 
-  // Refetch artifacts on open and whenever the directory changes.
-  const refreshArtifacts = useCallback(() => {
-    const id = projectIdRef.current;
-    if (id) getArtifacts(id).then(setArtifacts).catch(() => {});
-  }, []);
-
   const openArtifactsTab = useCallback(() => {
-    refreshArtifacts();
     setArtifactsTabOpen(true);
     selectRightTab("artifacts");
-  }, [refreshArtifacts, selectRightTab]);
+  }, [selectRightTab]);
 
   // Live store updates.
   useOrxEvents({
@@ -841,7 +847,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       if (previous && previous.updatedAt > run.updatedAt) return;
       observedRunsRef.current.set(run.id, run);
       liveRunIdsRef.current.add(run.id);
-      setRuns((current) => upsert(current, run));
       if (run.status !== "running" || previous?.status === "running") return;
       const baselineRun = baselineRunsRef.current.get(run.id);
       const newSinceBaseline =
@@ -850,16 +855,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           (baselineRun.status !== "running" && baselineRun.updatedAt <= run.updatedAt));
       if ((previouslyLive && previous) || newSinceBaseline) openExperimentsTab(true);
       else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
-    },
-    onExperiment: (experiment) => {
-      if (experiment.projectId === projectIdRef.current)
-        setExperiments((cur) => upsert(cur, experiment));
-    },
-    onProject: (project) => {
-      setProjects((cur) => (cur ? upsert(cur, project) : [project]));
-    },
-    onArtifacts: (pid) => {
-      if (pid === projectIdRef.current) refreshArtifacts();
     },
   });
 
@@ -989,8 +984,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       // short id (`orx` prints an 8-char prefix), so match the full id or prefix.
       const experiment = exp
         ? experimentsRef.current.find(
-            (e) => e.id === exp || (exp.length >= 6 && e.id.startsWith(exp)),
-          )
+          (e) => e.id === exp || (exp.length >= 6 && e.id.startsWith(exp)),
+        )
         : undefined;
       const effectiveRef = ref ?? experiment?.branchName;
       // A branch ref only applies to repo files; artifacts and absolute-path
@@ -1189,7 +1184,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     const seed = () => {
       const gen = ++seedGen;
       for (const sid of new Set(subagentTabs.map((t) => t.sessionId))) {
-        getChatMessages(sid)
+        queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 })
           .then(({ messages }) => {
             if (live && gen === seedGen)
               apply(messages, subagentTabs.filter((t) => t.sessionId === sid), true);
@@ -1235,8 +1230,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       setCodeTabs((prev) =>
         prev.some((tab) => sameCodeTab(tab, opened))
           ? prev.map((tab) =>
-              sameCodeTab(tab, opened) ? { ...tab, experimentId, view } : tab,
-            )
+            sameCodeTab(tab, opened) ? { ...tab, experimentId, view } : tab,
+          )
           : [...prev, opened],
       );
       openRightTab(opened, intent);
@@ -1349,12 +1344,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const onboardingOverviewTab =
     activeSessionId === DEMO_MAIN_SESSION_ID && demoOverviewLeading
       ? fileTabs.find(
-          (tab) =>
-            sameFileTab(tab, {
-              path: DEMO_OVERVIEW_ARTIFACT,
-              source: "artifacts",
-            }),
-        )
+        (tab) =>
+          sameFileTab(tab, {
+            path: DEMO_OVERVIEW_ARTIFACT,
+            source: "artifacts",
+          }),
+      )
       : undefined;
   // The demo overview leads the home tabs; every other content tab follows the
   // stable order in which it was opened (or reused as the preview slot).
@@ -1364,28 +1359,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "plan"
       ? rightTab
       : null;
-  const [planContent, setPlanContent] = useState<{ key: string; text: string | null } | null>(null);
   const planSessionId = planTab?.sessionId;
   const planPromptId = planTab?.promptId;
-  useEffect(() => {
-    if (!planSessionId || !planPromptId || !sessions?.includes(planSessionId)) return;
-    let active = true;
-    const key = `${planSessionId}:${planPromptId}`;
-    const apply = (messages: ChatMessage[]) => {
-      const part = messages.flatMap((message) => {
-        const found = findPartById(message.parts, planPromptId);
-        return found ? [found] : [];
-      })[0];
-      if (active) setPlanContent({ key, text: part?.prompt?.plan ?? null });
-    };
-    const load = () => void getChatMessages(planSessionId).then(({ messages }) => apply(messages)).catch(() => { if (active) setPlanContent({ key, text: null }); });
-    load();
-    const off = onChatEvent((event) => {
-      if (event.type === "reconnected") load();
-      if (event.type === "message" && event.sessionId === planSessionId && findPartById(event.message.parts, planPromptId)) apply([event.message]);
-    });
-    return () => { active = false; off(); };
-  }, [planSessionId, planPromptId, sessions]);
+  const planEnabled = Boolean(planSessionId && planPromptId && sessions?.includes(planSessionId));
+  const planQuery = useQuery({ ...getChatMessagesQuery(planSessionId ?? ""), enabled: planEnabled, subscribed: planEnabled });
+  const planContent = useMemo(() => {
+    if (!planSessionId || !planPromptId || !planQuery.data) return null;
+    const part = planQuery.data.messages.flatMap((message) => {
+      const found = findPartById(message.parts, planPromptId);
+      return found ? [found] : [];
+    })[0];
+    return { key: `${planSessionId}:${planPromptId}`, text: part?.prompt?.plan ?? null };
+  }, [planSessionId, planPromptId, planQuery.data]);
   const subagentTab =
     typeof rightTab === "object" && "kind" in rightTab && rightTab.kind === "subagent"
       ? rightTab
@@ -1418,7 +1403,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       onSelect={() => selectRightTab(tab)}
       onPromote={() => promoteRightTab(tab)}
       onClose={() => closeFileTab(tab)}
-   />
+    />
   );
   const tabExperiment = expTab ? (experiments.find((e) => e.id === expTab.id) ?? null) : null;
   const codeExperiment = codeTab
@@ -1444,7 +1429,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closeExperimentTab(tab)}
-       />
+        />
       );
     }
     if ("kind" in tab && tab.kind === "plan") {
@@ -1458,7 +1443,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closePlanTab(tab)}
-       />
+        />
       );
     }
     if ("kind" in tab) {
@@ -1473,7 +1458,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
           onSelect={() => selectRightTab(tab)}
           onPromote={() => promoteRightTab(tab)}
           onClose={() => closeSubagentTab(tab)}
-       />
+        />
       );
     }
     const experiment = experiments.find((item) => item.id === tab.experimentId);
@@ -1487,7 +1472,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         onSelect={() => selectRightTab(tab)}
         onPromote={() => promoteRightTab(tab)}
         onClose={() => closeCodeTab(tab)}
-     />
+      />
     );
   };
 
@@ -1535,7 +1520,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       onNewProject={() => setNewProjectOpen(true)}
       onRepository={() => selectMainView("git")}
       onCollapse={() => setRailOpen(false)}
-   />
+    />
   );
 
   return (
@@ -1570,8 +1555,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onOpenWorktree={openWorktreeTab}
             composerPrefill={
               activeProject &&
-              isDemoProjectId(activeProject.id) &&
-              uiState?.tourCompleted === false
+                isDemoProjectId(activeProject.id) &&
+                uiState?.tourCompleted === false
                 ? DEMO_RUN_EXPERIMENT_PROMPT
                 : null
             }
@@ -1595,424 +1580,423 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                   setProjects((current) => (current ? upsert(current, project) : [project]));
                 }}
                 onSelectTab={selectMainView}
-             />
+              />
             ) : null}
           </ChatPanel>
         )}
         {mainView === "chat" && panelOpen && (
-        <aside
-          className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
-          style={panelMax ? undefined : { width: panelWidth }}
-          data-onboarding="experiments"
-        >
-          <div
-            className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
-            title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
-            onPointerDown={resizePanel}
-         />
-          <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
-            <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-              {leadingFileTabs.map(renderFileTab)}
-              {filesTabOpen && (
-                <ClosableTab
-                  active={rightTab === "files"}
-                  label={m.app_files()}
-                  icon={<FolderOpen size={12} className="shrink-0" />}
-                  onSelect={() => selectRightTab("files")}
-                  onClose={() => closeHomeTab("files")}
-               />
-              )}
-              {artifactsTabOpen && (
-                <ClosableTab
-                  active={rightTab === "artifacts"}
-                  label={m.app_artifacts()}
-                  icon={<Package size={12} className="shrink-0" />}
-                  onSelect={() => selectRightTab("artifacts")}
-                  onClose={() => closeHomeTab("artifacts")}
-               />
-              )}
-              {experimentsTabOpen && (
-                <ClosableTab
-                  active={rightTab === "experiments"}
-                  label={m.app_experiments()}
-                  icon={<FlaskConical size={12} className="shrink-0" />}
-                  onSelect={() => selectRightTab("experiments")}
-                  onClose={() => closeHomeTab("experiments")}
-               />
-              )}
-              {orderedContentTabs.map(renderContentTab)}
-            </div>
-            <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
-              <IconButton
-                title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
-                onClick={() => setPanelMax((m) => !m)}
-              >
-                {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-              </IconButton>
-              <IconButton
-                title={m.app_close_panel()}
-                aria-label={m.app_close_panel()}
-                onClick={() => {
-                  closePanel();
-                  setPanelMax(false);
-                }}
-              >
-                <X size={14} />
-              </IconButton>
-            </div>
-          </div>
-          {!workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
-            <TabBody><Spinner /></TabBody>
-          ) : (expTab && (!tabExperiment || (selectedRunId && !runs.some((run) => run.id === selectedRunId && run.experimentId === expTab.id))))
-            || (requestedCodeTab && !codeExperiment)
-            || (pane && "sessionId" in pane && pane.sessionId && !sessions?.includes(pane.sessionId)) ? (
-            <TabBody><div className="p-6 text-subtext">{m.model_picker_unavailable()}</div></TabBody>
-          ) : rightTab === "artifacts" ? (
-            <TabBody>
-              {activeProject && (
-                <ArtifactsTab
-                  key={activeProject.id}
-                  project={activeProject}
-                  artifacts={artifacts}
-                  onChanged={refreshArtifacts}
-                  onOpenFile={openArtifactFileTab}
-                  canRenameFile={(path) => !fileBuffersRef.current.get(
-                    fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
-                  )?.needsProtection}
-                  onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
-               />
-              )}
-            </TabBody>
-          ) : rightTab === "experiments" ? (
-            <TabBody>
-              <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
-                <span className="flex-1" />
-                <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
-                  <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
-                    <IconButton size="small"
-                      ref={scopeTriggerRef}
-                      className="experiment-scope-trigger"
-                      active={effectiveScope === "agent"}
-                      title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
-                      aria-label={m.app_filter_experiments()}
-                      aria-expanded={scopeMenuOpen}
-                      onClick={() => setScopeMenuOpen((open) => !open)}
-                    >
-                      <Filter size={16} strokeWidth={2.5} />
-                    </IconButton>
-                    {scopeMenuOpen && (
-                      <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
-                        <MenuItem
-                          aria-pressed={effectiveScope === "agent"}
-                          disabled={!activeSessionId || !allExperimentsAttributed}
-                          title={
-                            !activeSessionId
-                              ? m.app_open_task_to_filter()
-                              : !allExperimentsAttributed
-                                ? m.app_filter_unavailable_unattributed()
-                                : undefined
-                          }
-                          onClick={() => {
-                            setScope("agent");
-                            setScopeMenuOpen(false);
-                          }}
-                        >
-                          <span>{m.app_current_task()}</span>
-                          {effectiveScope === "agent" && <Check size={13} />}
-                        </MenuItem>
-                        <MenuItem
-                          aria-pressed={effectiveScope === "project"}
-                          onClick={() => {
-                            setScope("project");
-                            setScopeMenuOpen(false);
-                          }}
-                        >
-                          <span>{m.app_entire_project()}</span>
-                          {effectiveScope === "project" && <Check size={13} />}
-                        </MenuItem>
-                      </div>
-                    )}
-                  </div>
-                  <div
-                    className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
-                    role="group"
-                    aria-label={m.app_experiment_view()}
-                  >
-                    <button
-                      className={view === "table" ? "active" : ""}
-                      aria-pressed={view === "table"}
-                      onClick={() => setView("table")}
-                    >
-                      {m.app_table()}
-                    </button>
-                    <button
-                      className={view === "tree" ? "active" : ""}
-                      aria-pressed={view === "tree"}
-                      onClick={() => setView("tree")}
-                    >
-                      {m.app_tree()}
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <div className="pane-content flex-1 min-h-0 relative bg-background">
-                {view === "tree" ? (
-                  activeProject && (
-                    <TreeView
-                      experiments={experiments}
-                      runs={scopedRuns}
-                      project={activeProject}
-                      onOpenView={openExperimentTab}
-                      onOpenCode={openCodeTabForExperiment}
-                      agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
-                      onShowProjectScope={showProjectScope}
-                   />
-                  )
-                ) : (
-                  <ExperimentsTable
-                    runs={scopedRuns}
-                    emptyHint={
-                      effectiveScope === "agent" && experiments.length > 0
-                        ? m.app_no_task_experiments()
-                        : undefined
-                    }
-                    experiments={scopedExperiments}
-                    onOpen={(experiment, intent) => {
-                      openExperimentTab(experiment.id, "overview", intent);
-                    }}
-                    onOpenLogs={(experimentId, runId, intent) => {
-                      openExperimentTab(experimentId, "terminal", intent, runId);
-                    }}
-                    onOpenCode={(experimentId, intent) => {
-                      const experiment = experiments.find((item) => item.id === experimentId);
-                      if (experiment)
-                        openCodeTabForExperiment(
-                          experiment.id,
-                          experiment.branchName,
-                          "files",
-                          intent,
-                        );
-                    }}
-                    onCancel={cancelRun}
-                 />
+          <aside
+            className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
+            style={panelMax ? undefined : { width: panelWidth }}
+            data-onboarding="experiments"
+          >
+            <div
+              className={`panel-resizer absolute start-0 top-0 bottom-0 w-1.5 z-30 [&:hover]:bg-resizer-hover [&:active]:bg-resizer-hover ${panelMax ? "cursor-e-resize" : "cursor-col-resize"}`}
+              title={panelMax ? m.app_drag_to_restore_panel() : m.app_drag_to_resize_panel()}
+              onPointerDown={resizePanel}
+            />
+            <div className="tabs flex items-end gap-0 pt-1 pe-1.5 pb-0 ps-2 h-10 border-b border-b-border bg-background shrink-0">
+              <div className="tab-strip flex items-end gap-0.5 flex-1 min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {leadingFileTabs.map(renderFileTab)}
+                {filesTabOpen && (
+                  <ClosableTab
+                    active={rightTab === "files"}
+                    label={m.app_files()}
+                    icon={<FolderOpen size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab("files")}
+                    onClose={() => closeHomeTab("files")}
+                  />
                 )}
+                {artifactsTabOpen && (
+                  <ClosableTab
+                    active={rightTab === "artifacts"}
+                    label={m.app_artifacts()}
+                    icon={<Package size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab("artifacts")}
+                    onClose={() => closeHomeTab("artifacts")}
+                  />
+                )}
+                {experimentsTabOpen && (
+                  <ClosableTab
+                    active={rightTab === "experiments"}
+                    label={m.app_experiments()}
+                    icon={<FlaskConical size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab("experiments")}
+                    onClose={() => closeHomeTab("experiments")}
+                  />
+                )}
+                {orderedContentTabs.map(renderContentTab)}
               </div>
-            </TabBody>
-          ) : rightTab === "files" ? (
-            <TabBody>
-              {activeProject ? (
-                <WorktreeTab
-                  key={`files:${activeSessionId ?? `project:${activeProject.id}`}`}
-                  sessionId={activeSessionId ?? undefined}
-                  project={activeProject}
-                  view={filesView}
-                  toggled={filesToggled}
-                  onViewChange={setFilesView}
-                  onToggledChange={setFilesToggled}
-                  canRenameFile={(path) => !fileBuffersRef.current.get(
-                    fileScrollKey(activeProject.id, activeSessionId, {
-                      path,
-                      source: "repo",
-                      sessionId: activeSessionId ?? undefined,
-                    }),
-                  )?.needsProtection}
-                  onOpenFile={(path, sessionId, ref, intent) =>
-                    openFileTab(
-                      path,
-                      sessionId,
-                      ref,
-                      undefined,
-                      undefined,
-                      undefined,
-                      intent,
-                    )
-                  }
-               />
-              ) : (
-                <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
-                  <CodeTabBody>
-                    <div className="wt-empty flex flex-col items-center gap-2.5 py-12 px-6 text-center text-muted [&_>_svg]:text-subtext [&_p]:m-0 [&_p]:max-w-80 [&_p]:text-sm">
-                      <FolderGit2 size={22} />
-                      <p>{m.app_select_a_project_to_browse_its_files()}</p>
+              <div className="panel-controls inline-flex items-center gap-0.5 self-center py-0 px-1.5 shrink-0">
+                <IconButton
+                  title={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                  aria-label={panelMax ? m.app_restore_panel() : m.app_expand_panel()}
+                  onClick={() => setPanelMax((m) => !m)}
+                >
+                  {panelMax ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+                </IconButton>
+                <IconButton
+                  title={m.app_close_panel()}
+                  aria-label={m.app_close_panel()}
+                  onClick={() => {
+                    closePanel();
+                    setPanelMax(false);
+                  }}
+                >
+                  <X size={14} />
+                </IconButton>
+              </div>
+            </div>
+            {!workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
+              <TabBody><Spinner /></TabBody>
+            ) : (expTab && (!tabExperiment || (selectedRunId && !runs.some((run) => run.id === selectedRunId && run.experimentId === expTab.id))))
+              || (requestedCodeTab && !codeExperiment)
+              || (pane && "sessionId" in pane && pane.sessionId && !sessions?.includes(pane.sessionId)) ? (
+              <TabBody><div className="p-6 text-subtext">{m.model_picker_unavailable()}</div></TabBody>
+            ) : rightTab === "artifacts" ? (
+              <TabBody>
+                {activeProject && (
+                  <ArtifactsTab
+                    key={activeProject.id}
+                    project={activeProject}
+                    artifacts={artifacts}
+                    onOpenFile={openArtifactFileTab}
+                    canRenameFile={(path) => !fileBuffersRef.current.get(
+                      fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
+                    )?.needsProtection}
+                    onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
+                  />
+                )}
+              </TabBody>
+            ) : rightTab === "experiments" ? (
+              <TabBody>
+                <div className="pane-toolbar flex shrink-0 flex-wrap items-center gap-2 bg-background px-3 pt-2.5 pb-2">
+                  <span className="flex-1" />
+                  <div className="experiments-toolbar-controls inline-flex items-center gap-[5px]">
+                    <div className="option-picker relative inline-flex" ref={scopeMenuRef}>
+                      <IconButton size="small"
+                        ref={scopeTriggerRef}
+                        className="experiment-scope-trigger"
+                        active={effectiveScope === "agent"}
+                        title={m.app_experiment_filter({ scope: effectiveScope === "agent" ? m.app_current_task() : m.app_entire_project() })}
+                        aria-label={m.app_filter_experiments()}
+                        aria-expanded={scopeMenuOpen}
+                        onClick={() => setScopeMenuOpen((open) => !open)}
+                      >
+                        <Filter size={16} strokeWidth={2.5} />
+                      </IconButton>
+                      {scopeMenuOpen && (
+                        <div className="option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 drop-down align-right experiment-scope-menu [&_.model-item]:whitespace-nowrap [&_.model-item:disabled]:text-muted [&_.model-item:disabled]:cursor-default [&_.model-item:disabled:hover]:bg-transparent">
+                          <MenuItem
+                            aria-pressed={effectiveScope === "agent"}
+                            disabled={!activeSessionId || !allExperimentsAttributed}
+                            title={
+                              !activeSessionId
+                                ? m.app_open_task_to_filter()
+                                : !allExperimentsAttributed
+                                  ? m.app_filter_unavailable_unattributed()
+                                  : undefined
+                            }
+                            onClick={() => {
+                              setScope("agent");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_current_task()}</span>
+                            {effectiveScope === "agent" && <Check size={13} />}
+                          </MenuItem>
+                          <MenuItem
+                            aria-pressed={effectiveScope === "project"}
+                            onClick={() => {
+                              setScope("project");
+                              setScopeMenuOpen(false);
+                            }}
+                          >
+                            <span>{m.app_entire_project()}</span>
+                            {effectiveScope === "project" && <Check size={13} />}
+                          </MenuItem>
+                        </div>
+                      )}
                     </div>
-                  </CodeTabBody>
+                    <div
+                      className="seg inline-flex items-center gap-0.5 rounded-md bg-hover-subtle [&_button]:font-medium [&_button]:text-text [&_button]:rounded-sm [&_button:not(:disabled):hover]:text-text [&_button.active]:bg-background [&_button.active]:shadow-segment [&_button:disabled]:text-muted [&_button:disabled]:cursor-default experiments-view-toggle p-0.5 [&_button]:py-0.5 [&_button]:px-2 [&_button]:text-sm"
+                      role="group"
+                      aria-label={m.app_experiment_view()}
+                    >
+                      <button
+                        className={view === "table" ? "active" : ""}
+                        aria-pressed={view === "table"}
+                        onClick={() => setView("table")}
+                      >
+                        {m.app_table()}
+                      </button>
+                      <button
+                        className={view === "tree" ? "active" : ""}
+                        aria-pressed={view === "tree"}
+                        onClick={() => setView("tree")}
+                      >
+                        {m.app_tree()}
+                      </button>
+                    </div>
+                  </div>
                 </div>
-              )}
-            </TabBody>
-          ) : fileTab ? (
-            <TabBody>
-              {projectId && (
-                <FileViewer
-                  remote={runtime.kind === "ssh"}
-                  restored={restoredFilesRef.current.has(fileScrollKey(projectId, activeSessionId, fileTab))}
-                  onRestoreActivated={() => {
-                    const key = fileScrollKey(projectId, activeSessionId, fileTab);
-                    restoredFilesRef.current.delete(key);
-                    intentionalFilesRef.current.add(key);
-                  }}
-                  showSource={sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] ?? false}
-                  onShowSourceChange={(showSource) => {
-                    sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] = showSource;
-                    setMetadataRevision((value) => value + 1);
-                  }}
-                  key={fileScrollKey(projectId, activeSessionId, fileTab)}
-                  projectId={projectId}
-                  path={fileTab.path}
-                  source={fileTab.source}
-                  // Artifacts tabs fall back to the checkout, which needs this session.
-                  sessionId={
-                    fileTab.source === "artifacts"
-                      ? (activeSessionId ?? undefined)
-                      : fileTab.sessionId
-                  }
-                  gitRef={fileTab.ref}
-                  line={fileTab.line}
-                  branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
-                  artifactVersion={artifactVersion}
-                  artifactEntries={fileTab.source === "artifacts" ? artifacts?.entries : undefined}
-                  bufferSession={getFileBufferSession(fileScrollKey(projectId, activeSessionId, fileTab))}
-                  onOpenFile={(path, sessionId, ref, intent) =>
-                    openFromRightTab(fileTab, () =>
-                      openFileTab(
-                        path,
-                        sessionId,
-                        ref,
-                        undefined,
-                        undefined,
-                        undefined,
-                        intent,
-                      ),
+                <div className="pane-content flex-1 min-h-0 relative bg-background">
+                  {view === "tree" ? (
+                    activeProject && (
+                      <TreeView
+                        experiments={experiments}
+                        runs={scopedRuns}
+                        project={activeProject}
+                        onOpenView={openExperimentTab}
+                        onOpenCode={openCodeTabForExperiment}
+                        agentSessionId={effectiveScope === "agent" ? activeSessionId : null}
+                        onShowProjectScope={showProjectScope}
+                      />
                     )
-                  }
-                  scrollPosition={fileScrollPositionsRef.current.get(
-                    fileScrollKey(projectId, activeSessionId, fileTab),
+                  ) : (
+                    <ExperimentsTable
+                      runs={scopedRuns}
+                      emptyHint={
+                        effectiveScope === "agent" && experiments.length > 0
+                          ? m.app_no_task_experiments()
+                          : undefined
+                      }
+                      experiments={scopedExperiments}
+                      onOpen={(experiment, intent) => {
+                        openExperimentTab(experiment.id, "overview", intent);
+                      }}
+                      onOpenLogs={(experimentId, runId, intent) => {
+                        openExperimentTab(experimentId, "terminal", intent, runId);
+                      }}
+                      onOpenCode={(experimentId, intent) => {
+                        const experiment = experiments.find((item) => item.id === experimentId);
+                        if (experiment)
+                          openCodeTabForExperiment(
+                            experiment.id,
+                            experiment.branchName,
+                            "files",
+                            intent,
+                          );
+                      }}
+                      onCancel={cancelRun}
+                    />
                   )}
-                  onScrollPositionChange={(position) => {
-                    fileScrollPositionsRef.current.set(
-                      fileScrollKey(projectId, activeSessionId, fileTab),
-                      position,
-                    );
-                    recordScroll();
-                  }}
-                  lineScrollRequest={fileTab.lineScrollRequest}
-                  onLineScrollRequestHandled={() => consumeFileLineScrollRequest(fileTab)}
-                  onEdit={() => promoteRightTab(fileTab)}
-               />
-              )}
-            </TabBody>
-          ) : planTab ? (
-            <TabBody>
-              {/* The plan markdown is already client-side — render directly,
-                  file links resolve against the plan's session worktree. */}
-              <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
-                <Md
-                  text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
-                  onOpenFile={(path, line, exp, ref, intent) =>
-                    openFromRightTab(planTab, () =>
-                      openFileTab(
+                </div>
+              </TabBody>
+            ) : rightTab === "files" ? (
+              <TabBody>
+                {activeProject ? (
+                  <WorktreeTab
+                    key={`files:${activeSessionId ?? `project:${activeProject.id}`}`}
+                    sessionId={activeSessionId ?? undefined}
+                    project={activeProject}
+                    view={filesView}
+                    toggled={filesToggled}
+                    onViewChange={setFilesView}
+                    onToggledChange={setFilesToggled}
+                    canRenameFile={(path) => !fileBuffersRef.current.get(
+                      fileScrollKey(activeProject.id, activeSessionId, {
                         path,
-                        planTab.sessionId,
-                        ref,
-                        line,
-                        exp,
-                        undefined,
-                        intent,
-                      ),
-                    )
-                  }
-               />
-              </div>
-            </TabBody>
-          ) : subagentTab ? (
-            <SubagentTab
-              // Remount per spawn part so the seed + subscription reset cleanly.
-              key={subagentTab.spawnPartId}
-              sessionId={subagentTab.sessionId}
-              spawnPartId={subagentTab.spawnPartId}
-              onOpenFile={(path, line, exp, ref, intent) =>
-                openFromRightTab(subagentTab, () =>
-                  openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
-                )
-              }
-              onOpenRun={(runId, intent) =>
-                openFromRightTab(subagentTab, () => openRunLogs(runId, intent))
-              }
-              runExperimentName={runExperimentName}
-              onOpenExperiment={(experimentId, intent) =>
-                openFromRightTab(subagentTab, () => openExperimentNotes(experimentId, intent))
-              }
-              experimentName={experimentName}
-              onOpenSubagent={(pid, label, intent) =>
-                openFromRightTab(subagentTab, () =>
-                  openSubagentTab(subagentTab.sessionId, pid, label, intent),
-                )
-              }
-           />
-          ) : codeTab ? (
-            <TabBody>
-              {projectId && activeProject && codeTab && codeExperiment && (
-                <CodeTab
-                  key={`code:${codeTab.branch}`}
-                  projectId={projectId}
-                  project={activeProject}
-                  experiment={codeExperiment}
-                  view={codeTab.view}
-                  toggled={codeTab.toggled}
-                  onViewChange={(view) => updateCodeTab(codeTab, { view })}
-                  onToggledChange={(toggled) => updateCodeTab(codeTab, { toggled })}
-                  onOpenFile={(path, sessionId, ref, intent) =>
-                    openFromRightTab(codeTab, () =>
+                        source: "repo",
+                        sessionId: activeSessionId ?? undefined,
+                      }),
+                    )?.needsProtection}
+                    onOpenFile={(path, sessionId, ref, intent) =>
                       openFileTab(
                         path,
                         sessionId,
                         ref,
                         undefined,
                         undefined,
-                        codeExperiment.branchName,
+                        undefined,
                         intent,
-                      ),
-                    )
-                  }
-               />
-              )}
-            </TabBody>
-          ) : (
-            <TabBody>
-              {expTab && tabExperiment && activeProject && (
-                <DetailDrawer
-                  key={`${expTab.id}:${expTab.view}`}
-                  experiment={tabExperiment}
-                  project={activeProject}
-                  view={expTab.view}
-                  runs={runs}
-                  selectedRunId={selectedRunId}
-                  onSelectRun={setSelectedRunId}
-                  parentExperiment={
-                    experiments.find(
-                      (experiment) => experiment.id === tabExperiment.parentExperimentId,
-                    ) ?? null
-                  }
-                  onOpenView={(view, runId, intent) => {
-                    openFromRightTab(expTab, () =>
-                      openExperimentTab(tabExperiment.id, view, intent, runId),
-                    );
-                  }}
-                  onOpenCode={(view, intent) =>
-                    openFromRightTab(expTab, () =>
-                      openCodeTabForExperiment(
-                        tabExperiment.id,
-                        tabExperiment.branchName,
-                        view,
-                        intent,
-                      ),
-                    )
-                  }
-               />
-              )}
-            </TabBody>
-          )}
-        </aside>
+                      )
+                    }
+                  />
+                ) : (
+                  <div className="code-tab flex flex-col h-full min-h-0 wt-tab">
+                    <CodeTabBody>
+                      <div className="wt-empty flex flex-col items-center gap-2.5 py-12 px-6 text-center text-muted [&_>_svg]:text-subtext [&_p]:m-0 [&_p]:max-w-80 [&_p]:text-sm">
+                        <FolderGit2 size={22} />
+                        <p>{m.app_select_a_project_to_browse_its_files()}</p>
+                      </div>
+                    </CodeTabBody>
+                  </div>
+                )}
+              </TabBody>
+            ) : fileTab ? (
+              <TabBody>
+                {projectId && (
+                  <FileViewer
+                    remote={runtime.kind === "ssh"}
+                    restored={restoredFilesRef.current.has(fileScrollKey(projectId, activeSessionId, fileTab))}
+                    onRestoreActivated={() => {
+                      const key = fileScrollKey(projectId, activeSessionId, fileTab);
+                      restoredFilesRef.current.delete(key);
+                      intentionalFilesRef.current.add(key);
+                    }}
+                    showSource={sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] ?? false}
+                    onShowSourceChange={(showSource) => {
+                      sourceModesRef.current[fileScrollKey(projectId, activeSessionId, fileTab)] = showSource;
+                      setMetadataRevision((value) => value + 1);
+                    }}
+                    key={fileScrollKey(projectId, activeSessionId, fileTab)}
+                    projectId={projectId}
+                    path={fileTab.path}
+                    source={fileTab.source}
+                    // Artifacts tabs fall back to the checkout, which needs this session.
+                    sessionId={
+                      fileTab.source === "artifacts"
+                        ? (activeSessionId ?? undefined)
+                        : fileTab.sessionId
+                    }
+                    gitRef={fileTab.ref}
+                    line={fileTab.line}
+                    branchLabel={fileBranchLabel(fileTab, activeProject?.baselineBranch)}
+                    artifactVersion={artifactVersion}
+                    artifactEntries={fileTab.source === "artifacts" ? artifacts?.entries : undefined}
+                    bufferSession={getFileBufferSession(fileScrollKey(projectId, activeSessionId, fileTab))}
+                    onOpenFile={(path, sessionId, ref, intent) =>
+                      openFromRightTab(fileTab, () =>
+                        openFileTab(
+                          path,
+                          sessionId,
+                          ref,
+                          undefined,
+                          undefined,
+                          undefined,
+                          intent,
+                        ),
+                      )
+                    }
+                    scrollPosition={fileScrollPositionsRef.current.get(
+                      fileScrollKey(projectId, activeSessionId, fileTab),
+                    )}
+                    onScrollPositionChange={(position) => {
+                      fileScrollPositionsRef.current.set(
+                        fileScrollKey(projectId, activeSessionId, fileTab),
+                        position,
+                      );
+                      recordScroll();
+                    }}
+                    lineScrollRequest={fileTab.lineScrollRequest}
+                    onLineScrollRequestHandled={() => consumeFileLineScrollRequest(fileTab)}
+                    onEdit={() => promoteRightTab(fileTab)}
+                  />
+                )}
+              </TabBody>
+            ) : planTab ? (
+              <TabBody>
+                {/* The plan markdown is already client-side — render directly,
+                  file links resolve against the plan's session worktree. */}
+                <div className="pane-content flex-1 min-h-0 relative plan-tab-content overflow-y-auto bg-background py-4.5 px-6 [&_.md]:max-w-readable">
+                  <Md
+                    text={planContent?.key === `${planTab.sessionId}:${planTab.promptId}` ? planContent.text ?? m.model_picker_unavailable() : planTabs.find((tab) => tab.promptId === planTab.promptId)?.plan || m.artifacts_tab_loading()}
+                    onOpenFile={(path, line, exp, ref, intent) =>
+                      openFromRightTab(planTab, () =>
+                        openFileTab(
+                          path,
+                          planTab.sessionId,
+                          ref,
+                          line,
+                          exp,
+                          undefined,
+                          intent,
+                        ),
+                      )
+                    }
+                  />
+                </div>
+              </TabBody>
+            ) : subagentTab ? (
+              <SubagentTab
+                // Remount per spawn part so the seed + subscription reset cleanly.
+                key={subagentTab.spawnPartId}
+                sessionId={subagentTab.sessionId}
+                spawnPartId={subagentTab.spawnPartId}
+                onOpenFile={(path, line, exp, ref, intent) =>
+                  openFromRightTab(subagentTab, () =>
+                    openChatFile(path, subagentTab.sessionId, line, exp, ref, intent),
+                  )
+                }
+                onOpenRun={(runId, intent) =>
+                  openFromRightTab(subagentTab, () => openRunLogs(runId, intent))
+                }
+                runExperimentName={runExperimentName}
+                onOpenExperiment={(experimentId, intent) =>
+                  openFromRightTab(subagentTab, () => openExperimentNotes(experimentId, intent))
+                }
+                experimentName={experimentName}
+                onOpenSubagent={(pid, label, intent) =>
+                  openFromRightTab(subagentTab, () =>
+                    openSubagentTab(subagentTab.sessionId, pid, label, intent),
+                  )
+                }
+              />
+            ) : codeTab ? (
+              <TabBody>
+                {projectId && activeProject && codeTab && codeExperiment && (
+                  <CodeTab
+                    key={`code:${codeTab.branch}`}
+                    projectId={projectId}
+                    project={activeProject}
+                    experiment={codeExperiment}
+                    view={codeTab.view}
+                    toggled={codeTab.toggled}
+                    onViewChange={(view) => updateCodeTab(codeTab, { view })}
+                    onToggledChange={(toggled) => updateCodeTab(codeTab, { toggled })}
+                    onOpenFile={(path, sessionId, ref, intent) =>
+                      openFromRightTab(codeTab, () =>
+                        openFileTab(
+                          path,
+                          sessionId,
+                          ref,
+                          undefined,
+                          undefined,
+                          codeExperiment.branchName,
+                          intent,
+                        ),
+                      )
+                    }
+                  />
+                )}
+              </TabBody>
+            ) : (
+              <TabBody>
+                {expTab && tabExperiment && activeProject && (
+                  <DetailDrawer
+                    key={`${expTab.id}:${expTab.view}`}
+                    experiment={tabExperiment}
+                    project={activeProject}
+                    view={expTab.view}
+                    runs={runs}
+                    selectedRunId={selectedRunId}
+                    onSelectRun={setSelectedRunId}
+                    parentExperiment={
+                      experiments.find(
+                        (experiment) => experiment.id === tabExperiment.parentExperimentId,
+                      ) ?? null
+                    }
+                    onOpenView={(view, runId, intent) => {
+                      openFromRightTab(expTab, () =>
+                        openExperimentTab(tabExperiment.id, view, intent, runId),
+                      );
+                    }}
+                    onOpenCode={(view, intent) =>
+                      openFromRightTab(expTab, () =>
+                        openCodeTabForExperiment(
+                          tabExperiment.id,
+                          tabExperiment.branchName,
+                          view,
+                          intent,
+                        ),
+                      )
+                    }
+                  />
+                )}
+              </TabBody>
+            )}
+          </aside>
         )}
       </div>
       {newProjectOpen && (
@@ -2023,13 +2007,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             setNewProjectOpen(false);
             onProjectCreated(project, publicationError);
           }}
-       />
+        />
       )}
       {demoWelcomeOpen && activeProject && isDemoProjectId(activeProject.id) && (
         <DemoWelcomeModal
           onClose={closeDemoWelcome}
           onCreateProject={createProjectFromDemoWelcome}
-       />
+        />
       )}
     </div>
   );

@@ -1,9 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
+import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
-  getHarnesses,
   fmtNumber,
   harnessModelLabel,
   modelLabel,
@@ -15,11 +16,11 @@ import {
   type Harness,
   type HarnessId,
   type OptionChoice,
+  type AgentSelection,
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
-import { onHarnessAuth } from "../events";
-import type { AgentSelection } from "../api";
+
 import { MenuItem } from "./ui";
 import { cn } from "./ui/cn";
 
@@ -106,7 +107,6 @@ export function ModelPicker({
   reasoningChoices = [],
   defaultReasoningId,
   onSelectReasoning,
-  onHarnesses,
   lockHarness = false,
   className,
 }: {
@@ -118,14 +118,13 @@ export function ModelPicker({
   reasoningChoices?: OptionChoice[];
   defaultReasoningId?: string | null;
   onSelectReasoning?: (id: string) => void;
-  onHarnesses?: (harnesses: Harness[]) => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
   lockHarness?: boolean;
   className?: string;
 }) {
-  const [harnesses, setHarnesses] = useState<Harness[]>([]);
+  const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
@@ -143,25 +142,6 @@ export function ModelPicker({
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
-
-  useEffect(() => {
-    let mounted = true;
-    const load = (refresh = false) =>
-      getHarnesses(refresh)
-        .then((list) => {
-          if (!mounted) return;
-          setHarnesses(list);
-          onHarnesses?.(list);
-        })
-        .catch(() => {});
-    void load();
-    const unsubscribe = onHarnessAuth(() => void load(true));
-    return () => {
-      mounted = false;
-      unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -210,8 +190,8 @@ export function ModelPicker({
   const selected =
     value?.model != null
       ? harnesses
-          .find((h) => h.id === value.harness)
-          ?.models.find((m) => m.id === value.model)
+        .find((h) => h.id === value.harness)
+        ?.models.find((m) => m.id === value.model)
       : undefined;
   const label = value
     ? value.model
@@ -360,7 +340,7 @@ export function ModelPicker({
                 placeholder={m.model_picker_search_models()}
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-             />
+              />
               <div className="model-menu-list overflow-y-auto p-1.5">
                 {groups.map(({ harness, models, hidden }) => (
                   <div key={harness.id} className="[&_.model-item]:ps-6">
@@ -381,52 +361,52 @@ export function ModelPicker({
                       </div>
                     ) : (
                       <>
-                    {/* "Default model" (= send no --model, the CLI decides)
+                        {/* "Default model" (= send no --model, the CLI decides)
                         only where the CLI advertises no catalog — a custom
                         provider whose real models live behind its gateway.
                         With a discovered catalog the row is redundant noise:
                         the catalog's own default leads the list. */}
-                    {harness.models.length === 0 && (
-                      <MenuItem onClick={() => pick(harness, null)}>
-                        <span>
-                          {m.model_picker_default_model()}
-                          <span className="model-id">{m.model_picker_cli_configuration()}</span>
-                        </span>
-                        {value?.harness === harness.id && value?.model === null && (
-                          <Check size={13} />
+                        {harness.models.length === 0 && (
+                          <MenuItem onClick={() => pick(harness, null)}>
+                            <span>
+                              {m.model_picker_default_model()}
+                              <span className="model-id">{m.model_picker_cli_configuration()}</span>
+                            </span>
+                            {value?.harness === harness.id && value?.model === null && (
+                              <Check size={13} />
+                            )}
+                          </MenuItem>
                         )}
-                      </MenuItem>
-                    )}
-                    {models.map((m) => (
-                      <MenuItem
-                        key={m.id}
+                        {models.map((m) => (
+                          <MenuItem
+                            key={m.id}
 
-                        title={m.id}
-                        onClick={() => pick(harness, m.id)}
-                      >
-                        <span>{harnessModelLabel(m)}</span>
-                        {value?.harness === harness.id && value?.model === m.id && (
-                          <Check size={13} />
+                            title={m.id}
+                            onClick={() => pick(harness, m.id)}
+                          >
+                            <span>{harnessModelLabel(m)}</span>
+                            {value?.harness === harness.id && value?.model === m.id && (
+                              <Check size={13} />
+                            )}
+                          </MenuItem>
+                        ))}
+                        {hidden > 0 && (
+                          <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
                         )}
-                      </MenuItem>
-                    ))}
-                    {hidden > 0 && (
-                      <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
-                    )}
-                    {/* Free-form escape hatch: the catalogs are curated menus,
+                        {/* Free-form escape hatch: the catalogs are curated menus,
                         not the set of ids the CLIs accept — `--model
                         claude-opus-5` works on a CLI whose menu doesn't list
                         it. Typing an id not in the list offers it directly. */}
-                    {filter.trim().length > 0 &&
-                      !harness.models.some((m) => m.id === filter.trim()) && (
-                        <MenuItem
-                          onClick={() => pick(harness, filter.trim())}
-                        >
-                          <span>
-                            {m.model_picker_use_id({ id: ltr(filter.trim()) })}
-                          </span>
-                        </MenuItem>
-                      )}
+                        {filter.trim().length > 0 &&
+                          !harness.models.some((m) => m.id === filter.trim()) && (
+                            <MenuItem
+                              onClick={() => pick(harness, filter.trim())}
+                            >
+                              <span>
+                                {m.model_picker_use_id({ id: ltr(filter.trim()) })}
+                              </span>
+                            </MenuItem>
+                          )}
                       </>
                     )}
                   </div>
@@ -605,3 +585,5 @@ export function OptionPicker({
     </div>
   );
 }
+
+const EMPTY_HARNESSES: Harness[] = [];

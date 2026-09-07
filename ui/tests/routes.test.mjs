@@ -1,3 +1,5 @@
+import * as query from "@tanstack/react-query";
+import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -10,6 +12,7 @@ import * as workspace from "../src/workspaceState.ts";
 // Run complete route modules with UI-only dependencies stubbed; route definitions stay real.
 function loadModule(filename, api = {}, remembered = null) {
   const cache = new Map();
+  const queries = queryModules(api);
   function load(url) {
     if (cache.has(url.href)) return cache.get(url.href);
     const output = ts.transpileModule(readFileSync(url, "utf8"), {
@@ -20,6 +23,8 @@ function loadModule(filename, api = {}, remembered = null) {
     new Function("require", "exports", output)((id) => {
       if (id === "@tanstack/react-router") return routing;
       if (id === "react") return react;
+      if (id === "@tanstack/react-query") return query;
+      if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
       if (id.endsWith("/useProjectWorkspace")) return { getCachedProjectWorkspace: () => undefined };
       if (id === "react/jsx-runtime") return jsx;
       if (id.endsWith("/workspaceState")) return workspace;

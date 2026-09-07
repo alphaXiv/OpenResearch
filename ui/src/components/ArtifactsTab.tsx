@@ -1,3 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
+import { queryClient } from "../queries/client";
+import { getArtifactFileTextQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
@@ -22,7 +25,6 @@ import {
   deleteArtifact,
   FILE_PREVIEW_BYTES,
   fmtBytes,
-  getArtifactFileText,
   manageArtifactFile,
   type ArtifactEntry,
   type Project,
@@ -212,49 +214,26 @@ function previewKind(entry: ArtifactEntry): PreviewKind {
 
 /** Fetched body for kinds that need text: markdown or raw text. */
 function useTextBody(projectId: string, entry: ArtifactEntry, kind: PreviewKind, version: string | null) {
-  const [text, setText] = useState<string | null>(null);
-  const [binary, setBinary] = useState(false);
-  const [truncated, setTruncated] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const requestSequence = useRef(0);
-  const hasText = useRef(false);
-
   const wantsText = kind === "markdown" || (kind === "text" && entry.size <= FILE_PREVIEW_BYTES);
-
+  const options = getArtifactFileTextQuery(projectId, entry.path);
+  const query = useQuery({ ...options, enabled: wantsText, subscribed: wantsText });
+  const previous = useRef({ projectId, path: entry.path, modifiedAt: entry.modifiedAt, size: entry.size, version });
   useEffect(() => {
-    // Keep the previous body visible while a same-path rewrite is refetched.
-    // The preview component remounts when the selected path changes.
-    setBinary(false);
-    setTruncated(false);
-    setError(null);
-    if (!wantsText) return;
-    let cancelled = false;
-    const request = ++requestSequence.current;
-    const load = getArtifactFileText(projectId, entry.path).then((body) => {
-      if (!body) throw new Error(m.artifacts_not_found());
-      return body;
-    });
-    load
-      .then((body) => {
-        if (cancelled || request !== requestSequence.current) return;
-        if (body.binary) setBinary(true);
-        else {
-          hasText.current = true;
-          setText(body.content);
-        }
-        setTruncated(body.truncated);
-      })
-      .catch((e) => {
-        if (!cancelled && request === requestSequence.current && !hasText.current) {
-          setError(e instanceof Error ? e.message : String(e));
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, entry.path, entry.modifiedAt, entry.size, kind, wantsText, version]);
-
-  return { text, binary, truncated, error, wantsText };
+    const old = previous.current;
+    previous.current = { projectId, path: entry.path, modifiedAt: entry.modifiedAt, size: entry.size, version };
+    if (wantsText && old.projectId === projectId && old.path === entry.path
+      && (old.modifiedAt !== entry.modifiedAt || old.size !== entry.size || (old.version !== null && old.version !== version))) {
+      void queryClient.invalidateQueries({ queryKey: options.queryKey, exact: true });
+    }
+  }, [projectId, entry.path, entry.modifiedAt, entry.size, version, wantsText]);
+  const body = query.data;
+  return {
+    text: body && !body.binary ? body.content : null,
+    binary: body?.binary ?? false,
+    truncated: body?.truncated ?? false,
+    error: body ? null : query.error?.message ?? (body === null ? m.artifacts_not_found() : null),
+    wantsText,
+  };
 }
 
 /** Right pane: the selected artifact rendered inline — markdown as a document,
@@ -452,7 +431,7 @@ function TreeRows({
                   onContextMenu={onContextMenu}
                   onRename={onRename}
                   onCancelRename={onCancelRename}
-               />
+                />
               )}
             </div>
           );
@@ -565,14 +544,12 @@ function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage?: () => 
 export function ArtifactsTab({
   project,
   artifacts,
-  onChanged,
   onOpenFile,
   canRenameFile,
   onOpenStorage,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
-  onChanged: () => void;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
   /** Navigate to Settings → Storage (where the data dir can be changed). */
@@ -645,8 +622,7 @@ export function ArtifactsTab({
   const remove = (path: string) => {
     if (selected === path || selected?.startsWith(path + "/")) setSelected(null);
     void deleteArtifact(project.id, path)
-      .catch(() => {})
-      .finally(onChanged);
+      .catch(() => {});
   };
 
   const manage = async (
@@ -656,7 +632,6 @@ export function ArtifactsTab({
     try {
       await manageArtifactFile(project.id, path, action);
       if (action.action === "rename" && selected === path) setSelected(null);
-      onChanged();
     } catch (error) {
       showAlert(error instanceof Error ? error.message : String(error), "error");
     }
@@ -695,7 +670,7 @@ export function ArtifactsTab({
         void manage(path, { action: "rename", newName: name });
       }}
       onCancelRename={() => setRenamingPath(null)}
-   />
+    />
   );
   const selectedEntry = selected ? findArtifactEntry(artifacts.entries, selected) : null;
 
@@ -734,7 +709,7 @@ export function ArtifactsTab({
           entry={selectedEntry}
           onDelete={remove}
           artifactEntries={artifacts.entries}
-       />
+        />
       ) : (
         <div className="fpreview flex-1 min-w-0 flex flex-col min-h-0 bg-background fpreview-none items-center justify-center gap-2 text-sm text-muted [@container((max-width:_720px))]:hidden">
           <MousePointerClick size={22} strokeWidth={1.5} />
