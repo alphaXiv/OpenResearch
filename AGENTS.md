@@ -18,5 +18,6 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 
 ## CI and release gates
 
-- GitHub protection for `main` must require the merge queue plus the `fmt, clippy, test` and `version sanity` checks from GitHub Actions, including for administrators. Disable the separate branch-up-to-date requirement: the queue validates the combined result against current `main`. These settings are managed in GitHub, not by this file.
-- CI runs on PR merge candidates, merge groups and again on `main`. Releases also call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.
+- GitHub protection for `main` must require the `fmt, clippy, test` and `version sanity` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
+- PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `main` do not automatically rerun open PRs.
+- CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.

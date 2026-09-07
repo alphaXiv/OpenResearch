@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  merge_group:
   workflow_call:
     inputs:
       plan:
@@ -95,7 +94,7 @@ jobs:
   # release trigger.
   version-guard:
     name: version sanity
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +103,7 @@ jobs:
 
       - name: Version must move forward (with a fresh lockfile)
         env:
-          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
