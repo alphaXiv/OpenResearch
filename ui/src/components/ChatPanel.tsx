@@ -1,3 +1,4 @@
+import { useVirtualizer, defaultRangeExtractor, type Range as VirtualRange } from "@tanstack/react-virtual";
 import { markLiveUpdate } from "../queries/live";
 import { removeSession as removeCachedSession } from "../queries/invalidation";
 import {
@@ -1407,7 +1408,19 @@ function commandExperimentIds(command: string, output?: string, preservedIds: st
 /** User-facing activity inferred from the structured tool input. Shell calls
  * get a small set of realistic recognizers; unknown commands keep their actual
  * command after the shell wrapper is removed. */
+const toolActivities = new WeakMap<ChatPart, { locale: string; activity: ToolActivity }>();
+
 function toolActivity(part: ChatPart): ToolActivity {
+  const locale = getLocale();
+  const cached = toolActivities.get(part);
+  if (cached?.locale === locale) return cached.activity;
+  const activity = computeToolActivity(part);
+  // Stream updates replace parts; weak keys release labels with their transcript.
+  toolActivities.set(part, { locale, activity });
+  return activity;
+}
+
+function computeToolActivity(part: ChatPart): ToolActivity {
   const tool = part.tool ?? "tool";
   const input = part.state?.input ?? {};
   const argumentsValue = input.arguments;
@@ -3529,6 +3542,9 @@ function useTranscriptAnnouncement(messages: ChatMessage[]): TranscriptAnnouncem
 
 const Transcript = memo(function Transcript({
   messages,
+  scrollRef,
+  scrollToEndRef,
+  onBottomChange,
   allMessages,
   canFork,
   onFork,
@@ -3549,6 +3565,9 @@ const Transcript = memo(function Transcript({
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  scrollToEndRef: React.RefObject<(() => void) | null>;
+  onBottomChange: (atBottom: boolean) => void;
   /** Every branch, for counting the forks of each turn. */
   allMessages: ChatMessage[];
   /** False greys out the edit control (busy turn, harness not ready). */
@@ -3582,6 +3601,51 @@ const Transcript = memo(function Transcript({
     );
     return forkPositions(allMessages, messages, bearers, (id) => id.startsWith(LOCAL_PREFIX));
   }, [messages, visibleMessages, allMessages]);
+  // ponytail: interacted rows stay mounted for this visit; lift row state if retention becomes costly.
+  const retainedRows = useRef(new Set<string>());
+  const [fullHistory, setFullHistory] = useState(false);
+  const getItemKey = useCallback((index: number) => visibleMessages[index].id, [visibleMessages]);
+  const rangeExtractor = useCallback((range: VirtualRange) => {
+    if (fullHistory) return visibleMessages.map((_, index) => index);
+    const indexes = new Set(defaultRangeExtractor(range));
+    visibleMessages.forEach((message, index) => {
+      if (retainedRows.current.has(message.id)) indexes.add(index);
+    });
+    return [...indexes].sort((a, b) => a - b);
+  }, [visibleMessages, fullHistory]);
+  const virtualizer = useVirtualizer({
+    count: visibleMessages.length,
+    useFlushSync: false,
+    getScrollElement: () => scrollRef.current,
+    getItemKey,
+    estimateSize: () => 400,
+    overscan: 1,
+    initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
+    initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
+    anchorTo: "end",
+    followOnAppend: true,
+    scrollEndThreshold: 60,
+    rangeExtractor,
+  });
+  useLayoutEffect(() => {
+    const scroll = () => virtualizer.scrollToEnd();
+    scrollToEndRef.current = scroll;
+    scroll();
+    onBottomChange(true);
+    return () => { scrollToEndRef.current = null; };
+  }, [virtualizer, scrollToEndRef, onBottomChange]);
+  useEffect(() => {
+    const retainSelection = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+      const range = selection.getRangeAt(0);
+      for (const row of scrollRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []) {
+        if (range.intersectsNode(row) && row.dataset.messageId) retainedRows.current.add(row.dataset.messageId);
+      }
+    };
+    document.addEventListener("selectionchange", retainSelection);
+    return () => document.removeEventListener("selectionchange", retainSelection);
+  }, [scrollRef]);
   const activeMessage = visibleMessages.at(-1);
   const transcriptAnnouncement = useTranscriptAnnouncement(messages);
   const pendingTailTool = busy ? streamTailTool(messages) : null;
@@ -3590,15 +3654,29 @@ const Transcript = memo(function Transcript({
       <span className="sr-only" role="status" aria-live="polite">
         <span key={transcriptAnnouncement.sequence}>{transcriptAnnouncement.text}</span>
       </span>
-      {visibleMessages.map((m) => {
+      <button type="button" className="sr-only focus:not-sr-only" aria-pressed={fullHistory} onClick={() => setFullHistory((value) => !value)}>
+        {m.chat_show_full_conversation()}
+      </button>
+      <div className="relative" style={{ height: virtualizer.getTotalSize() }}>
+      {virtualizer.getVirtualItems().map((item) => {
+        const m = visibleMessages[item.index];
         const turnStatus = m.parts.find(isTurnStatusPart);
         const turnId = turnStatus?.state?.input?.turnId;
         // A session owns one turn slot, so one recovery disables every status
         // card until its durable admission resolves.
         const recoveryDisabled = turnStatus ? busy || recoveringTurnId !== null : false;
         return (
-          <Message
+          <div
             key={m.id}
+            data-index={item.index}
+            data-message-id={m.id}
+            ref={virtualizer.measureElement}
+            className="absolute left-0 w-full pb-4"
+            style={{ top: item.start }}
+            onPointerDownCapture={() => retainedRows.current.add(m.id)}
+            onFocusCapture={() => retainedRows.current.add(m.id)}
+          >
+          <Message
             message={m}
             forkCount={positions.get(m.id)?.count}
             forkIndex={positions.get(m.id)?.index}
@@ -3625,8 +3703,10 @@ const Transcript = memo(function Transcript({
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
+          </div>
         );
       })}
+      </div>
     </>
   );
 });
@@ -4221,6 +4301,7 @@ export function ChatPanel({
   // alone (syncSessionList snapshots it before fetching).
   const threadRef = useRef<HTMLDivElement>(null);
   const threadInnerRef = useRef<HTMLDivElement>(null);
+  const scrollToEndRef = useRef<(() => void) | null>(null);
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -4943,35 +5024,20 @@ export function ChatPanel({
   const pinTranscriptToBottom = useCallback(() => {
     stickToBottom.current = true;
     setTranscriptAtBottom(true);
-    const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    scrollToEndRef.current?.();
   }, []);
-  useLayoutEffect(() => {
-    pinTranscriptToBottom();
-  }, [activeId, threadMounted, pinTranscriptToBottom]);
-
-  // Autoscroll while pinned. Layout effect, so history seeds and streamed
-  // messages land already scrolled (no flash of the top of the thread).
-  useLayoutEffect(() => {
-    if (stickToBottom.current) pinTranscriptToBottom();
-  }, [messages, busy, pinTranscriptToBottom]);
-
-  // Re-pin when the thread resizes without a message change — images loading,
-  // tool rows expanding, the pane resizing.
   useEffect(() => {
     const el = threadRef.current;
     const inner = threadInnerRef.current;
     if (!el || !inner) return;
-    const ro = new ResizeObserver(() => {
-      if (stickToBottom.current) {
-        el.scrollTop = el.scrollHeight;
-        return;
-      }
-      updateTranscriptBottom(el);
+    // Virtual rows anchor their own growth; viewport and footer changes need the same pin.
+    const observer = new ResizeObserver(() => {
+      if (stickToBottom.current) scrollToEndRef.current?.();
+      else updateTranscriptBottom(el);
     });
-    ro.observe(inner);
-    ro.observe(el);
-    return () => ro.disconnect();
+    observer.observe(el);
+    observer.observe(inner);
+    return () => observer.disconnect();
   }, [threadMounted, updateTranscriptBottom]);
 
   const scrollToTranscriptBottom = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
@@ -5880,13 +5946,20 @@ export function ChatPanel({
           <div
             className="chat-thread flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]"
             ref={threadRef}
-            onScroll={(e) => {
-              updateTranscriptBottom(e.currentTarget);
+            tabIndex={0}
+            role="region"
+            aria-label={activeSession?.title?.trim() || m.chat_untitled()}
+            onScroll={(event) => {
+              updateTranscriptBottom(event.currentTarget);
               transcriptSelection.dismiss();
             }}
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
               <Transcript
+                key={activeId}
+                scrollRef={threadRef}
+                scrollToEndRef={scrollToEndRef}
+                onBottomChange={setTranscriptAtBottom}
                 messages={messages}
                 allMessages={allMessages}
                 canFork={canFork}
