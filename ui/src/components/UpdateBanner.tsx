@@ -1,9 +1,12 @@
+import { useQuery } from "@tanstack/react-query";
+import { queryClient, setScopedQueryData, isCurrentScope } from "../queries/client";
+import { getUpdateStatusQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { getUpdateStatus, restartApp, type UpdateStatus } from "../api";
-import { onUpdateStatus } from "../events";
+import { restartApp, type UpdateStatus } from "../api";
+
 import { Button, IconButton } from "./ui";
 
 export interface UpdateState {
@@ -18,23 +21,13 @@ export interface UpdateState {
 /** Live update status: the initial fetch plus every `update.status` SSE frame.
  *  Exported because the Updates settings card renders the same state. */
 export function useUpdateStatus(enabled = true): UpdateState {
-  const [status, setStatus] = useState<UpdateStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!enabled) return;
-    let fromEvent = false;
-    const stop = onUpdateStatus((next) => {
-      fromEvent = true;
-      setStatus(next);
-    });
-    getUpdateStatus()
-      // An SSE frame can land first; it is never staler than this fetch.
-      .then((next) => !fromEvent && setStatus(next))
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
-    return stop;
-  }, [enabled]);
-  // `setStatus` is referentially stable, so this needs no memoization.
-  return { status, error, apply: setStatus };
+  const options = getUpdateStatusQuery();
+  const query = useQuery({ ...options, enabled });
+  return {
+    status: query.data ?? null,
+    error: query.error?.message ?? null,
+    apply: (status) => setScopedQueryData(options.queryKey, status),
+  };
 }
 
 /** How long to wait for the relaunched server before giving up on the reload. */
@@ -64,15 +57,20 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
   const previous = status?.restartRequired ? status.instance : null;
   const restart = () => {
     if (!previous || restarting) return;
+    const options = getUpdateStatusQuery();
+    const retired = () => unmounted.current || !isCurrentScope(options.queryKey);
     setRestarting(true);
     setError(null);
     void (async () => {
       try {
         await restartApp();
+        if (retired()) return;
         const deadline = Date.now() + RESTART_TIMEOUT_MS;
         while (Date.now() < deadline) {
           await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_MS));
-          const next = await getUpdateStatus().catch(() => null);
+          if (retired()) return;
+          const next = await queryClient.fetchQuery({ ...options, staleTime: 0 }).catch(() => null);
+          if (retired()) return;
           if (next && next.instance !== previous) {
             window.location.reload();
             return;
@@ -80,7 +78,7 @@ export function useRestartApp(status: UpdateStatus | null): RestartState {
         }
         throw new Error(m.update_banner_restart_timed_out());
       } catch (e) {
-        if (unmounted.current) return;
+        if (retired()) return;
         setError(e instanceof Error ? e.message : String(e));
         setRestarting(false);
       }

@@ -1,14 +1,15 @@
+import { useMutation, useQuery } from "@tanstack/react-query";
+
+import { listUserSkillsQuery, listLatexTemplatesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, Trash2, Upload } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useRef, useState, type ReactNode } from "react";
 import {
   deleteLatexTemplate,
   deleteUserSkill,
   fmtBytes,
   fmtNumber,
-  listLatexTemplates,
-  listUserSkills,
   timeAgo,
   uploadLatexTemplate,
   uploadUserSkill,
@@ -67,11 +68,11 @@ function DropZone({
     <div
       className={`flex flex-col items-center justify-center gap-2 py-6.5 px-4.5 border-[1.5px] border-dashed rounded-md text-center text-sm text-text transition-[border-color,background] duration-120 ${
         busy ? "cursor-default" : "cursor-pointer"
-      } ${
+        } ${
         dragging
           ? "border-primary bg-surface text-text"
           : "border-border-variant bg-surface [&:hover]:border-primary"
-      }`}
+        }`}
       onDragOver={(e) => {
         e.preventDefault();
         setDragging(true);
@@ -108,7 +109,7 @@ function DropZone({
           if (file) onFile(file);
           e.target.value = "";
         }}
-     />
+      />
       {busy ? (
         <>
           <Spinner />
@@ -138,14 +139,14 @@ function RowMeta({ bytes, updatedAt }: { bytes: number; updatedAt: number }) {
  * so it carries that agent's badge instead of a delete button. */
 function SkillRow({
   skill,
-  onDeleted,
   onError,
 }: {
   skill: UserSkill;
-  onDeleted: () => void;
   onError: (message: string) => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const deleteUserSkillMutation = useMutation({ mutationFn: deleteUserSkill });
+
+  const busy = deleteUserSkillMutation.isPending;
   return (
     <div className={SKILL_ROW_CLASS_NAME}>
       <div className="flex-1 min-w-0 flex items-center gap-2">
@@ -161,11 +162,8 @@ function SkillRow({
           disabled={busy}
           onClick={() => {
             if (!window.confirm(m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
-            setBusy(true);
-            deleteUserSkill(skill.name)
-              .then(onDeleted)
+            deleteUserSkillMutation.mutateAsync(skill.name)
               .catch((e) => {
-                setBusy(false);
                 onError(e instanceof Error ? e.message : String(e));
               });
           }}
@@ -179,14 +177,14 @@ function SkillRow({
 
 function LatexTemplateRow({
   template,
-  onChanged,
   onError,
 }: {
   template: LatexTemplate;
-  onChanged: () => void;
   onError: (message: string) => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const deleteLatexTemplateMutation = useMutation({ mutationFn: deleteLatexTemplate });
+
+  const busy = deleteLatexTemplateMutation.isPending;
   const support = template.supportFiles.length;
   return (
     <div className={SKILL_ROW_CLASS_NAME}>
@@ -208,11 +206,8 @@ function LatexTemplateRow({
         disabled={busy}
         onClick={() => {
           if (!window.confirm(m.skills_delete_template_confirm({ name: ltr(template.name) }))) return;
-          setBusy(true);
-          deleteLatexTemplate(template.name)
-            .then(onChanged)
+          deleteLatexTemplateMutation.mutateAsync(template.name)
             .catch((e) => {
-              setBusy(false);
               onError(e instanceof Error ? e.message : String(e));
             });
         }}
@@ -226,31 +221,15 @@ function LatexTemplateRow({
 /** Everything the agent can invoke with `/name`: skills uploaded here, and the
  * ones already installed in the user's coding agents, mirrored automatically. */
 function SkillsCard() {
-  const [skills, setSkills] = useState<UserSkill[] | null>(null);
+  const uploadUserSkillMutation = useMutation({ mutationFn: uploadUserSkill });
+
+  const skillsQuery = useQuery(listUserSkillsQuery());
+  const skills = skillsQuery.data;
+  const refreshing = skillsQuery.isFetching;
+  const loadError = skillsQuery.error?.message;
   const [busy, setBusy] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const refresh = useCallback(() => {
-    setRefreshing(true);
-    listUserSkills()
-      .then((next) => {
-        setSkills(next);
-        setLoadError(null);
-      })
-      .catch((e) => {
-        // An empty list is a real outcome here, so a failed fetch must not look
-        // like one — it would read as "your agents' skills weren't found".
-        setSkills([]);
-        setLoadError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => setRefreshing(false));
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  const refresh = () => { void skillsQuery.refetch(); };
 
   const busyRef = useRef(false);
   const upload = useCallback(
@@ -268,11 +247,10 @@ function SkillsCard() {
       busyRef.current = true;
       setBusy(true);
       try {
-        await uploadUserSkill({
+        await uploadUserSkillMutation.mutateAsync({
           filename: file.name,
           contentBase64: await fileToBase64(file),
         });
-        refresh();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -280,7 +258,7 @@ function SkillsCard() {
         setBusy(false);
       }
     },
-    [refresh],
+    [],
   );
 
   return (
@@ -292,7 +270,7 @@ function SkillsCard() {
           <RefreshCw
             size={12}
             className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""}
-         />{" "}
+          />{" "}
           {m.settings_page_refresh()}
         </Button>
       </div>
@@ -303,7 +281,7 @@ function SkillsCard() {
         busy={busy}
         prompt={m.skills_drop_skill()}
         onFile={(file) => void upload(file)}
-     />
+      />
 
       {error && (
         <div role="alert" className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">
@@ -311,20 +289,21 @@ function SkillsCard() {
         </div>
       )}
 
-      {skills === null ? (
-        <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
-          <Spinner /> {m.skills_tab_loading_skills()}
-        </div>
-      ) : loadError ? (
+      {loadError && (
         <div role="alert" className="pt-3 text-base text-accent-red">
           {m.skills_tab_could_not_load_skills()} {loadError}
         </div>
-      ) : skills.length === 0 ? (
+      )}
+      {skills === undefined ? (loadError ? null : (
+        <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
+          <Spinner /> {m.skills_tab_loading_skills()}
+        </div>
+      )) : skills.length === 0 ? (
         <div className="pt-3 text-sm text-subtext">{m.skills_tab_no_skills_yet()}</div>
       ) : (
         <div className="flex flex-col mt-1">
           {skills.map((s) => (
-            <SkillRow key={s.name} skill={s} onDeleted={refresh} onError={setError} />
+            <SkillRow key={s.name} skill={s} onError={setError} />
           ))}
         </div>
       )}
@@ -335,26 +314,13 @@ function SkillsCard() {
 /** LaTeX templates the `orx-paper` skill follows instead of its built-in
  * preamble — a conference class, a lab style. */
 function LatexTemplatesCard() {
-  const [templates, setTemplates] = useState<LatexTemplate[] | null>(null);
+  const uploadLatexTemplateMutation = useMutation({ mutationFn: uploadLatexTemplate });
+
+  const templatesQuery = useQuery(listLatexTemplatesQuery());
+  const templates = templatesQuery.data;
+  const loadError = templatesQuery.error?.message;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  const refresh = useCallback(() => {
-    listLatexTemplates()
-      .then((next) => {
-        setTemplates(next);
-        setLoadError(null);
-      })
-      .catch((e) => {
-        setTemplates([]);
-        setLoadError(e instanceof Error ? e.message : String(e));
-      });
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
 
   const busyRef = useRef(false);
   const upload = useCallback(
@@ -373,11 +339,10 @@ function LatexTemplatesCard() {
       busyRef.current = true;
       setBusy(true);
       try {
-        await uploadLatexTemplate({
+        await uploadLatexTemplateMutation.mutateAsync({
           filename: file.name,
           contentBase64: await fileToBase64(file),
         });
-        refresh();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -385,7 +350,7 @@ function LatexTemplatesCard() {
         setBusy(false);
       }
     },
-    [refresh],
+    [],
   );
 
   return (
@@ -398,7 +363,7 @@ function LatexTemplatesCard() {
         busy={busy}
         prompt={m.skills_drop_template()}
         onFile={(file) => void upload(file)}
-     />
+      />
 
       {error && (
         <div role="alert" className="mt-2.5 text-base text-accent-red whitespace-pre-wrap">
@@ -406,20 +371,21 @@ function LatexTemplatesCard() {
         </div>
       )}
 
-      {templates === null ? (
-        <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
-          <Spinner /> {m.skills_tab_loading_templates()}
-        </div>
-      ) : loadError ? (
+      {loadError && (
         <div role="alert" className="pt-3 text-base text-accent-red">
           {m.skills_tab_could_not_load_templates()} {loadError}
         </div>
-      ) : templates.length === 0 ? (
+      )}
+      {templates === undefined ? (loadError ? null : (
+        <div className="flex items-center gap-2 pt-3 text-sm text-subtext">
+          <Spinner /> {m.skills_tab_loading_templates()}
+        </div>
+      )) : templates.length === 0 ? (
         <div className="pt-3 text-sm text-subtext">{m.skills_tab_no_templates_yet()}</div>
       ) : (
         <div className="flex flex-col mt-1">
           {templates.map((t) => (
-            <LatexTemplateRow key={t.name} template={t} onChanged={refresh} onError={setError} />
+            <LatexTemplateRow key={t.name} template={t} onError={setError} />
           ))}
         </div>
       )}

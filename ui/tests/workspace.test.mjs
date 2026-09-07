@@ -1,3 +1,4 @@
+import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -5,12 +6,14 @@ import ts from "typescript";
 import * as workspace from "../src/workspaceState.ts";
 
 function load(name, dependencies) {
+  const queries = queryModules(dependencies["./api"] ?? {});
   const code = ts.transpileModule(readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8"), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
   const exports = {};
   new Function("require", "exports", "window", code)((id) => {
     if (id in dependencies) return dependencies[id];
+    if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
     throw new Error(`Unexpected dependency: ${id}`);
   }, exports, { addEventListener() {}, removeEventListener() {} });
   return exports;
@@ -264,6 +267,8 @@ test("a run baseline resolving after project unmount cannot navigate", async () 
     setExperiments() {}, setRuns() {}, setArtifacts() {}, setRunDataReady() {}, setExperimentDataReady() {},
     openExperimentsTab: () => { navigations++; },
   };
+  const queryContext = queryModules(context);
+  Object.assign(context, queryContext.load("projects"), queryContext.load("files"), { queryClient: queryContext.client });
   function evaluate(node) {
     assert(node);
     const code = ts.transpileModule(`const callback = ${node.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -292,27 +297,22 @@ test("deep-linked tabs participate in close fallback after hydration", () => {
 });
 
 test("session refresh removes missing tasks while preserving concurrent live events", async () => {
-  const source = ts.createSourceFile("App.tsx", readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-  let callback;
-  function visit(node) {
-    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "loadSessionIds") callback = node.initializer.arguments[0];
-    ts.forEachChild(node, visit);
-  }
-  visit(source);
-  assert(callback);
-  const response = deferred();
-  let ids = ["old", "deleted-offline"];
-  const sessionLoadRef = { current: null }, rememberedSessionRef = { current: "deleted-offline" };
-  const code = ts.transpileModule(`const callback = ${callback.getText(source)};`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const load = new Function("listChatSessions", "projectId", "sessionLoadRef", "setSessions", "rememberedSessionRef", `${code}; return callback;`)(() => response.promise, "p", sessionLoadRef, (next) => { ids = next; }, rememberedSessionRef);
-  const pending = load();
-  sessionLoadRef.current.set("created-live", true);
-  sessionLoadRef.current.set("deleted-live", false);
-  response.resolve([{ id: "old" }, { id: "deleted-live" }]);
-  await pending;
-  assert.deepEqual(ids, ["old", "created-live"]);
-  assert.equal(rememberedSessionRef.current, null);
-  assert.equal(sessionLoadRef.current, null);
+  const requests = [deferred(), deferred()];
+  let calls = 0;
+  const queries = queryModules({ listChatSessions: () => requests[calls++].promise });
+  const options = queries.load("chat").listChatSessionsQuery("p");
+  const live = queries.load("live");
+  queries.client.setQueryData(options.queryKey, [{ id: "old" }, { id: "deleted-offline" }]);
+  const read = queries.client.fetchQuery({ ...options, staleTime: 0 });
+  live.markLiveUpdate(queries.client, options.queryKey, "created-live");
+  requests[0].resolve([{ id: "old" }]);
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  live.markLiveUpdate(queries.client, options.queryKey, "created-live");
+  live.markLiveUpdate(queries.client, options.queryKey, "deleted-live");
+  queries.client.setQueryData(options.queryKey, [{ id: "created-live" }, { id: "old" }]);
+  requests[1].resolve([{ id: "old" }, { id: "deleted-live" }]);
+  assert.deepEqual((await read).map((row) => row.id), ["created-live", "old"]);
+  queries.client.clear();
 });
 
 

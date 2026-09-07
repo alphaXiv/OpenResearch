@@ -1,3 +1,10 @@
+import {
+  setScopedQueryData,
+  queryClient,
+} from "../queries/client";
+import { useQuery } from "@tanstack/react-query";
+import { resolvedFileQuery, refreshFile, type LoadedFile } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // Mirror of openresearch.sh's AgentFileView: one file from the project —
@@ -23,17 +30,10 @@ import {
   absoluteFileUrl,
   artifactUrl,
   FileChangedError,
-  getAbsoluteFile,
-  getArtifactFileMetadata,
-  getArtifactFileText,
-  getProjectFile,
   openFileInEditor,
   projectFileUrl,
   saveProjectFile,
-  type AbsoluteFile,
   type ArtifactEntry,
-  type CheckoutRoot,
-  type ProjectFile,
 } from "../api";
 import { useFileVersion } from "../useFileVersion";
 import {
@@ -63,12 +63,6 @@ import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner } from "./ui";
-
-type ArtifactPreviewFile = Omit<ProjectFile, "root">;
-type LoadedFile =
-  | { source: "checkout"; file: ProjectFile }
-  | { source: "artifact"; file: ArtifactPreviewFile; checkoutRoot?: CheckoutRoot }
-  | { source: "absolute"; file: AbsoluteFile };
 
 export interface FileScrollPosition {
   top: number;
@@ -192,8 +186,13 @@ export function FileViewer({
   showSource?: boolean;
   onShowSourceChange?: (showSource: boolean) => void;
 }) {
-  const [loaded, setLoaded] = useState<LoadedFile | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const fileOptions = resolvedFileQuery(projectId, path, source ?? "repo", sessionId, gitRef);
+  const fileQuery = useQuery({ ...fileOptions, enabled: !bufferSession.saving });
+  const loaded = fileQuery.data ?? null;
+  const error = fileQuery.error?.message ?? null;
+  const setLoaded = (value: React.SetStateAction<LoadedFile | null>) => {
+    setScopedQueryData(fileOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
   const [nonce, setNonce] = useState(0);
   const isArtifacts = source === "artifacts";
   const isAbsolute = source === "abs";
@@ -221,7 +220,6 @@ export function FileViewer({
   const saveRevision = bufferSession.saveRevision;
   const saveError = bufferSession.saveError;
   const setSaveError = bufferSession.setSaveError;
-  const loadRequestRef = useRef(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
@@ -304,13 +302,13 @@ export function FileViewer({
     setSaving(true);
     setSaveError(null);
     try {
+      await queryClient.cancelQueries(fileOptions);
       const result = await saveProjectFile(projectId, filePath, content, {
         sessionId,
         expectedVersion: expectedVersion ?? savingState.version,
       });
       const current = bufferSession.getSnapshot();
       if (!current) return false;
-      loadRequestRef.current++;
       bufferSession.saved(savedDraft, result.version);
       setLoaded((prev) =>
         prev && prev.source === "checkout"
@@ -444,98 +442,45 @@ export function FileViewer({
   const rawUrl = `${rawFileUrl(filePath)}&v=${encodeURIComponent(diskVersion ?? artifactVersion ?? "")}&reload=${nonce}`;
 
   useEffect(() => {
-    let cancelled = false;
-    const request = ++loadRequestRef.current;
-    if (saving) return;
-    // Artifacts come from the compatibility /files endpoint (no session/branch);
-    // repo files from the checkout-aware /file endpoint. All paths normalize
-    // into the same ProjectFile-shaped `data` so the render body is shared.
-    const fromArtifacts = async (): Promise<ArtifactPreviewFile> => {
-      const metadata = await getArtifactFileMetadata(projectId, path);
-      const wantsBody = metadata?.presentation === "text" || metadata?.presentation === "unknown";
-      const body = metadata && wantsBody
-        ? await getArtifactFileText(projectId, path)
-        : null;
-      const notFound = metadata === null || (wantsBody && body === null);
-      return {
-        // A missing artifact resolves to null → notFound, so it shows
-        // the friendly copy rather than a raw error.
-        path,
-        content: body?.content ?? "",
-        truncated: body?.truncated ?? false,
-        binary: body?.binary ?? metadata?.presentation === "download",
-        notFound,
-        presentation: body
-          ? (body.binary ? "download" : "text")
-          : (metadata?.presentation ?? "download"),
-      };
-    };
-    // A cited artifact path arrives stripped of its `artifacts/` prefix, which
-    // the checkout copy usually keeps — try that first; a throwing probe
-    // (unknown session, directory name) just means "not here".
-    const fromCheckout = async (): Promise<ProjectFile | null> => {
-      for (const candidate of [`artifacts/${path}`, path]) {
-        const file = await getProjectFile(projectId, candidate, { sessionId }).catch(() => null);
-        if (file && !file.notFound) return file;
+    if (!loaded || bufferSession.saving) return;
+    const next = loaded;
+    const current = bufferSession.getSnapshot();
+    if (current && isDirtyFileBuffer(current)) {
+      const checkout = next.source === "checkout" ? next.file : null;
+      const sameTarget = checkout !== null &&
+        checkout.path === current.path &&
+        (!sessionId || checkout.root === "worktree");
+      const conflict = conflictAfterRefresh(
+        current,
+        sameTarget && typeof checkout.version === "string" ? checkout.version : null,
+        sameTarget && !checkout.notFound,
+      );
+      if (
+        conflict &&
+        (conflict.currentVersion !== current.conflict?.currentVersion ||
+          conflict.exists !== current.conflict?.exists)
+      ) {
+        updateEditState({ ...current, conflict });
       }
-      return null;
-    };
-    // Branch tabs do not fall back because a ref names a committed tree.
-    const load: Promise<LoadedFile> = isAbsolute
-      ? getAbsoluteFile(path).then((file) => ({ source: "absolute", file }))
-      : isArtifacts
-      ? fromArtifacts().then(async (file) => {
-          if (!file.notFound) return { source: "artifact", file };
-          const checkout = await fromCheckout();
-          return checkout ? { source: "checkout", file: checkout } : { source: "artifact", file };
-        })
-      : getProjectFile(projectId, path, { sessionId, ref: gitRef }).then((d) =>
-          d.notFound && !gitRef
-            ? fromArtifacts().then((f) =>
-                f.notFound
-                  ? { source: "checkout", file: d }
-                  : { source: "artifact", file: f, checkoutRoot: d.root },
-              )
-            : { source: "checkout", file: d },
-        );
-    load
-      .then((next) => {
-        if (cancelled || request !== loadRequestRef.current || bufferSession.saving || saveRevision !== bufferSession.saveRevision) return;
-        const current = bufferSession.getSnapshot();
-        if (current && isDirtyFileBuffer(current)) {
-          const checkout = next.source === "checkout" ? next.file : null;
-          const sameTarget = checkout !== null &&
-            checkout.path === current.path &&
-            (!sessionId || checkout.root === "worktree");
-          const conflict = conflictAfterRefresh(
-            current,
-            sameTarget && typeof checkout.version === "string" ? checkout.version : null,
-            sameTarget && !checkout.notFound,
-          );
-          if (
-            conflict &&
-            (conflict.currentVersion !== current.conflict?.currentVersion ||
-              conflict.exists !== current.conflict?.exists)
-          ) {
-            updateEditState({ ...current, conflict });
-          }
-          else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
-        }
-        if ((!current || !isDirtyFileBuffer(current)) && next.source === "checkout" &&
-            !next.file.notFound && !next.file.binary && !next.file.truncated && typeof next.file.version === "string") {
-          updateEditState(createFileBuffer(next.file.path, next.file.content, next.file.version));
-          setSaveError(null);
-        }
-        setLoaded(next);
-        setError(null);
-      })
-      .catch((e: Error) => {
-        if (!cancelled && request === loadRequestRef.current) setError(e.message);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, path, source, sessionId, gitRef, nonce, artifactVersion, diskVersion, saving, saveRevision]);
+      else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
+    }
+    if ((!current || !isDirtyFileBuffer(current)) && next.source === "checkout" &&
+      !next.file.notFound && !next.file.binary && !next.file.truncated && typeof next.file.version === "string") {
+      updateEditState(createFileBuffer(next.file.path, next.file.content, next.file.version));
+      setSaveError(null);
+    }
+  }, [loaded, bufferSession, sessionId, saving, saveRevision]);
+  const sourceKey = JSON.stringify(fileOptions.queryKey);
+  const previousVersion = useRef({ sourceKey, nonce, artifactVersion, diskVersion });
+  useEffect(() => {
+    const previous = previousVersion.current;
+    previousVersion.current = { sourceKey, nonce, artifactVersion, diskVersion };
+    if (previous.sourceKey !== sourceKey) return;
+    if (previous.nonce !== nonce || (previous.diskVersion !== null && previous.diskVersion !== diskVersion)
+      || (previous.artifactVersion != null && previous.artifactVersion !== artifactVersion)) {
+      void refreshFile(projectId, path, source ?? "repo", sessionId, gitRef);
+    }
+  }, [sourceKey, nonce, artifactVersion, diskVersion, projectId, path, source, sessionId, gitRef]);
 
   // Stays a layout effect: the code views scroll to a `file:line` target in
   // passive effects, which run after this and so win over the restore.
@@ -709,7 +654,7 @@ export function FileViewer({
             <span
               className={`flex-1 min-w-0 text-sm ${
                 latex.builtWithErrors ? "text-subtext" : "text-accent-red"
-              }`}
+                }`}
             >
               {latex.error ??
                 (latex.builtWithErrors
@@ -815,7 +760,7 @@ export function FileViewer({
               scrollPositionRef.current = position;
               onScrollPositionChange?.(position);
             }}
-         />
+          />
         ) : data.notFound ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {loaded ? notFoundCopy(loaded) : m.file_viewer_not_found()}
@@ -825,7 +770,7 @@ export function FileViewer({
             kind={mediaKind}
             url={rawUrl}
             name={path.split("/").pop() ?? path}
-         />
+          />
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
@@ -837,7 +782,7 @@ export function FileViewer({
             url={pdfPaneUrl}
             name={compiledPdfName}
             downloadBar={false}
-         />
+          />
         ) : isMarkdown && !showSource ? (
           <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
@@ -846,7 +791,7 @@ export function FileViewer({
                 folder={parentFolder}
                 markdown={data.content}
                 entries={artifactEntries}
-             />
+              />
             ) : (
               <Md
                 text={data.content}
@@ -857,7 +802,7 @@ export function FileViewer({
                   ((p, _line, _exp, _ref, intent) =>
                     onOpenFile(p, sessionId, gitRef, intent))
                 }
-             />
+              />
             )}
           </div>
         ) : isHtml && !showSource ? (
@@ -867,7 +812,7 @@ export function FileViewer({
             url={rawUrl}
             name={filePath}
             resolveSrc={resolveAssetSrc}
-         />
+          />
         ) : (
           <>
             <CodeView
@@ -876,7 +821,7 @@ export function FileViewer({
               highlightLine={line}
               scrollRequest={lineScrollRequest}
               onScrollRequestHandled={onLineScrollRequestHandled}
-           />
+            />
             {data.truncated && (
               <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
             )}

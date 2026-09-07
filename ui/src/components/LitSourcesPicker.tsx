@@ -1,42 +1,27 @@
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { setScopedQueryData } from "../queries/client";
+import { getLitSourcesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 // Literature-source toggles shown inline in the composer chat-settings panel:
 // which sources discovery and paper reading may use. State lives in settings.json
 // (same `/api/settings/lit-sources` endpoint the CLI enforces).
 
-import { useEffect, useState } from "react";
-
-import { getLitSources, setLitSources, type LitSourcesSettings } from "../api";
+import { setLitSources } from "../api";
 import { LitSourceLogo, LIT_SOURCE_NAME, type LitSource } from "./LitSourceLogo";
 import { MenuItem, SwitchIndicator } from "./ui";
 
 const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv"];
 
-// Remembered across mounts so reopening the panel shows the last values
-// immediately instead of flashing "Loading…" while it revalidates.
-let cachedSettings: LitSourcesSettings | null = null;
-
 export function LitSourcesList() {
-  const [settings, setSettings] = useState<LitSourcesSettings | null>(cachedSettings);
-  const [saving, setSaving] = useState(false);
-
-  const remember = (s: LitSourcesSettings) => {
-    cachedSettings = s;
-    setSettings(s);
-  };
-
-  useEffect(() => {
-    void getLitSources()
-      .then(remember)
-      .catch(() => {});
-  }, []);
-
+  const options = getLitSourcesQuery();
+  const { data: settings } = useQuery(options);
+  const mutation = useMutation({
+    mutationFn: setLitSources,
+    onSuccess: (settings) => setScopedQueryData(options.queryKey, settings),
+  });
+  const saving = mutation.isPending;
   const toggle = (key: LitSource) => {
-    if (!settings || saving) return;
-    setSaving(true);
-    void setLitSources({ ...settings, [key]: !settings[key] })
-      .then(remember)
-      .catch(() => {})
-      .finally(() => setSaving(false));
+    if (settings && !saving) mutation.mutate({ ...settings, [key]: !settings[key] });
   };
 
   if (!settings) return <div className="py-1.5 px-2 text-muted text-sm">{m.lit_sources_picker_loading()}</div>;
