@@ -715,8 +715,8 @@ mod tests {
     fn playbook_carries_python_environment_policy() {
         let md = sample_playbook();
         assert!(md.contains("## Python environments"));
-        assert!(md.contains("use `uv run --locked python train.py`"));
-        assert!(md.contains("If uv is absent"));
+        assert!(md.contains("use `uv run --locked`"));
+        assert!(md.contains("Without uv"));
     }
 
     #[test]
