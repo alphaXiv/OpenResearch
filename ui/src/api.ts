@@ -576,6 +576,8 @@ export interface OverleafLiveStatus {
   state: "connecting" | "live" | "stopped";
   /** Why the channel stopped and will not reconnect on its own. */
   error: string | null;
+  /** The cookie is what it stopped over, so a fresh one is the way back in. */
+  needsSession: boolean;
   /** Why some documents are not moving: read-only access, a conflict held
    * for the git sync, a format this client cannot follow. */
   note: string | null;

@@ -75,8 +75,8 @@ export interface OverleafSync {
   saveToken: (token: string) => Promise<void>;
   /** Store the Overleaf session cookie the live channel signs in with. */
   saveSession: (session: string) => Promise<void>;
-  /** Read the cookie from a signed-in browser instead of pasting it, and
-   * report which browser it came from. */
+  /** Read the cookie from a signed-in browser instead of pasting it. Resolves
+   * with the browser it came from, which is the only sign it worked. */
   importSession: () => Promise<string>;
   linkProject: (project: string) => Promise<void>;
   unlink: () => Promise<void>;
@@ -137,6 +137,7 @@ export function useOverleafSync({
     setLink(null);
     setLast(null);
     setLiveAttempt(0);
+    agreed.current = false;
     setError(null);
     setStaleOnDisk(false);
     failedRef.current = false;
@@ -217,27 +218,22 @@ export function useOverleafSync({
   // and stays so through a reconnect — a clone per network blip is the same
   // waste. Only a channel that is down hands the git sync back its polling.
   const liveActive = live?.state === "live";
-  const liveOpening = liveActive || live?.state === "connecting";
   useEffect(() => {
-    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty || liveOpening) return;
+    if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty || liveActive) return;
     const marker = `${filePath}:${link.projectId}:${savedSource}`;
     if (syncedMarker.current === marker) return;
     if (sync()) syncedMarker.current = marker;
     // `syncing` is a dependency so a sync refused while another was in flight
     // is retried when that one finishes, rather than waiting for an edit.
-  }, [enabled, autoRun, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync, liveOpening]);
+  }, [enabled, autoRun, loaded, hasToken, link, filePath, savedSource, dirty, syncing, sync, liveActive]);
 
   // The live channel opens once a git sync has brought the two into step with
   // nothing left to resolve; the server starts from what that sync agreed on.
   // Once open it stays open through later syncs — the server pauses it for
   // them — rather than being rebuilt around each one.
-  const liveReady =
-    enabled &&
-    loaded &&
-    !!link &&
-    hasSession &&
-    (live !== null || (!syncing && !!last && last.conflicts.length === 0 && !error));
-  const linkedProject = link?.projectId ?? null;
+  const agreed = useRef(false);
+  if (!syncing && !!last && last.conflicts.length === 0 && !error) agreed.current = true;
+  const liveReady = enabled && loaded && !!link && hasToken && hasSession && agreed.current;
   const liveKey = useRef<string | null>(null);
   // A start and the stop of the session before it share a key, so each waits
   // for the other: a stop landing second would kill the session it did not
@@ -273,6 +269,8 @@ export function useOverleafSync({
             setLive({
               state: "stopped",
               error: e instanceof Error ? e.message : String(e),
+              // The server never answered, so nothing says the cookie is why.
+              needsSession: false,
               note: null,
             });
           });
@@ -289,7 +287,7 @@ export function useOverleafSync({
         .then(() => stopOverleafLive(projectId, filePath, { sessionId }))
         .catch(() => undefined);
     };
-  }, [liveReady, liveAttempt, linkedProject, projectId, filePath, sessionId]);
+  }, [liveReady, liveAttempt, projectId, filePath, sessionId]);
 
   // What the channel reports: its state, and the files Overleaf just changed.
   // A pull of this file is handled exactly as a git pull is — the buffer is
@@ -380,6 +378,7 @@ export function useOverleafSync({
       // and the channel waits for the sync that starts a new agreement.
       setLast(null);
       setLive(null);
+      agreed.current = false;
       syncedMarker.current = null;
       apply(await linkOverleaf(projectId, filePath, { project, sessionId }));
       onManualAction?.();

@@ -46,11 +46,15 @@ mod imp {
                 Err(e) => denied = denied.or(Some(e)),
             }
         }
-        if let Some(cookie) = firefox_session(host)? {
-            return Ok(Some(Imported {
-                source: "Firefox".to_string(),
-                cookie,
-            }));
+        match firefox_session(host) {
+            Ok(Some(cookie)) => {
+                return Ok(Some(Imported {
+                    source: "Firefox".to_string(),
+                    cookie,
+                }))
+            }
+            Ok(None) => {}
+            Err(e) => denied = denied.or(Some(e)),
         }
         match denied {
             Some(e) => Err(e),
@@ -127,6 +131,15 @@ mod imp {
         let copy =
             std::env::temp_dir().join(format!("orx-cookies-{}.sqlite", uuid::Uuid::new_v4()));
         std::fs::copy(path, &copy)?;
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = path.with_file_name(format!(
+                "{}{suffix}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ));
+            if sidecar.exists() {
+                let _ = std::fs::copy(&sidecar, format!("{}{suffix}", copy.display()));
+            }
+        }
         let result = (|| {
             let conn = rusqlite::Connection::open_with_flags(
                 &copy,
@@ -336,7 +349,9 @@ mod imp {
         let mut hosts: Vec<String> = Vec::new();
         for entry in entries.flatten() {
             let file = entry.path().join("cookies.sqlite");
-            let read = read_sqlite(
+            // A profile in use or half-written is skipped, not fatal: another
+            // profile may still hold the cookie.
+            let Ok(read) = read_sqlite(
                 &file,
                 "SELECT host, name, value, expiry FROM moz_cookies",
                 |r| {
@@ -347,7 +362,9 @@ mod imp {
                         r.get::<_, i64>(3)?,
                     ))
                 },
-            )?;
+            ) else {
+                continue;
+            };
             for (host_key, name, value, expiry) in read {
                 if host_matches(&host_key, host)
                     && SESSION_COOKIES.contains(&name.as_str())
@@ -444,6 +461,9 @@ mod imp {
         }
     }
 }
+
+/// Whether a browser store can be read at all here.
+pub const SUPPORTED: bool = cfg!(target_os = "macos");
 
 #[cfg(target_os = "macos")]
 pub use imp::import_session;

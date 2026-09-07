@@ -1101,7 +1101,6 @@
   "overleaf_live_connecting": "正在连接 Overleaf…",
   "overleaf_live_stopped": "实时同步已停止。",
   "overleaf_live_retry": "重试",
-  "overleaf_live_tip": "与 Overleaf 实时同步",
   "overleaf_live_waiting": "论文与 Overleaf 同步后，实时同步即会开始。",
   "overleaf_session_instructions": "要在他人输入时实时跟随 Overleaf，请粘贴你的 Overleaf 会话 cookie：在已登录 Overleaf 的浏览器中打开开发者工具，找到 overleaf_session2 cookie 并复制其值。它只保存在这台机器上。",
   "overleaf_session_cookie": "Overleaf 会话 cookie",
@@ -1110,7 +1109,9 @@
   "overleaf_add_cookie": "添加 cookie",
   "overleaf_import_cookie": "从浏览器导入",
   "settings_page_session_cookie": "会话 cookie",
-  "settings_page_session_cookie_help": "保存会话 cookie 后，已关联的论文会在他人输入时实时跟随 Overleaf，并立即回传保存，而不是每隔一段时间通过 Git 同步。请从已登录 Overleaf 的浏览器复制 overleaf_session2 cookie；该登录失效后它也会失效。",
+  "settings_page_session_cookie_help": "保存会话 cookie 后，已关联的论文会在他人输入时实时跟随 Overleaf，并立即回传保存；图片仍通过较慢的 Git 同步传输。请从已登录 Overleaf 的浏览器复制 overleaf_session2 cookie；该登录失效后它也会失效。",
   "settings_remove_session": "移除 cookie",
-  "overleaf_sync_files_tip": "文本会实时同步。此操作用于同步图片等其他文件，并解决冲突。"
+  "overleaf_sync_files_tip": "文本会实时同步。此操作用于同步图片等其他文件，并解决冲突。",
+  "overleaf_paste_cookie": "改为粘贴",
+  "overleaf_replace_cookie_prompt": "添加新的 Overleaf 会话 cookie 即可继续实时跟随。"
 }

@@ -625,6 +625,9 @@ pub struct Status {
     pub state: State,
     /// Why the channel stopped and will not open again by itself.
     pub error: Option<String>,
+    /// The cookie is what it stopped over, so a fresh one is the way back in
+    /// rather than another attempt with the same.
+    pub needs_session: bool,
     /// Something the user should know that is not a failure: read-only access,
     /// documents this client had to leave to the git sync.
     pub note: Option<String>,
@@ -635,6 +638,7 @@ impl Status {
         Status {
             state,
             error: None,
+            needs_session: false,
             note: None,
         }
     }
@@ -647,13 +651,13 @@ impl Status {
                 State::Stopped => "stopped",
             },
             "error": self.error,
+            "needsSession": self.needs_session,
             "note": self.note,
         })
     }
 }
 
-const BAD_COOKIE: &str =
-    "Overleaf did not accept the session cookie. Copy a fresh one from your browser into Settings.";
+const BAD_COOKIE: &str = "Overleaf did not accept the session cookie.";
 
 // --- one live session ---------------------------------------------------------
 
@@ -711,6 +715,8 @@ struct Doc {
     disk: Option<Stamp>,
     /// The file's content when last read or written.
     disk_text: Option<Text>,
+    /// The file on disk uses CRLF, so a write restores it.
+    crlf: bool,
     /// `text` changed since the file was last written.
     dirty: bool,
     /// A join is in flight; ops arriving meanwhile are kept for after it.
@@ -802,6 +808,7 @@ impl<'a> Connection<'a> {
         self.shared.set_status(Status {
             state,
             error: None,
+            needs_session: false,
             note: (!notes.is_empty()).then(|| notes.join(" ")),
         });
     }
@@ -978,6 +985,7 @@ impl<'a> Connection<'a> {
                     since_disk: Vec::new(),
                     disk: None,
                     disk_text: None,
+                    crlf: false,
                     dirty: false,
                     joining: true,
                     buffered: Vec::new(),
@@ -1019,14 +1027,18 @@ impl<'a> Connection<'a> {
         let mut dropped = Vec::new();
         for (id, doc) in &mut self.docs {
             match paths.get(id) {
-                Some(path) if text_doc(path) && confined_path(&self.config.dir, path).is_some() => {
+                Some(path)
+                    if text_doc(path)
+                        && confined_path(&self.config.dir, path).is_some()
+                        && !self.shared.is_unsupported(path) =>
+                {
                     if doc.path != *path {
                         doc.path = path.clone();
                         doc.disk = None;
                         doc.disk_text = None;
                         doc.dirty = true;
                         // A file already there is somebody's; it is not replaced.
-                        if let Some(Ok((existing, _))) = read_disk(&self.config.dir, path) {
+                        if let Some(Ok((existing, ..))) = read_disk(&self.config.dir, path) {
                             if existing != doc.text {
                                 doc.held = Some(Hold::Conflict);
                             }
@@ -1152,11 +1164,14 @@ impl<'a> Connection<'a> {
                 doc.dirty = true;
             }
             Some(Err(())) => doc.held = Some(Hold::Encoding),
-            Some(Ok((on_disk, stamp))) => {
+            Some(Ok((on_disk, stamp, crlf))) => {
                 doc.disk = Some(stamp);
                 doc.disk_text = Some(on_disk.clone());
+                doc.crlf = crlf;
                 if on_disk == doc.text {
                     Self::remember(shared, doc);
+                } else if read_only {
+                    doc.held = Some(Hold::ReadOnly);
                 } else if let Some(base) = base {
                     let local = diff(&base, &on_disk);
                     // What the server has beyond the file. When that stays
@@ -1166,8 +1181,6 @@ impl<'a> Connection<'a> {
                     if local.is_empty() || disjoint(&local, &beyond) {
                         doc.since_disk = beyond;
                         doc.dirty = true;
-                    } else if read_only {
-                        doc.held = Some(Hold::ReadOnly);
                     } else {
                         let remote = diff(&base, &doc.text);
                         if remote.is_empty() {
@@ -1318,7 +1331,8 @@ impl<'a> Connection<'a> {
                 continue;
             }
             let on_disk = match read_disk(&config.dir, &doc.path) {
-                Some(Ok((on_disk, stamp))) => {
+                Some(Ok((on_disk, stamp, crlf))) => {
+                    doc.crlf = crlf;
                     // Still being written: the next tick will see the whole file.
                     if std::fs::metadata(&full).ok().map(|m| stamp_of(&m)) != Some(stamp) {
                         continue;
@@ -1372,7 +1386,7 @@ impl<'a> Connection<'a> {
             return Flushed::Skipped;
         };
         match read_disk(&config.dir, &doc.path) {
-            Some(Ok((on_disk, _))) => {
+            Some(Ok((on_disk, _, _))) => {
                 if on_disk == doc.text {
                     doc.dirty = false;
                     doc.disk_text = Some(on_disk);
@@ -1398,7 +1412,13 @@ impl<'a> Connection<'a> {
             }
         }
         doc.dirty = false;
-        if let Err(e) = write_pulled(&config.dir, &full, from_text(&doc.text).as_bytes()) {
+        let text = from_text(&doc.text);
+        let bytes = if doc.crlf {
+            text.replace('\n', "\r\n")
+        } else {
+            text
+        };
+        if let Err(e) = write_pulled(&config.dir, &full, bytes.as_bytes()) {
             shared.mark_unsupported(&doc.path, format!("could not be written ({e})."));
             doc.held = Some(Hold::Unwritable);
             return Flushed::Skipped;
@@ -1475,16 +1495,27 @@ fn stamp_of(metadata: &std::fs::Metadata) -> Stamp {
 /// The file as text: `None` when it is not there, `Err` when it is not UTF-8.
 /// Line endings are folded to `\n` because Overleaf's document model has no
 /// `\r`; sending one would leave this copy a code unit ahead of the server's.
-fn read_disk(dir: &Path, rel: &str) -> Option<std::result::Result<(Text, Stamp), ()>> {
+fn read_disk(dir: &Path, rel: &str) -> Option<std::result::Result<(Text, Stamp, bool), ()>> {
     let full = confined_path(dir, rel)?;
+    // `write_pulled` refuses a symlink; reading one would push whatever it
+    // points at, outside the paper, into the Overleaf document.
+    if std::fs::symlink_metadata(&full).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Some(Err(()));
+    }
     let metadata = std::fs::metadata(&full).ok()?;
     let bytes = std::fs::read(&full).ok()?;
-    Some(decode(bytes).map(|text| (text, stamp_of(&metadata))))
+    Some(decode(bytes).map(|(text, crlf)| (text, stamp_of(&metadata), crlf)))
 }
 
-fn decode(bytes: Vec<u8>) -> std::result::Result<Text, ()> {
+/// Overleaf's model has no `\r`, so the file is compared as LF; whether it
+/// came as CRLF is remembered so a write can put it back.
+fn decode(bytes: Vec<u8>) -> std::result::Result<(Text, bool), ()> {
     let text = String::from_utf8(bytes).map_err(|_| ())?;
-    Ok(to_text(&text.replace("\r\n", "\n").replace('\r', "\n")))
+    let crlf = text.contains("\r\n");
+    Ok((
+        to_text(&text.replace("\r\n", "\n").replace('\r', "\n")),
+        crlf,
+    ))
 }
 
 /// A little jitter without a crate for it: the clock's low bits.
@@ -1662,6 +1693,7 @@ async fn run(config: Config, shared: Arc<Shared>) {
             Ended::Refused(message) => {
                 shared.set_status(Status {
                     state: State::Stopped,
+                    needs_session: message == BAD_COOKIE,
                     error: Some(message),
                     note: None,
                 });
@@ -1920,25 +1952,48 @@ pub fn stop_dir(dir: &Path) {
     lock(&BASES).remove(dir);
 }
 
-/// A git sync is about to read and write this folder. Until `resume`, the
-/// live sessions covering it neither write files nor read them as edits;
-/// afterwards every doc is compared afresh, which is how a resolved conflict
-/// is released.
-pub fn pause(dir: &Path) {
-    for entry in sessions().values() {
-        if entry.shared.dir == dir {
-            entry.shared.paused.store(true, Ordering::SeqCst);
-            drop(lock(&entry.shared.writing));
-        }
+/// A git sync is about to read and write this folder. Until the guard is
+/// dropped, the live sessions covering it neither write files nor read them as
+/// edits; afterwards every doc is compared afresh, which is how a resolved
+/// conflict is released.
+pub fn pause(dir: &Path) -> Paused {
+    let sessions = sessions();
+    let shared: Vec<Arc<Shared>> = sessions
+        .values()
+        .filter(|entry| entry.shared.dir == dir)
+        .map(|entry| entry.shared.clone())
+        .collect();
+    drop(sessions);
+    for shared in &shared {
+        shared.paused.store(true, Ordering::SeqCst);
+        // Waits out a step already reading or writing the folder.
+        drop(lock(&shared.writing));
+    }
+    Paused {
+        dir: dir.to_path_buf(),
+        shared,
     }
 }
 
-pub fn resume(dir: &Path) {
-    for entry in sessions().values() {
-        if entry.shared.dir == dir {
-            entry.shared.rejoin.store(true, Ordering::SeqCst);
-            entry.shared.paused.store(false, Ordering::SeqCst);
-            entry.shared.nudge.notify_one();
+/// Lets the folder go again, whether the sync finished or unwound.
+pub struct Paused {
+    dir: PathBuf,
+    shared: Vec<Arc<Shared>>,
+}
+
+impl Paused {
+    /// The agreement the sync reached, which the next join compares against.
+    pub fn synced(&self, baseline: &Baseline) {
+        synced(&self.dir, baseline);
+    }
+}
+
+impl Drop for Paused {
+    fn drop(&mut self) {
+        for shared in &self.shared {
+            shared.rejoin.store(true, Ordering::SeqCst);
+            shared.paused.store(false, Ordering::SeqCst);
+            shared.nudge.notify_one();
         }
     }
 }
@@ -1959,7 +2014,7 @@ pub fn synced(dir: &Path, baseline: &Baseline) {
         };
         match std::fs::read(&full) {
             Ok(bytes) if hash(&bytes) == *expected => {
-                if let Ok(text) = decode(bytes) {
+                if let Ok((text, _)) = decode(bytes) {
                     agreed.insert(path.clone(), Some(text));
                 }
             }

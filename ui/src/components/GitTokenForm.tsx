@@ -10,14 +10,12 @@ export function TokenForm<T>({
   placeholder,
   createHref,
   createLabel,
-  onCancel,
 }: {
   save: (token: string) => Promise<T>;
   onSaved: (result: T) => void;
   placeholder: string;
   createHref: string;
   createLabel?: string;
-  onCancel?: () => void;
 }) {
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -53,11 +51,6 @@ export function TokenForm<T>({
       <a href={createHref} target="_blank" rel="noreferrer">
         {createLabel ?? m.git_token_form_create_a_token()}
       </a>
-      {onCancel && (
-        <Button variant="ghost" type="button" onClick={onCancel}>
-          {m.overleaf_panel_cancel()}
-        </Button>
-      )}
       {error && <div className="error">{error}</div>}
     </form>
   );

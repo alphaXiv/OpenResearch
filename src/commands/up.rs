@@ -3286,6 +3286,11 @@ async fn import_overleaf_session(Json(req): Json<ImportOverleafSessionReq>) -> A
             .as_deref()
             .unwrap_or(local::overleaf::CLOUD_HOST)
             .to_string();
+        if !local::browser_cookies::SUPPORTED {
+            return Err(bad_request(
+                "Importing from a browser works on macOS only. Paste the cookie instead.",
+            ));
+        }
         let imported = local::browser_cookies::import_session(&host)
             .map_err(bad_request)?
             .ok_or_else(|| {
@@ -3362,7 +3367,7 @@ async fn start_overleaf_live(
         // The cookie signs in to one site; it goes nowhere else.
         if host != target.project.live_host() {
             return Err(bad_request(format!(
-                "The saved session cookie is for {host}, but this paper is linked to a project on {}.",
+                "The saved session cookie is for {host}, but this paper is linked to a project on {}. Add one for that site.",
                 target.project.live_host()
             )));
         }
@@ -3474,15 +3479,16 @@ async fn sync_overleaf(Path(id): Path<String>, Json(req): Json<OverleafFileReq>)
         }
         // The live channel writes the same files; it waits while the sync
         // does, then starts again from what the sync agreed on.
-        let dir = paper_dir(&full)?;
-        local::overleaf_live::pause(dir);
+        // Held so the channel is let go even if the sync unwinds; a folder
+        // left paused would look live while syncing nothing.
+        let paused = local::overleaf_live::pause(paper_dir(&full)?);
         let outcome = local::overleaf::collect(&full).and_then(|payload| {
             local::overleaf::sync(&payload, &project, &token, &baseline, &resolutions)
         });
         if let Ok(outcome) = &outcome {
-            local::overleaf_live::synced(dir, &outcome.baseline);
+            paused.synced(&outcome.baseline);
         }
-        local::overleaf_live::resume(dir);
+        drop(paused);
         let outcome = outcome.map_err(|e| bad_request(e.to_string()))?;
         let store = Store::open()?;
         store.set_overleaf_link(

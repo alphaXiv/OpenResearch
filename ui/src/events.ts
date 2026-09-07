@@ -188,7 +188,7 @@ function emitDataDirMove(ev: DataDirMoveEvent) {
 export type OverleafEvent =
   | { type: "live"; key: string; status: OverleafLiveStatus }
   /** Overleaf edits reached these checkout-relative files. */
-  | { type: "pulled"; key: string; projectId: string; paths: string[] };
+  | { type: "pulled"; key: string; paths: string[] };
 
 type OverleafListener = (ev: OverleafEvent) => void;
 const overleafListeners = new Set<OverleafListener>();
@@ -414,10 +414,8 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
       });
       es.addEventListener("overleaf.pulled", (e) => {
-        const d = parse<{ key: string; projectId: string; paths: string[] }>(e as MessageEvent);
-        if (d?.key && Array.isArray(d.paths)) {
-          emitOverleaf({ type: "pulled", key: d.key, projectId: d.projectId, paths: d.paths });
-        }
+        const d = parse<{ key: string; paths: string[] }>(e as MessageEvent);
+        if (d?.key && Array.isArray(d.paths)) emitOverleaf({ type: "pulled", key: d.key, paths: d.paths });
       });
     };
     connect();

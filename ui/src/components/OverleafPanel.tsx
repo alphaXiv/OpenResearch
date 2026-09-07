@@ -124,7 +124,7 @@ function liveText(live: OverleafLiveStatus): string {
 
 /** Read the session cookie from a signed-in browser, or paste it. Import is
  * the offer; the paste is what an unreadable browser falls back to. */
-function SessionForm({ overleaf }: { overleaf: OverleafSync }) {
+function SessionForm({ overleaf, replacing }: { overleaf: OverleafSync; replacing?: boolean }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [pasting, setPasting] = useState(false);
@@ -143,11 +143,15 @@ function SessionForm({ overleaf }: { overleaf: OverleafSync }) {
       .finally(() => setBusy(false));
   };
 
+  const prompt = pasting
+    ? m.overleaf_session_instructions()
+    : replacing
+      ? m.overleaf_replace_cookie_prompt()
+      : m.overleaf_go_live_prompt();
+
   return (
     <div className="flex flex-col gap-1.5">
-      <p className="text-sm text-subtext">
-        {pasting ? m.overleaf_session_instructions() : m.overleaf_go_live_prompt()}
-      </p>
+      <p className="text-sm text-subtext">{prompt}</p>
       {pasting && (
         <Input
           className="basis-full min-w-0"
@@ -175,7 +179,7 @@ function SessionForm({ overleaf }: { overleaf: OverleafSync }) {
           </Button>
         )}
         <Button variant="ghost" type="button" disabled={busy} onClick={() => setPasting(!pasting)}>
-          {pasting ? m.overleaf_panel_cancel() : m.overleaf_add_cookie()}
+          {pasting ? m.overleaf_panel_cancel() : m.overleaf_paste_cookie()}
         </Button>
       </div>
       {error && (
@@ -193,7 +197,7 @@ function LiveSection({ overleaf }: { overleaf: OverleafSync }) {
   if (!live) return <p className="text-sm text-subtext">{m.overleaf_live_waiting()}</p>;
   // The cookie is the problem (expired, or for another site): the way back in
   // is a fresh one, not a retry with the same.
-  const cookieRefused = live.state === "stopped" && !!live.error?.includes("session cookie");
+  const cookieRefused = live.state === "stopped" && live.needsSession;
   const dot =
     live.state === "live"
       ? "bg-accent-green"
@@ -202,7 +206,10 @@ function LiveSection({ overleaf }: { overleaf: OverleafSync }) {
         : "bg-accent-red";
   return (
     <div className="flex flex-col gap-1.5">
-      <div className={`flex items-center gap-2 text-sm ${live.error ? "text-accent-red" : "text-subtext"}`}>
+      <div
+        role={live.error ? "alert" : "status"}
+        className={`flex items-center gap-2 text-sm ${live.error ? "text-accent-red" : "text-subtext"}`}
+      >
         <span className={`inline-block w-2 h-2 rounded-full shrink-0 ${dot}`} />
         <span className="min-w-0 break-words">{liveText(live)}</span>
       </div>
@@ -212,7 +219,7 @@ function LiveSection({ overleaf }: { overleaf: OverleafSync }) {
           <Button onClick={overleaf.retryLive}>{m.overleaf_live_retry()}</Button>
         </div>
       )}
-      {cookieRefused && <SessionForm overleaf={overleaf} />}
+      {cookieRefused && <SessionForm overleaf={overleaf} replacing />}
     </div>
   );
 }
@@ -266,7 +273,13 @@ export function OverleafPanel({ overleaf }: { overleaf: OverleafSync }) {
           <Button
             variant={overleaf.error ? "primary" : "default"}
             disabled={overleaf.syncing || overleaf.blocked}
-            data-tip={overleaf.blocked ? m.overleaf_save_first() : m.overleaf_sync_files_tip()}
+            data-tip={
+              overleaf.blocked
+                ? m.overleaf_save_first()
+                : overleaf.live?.state === "live"
+                  ? m.overleaf_sync_files_tip()
+                  : undefined
+            }
             onClick={() => overleaf.sync()}
           >
             {overleaf.error ? m.app_retry() : m.overleaf_panel_sync_now()}
