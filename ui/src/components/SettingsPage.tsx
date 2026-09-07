@@ -18,6 +18,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
   fmtDuration,
@@ -43,6 +44,7 @@ import {
   setProjectDefaults,
   setTelemetry,
   provisionModal,
+  saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
@@ -64,6 +66,7 @@ import {
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
+  type OverleafSettings,
   type Project,
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
@@ -2658,18 +2661,33 @@ function GitHubCliHelp({
   );
 }
 
-/** The Overleaf Git authentication token is machine-wide. Which Overleaf
- * *project* a paper pushes to is per-paper, and lives on the .tex tab. */
+/** The Overleaf Git authentication token and session cookie are machine-wide.
+ * Which Overleaf *project* a paper pushes to is per-paper, and lives on the
+ * .tex tab. */
 function OverleafCard() {
-  const [hasToken, setHasToken] = useState<boolean | null>(null);
-  const [saving, setSaving] = useState(false);
+  const [settings, setSettings] = useState<OverleafSettings | null>(null);
+  const [removing, setRemoving] = useState<"token" | "session" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     getOverleafSettings()
-      .then((s) => setHasToken(s.hasToken))
+      .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, []);
+
+  const badge = (set: boolean | undefined) =>
+    settings === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : set ? m.settings_saved() : m.settings_not_set();
+  // A save or removal answers for itself, even when the initial read failed.
+  const merge = (result: Partial<OverleafSettings>) =>
+    setSettings((prev) => ({ ...(prev ?? { hasToken: false, hasSession: false }), ...result }));
+  const remove = (which: "token" | "session", call: () => Promise<Partial<OverleafSettings>>) => {
+    setRemoving(which);
+    setError(null);
+    void call()
+      .then(merge)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setRemoving(null));
+  };
 
   return (
     <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
@@ -2677,37 +2695,47 @@ function OverleafCard() {
       <div className={KV_CLASS_NAME}>
         <span className="k">{m.settings_page_git_token()}</span>
         <span className="v">
-          <Badge variant={hasToken ? "success" : "default"}>
-            {hasToken === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasToken ? m.settings_saved() : m.settings_not_set()}
-          </Badge>
+          <Badge variant={settings?.hasToken ? "success" : "default"}>{badge(settings?.hasToken)}</Badge>
+        </span>
+        <span className="k">{m.settings_page_session_cookie()}</span>
+        <span className="v">
+          <Badge variant={settings?.hasSession ? "success" : "default"}>{badge(settings?.hasSession)}</Badge>
         </span>
       </div>
       <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
         {m.settings_page_with_a_token_saved_a_paper_opened_in()}
       </p>
-      {hasToken ? (
+      {settings?.hasToken ? (
         <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
-          <Button
-            disabled={saving}
-            onClick={() => {
-              setSaving(true);
-              setError(null);
-              void deleteOverleafToken()
-                .then((s) => setHasToken(s.hasToken))
-                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {saving ? m.settings_removing() : m.settings_remove_token()}
+          <Button disabled={removing !== null} onClick={() => remove("token", deleteOverleafToken)}>
+            {removing === "token" ? m.settings_removing() : m.settings_remove_token()}
           </Button>
         </div>
       ) : (
         <TokenForm
           save={saveOverleafToken}
-          onSaved={(result) => setHasToken(result.hasToken)}
+          onSaved={merge}
           placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
-       />
+        />
+      )}
+      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
+        {m.settings_page_session_cookie_help()}
+      </p>
+      {settings?.hasSession ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button disabled={removing !== null} onClick={() => remove("session", deleteOverleafSession)}>
+            {removing === "session" ? m.settings_removing() : m.settings_remove_session()}
+          </Button>
+        </div>
+      ) : (
+        <TokenForm
+          save={saveOverleafSession}
+          onSaved={merge}
+          placeholder={m.overleaf_session_cookie()}
+          createHref="https://www.overleaf.com/project"
+          createLabel={m.overleaf_open_overleaf()}
+        />
       )}
       {error && <div className="error">{error}</div>}
     </div>

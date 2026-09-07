@@ -2,17 +2,22 @@ import { m } from "../paraglide/messages.js";
 import { useState } from "react";
 import { Button } from "./ui";
 
-/** Paste an Overleaf Git token with a link to where the token is minted. */
+/** Paste a secret with a link to where it comes from — an Overleaf Git token
+ * by default, or whatever `createLabel` names. */
 export function TokenForm<T>({
   save,
   onSaved,
   placeholder,
   createHref,
+  createLabel,
+  onCancel,
 }: {
   save: (token: string) => Promise<T>;
   onSaved: (result: T) => void;
   placeholder: string;
   createHref: string;
+  createLabel?: string;
+  onCancel?: () => void;
 }) {
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
@@ -46,8 +51,13 @@ export function TokenForm<T>({
         {saving ? m.common_saving() : m.common_save()}
       </Button>
       <a href={createHref} target="_blank" rel="noreferrer">
-        {m.git_token_form_create_a_token()}
+        {createLabel ?? m.git_token_form_create_a_token()}
       </a>
+      {onCancel && (
+        <Button variant="ghost" type="button" onClick={onCancel}>
+          {m.overleaf_panel_cancel()}
+        </Button>
+      )}
       {error && <div className="error">{error}</div>}
     </form>
   );

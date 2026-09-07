@@ -389,16 +389,36 @@ export const absoluteFileUrl = (path: string) =>
 /** Overwrite a text file in the project's live checkout (worktree when
  * `sessionId` is given, else the hub clone). Committed branch trees are
  * read-only, so pass no `ref`. */
+export interface SaveResult {
+  ok: boolean;
+  root?: CheckoutRoot;
+  bytesWritten?: number;
+  /** The file no longer matches what the editor loaded, so nothing was
+   * written — Overleaf's live channel rewrites files as collaborators type. */
+  changedOnDisk?: boolean;
+}
+
+/** `expectedSha256` is the hash of the loaded bytes; a file that has since
+ * changed is left alone and reported rather than overwritten. */
 export const saveProjectFile = (
   projectId: string,
   path: string,
   content: string,
-  opts: { sessionId?: string } = {},
+  opts: { sessionId?: string; expectedSha256?: string } = {},
 ) =>
-  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number }>(
-    `/api/projects/${projectId}/file`,
-    { path, content, sessionId: opts.sessionId },
-  );
+  put<SaveResult>(`/api/projects/${projectId}/file`, {
+    path,
+    content,
+    sessionId: opts.sessionId,
+    expectedSha256: opts.expectedSha256,
+  });
+
+/** Hex SHA-256 of a string's UTF-8 bytes, or null where the API is missing. */
+export async function sha256Hex(text: string): Promise<string | null> {
+  if (!globalThis.crypto?.subtle) return null;
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 /** Open a checkout file on the machine running `orx up`, in the OS default app
  * for its type (the user's editor for source files). */
@@ -455,6 +475,8 @@ export const compileLatex = (
 /** The Overleaf project a `.tex` pushes to. */
 export interface OverleafLink {
   projectId: string;
+  /** The Overleaf site the project lives on: www.overleaf.com, or a Server Pro host. */
+  host: string;
   /** The project on overleaf.com, for opening it. */
   url: string;
 }
@@ -462,13 +484,21 @@ export interface OverleafLink {
 export interface OverleafState {
   /** A Git authentication token is stored on this machine. */
   hasToken: boolean;
+  /** A browser session cookie is stored, so a linked paper can follow
+   * Overleaf live rather than by polling. */
+  hasSession: boolean;
   /** Null until this paper is pointed at a project. */
   link: OverleafLink | null;
 }
 
+export interface OverleafSettings {
+  hasToken: boolean;
+  hasSession: boolean;
+}
+
 /** Whether a Git authentication token is stored — the machine-wide half of the
  * Overleaf state, for Settings. */
-export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+export const getOverleafSettings = () => get<OverleafSettings>("/api/overleaf/settings");
 
 /** Store an Overleaf Git authentication token. Not validated here: only the Git
  * bridge can judge a token, and it needs a project to judge it against, so a
@@ -478,6 +508,55 @@ export const saveOverleafToken = (token: string) =>
 
 export const deleteOverleafToken = () =>
   fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+/** Store the Overleaf browser session cookie the live channel signs in with.
+ * Accepts the bare value or `name=value`; only a connection can say whether it
+ * works, so a stale cookie surfaces from `startOverleafLive`. */
+export const saveOverleafSession = (session: string, opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean }>("/api/overleaf/session", { session, host: opts.host });
+
+export const deleteOverleafSession = () =>
+  fetch("/api/overleaf/session", { method: "DELETE" }).then((r) => json<{ hasSession: boolean }>(r));
+
+/** Read the session cookie from a browser signed in to Overleaf on this
+ * machine, so it need not be pasted. macOS only; reading Chrome/Edge/Brave/Arc
+ * asks the Keychain for their cookie key. Rejects when no browser holds one. */
+export const importOverleafSession = (opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean; source: string }>("/api/overleaf/session/import", { host: opts.host });
+
+export interface OverleafLiveStatus {
+  state: "connecting" | "live" | "stopped";
+  /** Why the channel stopped and will not reconnect on its own. */
+  error: string | null;
+  /** Why some documents are not moving: read-only access, a conflict held
+   * for the git sync, a format this client cannot follow. */
+  note: string | null;
+}
+
+export interface OverleafLive {
+  /** Identifies this session in `overleaf.live` and `overleaf.pulled` events. */
+  key: string;
+  /** Null in a stop's reply; a start always reports the channel's state. */
+  status: OverleafLiveStatus | null;
+}
+
+/** Open the live channel, or keep it open: a tab calls this while it stays on
+ * the file. One Overleaf refused stays refused unless `retry` is set. */
+export const startOverleafLive = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; retry?: boolean } = {},
+) =>
+  post<OverleafLive>(`/api/projects/${projectId}/file/overleaf/live`, {
+    path,
+    sessionId: opts.sessionId,
+    retry: opts.retry,
+  });
+
+export const stopOverleafLive = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf/live?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafLive>(r));
 
 export const getOverleafState = (
   projectId: string,

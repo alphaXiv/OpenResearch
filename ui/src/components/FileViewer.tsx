@@ -31,12 +31,14 @@ import {
   openFileInEditor,
   projectFileUrl,
   saveProjectFile,
+  sha256Hex,
   type AbsoluteFile,
   type CheckoutRoot,
   type ProjectFile,
 } from "../api";
 import { useLatexCompile } from "../useLatexCompile";
 import { useOverleafSync } from "../useOverleafSync";
+import { mergeText } from "../textMerge";
 import {
   isExternalMarkdownTarget,
   markdownTargetUrl,
@@ -170,6 +172,9 @@ export function FileViewer({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [nonce, setNonce] = useState(0);
+  // A load that started before a save finished would seed the buffer with
+  // the file as it was; results from before the latest write are dropped.
+  const writeGen = useRef(0);
   const isArtifacts = source === "artifacts";
   const isAbsolute = source === "abs";
   // Markdown renders by default; the header toggle shows the raw source.
@@ -250,24 +255,64 @@ export function FileViewer({
 
   // Reseed the buffer only on a genuine load/reload — skip the optimistic
   // baseline bump `save()` makes, so a keystroke typed mid-save isn't clobbered.
+  // A reload that finds the buffer edited since (Overleaf's live channel
+  // rewrites the file while the user types) folds the file's change into the
+  // buffer where the two touched different places, and flags it where not.
   const lastWriteRef = useRef<string | null>(null);
+  const seededRef = useRef<{ path: string; text: string } | null>(null);
+  // Set once the Overleaf hook exists: a save while Overleaf's copy replaced
+  // the file would send the stale buffer straight back.
+  const staleOnDiskRef = useRef(false);
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const staleRef = useRef<() => void>(() => undefined);
   useEffect(() => {
-    const incoming = data?.content ?? "";
-    if (lastWriteRef.current !== null && incoming === lastWriteRef.current) {
+    const incoming = (data?.content ?? "").replace(/\r\n/g, "\n");
+    const seeded = seededRef.current;
+    seededRef.current = { path, text: incoming };
+    if (lastWriteRef.current !== null && (data?.content ?? "") === lastWriteRef.current) {
       lastWriteRef.current = null;
       return;
     }
-    setDraft(incoming.replace(/\r\n/g, "\n"));
+    const typed = seeded?.path === path && draftRef.current !== seeded.text ? draftRef.current : null;
+    if (typed !== null && seeded) {
+      // A buffer already stale has no common ancestor with this file either;
+      // it stays as it is until the user lets it go.
+      const merged = staleOnDiskRef.current ? null : mergeText(seeded.text, typed, incoming);
+      if (merged !== null) {
+        setDraft(merged);
+        setSaveError(null);
+        return;
+      }
+      seededRef.current = seeded;
+      // After this commit's effects: the sync hook clears the flag on the
+      // baseline change that this very reload is.
+      queueMicrotask(() => staleRef.current());
+      return;
+    }
+    setDraft(incoming);
     setSaveError(null);
   }, [data?.content, path]);
 
   const save = async (): Promise<boolean> => {
     if (!editable || data == null || !dirty || saving) return !dirty;
+    if (staleOnDiskRef.current) {
+      setSaveError(m.file_viewer_reload_before_saving());
+      return false;
+    }
     const content = data.content.includes("\r\n") ? draft.replace(/\n/g, "\r\n") : draft;
     setSaving(true);
     setSaveError(null);
     try {
-      await saveProjectFile(projectId, filePath, content, { sessionId });
+      const expectedSha256 = (await sha256Hex(data.content)) ?? undefined;
+      const result = await saveProjectFile(projectId, filePath, content, { sessionId, expectedSha256 });
+      if (!result.ok) {
+        // Somebody's edit reached the file first; take it in before saving.
+        setSaveError(m.file_viewer_reload_before_saving());
+        setNonce((n) => n + 1);
+        return false;
+      }
+      writeGen.current += 1;
       // Advance the baseline to what we wrote so `dirty` clears without a refetch;
       // mark it so the reseed effect ignores this self-inflicted change.
       lastWriteRef.current = content;
@@ -315,6 +360,8 @@ export function FileViewer({
       [filePath],
     ),
   });
+  staleOnDiskRef.current = overleaf.staleOnDisk;
+  staleRef.current = overleaf.stale;
   const [showOverleaf, setShowOverleaf] = useState(false);
   const overleafConflicts = overleaf.last?.conflicts.length ?? 0;
   // A conflict is the one outcome the user has to act on, and an automatic sync
@@ -322,21 +369,28 @@ export function FileViewer({
   useEffect(() => {
     if (overleafConflicts > 0) setShowOverleaf(true);
   }, [overleafConflicts]);
+  const liveDown = overleaf.live?.state === "stopped" && !!overleaf.live.error;
   const overleafTip = overleaf.error
     ? m.overleaf_sync_failed()
     : overleafConflicts > 0
       ? m.overleaf_conflict_tip()
-      : overleaf.blocked
-        ? m.overleaf_save_to_sync()
-        : overleaf.link
-          ? m.overleaf_in_sync()
-          : m.overleaf_send_paper();
+      : liveDown
+        ? m.overleaf_live_stopped()
+        : overleaf.live?.state === "live"
+          ? m.overleaf_live_tip()
+          : overleaf.blocked
+            ? m.overleaf_save_to_sync()
+            : overleaf.link
+              ? m.overleaf_in_sync()
+              : m.overleaf_send_paper();
   const overleafColor =
     overleaf.error || overleafConflicts > 0
       ? "text-accent-red"
-      : overleaf.link
-        ? "text-accent-green"
-        : undefined;
+      : liveDown
+        ? "text-accent-amber"
+        : overleaf.link
+          ? "text-accent-green"
+          : undefined;
 
   // A .tex shows its compiled PDF or its source — nothing in between.
   const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
@@ -441,9 +495,14 @@ export function FileViewer({
               )
             : { source: "checkout", file: d },
         );
+    const gen = writeGen.current;
     load
       .then((next) => {
         if (cancelled) return;
+        if (gen !== writeGen.current) {
+          setNonce((n) => n + 1);
+          return;
+        }
         setLoaded(next);
         setError(null);
       })
@@ -645,8 +704,11 @@ export function FileViewer({
           </span>
           <Button
             onClick={() => {
+              // The file is already loaded; only the buffer is behind.
+              setDraft(baseline);
+              seededRef.current = { path, text: baseline };
+              setSaveError(null);
               overleaf.reloaded();
-              setNonce((n) => n + 1);
             }}
           >
             {m.file_viewer_discard_my_edits_and_reload()}

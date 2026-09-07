@@ -8,6 +8,7 @@ import type {
   ChatSession,
   ContextUsage,
   Experiment,
+  OverleafLiveStatus,
   Project,
   QueuedMessage,
   Run,
@@ -120,6 +121,27 @@ export function onDataDirMove(fn: DataDirMoveListener): () => void {
 
 function emitDataDirMove(ev: DataDirMoveEvent) {
   dataDirMoveListeners.forEach((fn) => fn(ev));
+}
+
+// Overleaf live-sync events fan out the same way: the .tex tab that opened the
+// channel is the one that reloads on a pull or shows the connection state.
+export type OverleafEvent =
+  | { type: "live"; key: string; status: OverleafLiveStatus }
+  /** Overleaf edits reached these checkout-relative files. */
+  | { type: "pulled"; key: string; projectId: string; paths: string[] };
+
+type OverleafListener = (ev: OverleafEvent) => void;
+const overleafListeners = new Set<OverleafListener>();
+
+export function onOverleafEvent(fn: OverleafListener): () => void {
+  overleafListeners.add(fn);
+  return () => {
+    overleafListeners.delete(fn);
+  };
+}
+
+function emitOverleaf(ev: OverleafEvent) {
+  overleafListeners.forEach((fn) => fn(ev));
 }
 
 // Update status fans out the same way: the restart banner and the Updates
@@ -326,6 +348,16 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
       es.addEventListener("update.status", (e) => {
         const d = parse<UpdateStatus>(e as MessageEvent);
         if (d) emitUpdateStatus(d);
+      });
+      es.addEventListener("overleaf.live", (e) => {
+        const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);
+        if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
+      });
+      es.addEventListener("overleaf.pulled", (e) => {
+        const d = parse<{ key: string; projectId: string; paths: string[] }>(e as MessageEvent);
+        if (d?.key && Array.isArray(d.paths)) {
+          emitOverleaf({ type: "pulled", key: d.key, projectId: d.projectId, paths: d.paths });
+        }
       });
     };
     connect();

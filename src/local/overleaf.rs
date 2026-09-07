@@ -17,6 +17,10 @@
 //!
 //! The bridge cannot create projects, so a paper is linked to a project the
 //! user already owns; `crate::store` remembers which.
+//!
+//! Neither path is live: the bridge snapshots on demand and rate-limits a
+//! client that asks often. `crate::local::overleaf_live` is the third path,
+//! the editor's own channel, which this module's pull rules also govern.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +46,12 @@ const HOST_ENV: &str = "ORX_OVERLEAF_HOST";
 const PULLABLE_EXTENSIONS: &[&str] = &[
     "tex", "bib", "cls", "sty", "bst", "png", "jpg", "jpeg", "pdf", "eps", "svg",
 ];
+
+/// The ones Overleaf holds as documents, which the live channel can follow.
+const TEXT_EXTENSIONS: &[&str] = &["tex", "bib", "cls", "sty", "bst"];
+
+/// Where Overleaf's own site serves its editor and its bridge.
+pub const CLOUD_HOST: &str = "www.overleaf.com";
 
 /// Overleaf caps a project at far more than this; the limit here is about not
 /// mistaking a checkout for a paper when a `\includegraphics` path is wrong.
@@ -78,7 +88,7 @@ pub struct Project {
 
 impl Project {
     fn is_cloud(&self) -> bool {
-        self.host == "www.overleaf.com" || self.host == "overleaf.com"
+        self.host == CLOUD_HOST || self.host == "overleaf.com"
     }
 
     /// Cloud puts the bridge on its own host; Server Pro serves it from the
@@ -102,12 +112,17 @@ impl Project {
     }
 
     pub fn web_url(&self) -> String {
-        let host = if self.is_cloud() {
-            "www.overleaf.com"
+        format!("https://{}/project/{}", self.live_host(), self.id)
+    }
+
+    /// The site the editor itself is served from — where a session cookie is
+    /// valid, and the only host the live channel talks to.
+    pub fn live_host(&self) -> String {
+        if self.is_cloud() {
+            CLOUD_HOST.to_string()
         } else {
-            &self.host
-        };
-        format!("https://{host}/project/{}", self.id)
+            self.host.clone()
+        }
     }
 }
 
@@ -1071,7 +1086,7 @@ fn tree_files(clone: &Path) -> Result<BTreeSet<String>> {
 /// A remote path resolved under the paper's directory, or None when it does not
 /// stay there. Overleaf paths are ordinary relative paths, so this only ever
 /// refuses something that should not have arrived.
-fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
+pub(crate) fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
     let path = Path::new(rel);
     let ordinary = path.components().all(|c| match c {
         // A dotted component is how a config or workflow file would arrive.
@@ -1081,18 +1096,26 @@ fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
     (!path.is_absolute() && ordinary).then(|| dir.join(path))
 }
 
-fn pullable(rel: &str) -> bool {
+pub(crate) fn pullable(rel: &str) -> bool {
+    has_extension(rel, PULLABLE_EXTENSIONS)
+}
+
+pub(crate) fn text_doc(rel: &str) -> bool {
+    has_extension(rel, TEXT_EXTENSIONS)
+}
+
+fn has_extension(rel: &str, extensions: &[&str]) -> bool {
     Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| PULLABLE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 /// Never follow a symlink out of the paper's directory: the pull writes files,
 /// not wherever a link in the checkout happens to point. Every directory on the
 /// way is checked, not just the leaf, since a symlinked `figs/` would carry the
 /// write out just as well.
-fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         // Checked before anything is created: `create_dir_all` follows a
         // symlinked component, which would leave directories outside the paper
@@ -1119,7 +1142,7 @@ fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
