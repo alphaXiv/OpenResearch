@@ -7043,21 +7043,7 @@ async fn events(
     let (tx, rx) = mpsc::channel::<Event>(16);
     tokio::spawn(event_loop(tx.clone()));
     // Chat events ride the same stream: chat.session / chat.message / chat.busy.
-    let mut chat_rx = state.chat.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match chat_rx.recv().await {
-                Ok((name, data)) => {
-                    if tx.send(json_event(name, &data)).await.is_err() {
-                        return;
-                    }
-                }
-                // Lagged subscriber: drop missed events, keep streaming.
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-            }
-        }
-    });
+    tokio::spawn(forward_chat_events(state.chat.subscribe(), tx));
     // The guard rides the stream state, so the count drops when the response
     // body is dropped — i.e. when the tab closes or navigates away.
     let guard = DashboardClientGuard::new();
@@ -7065,6 +7051,37 @@ async fn events(
         rx.recv().await.map(|ev| (Ok(ev), (rx, guard)))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+async fn forward_chat_events(
+    mut chat_rx: tokio::sync::broadcast::Receiver<(&'static str, Value)>,
+    tx: mpsc::Sender<Event>,
+) {
+    loop {
+        let event = tokio::select! {
+            _ = tx.closed() => return,
+            event = chat_rx.recv() => event,
+        };
+        match event {
+            Ok((name, data)) => {
+                if tx.send(json_event(name, &data)).await.is_err() {
+                    return;
+                }
+            }
+            // The client must repair snapshots after missed edge-only events.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                if tx
+                    .send(json_event("resync.required", &json!({})))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
 }
 
 /// Whether a dashboard is open somewhere — macOS app mode asks on a Dock click,
@@ -7365,6 +7382,42 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closed_dashboard_releases_idle_chat_receiver() {
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        let (tx, rx) = mpsc::channel(1);
+        drop(rx);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            forward_chat_events(receiver, tx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sender.receiver_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn lagged_chat_stream_requests_resync_and_continues() {
+        use axum::response::IntoResponse;
+        let (sender, receiver) = tokio::sync::broadcast::channel(1);
+        sender.send(("chat.busy", json!({"busy": true}))).unwrap();
+        sender.send(("chat.busy", json!({"busy": false}))).unwrap();
+        drop(sender);
+        let (tx, mut rx) = mpsc::channel(4);
+        forward_chat_events(receiver, tx).await;
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(Ok::<_, Infallible>(event));
+        }
+        let response = Sse::new(futures::stream::iter(events)).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.starts_with("event: resync.required\ndata: {}\n\n"));
+        assert!(body.contains("event: chat.busy\ndata: {\"busy\":false}"));
+    }
 
     #[tokio::test]
     async fn workspace_requests_validate_metadata_and_allow_independent_preferences() {

@@ -7,10 +7,16 @@
 // current: a sync while the editor holds unsaved edits is refused, not
 // resolved, because a pull would land under a draft the user can still see.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  getOverleafState,
-  getOverleafStatus,
+  isCurrentScope,
+  queryClient,
+} from "./queries/client";
+
+import { getOverleafStateQuery, getOverleafStatusQuery } from "./queries/files";
+
+import { useCallback, useMemo, useEffect, useRef, useState } from "react";
+import {
   linkOverleaf,
   overleafUploadUrl,
   saveOverleafToken,
@@ -80,45 +86,25 @@ export function useOverleafSync({
   /** A sync wrote these files; the viewer reloads when its own is among them. */
   onPulled: (paths: string[]) => void;
 }): OverleafSync {
-  const [hasToken, setHasToken] = useState(false);
-  const [link, setLink] = useState<OverleafLink | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  const options = useMemo(() => getOverleafStateQuery(projectId, filePath, { sessionId }), [projectId, filePath, sessionId]);
+  const stateQuery = useQuery({ ...options, enabled, subscribed: enabled });
+  const hasToken = stateQuery.data?.hasToken ?? false;
+  const link = stateQuery.data?.link ?? null;
+  const loaded = !stateQuery.isPending;
   const [syncing, setSyncing] = useState(false);
   const [last, setLast] = useState<OverleafSyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [staleOnDisk, setStaleOnDisk] = useState(false);
 
   const apply = useCallback((state: OverleafState) => {
-    setHasToken(state.hasToken);
-    setLink(state.link);
-  }, []);
-
-  // The link does not survive a change of file: showing the previous paper's
-  // link while acting on this one would unlink or sync the wrong project.
-  // `hasToken` does — it is machine-wide, not this paper's.
+    if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, state);
+  }, [options]);
   useEffect(() => {
-    let cancelled = false;
-    setLoaded(false);
-    setLink(null);
     setLast(null);
     setError(null);
     setStaleOnDisk(false);
     failedRef.current = false;
-    if (!enabled) return;
-    getOverleafState(projectId, filePath, { sessionId })
-      .then((state) => {
-        if (!cancelled) apply(state);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, projectId, filePath, sessionId, apply]);
+  }, [enabled, projectId, filePath, sessionId]);
 
   // Saving answers the stale-buffer banner as well as reloading does — both
   // advance the file. Undoing back to the loaded text does not: that buffer is
@@ -191,7 +177,7 @@ export function useOverleafSync({
     if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty) return;
     const timer = setInterval(() => {
       if (syncingRef.current || failedRef.current) return;
-      getOverleafStatus(projectId, filePath, { sessionId })
+      queryClient.fetchQuery({ ...getOverleafStatusQuery(projectId, filePath, { sessionId }), staleTime: 0 })
         .then((status) => {
           if (status.remoteChanged) sync();
         })
@@ -209,7 +195,7 @@ export function useOverleafSync({
     loaded,
     syncing,
     last,
-    error,
+    error: error ?? stateQuery.error?.message ?? null,
     blocked: dirty,
     staleOnDisk,
     reloaded: () => setStaleOnDisk(false),
@@ -219,7 +205,7 @@ export function useOverleafSync({
       syncedMarker.current = null;
       failedRef.current = false;
       setError(null);
-      setHasToken(result.hasToken);
+      if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, (state) => state && { ...state, hasToken: result.hasToken });
     },
     linkProject: async (project: string) => {
       apply(await linkOverleaf(projectId, filePath, { project, sessionId }));

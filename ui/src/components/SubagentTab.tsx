@@ -1,7 +1,10 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { getChatMessagesQuery } from "../queries/chat";
 import { m } from "../paraglide/messages.js";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { getChatMessages, type ChatMessage, type ChatPart } from "../api";
-import { onChatEvent } from "../events";
+import { useEffect, useLayoutEffect, useRef } from "react";
+import { type ChatPart } from "../api";
+
 import { findPartById, SubagentTranscript } from "./ChatPanel";
 import type { TabOpenIntent } from "../tabPreview";
 import { TabBody } from "./layout/TabBody";
@@ -47,7 +50,8 @@ export function SubagentTab({
     intent: TabOpenIntent,
   ) => void;
 }) {
-  const [messages, setMessages] = useState<ChatMessage[] | null>(null);
+  const query = useQuery(getChatMessagesQuery(sessionId));
+  const messages = query.data?.messages ?? (query.isError ? [] : null);
   // Same stick-to-bottom contract as the main transcript: pinned on mount,
   // unpinned when the user scrolls up, re-pinned within 60px of the bottom.
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -78,57 +82,6 @@ export function SubagentTab({
     ro.observe(el);
     return () => ro.disconnect();
   }, [messages === null]);
-
-  useEffect(() => {
-    let live = true;
-    // Message ids a live stream frame already updated: the initial fetch can
-    // resolve after newer frames and must not roll those messages back. A
-    // reconnect refetch clears the set — frames lost in the outage may
-    // include the terminal update, so there the fresh snapshot wins.
-    const liveUpdated = new Set<string>();
-    let seedGen = 0;
-    const seed = () => {
-      const gen = ++seedGen;
-      getChatMessages(sessionId)
-        .then(({ messages }) => {
-          if (!live || gen !== seedGen) return;
-          setMessages((prev) => {
-            if (!prev) return messages;
-            // Keep any message a live frame updated since this fetch began;
-            // the fetch supplies history and everything else.
-            const merged = messages.map((m) =>
-              liveUpdated.has(m.id) ? (prev.find((p) => p.id === m.id) ?? m) : m,
-            );
-            const known = new Set(messages.map((m) => m.id));
-            return [...merged, ...prev.filter((m) => !known.has(m.id))];
-          });
-        })
-        .catch(() => live && setMessages((prev) => prev ?? []));
-    };
-    seed();
-    // Live updates: replace the message the event carries (assistant turns
-    // re-broadcast the whole message on every flush).
-    const off = onChatEvent((ev) => {
-      if (ev.type === "reconnected") {
-        liveUpdated.clear();
-        seed();
-        return;
-      }
-      if (ev.type !== "message" || ev.sessionId !== sessionId) return;
-      liveUpdated.add(ev.message.id);
-      setMessages((prev) => {
-        const next = prev ? prev.slice() : [];
-        const idx = next.findIndex((m) => m.id === ev.message.id);
-        if (idx === -1) next.push(ev.message);
-        else next[idx] = ev.message;
-        return next;
-      });
-    });
-    return () => {
-      live = false;
-      off();
-    };
-  }, [sessionId]);
 
   if (messages === null) {
     return (
@@ -167,7 +120,7 @@ export function SubagentTab({
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
               onOpenSubagent={onOpenSubagent}
-           />
+            />
           ) : (
             <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
           )}

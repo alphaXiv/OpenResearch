@@ -1,3 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { listProjectActivityQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { Plus, Trash2 } from "lucide-react";
@@ -6,12 +9,10 @@ import { useEffect, useRef, useState } from "react";
 import {
   deleteProject,
   fmtNumber,
-  listProjectActivity,
   timeAgo,
   type Project,
-  type ProjectActivity,
 } from "../api";
-import { onProjectActivityEvent } from "../events";
+
 import { NewProjectForm } from "./NewProjectForm";
 import { Button } from "./ui";
 
@@ -224,39 +225,8 @@ export function ProjectsHome({
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null);
-  const [activityByProject, setActivityByProject] = useState<Record<string, ProjectActivity>>({});
-  const activityRequestRef = useRef(0);
-  const activityKey = projects.map((project) => project.id).join("\u0000");
-
-  useEffect(() => {
-    let current = true;
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const refresh = () => {
-      refreshTimer = null;
-      const requestId = ++activityRequestRef.current;
-      void listProjectActivity()
-        .then((activity) => {
-          if (!current || requestId !== activityRequestRef.current) return;
-          setActivityByProject(
-            Object.fromEntries(activity.map((summary) => [summary.projectId, summary])),
-          );
-        })
-        .catch(() => {});
-    };
-    const scheduleRefresh = () => {
-      if (refreshTimer !== null) return;
-      refreshTimer = setTimeout(refresh, 100);
-    };
-
-    refresh();
-    const unsubscribe = onProjectActivityEvent(scheduleRefresh);
-    return () => {
-      current = false;
-      unsubscribe();
-      if (refreshTimer !== null) clearTimeout(refreshTimer);
-    };
-  }, [activityKey]);
+  const activity = useQuery(listProjectActivityQuery());
+  const activityByProject = Object.fromEntries((activity.data ?? []).map((summary) => [summary.projectId, summary]));
 
   async function onDelete(p: Project) {
     setDeleting(p.id);
@@ -303,17 +273,17 @@ export function ProjectsHome({
                 const summary = activityByProject[p.id];
                 const githubUrl = p.githubEnabled
                   ? p.githubUrl ??
-                    (p.githubOwner && p.githubRepo
-                      ? `https://github.com/${p.githubOwner}/${p.githubRepo}`
-                      : null)
+                  (p.githubOwner && p.githubRepo
+                    ? `https://github.com/${p.githubOwner}/${p.githubRepo}`
+                    : null)
                   : null;
                 const githubState = githubUrl
                   ? p.githubOwner && p.githubRepo
                     ? `${p.githubOwner}/${p.githubRepo}`
                     : githubUrl
-                        .replace(/^https?:\/\/github\.com\//, "")
-                        .replace(/\.git$/, "")
-                        .replace(/\/$/, "")
+                      .replace(/^https?:\/\/github\.com\//, "")
+                      .replace(/\.git$/, "")
+                      .replace(/\/$/, "")
                   : m.projects_local();
                 const agentsLabel = summary
                   ? summary.activeAgents > 0
@@ -343,7 +313,7 @@ export function ProjectsHome({
                       className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
                       aria-label={m.a11y_open_item({ name: autoDir(p.name) })}
                       onClick={() => onOpen(p.id)}
-                   />
+                    />
                     {/* Cells stay click-transparent so the stretched button owns row navigation. */}
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
                       <span dir="auto" className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
@@ -418,7 +388,7 @@ export function ProjectsHome({
             setModalOpen(false);
             onCreated(project, githubPublicationError);
           }}
-       />
+        />
       )}
       {projectPendingDelete && (
         <DeleteProjectDialog
@@ -430,7 +400,7 @@ export function ProjectsHome({
             setProjectPendingDelete(null);
           }}
           onConfirm={() => void onDelete(projectPendingDelete)}
-       />
+        />
       )}
     </div>
   );

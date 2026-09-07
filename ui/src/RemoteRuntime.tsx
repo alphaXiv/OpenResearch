@@ -1,8 +1,25 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+
+import { getRuntimeQuery } from "./queries/settings";
+import {
+  activateWorkspace,
+  workspaceScope,
+  getWorkspaceGeneration,
+  subscribeWorkspace,
+} from "./queries/client";
+import { QueryEvents } from "./queries/Events";
+import {
+  useSyncExternalStore,
+  createContext,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Outlet, useLocation } from "@tanstack/react-router";
 import {
   disconnectCurrentRemote,
-  getRuntime,
   getRemoteStopPreview,
   installRemoteSession,
   reconnectCurrentRemote,
@@ -199,137 +216,137 @@ function RemoteSetup({
             ? session.error
               ? m.remote_failed_title({ host: ltr(session.host) })
               : session.canStartNewHost
-              ? m.remote_host_stopped_title({ host: ltr(session.host) })
-              : m.remote_disconnected_title({ host: ltr(session.host) })
+                ? m.remote_host_stopped_title({ host: ltr(session.host) })
+                : m.remote_disconnected_title({ host: ltr(session.host) })
             : m.remote_connecting_title({ host: ltr(session.host) });
   const description = session.error ?? (session.canStartNewHost
     ? m.remote_host_stopped_description()
     : needsInstall
-    ? m.remote_not_installed_description({
+      ? m.remote_not_installed_description({
         user: ltr(session.user ?? ""),
         host: ltr(session.host),
       })
-    : needsUpdate
-      ? m.remote_update_description({ host: ltr(session.host) })
-      : session.status === "applying"
-        ? m.remote_applying_description()
-        : session.status === "reconnecting"
-          ? m.remote_reconnecting_description()
-          : session.status === "disconnected"
-            ? m.remote_disconnected_description()
-            : m.remote_connecting_description());
+      : needsUpdate
+        ? m.remote_update_description({ host: ltr(session.host) })
+        : session.status === "applying"
+          ? m.remote_applying_description()
+          : session.status === "reconnecting"
+            ? m.remote_reconnecting_description()
+            : session.status === "disconnected"
+              ? m.remote_disconnected_description()
+              : m.remote_connecting_description());
 
   return (
     <>
       <main className={overlay ? "w-full max-w-2xl" : "app flex h-full items-center justify-center bg-background p-6"}>
-      <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
-        <div className="flex items-start gap-3">
-          {working && <Spinner className="mt-2" />}
-          <div className="min-w-0 flex-1">
-            <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
-              {title}
-            </h1>
-            {!showSshTerminal && <p className="mt-2 mb-0 text-base text-text">{description}</p>}
+        <section className="w-full max-w-2xl rounded-xl border border-border bg-background p-7 shadow-modal">
+          <div className="flex items-start gap-3">
+            {working && <Spinner className="mt-2" />}
+            <div className="min-w-0 flex-1">
+              <h1 id="remote-setup-title" className="m-0 text-2xl font-semibold text-text">
+                {title}
+              </h1>
+              {!showSshTerminal && <p className="mt-2 mb-0 text-base text-text">{description}</p>}
+            </div>
           </div>
-        </div>
 
-        {showSshTerminal && (
-          <SshConnectTerminal
-            host={session.host}
-            backend="ssh"
-            path="/_orx/ssh/connect"
-            onComplete={() => void reconnect(true)}
-          />
-        )}
+          {showSshTerminal && (
+            <SshConnectTerminal
+              host={session.host}
+              backend="ssh"
+              path="/_orx/ssh/connect"
+              onComplete={() => void reconnect(true)}
+            />
+          )}
 
-        {showInstallPaths && (
-          <div className="mt-6 grid gap-4 border-t border-border-variant pt-5">
-            <p className="m-0 text-sm text-subtext">{m.remote_install_location()}</p>
-            {([
-              ["binary", m.remote_install_binary()],
-              ["database", m.remote_install_database()],
-              ["cache", m.remote_install_cache()],
-            ] as const).map(([key, label]) => (
-              <label key={key} className="grid gap-1 text-sm font-medium text-subtext">
-                {label}
-                <Input
-                  value={paths[key]}
-                  onChange={(event) => setPaths({ ...paths, [key]: event.target.value })}
-                  disabled={installing}
-                  dir="ltr"
-                />
-              </label>
-            ))}
-            {!session.error && (
-              <div className="flex justify-end pt-1">
+          {showInstallPaths && (
+            <div className="mt-6 grid gap-4 border-t border-border-variant pt-5">
+              <p className="m-0 text-sm text-subtext">{m.remote_install_location()}</p>
+              {([
+                ["binary", m.remote_install_binary()],
+                ["database", m.remote_install_database()],
+                ["cache", m.remote_install_cache()],
+              ] as const).map(([key, label]) => (
+                <label key={key} className="grid gap-1 text-sm font-medium text-subtext">
+                  {label}
+                  <Input
+                    value={paths[key]}
+                    onChange={(event) => setPaths({ ...paths, [key]: event.target.value })}
+                    disabled={installing}
+                    dir="ltr"
+                  />
+                </label>
+              ))}
+              {!session.error && (
+                <div className="flex justify-end pt-1">
+                  <Button variant="primary" disabled={installing} onClick={() => void install()}>
+                    {installing ? <><Spinner /> {m.remote_installing()}</> : needsUpdate ? m.remote_update() : m.settings_page_install()}
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {needsUpdate && paths && (
+            <div className="mt-6 flex justify-end">
+              {!session.error && (
                 <Button variant="primary" disabled={installing} onClick={() => void install()}>
-                  {installing ? <><Spinner /> {m.remote_installing()}</> : needsUpdate ? m.remote_update() : m.settings_page_install()}
-                </Button>
-              </div>
-            )}
-          </div>
-        )}
-
-        {needsUpdate && paths && (
-          <div className="mt-6 flex justify-end">
-            {!session.error && (
-              <Button variant="primary" disabled={installing} onClick={() => void install()}>
-                {installing ? <><Spinner /> {m.remote_updating()}</> : m.remote_update()}
-              </Button>
-            )}
-          </div>
-        )}
-
-        {session.status === "disconnected" && (
-          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
-            {session.canStartNewHost ? (
-              <Button variant="primary" disabled={busy} onClick={() => void startNewHost()}>
-                {busy ? <Spinner /> : null}
-                {session.error ? m.remote_reconnect() : m.remote_start_new_host()}
-              </Button>
-            ) : (
-              <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
-                {busy ? <Spinner /> : null}
-                {m.remote_reconnect()}
-              </Button>
-            )}
-          </div>
-        )}
-        {(session.status === "connecting" || session.status === "reconnecting") && (
-          <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
-            <Button disabled={busy} onClick={() => void disconnect()}>
-              {m.remote_disconnect()}
-            </Button>
-          </div>
-        )}
-        {needsUpdate && session.error && (
-          <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
-            <Button disabled={busy} onClick={() => void disconnect()}>
-              {m.remote_disconnect()}
-            </Button>
-            {session.installPaths !== null &&
-              (session.dashboardProtocol === null || session.dashboardProtocol < runtime.dashboardProtocol) && (
-                <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
-                  {busy ? <Spinner /> : null}
-                  {m.remote_check_again()}
+                  {installing ? <><Spinner /> {m.remote_updating()}</> : m.remote_update()}
                 </Button>
               )}
-            {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
-              <Button variant="danger" disabled={busy} onClick={() => void prepareStopHost()}>
-                {busy ? <Spinner /> : null}
-                {m.remote_stop_host()}
+            </div>
+          )}
+
+          {session.status === "disconnected" && (
+            <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+              {session.canStartNewHost ? (
+                <Button variant="primary" disabled={busy} onClick={() => void startNewHost()}>
+                  {busy ? <Spinner /> : null}
+                  {session.error ? m.remote_reconnect() : m.remote_start_new_host()}
+                </Button>
+              ) : (
+                <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                  {busy ? <Spinner /> : null}
+                  {m.remote_reconnect()}
+                </Button>
+              )}
+            </div>
+          )}
+          {(session.status === "connecting" || session.status === "reconnecting") && (
+            <div className="mt-6 flex justify-end border-t border-border-variant pt-5">
+              <Button disabled={busy} onClick={() => void disconnect()}>
+                {m.remote_disconnect()}
               </Button>
-            )}
-          </div>
-        )}
-        {needsInstall && session.error && (
-          <div className="mt-6 flex justify-end">
-            <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
-              {busy ? <Spinner /> : null}
-              {m.remote_check_again()}
-            </Button>
-          </div>
-        )}
+            </div>
+          )}
+          {needsUpdate && session.error && (
+            <div className="mt-6 flex justify-end gap-2 border-t border-border-variant pt-5">
+              <Button disabled={busy} onClick={() => void disconnect()}>
+                {m.remote_disconnect()}
+              </Button>
+              {session.installPaths !== null &&
+                (session.dashboardProtocol === null || session.dashboardProtocol < runtime.dashboardProtocol) && (
+                  <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                    {busy ? <Spinner /> : null}
+                    {m.remote_check_again()}
+                  </Button>
+                )}
+              {session.installPaths === null && session.dashboardProtocol !== null && session.dashboardProtocol < runtime.dashboardProtocol && (
+                <Button variant="danger" disabled={busy} onClick={() => void prepareStopHost()}>
+                  {busy ? <Spinner /> : null}
+                  {m.remote_stop_host()}
+                </Button>
+              )}
+            </div>
+          )}
+          {needsInstall && session.error && (
+            <div className="mt-6 flex justify-end">
+              <Button variant="primary" disabled={busy} onClick={() => void reconnect()}>
+                {busy ? <Spinner /> : null}
+                {m.remote_check_again()}
+              </Button>
+            </div>
+          )}
         </section>
       </main>
       {stopPreview && (
@@ -368,6 +385,11 @@ function RemoteOverlay({ children }: { children: ReactNode }) {
 }
 
 export function RuntimeRoot() {
+  useSyncExternalStore(subscribeWorkspace, getWorkspaceGeneration);
+  useEffect(() => subscribeWorkspace(() => {
+    resetGlobalWorkspace();
+    clearProjectWorkspaceCache();
+  }), []);
   const launchPlaceholder = useLocation({ select: (location) => location.pathname === "/remote-launch" });
   const [runtime, setRuntime] = useState<RuntimeInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -377,52 +399,43 @@ export function RuntimeRoot() {
   const previousWorkspace = useRef<string | null>(null);
   const [retriedInteractiveError, setRetriedInteractiveError] = useState<string | null>(null);
 
+  const runtimeQuery = useQuery({
+    ...getRuntimeQuery(),
+    enabled: !launchPlaceholder,
+    refetchInterval: (query) => query.state.status === "error" || query.state.data?.kind === "ssh" ? 2_000 : false,
+    refetchIntervalInBackground: true,
+  });
   useEffect(() => {
     if (launchPlaceholder) return;
-    let active = true;
-    let timer: number | undefined;
-    const refresh = async () => {
-      try {
-        const next = await getRuntime();
-        if (!active) return;
-        const nextWorkspace = workspaceKey(next);
-        if (previousWorkspace.current !== null && previousWorkspace.current !== nextWorkspace) {
-          resetGlobalWorkspace();
-          clearProjectWorkspaceCache();
-          everConnected.current = false;
-          workspaceMounted.current = false;
-          preferencesApplied.current = false;
-        }
-        previousWorkspace.current = nextWorkspace;
-        if (next.kind === "ssh") {
-          if (!preferencesApplied.current) {
-            preferencesApplied.current = true;
-            applyRemotePreferences(next);
-          }
-          if (next.session.status === "connected") {
-            everConnected.current = true;
-            workspaceMounted.current = true;
-            setRetriedInteractiveError(null);
-          } else if (next.session.status === "disconnected" && next.session.error === null) {
-            workspaceMounted.current = false;
-          }
-        }
-        setRuntime((current) => JSON.stringify(current) === JSON.stringify(next) ? current : next);
-        setError(null);
-        if (next.kind === "ssh") timer = window.setTimeout(() => void refresh(), 2_000);
-      } catch (cause) {
-        if (active) {
-          setError(cause instanceof Error ? cause.message : String(cause));
-          timer = window.setTimeout(() => void refresh(), 2_000);
-        }
+    const next = runtimeQuery.data;
+    if (!next) {
+      setError(runtimeQuery.error?.message ?? null);
+      return;
+    }
+    const nextWorkspace = workspaceKey(next);
+    activateWorkspace(nextWorkspace);
+    if (previousWorkspace.current !== null && previousWorkspace.current !== nextWorkspace) {
+      everConnected.current = false;
+      workspaceMounted.current = false;
+      preferencesApplied.current = false;
+    }
+    previousWorkspace.current = nextWorkspace;
+    if (next.kind === "ssh") {
+      if (!preferencesApplied.current) {
+        preferencesApplied.current = true;
+        applyRemotePreferences(next);
       }
-    };
-    void refresh();
-    return () => {
-      active = false;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [launchPlaceholder]);
+      if (next.session.status === "connected") {
+        everConnected.current = true;
+        workspaceMounted.current = true;
+        setRetriedInteractiveError(null);
+      } else if (next.session.status === "disconnected" && next.session.error === null) {
+        workspaceMounted.current = false;
+      }
+    }
+    setRuntime(next);
+    setError(runtimeQuery.error?.message ?? null);
+  }, [launchPlaceholder, runtimeQuery.data, runtimeQuery.error]);
 
   useEffect(() => {
     const remote = runtime?.kind === "ssh";
@@ -448,23 +461,23 @@ export function RuntimeRoot() {
       </main>
     );
   }
-  if (runtime.kind === "local") return <RuntimeContext key={workspaceKey(runtime)} value={runtime}><Outlet /></RuntimeContext>;
+  if (runtime.kind === "local") return <RuntimeContext key={workspaceScope()[1]} value={runtime}><QueryEvents /><Outlet /></RuntimeContext>;
   const keepWorkspace = workspaceMounted.current &&
     (runtime.session.status !== "disconnected" || runtime.session.error !== null);
   if (!keepWorkspace && runtime.session.status !== "connected") {
     return error
       ? <GatewayUnavailable host={runtime.session.host} />
       : <RemoteSetup
-          runtime={runtime}
-          retriedInteractiveError={retriedInteractiveError}
-          setRetriedInteractiveError={setRetriedInteractiveError}
-        />;
+        runtime={runtime}
+        retriedInteractiveError={retriedInteractiveError}
+        setRetriedInteractiveError={setRetriedInteractiveError}
+      />;
   }
   const showOverlay = runtime.session.status !== "connected" || error !== null;
   return (
     <div className="relative h-full">
       <div className="h-full" inert={showOverlay}>
-        <RuntimeContext key={workspaceKey(runtime)} value={runtime}><Outlet /></RuntimeContext>
+        <RuntimeContext key={workspaceScope()[1]} value={runtime}><QueryEvents /><Outlet /></RuntimeContext>
       </div>
       {showOverlay && (
         <RemoteOverlay>
