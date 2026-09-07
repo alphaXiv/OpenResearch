@@ -1,7 +1,34 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type MutableRefObject } from "react";
-import { getProjectUiState, isDemoProjectId, saveProjectUiState } from "./api";
-import { createWorkspaceWriter, emptyProjectWorkspace, getTaskWorkspace, safeLocation, type Pane, type ProjectWorkspace, type TaskWorkspace } from "./workspaceState";
-import { applyPane, defaultTaskWorkspace, paneTab, rememberWorkspace, restoreWorkspace, rightTabKey, fileScrollKey, type RightPaneSessionState } from "./workspaceTabs";
+import { queryClient } from "./queries/client";
+import { getProjectUiStateQuery } from "./queries/projects";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type MutableRefObject,
+} from "react";
+import { isDemoProjectId, saveProjectUiState } from "./api";
+import {
+  createWorkspaceWriter,
+  emptyProjectWorkspace,
+  getTaskWorkspace,
+  safeLocation,
+  type Pane,
+  type ProjectWorkspace,
+  type TaskWorkspace,
+} from "./workspaceState";
+import {
+  applyPane,
+  defaultTaskWorkspace,
+  paneTab,
+  rememberWorkspace,
+  restoreWorkspace,
+  rightTabKey,
+  fileScrollKey,
+  type RightPaneSessionState,
+} from "./workspaceTabs";
 
 let epoch = 0;
 const writers = new Map<string, ReturnType<typeof createWorkspaceWriter<ProjectWorkspace>>>();
@@ -43,7 +70,8 @@ function writerFor(id: string) {
     const visit = epoch;
     writer = createWorkspaceWriter<ProjectWorkspace>(async (value, unloading) => {
       if (visit !== epoch) return;
-      await saveProjectUiState(id, value, unloading);
+      const saved = await saveProjectUiState(id, value, unloading);
+      if (visit === epoch) queryClient.setQueryData(getProjectUiStateQuery(id).queryKey, saved);
       if (visit === epoch && saveErrors.delete(id)) notifyErrors();
     }, (error) => {
       if (visit !== epoch) return;
@@ -140,7 +168,7 @@ export function useProjectWorkspace(props: Props): {
     setLoadedProject(null);
     if (!projectId) return;
     if (projectCache.has(projectId)) setLoadedProject(projectId);
-    else void getProjectUiState(projectId).then((saved) => {
+    else void queryClient.fetchQuery(getProjectUiStateQuery(projectId)).then((saved) => {
       if (!live || visit !== epoch) return;
       projectCache.set(projectId, saved ?? emptyProjectWorkspace());
       setLoadedProject(projectId);

@@ -1,3 +1,5 @@
+import { queryClient } from "./queries/client";
+import { getUiStateQuery } from "./queries/projects";
 import { saveGlobalWorkspace } from "./api";
 import { showAlert } from "./components/ui";
 import { m } from "./paraglide/messages.js";
@@ -10,7 +12,11 @@ export const getRememberedGlobalWorkspace = () => rememberedGlobalWorkspace;
 function createWriter() {
   const visit = epoch;
   return createWorkspaceWriter<GlobalWorkspace>(
-    (value, unloading) => visit === epoch ? saveGlobalWorkspace(value, unloading) : Promise.resolve(),
+    async (value, unloading) => {
+      if (visit !== epoch) return;
+      const saved = await saveGlobalWorkspace(value, unloading);
+      if (visit === epoch) queryClient.setQueryData(getUiStateQuery().queryKey, (current) => current ? { ...current, workspace: saved.workspace } : saved);
+    },
     (error) => {
       if (visit !== epoch) return;
       showAlert(error instanceof Error ? error.message : String(error), "error", {
@@ -32,6 +38,9 @@ export const globalWorkspaceWriter = {
   flush: (unloading = false) => writer.flush(unloading),
   retry: () => writer.retry(),
   queue(value: GlobalWorkspace, delay = 0) {
+    const old = rememberedGlobalWorkspace;
+    // Avoid writing the acknowledged snapshot back to the server.
+    if (old && old.lastLocation === value.lastLocation && old.railOpen === value.railOpen && old.panelWidth === value.panelWidth && old.experimentsView === value.experimentsView) return;
     rememberedGlobalWorkspace = value;
     writer.queue(value, delay);
   },

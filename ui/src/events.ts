@@ -3,7 +3,7 @@
 // terminals can subscribe without threading props everywhere.
 
 import { useEffect, useRef } from "react";
-import { listChatSessions } from "./api";
+
 import type {
   ChatMessage,
   ChatSession,
@@ -69,65 +69,6 @@ export function onChatEvent(fn: ChatListener): () => void {
 
 function emitChat(ev: ChatEvent) {
   chatListeners.forEach((fn) => fn(ev));
-}
-
-/** Reuse the Files pane's low-churn freshness policy: poll only while an agent
- * is working, then catch the final state and any reconnect gap. */
-export function useSessionBusyRefresh(
-  projectId: string,
-  sessionId: string | undefined,
-  refresh: () => void,
-) {
-  const refreshRef = useRef(refresh);
-  refreshRef.current = refresh;
-
-  useEffect(() => {
-    if (!sessionId) return;
-    let disposed = false;
-    let edgeSeen = false;
-    let busy = false;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    const stop = () => {
-      if (timer) clearInterval(timer);
-      timer = null;
-    };
-    const start = () => {
-      if (!timer) timer = setInterval(() => refreshRef.current(), 5000);
-    };
-    const seed = () => {
-      edgeSeen = false;
-      listChatSessions(projectId)
-        .then((sessions) => {
-          if (disposed || edgeSeen) return;
-          busy = Boolean(sessions.find((session) => session.id === sessionId)?.busy);
-          if (busy) start();
-          else stop();
-        })
-        .catch(() => {});
-    };
-    const off = onChatEvent((event) => {
-      if (event.type === "reconnected") {
-        refreshRef.current();
-        seed();
-        return;
-      }
-      if (event.type !== "busy" || event.sessionId !== sessionId) return;
-      edgeSeen = true;
-      if (event.busy === busy) return;
-      busy = event.busy;
-      if (busy) start();
-      else {
-        stop();
-        refreshRef.current();
-      }
-    });
-    seed();
-    return () => {
-      disposed = true;
-      off();
-      stop();
-    };
-  }, [projectId, sessionId]);
 }
 
 const projectActivityListeners = new Set<() => void>();
@@ -251,14 +192,14 @@ const REOPEN_AFTER_MS = 3_000;
 
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
-  onExperiment: (experiment: Experiment) => void;
-  onProject: (project: Project) => void;
+  onExperiment?: (experiment: Experiment) => void;
+  onProject?: (project: Project) => void;
   onReconnect?: () => void;
   /** The project's artifacts changed on disk — refetch the listing. */
   onArtifacts?: (projectId: string) => void;
 }
 
-export function useOrxEvents(handlers: OrxEventHandlers) {
+export function useOrxEventStream(handlers: OrxEventHandlers) {
   // Keep the latest handlers without re-opening the stream every render.
   const ref = useRef(handlers);
   ref.current = handlers;
@@ -317,6 +258,11 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
           return null;
         }
       };
+      es.addEventListener("resync.required", () => {
+        emitChat({ type: "reconnected" });
+        emitProjectActivityEvent();
+        ref.current.onReconnect?.();
+      });
       es.addEventListener("run.updated", (e) => {
         const d = parse<{ run: Run }>(e as MessageEvent);
         if (d?.run) {
@@ -328,14 +274,14 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         const d = parse<{ experiment: Experiment }>(e as MessageEvent);
         if (d?.experiment) {
           emitProjectActivityEvent();
-          ref.current.onExperiment(d.experiment);
+          ref.current.onExperiment?.(d.experiment);
         }
       });
       es.addEventListener("project.updated", (e) => {
         const d = parse<{ project: Project }>(e as MessageEvent);
         if (d?.project) {
           emitProjectActivityEvent();
-          ref.current.onProject(d.project);
+          ref.current.onProject?.(d.project);
         }
       });
       es.addEventListener("files.updated", (e) => {
@@ -427,3 +373,22 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     };
   }, []);
 }
+
+type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onReconnect">;
+const entityListeners = new Set<EntityObservers>();
+export function useOrxEvents(handlers: EntityObservers) {
+  const ref = useRef(handlers);
+  ref.current = handlers;
+  useEffect(() => {
+    const listener: EntityObservers = {
+      onRun: (run) => ref.current.onRun(run),
+      onReconnect: () => ref.current.onReconnect?.(),
+    };
+    entityListeners.add(listener);
+    return () => { entityListeners.delete(listener); };
+  }, []);
+}
+export const emitEntity = {
+  onRun: (run: Run) => entityListeners.forEach((h) => h.onRun(run)),
+  onReconnect: () => entityListeners.forEach((h) => h.onReconnect?.()),
+};

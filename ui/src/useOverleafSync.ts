@@ -13,10 +13,16 @@
 // typed, and sends saves back the same way. The git sync stays for figures,
 // for conflicts, and for whenever the live channel is down.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  getOverleafState,
-  getOverleafStatus,
+  isCurrentScope,
+  queryClient,
+} from "./queries/client";
+
+import { getOverleafStateQuery, getOverleafStatusQuery } from "./queries/files";
+
+import { useCallback, useMemo, useEffect, useRef, useState } from "react";
+import {
   importOverleafSession,
   linkOverleaf,
   overleafUploadUrl,
@@ -111,51 +117,41 @@ export function useOverleafSync({
   /** A sync wrote these files; the viewer reloads when its own is among them. */
   onPulled: (paths: string[]) => void;
 }): OverleafSync {
-  const [hasToken, setHasToken] = useState(false);
-  const [hasSession, setHasSession] = useState(false);
-  const [link, setLink] = useState<OverleafLink | null>(null);
+  const options = useMemo(() => getOverleafStateQuery(projectId, filePath, { sessionId }), [projectId, filePath, sessionId]);
+  const stateQuery = useQuery({ ...options, enabled, subscribed: enabled });
+  const hasToken = stateQuery.data?.hasToken ?? false;
+  const hasSession = stateQuery.data?.hasSession ?? false;
+  const link = stateQuery.data?.link ?? null;
+  const loaded = !stateQuery.isPending;
   const [live, setLive] = useState<OverleafLiveStatus | null>(null);
   const [liveAttempt, setLiveAttempt] = useState(0);
-  const [loaded, setLoaded] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [last, setLast] = useState<OverleafSyncResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [staleOnDisk, setStaleOnDisk] = useState(false);
 
-  const apply = useCallback((state: OverleafState) => {
-    setHasToken(state.hasToken);
-    setHasSession(state.hasSession);
-    setLink(state.link);
-  }, []);
+  // The cookie is machine-wide, so it rides the same cached state the token
+  // does rather than a copy of its own.
+  const setSession = useCallback(
+    (hasSession: boolean) => {
+      if (isCurrentScope(options.queryKey)) {
+        queryClient.setQueryData(options.queryKey, (state) => state && { ...state, hasSession });
+      }
+    },
+    [options],
+  );
 
-  // The link does not survive a change of file: showing the previous paper's
-  // link while acting on this one would unlink or sync the wrong project.
-  // `hasToken` and `hasSession` do — they are machine-wide, not this paper's.
+  const apply = useCallback((state: OverleafState) => {
+    if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, state);
+  }, [options]);
   useEffect(() => {
-    let cancelled = false;
-    setLoaded(false);
-    setLink(null);
     setLast(null);
     setLiveAttempt(0);
     agreed.current = false;
     setError(null);
     setStaleOnDisk(false);
     failedRef.current = false;
-    if (!enabled) return;
-    getOverleafState(projectId, filePath, { sessionId })
-      .then((state) => {
-        if (!cancelled) apply(state);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoaded(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled, projectId, filePath, sessionId, apply]);
+  }, [enabled, projectId, filePath, sessionId]);
 
   // Saving answers the stale-buffer banner as well as reloading does — both
   // advance the file. Undoing back to the loaded text does not: that buffer is
@@ -313,7 +309,7 @@ export function useOverleafSync({
     if (!enabled || !autoRun || !loaded || !hasToken || !link || dirty || liveActive) return;
     const timer = setInterval(() => {
       if (syncingRef.current || failedRef.current) return;
-      getOverleafStatus(projectId, filePath, { sessionId })
+      queryClient.fetchQuery({ ...getOverleafStatusQuery(projectId, filePath, { sessionId }), staleTime: 0 })
         .then((status) => {
           if (status.remoteChanged) sync();
         })
@@ -347,7 +343,7 @@ export function useOverleafSync({
     loaded,
     syncing,
     last,
-    error,
+    error: error ?? stateQuery.error?.message ?? null,
     blocked: dirty,
     staleOnDisk,
     reloaded: () => setStaleOnDisk(false),
@@ -357,18 +353,18 @@ export function useOverleafSync({
       syncedMarker.current = null;
       failedRef.current = false;
       setError(null);
-      setHasToken(result.hasToken);
+      if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, (state) => state && { ...state, hasToken: result.hasToken });
     },
     saveSession: async (session: string) => {
       const result = await saveOverleafSession(session, { host: link?.host });
-      setHasSession(result.hasSession);
+      setSession(result.hasSession);
       // A new cookie is the answer to a refused channel; ask again with it.
       retryRef.current = true;
       setLiveAttempt((n) => n + 1);
     },
     importSession: async () => {
       const result = await importOverleafSession({ host: link?.host });
-      setHasSession(result.hasSession);
+      setSession(result.hasSession);
       retryRef.current = true;
       setLiveAttempt((n) => n + 1);
       return result.source;

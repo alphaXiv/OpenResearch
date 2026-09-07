@@ -102,13 +102,14 @@ jobs:
           fetch-depth: 0
 
       - name: Version must move forward (with a fresh lockfile)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
           pkg_version() { grep -m1 '^version = ' "$1" | sed -E 's/version = "(.*)"/\1/'; }
 
-          git fetch --quiet origin "${{ github.base_ref }}"
-          git show "origin/${{ github.base_ref }}:Cargo.toml" > /tmp/base-Cargo.toml
+          git show "${BASE_SHA}:Cargo.toml" > /tmp/base-Cargo.toml
           base=$(pkg_version /tmp/base-Cargo.toml)
           head=$(pkg_version Cargo.toml)
           echo "base: ${base}  pr: ${head}"

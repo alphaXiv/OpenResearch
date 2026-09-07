@@ -1,5 +1,8 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import { workspaceScope, isCurrentScope, replaceWorkspace } from "./queries/client";
+import { invalidateWrite, removeSession, removeProject } from "./queries/invalidation";
+
 import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
@@ -96,6 +99,8 @@ export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): 
   return live && run.cancelRequested ? "cancelling" : run.status;
 }
 
+const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
@@ -124,32 +129,43 @@ async function json<T>(res: Response): Promise<T> {
     }
     throw new Error(message || `HTTP ${res.status}`);
   }
-  return (await res.json()) as T;
+  const data: T = await res.json();
+  const scope = writeScopes.get(res);
+  if (scope && !isCurrentScope(scope)) throw new DOMException("Workspace changed", "AbortError");
+  return data;
 }
 
-const get = <T>(url: string) => fetch(url).then((r) => json<T>(r));
+const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
+async function writeResponse(url: string, init: RequestInit): Promise<Response> {
+  const scope = workspaceScope();
+  const response = await fetch(url, init);
+  if (!isCurrentScope(scope)) throw new DOMException("Workspace changed", "AbortError");
+  writeScopes.set(response, scope);
+  if (response.ok) invalidateWrite(url, scope);
+  return response;
+}
 const post = <T>(url: string, body?: unknown, keepalive = false) =>
-  fetch(url, {
+  writeResponse(url, {
     method: "POST",
     keepalive,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then((r) => json<T>(r));
 const patch = <T>(url: string, body: unknown) =>
-  fetch(url, {
+  writeResponse(url, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => json<T>(r));
 const put = <T>(url: string, body: unknown) =>
-  fetch(url, {
+  writeResponse(url, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => json<T>(r));
 
-export const listProjects = () =>
-  get<{ projects: Project[] }>("/api/projects").then((r) => r.projects);
+export const listProjects = (signal?: AbortSignal) =>
+  get<{ projects: Project[] }>("/api/projects", signal).then((r) => r.projects);
 
 export interface ProjectActivity {
   projectId: string;
@@ -161,8 +177,8 @@ export interface ProjectActivity {
   lastMessageAt: number | null;
 }
 
-export const listProjectActivity = () =>
-  get<{ activity: ProjectActivity[] }>("/api/projects/activity").then((r) => r.activity);
+export const listProjectActivity = (signal?: AbortSignal) =>
+  get<{ activity: ProjectActivity[] }>("/api/projects/activity", signal).then((r) => r.activity);
 
 export interface OnboardingSelection {
   harness: HarnessId;
@@ -181,10 +197,10 @@ export interface UiState {
   preferredAgent: AgentSelection | null;
 }
 
-export const getUiState = () => get<UiState>("/api/settings/ui-state");
+export const getUiState = (signal?: AbortSignal) => get<UiState>("/api/settings/ui-state", signal);
 
-export const getProjectUiState = (projectId: string) =>
-  get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`);
+export const getProjectUiState = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, signal);
 
 export const saveProjectUiState = (projectId: string, state: ProjectWorkspace, keepalive = false) =>
   post<ProjectWorkspace>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, state, keepalive);
@@ -215,9 +231,9 @@ export interface ProjectPathStatus {
   githubRepo?: string | null;
 }
 
-export const getProjectPathStatus = (path = "") => {
+export const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
   const query = path ? `?path=${encodeURIComponent(path)}` : "";
-  return get<ProjectPathStatus>(`/api/project-path/status${query}`);
+  return get<ProjectPathStatus>(`/api/project-path/status${query}`, signal);
 };
 
 export const pickProjectFolder = () =>
@@ -258,28 +274,29 @@ export interface ResolvedPaper {
   repoStars?: number | null;
 }
 
-export const searchPapers = (q: string) =>
-  get<{ papers: PaperHit[] }>(`/api/papers/search?q=${encodeURIComponent(q)}`).then(
+export const searchPapers = (q: string, signal?: AbortSignal) =>
+  get<{ papers: PaperHit[] }>(`/api/papers/search?q=${encodeURIComponent(q)}`, signal).then(
     (r) => r.papers,
   );
 
 /** The signed-in GitHub login, for naming the account a new repo lands on.
  * `login` is null when there's no usable token. */
-export const githubAccount = () => get<{ login: string | null }>("/api/github/account");
+export const githubAccount = (signal?: AbortSignal) => get<{ login: string | null }>("/api/github/account", signal);
 
-export const githubProjectRepoPreview = (name: string) =>
-  get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`);
+export const githubProjectRepoPreview = (name: string, signal?: AbortSignal) =>
+  get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`, signal);
 
 /** Whether the stored credentials are explicitly confirmed to push to a repo. */
-export const repoAccess = (owner: string, repo: string) =>
+export const repoAccess = (owner: string, repo: string, signal?: AbortSignal) =>
   get<{ canPush: boolean }>(
     `/api/github/repo-access?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
+    signal,
   );
 
 /** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
  * seconds for papers alphaXiv hasn't indexed yet (it scrapes arXiv on a miss). */
-export const resolvePaper = (id: string) =>
-  get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`).then(
+export const resolvePaper = (id: string, signal?: AbortSignal) =>
+  get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(
     (r) => r.paper,
   );
 
@@ -314,9 +331,11 @@ export const getProjectStarterPrompts = (
   harness: HarnessId,
   model: string | null,
   locale: string,
+  signal?: AbortSignal,
 ) =>
   get<ProjectStarterPrompts>(
     `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
+    signal,
   );
 
 /** Record a visit so the backend can persist project-level UI recency. */
@@ -324,20 +343,21 @@ export const openProject = (projectId: string) =>
   post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
 export const deleteProject = (projectId: string) =>
-  fetch(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
+  writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => null);
       throw new Error(body?.error ?? `delete failed (${r.status})`);
     }
+    removeProject(projectId);
   });
 
-export const listExperiments = (projectId: string) =>
-  get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`).then(
+export const listExperiments = (projectId: string, signal?: AbortSignal) =>
+  get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`, signal).then(
     (r) => r.experiments,
   );
 
-export const listRuns = (projectId: string) =>
-  get<{ runs: Run[] }>(`/api/projects/${projectId}/runs`).then((r) => r.runs);
+export const listRuns = (projectId: string, signal?: AbortSignal) =>
+  get<{ runs: Run[] }>(`/api/projects/${projectId}/runs`, signal).then((r) => r.runs);
 
 /** A run viewed as compute: every run across all projects, tagged with the
  *  name of the project that launched it. `projectName` is enriched only on the
@@ -368,10 +388,10 @@ export interface DiffPayload {
   byteLimit: number;
 }
 
-export const getRunDiff = (runId: string) => get<DiffPayload>(`/api/runs/${runId}/diff`);
+export const getRunDiff = (runId: string, signal?: AbortSignal) => get<DiffPayload>(`/api/runs/${runId}/diff`, signal);
 
-export const getExperimentDiff = (experimentId: string) =>
-  get<DiffPayload>(`/api/experiments/${experimentId}/diff`);
+export const getExperimentDiff = (experimentId: string, signal?: AbortSignal) =>
+  get<DiffPayload>(`/api/experiments/${experimentId}/diff`, signal);
 
 /** Which source answered a checkout read: a session's live worktree, the hub
  * clone (also the worktree-pruned fallback), or a branch's committed tree. */
@@ -408,9 +428,10 @@ export interface ProjectFile {
 /** One file from the project — a branch's committed copy when `ref` is given,
  * else a chat session's worktree, else the hub clone — capped server-side
  * (~512 KB). */
-export const getProjectFile = (projectId: string, path: string, opts: CheckoutRef = {}) =>
+export const getProjectFile = (projectId: string, path: string, opts: CheckoutRef = {}, signal?: AbortSignal) =>
   get<ProjectFile>(
     `/api/projects/${projectId}/file?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+    signal,
   );
 
 /** Byte-exact checkout file for browser-native media rendering or download. */
@@ -426,8 +447,8 @@ export type AbsoluteFile = Omit<ProjectFile, "root">;
 /** One file by absolute path — the escape hatch for a file an agent references
  * that lives outside the checkout and artifacts. Server-side capped (~512 KB);
  * loopback-only, so it reads whatever the user running `orx up` can read. */
-export const getAbsoluteFile = (path: string) =>
-  get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`);
+export const getAbsoluteFile = (path: string, signal?: AbortSignal) =>
+  get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`, signal);
 
 /** Byte-exact absolute-path file for browser-native media rendering or download. */
 export const absoluteFileUrl = (path: string) =>
@@ -490,7 +511,7 @@ export interface LatexEngine {
 }
 
 /** Whether the machine running `orx up` can compile LaTeX. */
-export const getLatexEngine = () => get<LatexEngine>("/api/latex/engine");
+export const getLatexEngine = (signal?: AbortSignal) => get<LatexEngine>("/api/latex/engine", signal);
 
 export interface LatexCompileResult {
   ok: boolean;
@@ -546,7 +567,8 @@ export interface OverleafSettings {
 
 /** Whether a Git authentication token is stored — the machine-wide half of the
  * Overleaf state, for Settings. */
-export const getOverleafSettings = () => get<OverleafSettings>("/api/overleaf/settings");
+export const getOverleafSettings = (signal?: AbortSignal) =>
+  get<OverleafSettings>("/api/overleaf/settings", signal);
 
 /** Store an Overleaf Git authentication token. Not validated here: only the Git
  * bridge can judge a token, and it needs a project to judge it against, so a
@@ -555,7 +577,7 @@ export const saveOverleafToken = (token: string) =>
   post<{ hasToken: boolean }>("/api/overleaf/token", { token });
 
 export const deleteOverleafToken = () =>
-  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+  writeResponse("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
 
 /** Store the Overleaf browser session cookie the live channel signs in with.
  * Accepts the bare value or `name=value`; only a connection can say whether it
@@ -612,7 +634,8 @@ export const getOverleafState = (
   projectId: string,
   path: string,
   opts: { sessionId?: string } = {},
-) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+  signal?: AbortSignal,
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, signal);
 
 /** Point this `.tex` at an Overleaf project. The server proves the account can
  * reach it before storing the link, so this is where a plan without Git
@@ -629,7 +652,7 @@ export const linkOverleaf = (
   });
 
 export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
-  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+  writeResponse(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
     method: "DELETE",
   }).then((r) => json<OverleafState>(r));
 
@@ -667,9 +690,11 @@ export const getOverleafStatus = (
   projectId: string,
   path: string,
   opts: { sessionId?: string } = {},
+  signal?: AbortSignal,
 ) =>
   get<{ remoteChanged: boolean }>(
     `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+    signal,
   );
 
 /** Page that posts the paper to Overleaf as a new project — the path for an
@@ -697,9 +722,9 @@ export interface CodeTree {
  * given, else a chat session's live worktree when `sessionId` is given, else
  * the hub clone's checkout — plus the branch name. `ref` and `sessionId` are
  * mutually exclusive (the server rejects both). */
-export const getCodeTree = (projectId: string, opts: CheckoutRef = {}) => {
+export const getCodeTree = (projectId: string, opts: CheckoutRef = {}, signal?: AbortSignal) => {
   const qs = checkoutQuery(opts).toString();
-  return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`);
+  return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`, signal);
 };
 
 /** How a file in a session's worktree differs from the diff base. Lowercase to
@@ -729,8 +754,8 @@ export interface SessionWorktree {
   diff?: DiffPayload;
 }
 
-export const getSessionWorktree = (sessionId: string) =>
-  get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`);
+export const getSessionWorktree = (sessionId: string, signal?: AbortSignal) =>
+  get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`, signal);
 
 /** A GitHub `tree` URL for a branch. Branch names contain `/` (`orx/<slug>`),
  * so encode each path segment — never the whole string, which would escape the
@@ -754,7 +779,7 @@ export interface HfSettings {
   jobsWrite: boolean | null;
 }
 
-export const getHfSettings = () => get<HfSettings>("/api/settings/hf");
+export const getHfSettings = (signal?: AbortSignal) => get<HfSettings>("/api/settings/hf", signal);
 
 export const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
 
@@ -764,7 +789,7 @@ export interface TinkerSettings {
   processEnv: boolean;
 }
 
-export const getTinkerSettings = () => get<TinkerSettings>("/api/settings/tinker");
+export const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
 export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
 
 // --- updates ------------------------------------------------------------------
@@ -803,7 +828,7 @@ export interface InstalledCli {
   alreadyCurrent: boolean;
 }
 
-export const getUpdateStatus = () => get<UpdateStatus>("/api/update");
+export const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
 export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
 
@@ -836,7 +861,7 @@ export interface K8sSettings {
   preflight: K8sPreflight;
 }
 
-export const getK8sSettings = () => get<K8sSettings>("/api/settings/k8s");
+export const getK8sSettings = (signal?: AbortSignal) => get<K8sSettings>("/api/settings/k8s", signal);
 
 export const saveK8sSettings = (body: { context?: string; namespace?: string }) =>
   post<K8sSettings>("/api/settings/k8s", body);
@@ -853,7 +878,7 @@ export interface ModalSettings {
   processEnv: boolean;
 }
 
-export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
+export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/api/settings/modal", signal);
 export const saveModalToken = (tokenId: string, tokenSecret: string) =>
   post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
@@ -865,14 +890,14 @@ export interface EnvVar {
   inProcessEnv: boolean;
 }
 
-export const getEnvVars = () =>
-  get<{ vars: EnvVar[] }>("/api/settings/env").then((r) => r.vars);
+export const getEnvVars = (signal?: AbortSignal) =>
+  get<{ vars: EnvVar[] }>("/api/settings/env", signal).then((r) => r.vars);
 
 export const setEnvVar = (key: string, value: string) =>
   post<{ vars: EnvVar[] }>("/api/settings/env", { key, value }).then((r) => r.vars);
 
 export const deleteEnvVar = (key: string) =>
-  fetch(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
+  writeResponse(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
     .then((r) => json<{ vars: EnvVar[] }>(r))
     .then((r) => r.vars);
 
@@ -887,7 +912,7 @@ export interface DataDirSettings {
   source: DataDirSource;
 }
 
-export const getDataDir = () => get<DataDirSettings>("/api/settings/data-dir");
+export const getDataDir = (signal?: AbortSignal) => get<DataDirSettings>("/api/settings/data-dir", signal);
 
 export interface DataDirValidation {
   ok: boolean;
@@ -902,7 +927,7 @@ export const validateDataDir = (path: string) =>
 
 /** Set the path without moving (onboarding / already-populated target). */
 export const setDataDir = (path: string) =>
-  post<DataDirSettings>("/api/settings/data-dir", { path });
+  post<DataDirSettings>("/api/settings/data-dir", { path }).then((result) => { replaceWorkspace(); return result; });
 
 /** Kick off a relocate. Resolves once the move has *started* (HTTP 202); watch
  * `onDataDirMove` (events.ts) for `progress` / `done` / `error`. Throws on the
@@ -920,21 +945,21 @@ export interface SshHost {
   lastTest?: SshPreflight;
 }
 
-export const getSshHosts = () =>
-  get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
+export const getSshHosts = (signal?: AbortSignal) =>
+  get<{ hosts: SshHost[] }>("/api/settings/ssh", signal).then((r) => r.hosts);
 
 export interface SshConfigFile {
   path: string;
   content: string;
 }
 
-export const getSshConfig = () => get<SshConfigFile>("/api/settings/ssh/config");
+export const getSshConfig = (signal?: AbortSignal) => get<SshConfigFile>("/api/settings/ssh/config", signal);
 
 export const saveSshConfig = (content: string, previousContent: string) =>
   put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
-export const getSshMasterStatus = (host: string) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
+  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
 export type RemoteSessionStatus =
   | "connecting"
@@ -969,10 +994,10 @@ export type RuntimeInfo =
   | { kind: "local"; version: string }
   | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
 
-export const getRuntime = () => get<RuntimeInfo>("/_orx/runtime");
+export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 
-export const listRemoteSessions = () =>
-  get<{ sessions: RemoteSessionInfo[] }>("/api/remote/sessions").then((r) => r.sessions);
+export const listRemoteSessions = (signal?: AbortSignal) =>
+  get<{ sessions: RemoteSessionInfo[] }>("/api/remote/sessions", signal).then((r) => r.sessions);
 
 export const createRemoteSession = (
   host: string,
@@ -1039,7 +1064,7 @@ export interface SlurmSettings {
   hosts: SshHost[];
 }
 
-export const getSlurmSettings = () => get<SlurmSettings>("/api/settings/slurm");
+export const getSlurmSettings = (signal?: AbortSignal) => get<SlurmSettings>("/api/settings/slurm", signal);
 
 /** Empty string clears a field back to the cluster default. */
 export const saveSlurmSettings = (body: {
@@ -1068,7 +1093,7 @@ export interface RaySettings {
   source: string;
 }
 
-export const getRaySettings = () => get<RaySettings>("/api/settings/ray");
+export const getRaySettings = (signal?: AbortSignal) => get<RaySettings>("/api/settings/ray", signal);
 
 /** Empty string clears the saved address (fall back to env / default). */
 export const saveRaySettings = (body: { address?: string }) =>
@@ -1123,9 +1148,10 @@ export interface ComputeSettings {
   configuredDefaultFlavor?: string | null;
 }
 
-export const getComputeSettings = (projectId?: string) =>
+export const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
   get<ComputeSettings>(
     `/api/settings/compute${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+    signal,
   );
 
 /** Set (or clear, with backend: null) the default compute target. Responds
@@ -1153,7 +1179,7 @@ export interface LocalMachine {
   gpus: LocalGpu[];
 }
 
-export const getLocalMachine = () => get<LocalMachine>("/api/settings/local");
+export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
@@ -1170,8 +1196,8 @@ export interface OpenResearchSettings {
   error: string | null;
 }
 
-export const getOpenResearchSettings = () =>
-  get<OpenResearchSettings>("/api/settings/openresearch");
+export const getOpenResearchSettings = (signal?: AbortSignal) =>
+  get<OpenResearchSettings>("/api/settings/openresearch", signal);
 
 /** One node of the artifacts tree: a file, or a directory with children. */
 export interface ArtifactEntry {
@@ -1195,12 +1221,12 @@ export interface ProjectArtifacts {
   truncated: boolean;
 }
 
-export const getArtifacts = (projectId: string) =>
-  get<ProjectArtifacts>(`/api/projects/${projectId}/files`);
+export const getArtifacts = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectArtifacts>(`/api/projects/${projectId}/files`, signal);
 
 /** Delete a file or folder in the artifacts directory. */
 export const deleteArtifact = (projectId: string, path: string) =>
-  fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
+  writeResponse(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean }>(r));
 
@@ -1236,8 +1262,9 @@ const decodeFileText = (bytes: ArrayBuffer, truncated: boolean): FileTextBody =>
 export const getArtifactFileText = (
   projectId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<FileTextBody | null> => {
-  return fetch(artifactUrl(projectId, path), {
+  return fetch(artifactUrl(projectId, path), { signal,
     headers: { Range: `bytes=0-${FILE_PREVIEW_BYTES - 1}` },
   }).then((r) => {
     if (r.status === 404) return null;
@@ -1264,8 +1291,9 @@ export interface ArtifactFileMetadata {
 export const getArtifactFileMetadata = (
   projectId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<ArtifactFileMetadata | null> =>
-  fetch(artifactUrl(projectId, path), { method: "HEAD" }).then((r) => {
+  fetch(artifactUrl(projectId, path), { signal, method: "HEAD" }).then((r) => {
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const presentation = r.headers.get("x-openresearch-presentation");
@@ -1302,7 +1330,7 @@ export interface Profile {
   papers: LinkedPaper[];
 }
 
-export const getProfile = () => get<Profile>("/api/settings/profile");
+export const getProfile = (signal?: AbortSignal) => get<Profile>("/api/settings/profile", signal);
 
 export const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
@@ -1313,8 +1341,8 @@ export interface LitSourcesSettings {
   biorxiv: boolean;
 }
 
-export const getLitSources = () =>
-  get<LitSourcesSettings>("/api/settings/lit-sources");
+export const getLitSources = (signal?: AbortSignal) =>
+  get<LitSourcesSettings>("/api/settings/lit-sources", signal);
 
 export const setLitSources = (body: LitSourcesSettings) =>
   post<LitSourcesSettings>("/api/settings/lit-sources", body);
@@ -1326,8 +1354,8 @@ export interface ProjectDefaultsSettings {
   githubAuthenticated: boolean;
 }
 
-export const getProjectDefaults = () =>
-  get<ProjectDefaultsSettings>("/api/settings/projects");
+export const getProjectDefaults = (signal?: AbortSignal) =>
+  get<ProjectDefaultsSettings>("/api/settings/projects", signal);
 
 export const setProjectDefaults = (
   githubForNewProjects: boolean,
@@ -1363,8 +1391,8 @@ export interface ProjectGitStatus {
   };
 }
 
-export const getProjectGitStatus = (projectId: string) =>
-  get<ProjectGitStatus>(`/api/projects/${projectId}/git`);
+export const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectGitStatus>(`/api/projects/${projectId}/git`, signal);
 
 export const initializeProjectGit = (projectId: string) =>
   post<ProjectGitStatus>(`/api/projects/${projectId}/git/init`);
@@ -1389,7 +1417,7 @@ export interface TelemetrySettings {
   reason: string | null;
 }
 
-export const getTelemetry = () => get<TelemetrySettings>("/api/settings/telemetry");
+export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
@@ -1566,12 +1594,12 @@ export interface Harness {
   options: HarnessOptions;
 }
 
-export const getHarnesses = (refresh = false, retryRejected = false) => {
+export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();
   if (refresh) params.set("refresh", "1");
   if (retryRejected) params.set("retry", "1");
   const query = params.size > 0 ? `?${params.toString()}` : "";
-  return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`).then((r) => r.harnesses);
+  return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
 
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
@@ -1582,13 +1610,14 @@ export interface SkillInfo {
   source?: "builtin" | "user" | "command";
 }
 
-export const getSkills = () => get<{ skills: SkillInfo[] }>("/api/skills").then((r) => r.skills);
+export const getSkills = (signal?: AbortSignal) => get<{ skills: SkillInfo[] }>("/api/skills", signal).then((r) => r.skills);
 
-export const getSkillContent = (name: string, projectId?: string) =>
+export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal) =>
   get<{ content: string }>(
     `/api/skills/${encodeURIComponent(name)}${
       projectId ? `?project=${encodeURIComponent(projectId)}` : ""
     }`,
+    signal,
   ).then((r) => r.content);
 
 /** A user-uploaded LaTeX template the paper skill follows, managed in the
@@ -1603,14 +1632,14 @@ export interface LatexTemplate {
   updatedAt: number;
 }
 
-export const listLatexTemplates = () =>
-  get<{ templates: LatexTemplate[] }>("/api/latex-templates").then((r) => r.templates);
+export const listLatexTemplates = (signal?: AbortSignal) =>
+  get<{ templates: LatexTemplate[] }>("/api/latex-templates", signal).then((r) => r.templates);
 
 export const uploadLatexTemplate = (body: { filename: string; contentBase64: string }) =>
   post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
 
 export const deleteLatexTemplate = (name: string) =>
-  fetch(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+  writeResponse(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
 
@@ -1625,8 +1654,8 @@ export interface UserSkill {
   updatedAt: number;
 }
 
-export const listUserSkills = () =>
-  get<{ skills: UserSkill[] }>("/api/user-skills").then((r) => r.skills);
+export const listUserSkills = (signal?: AbortSignal) =>
+  get<{ skills: UserSkill[] }>("/api/user-skills", signal).then((r) => r.skills);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
@@ -1634,7 +1663,7 @@ export const uploadUserSkill = (req: { filename: string; contentBase64: string }
   post<{ skill: UserSkill }>("/api/user-skills", req).then((r) => r.skill);
 
 export const deleteUserSkill = (name: string) =>
-  fetch(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+  writeResponse(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
 
@@ -1765,9 +1794,10 @@ export interface ChatSession {
   contextUsage?: ContextUsage;
 }
 
-export const listChatSessions = (projectId: string) =>
+export const listChatSessions = (projectId: string, signal?: AbortSignal) =>
   get<{ sessions: ChatSession[] }>(
     `/api/chat/sessions?projectId=${encodeURIComponent(projectId)}`,
+    signal,
   ).then((r) => r.sessions);
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
@@ -1789,8 +1819,8 @@ export const createChatSession = (
   );
 
 export const deleteChatSession = (sessionId: string) =>
-  fetch(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
-    json<{ ok: boolean }>(r),
+  writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
+    json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
   );
 
 /** Archive/unarchive a session (archived chats stay resumable). */
@@ -1826,9 +1856,10 @@ export interface QueuedMessage {
   error?: string | null;
 }
 
-export const getChatMessages = (sessionId: string) =>
+export const getChatMessages = (sessionId: string, signal?: AbortSignal) =>
   get<{ messages: ChatMessage[]; queued?: QueuedMessage[]; activeLeafId?: string | null }>(
     `/api/chat/sessions/${sessionId}/messages`,
+    signal,
   ).then((r) => ({
     messages: r.messages,
     queued: r.queued ?? [],
@@ -1837,7 +1868,7 @@ export const getChatMessages = (sessionId: string) =>
 
 /** Remove a still-parked message. */
 export const cancelQueuedMessage = (sessionId: string, itemId: string) =>
-  fetch(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
+  writeResponse(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean; removed: boolean }>(r));
 
@@ -1884,8 +1915,8 @@ export const sendChatMessage = (
     reasoningLevel: opts.reasoningLevel,
     images,
     annotations,
-      mode,
-    },
+    mode,
+  },
   );
 
 /** A composer `!` command, run in the session's checkout and recorded on its

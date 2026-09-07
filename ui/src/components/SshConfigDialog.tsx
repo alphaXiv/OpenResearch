@@ -1,7 +1,10 @@
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { setScopedQueryData, isCurrentScope } from "../queries/client";
+import { getSshConfigQuery } from "../queries/settings";
 import { X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { getSshConfig, saveSshConfig, type SshConfigFile } from "../api";
+import { saveSshConfig, type SshConfigFile } from "../api";
 import { m } from "../paraglide/messages.js";
 import { CodeEditor } from "./CodeEditor";
 import { Button, IconButton, showAlert, Spinner } from "./ui";
@@ -14,9 +17,12 @@ export function SshConfigDialog({
   onClose: () => void;
   onSaved?: () => void;
 }) {
-  const [file, setFile] = useState<SshConfigFile | null>(null);
-  const [draft, setDraft] = useState("");
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const options = getSshConfigQuery();
+  const fileQuery = useQuery(options);
+  const [file, setFile] = useState<SshConfigFile | null>(() => fileQuery.data ?? null);
+  const [draft, setDraft] = useState(() => fileQuery.data?.content ?? "");
+  const loadError = !file && fileQuery.error ? fileQuery.error.message : null;
+  const saveMutation = useMutation({ mutationFn: ({ content, previous }: { content: string; previous: string }) => saveSshConfig(content, previous) });
   const [saving, setSaving] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -28,13 +34,10 @@ export function SshConfigDialog({
   onCloseRef.current = onClose;
 
   useEffect(() => {
-    getSshConfig()
-      .then((loaded) => {
-        setFile(loaded);
-        setDraft(loaded.content);
-      })
-      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
-  }, []);
+    if (!fileQuery.data || dirtyRef.current || savingRef.current) return;
+    setFile(fileQuery.data);
+    setDraft(fileQuery.data.content);
+  }, [fileQuery.data]);
 
   const close = () => {
     if (savingRef.current) return;
@@ -48,7 +51,9 @@ export function SshConfigDialog({
     if (!file || !dirty || saving) return;
     setSaving(true);
     try {
-      await saveSshConfig(draft, file.content);
+      await saveMutation.mutateAsync({ content: draft, previous: file.content });
+      if (!isCurrentScope(options.queryKey)) return;
+      setScopedQueryData(options.queryKey, { ...file, content: draft });
       setFile({ ...file, content: draft });
       onSaved?.();
       showAlert(m.ssh_config_saved(), "success");

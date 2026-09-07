@@ -1,3 +1,12 @@
+import { isImmutableQuery } from "../queries/invalidation";
+import { useQuery } from "@tanstack/react-query";
+import { listChatSessionsQuery } from "../queries/chat";
+import {
+  workspaceKey,
+  queryClient,
+} from "../queries/client";
+
+import { getCodeTreeQuery, getSessionWorktreeQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // The pinned Files home for the active chat session's private worktree — what
@@ -18,15 +27,11 @@ import { ltr } from "../i18n";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  getCodeTree,
-  getSessionWorktree,
   githubBranchUrl,
   manageProjectFile,
-  type CodeTree,
   type Project,
-  type SessionWorktree,
 } from "../api";
-import { useSessionBusyRefresh } from "../events";
+
 import { CodeBrowserHeader, type CodeBrowserView } from "./CodeBrowserHeader";
 import { buildTree, TreeLevel } from "./codeTree";
 import { GitDiffExplorer, TruncatedDiffNotice } from "./GitDiff";
@@ -71,58 +76,26 @@ export function WorktreeTab({
   canRenameFile: (path: string) => boolean;
 }) {
   const projectId = project.id;
-  const [wt, setWt] = useState<SessionWorktree | null>(null);
-  const [tree, setTree] = useState<CodeTree | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const sessions = useQuery(listChatSessionsQuery(projectId));
+  const busy = sessions.data?.some((session) => session.id === sessionId && session.busy) ?? false;
+  const worktree = useQuery({ ...getSessionWorktreeQuery(sessionId ?? ""), enabled: Boolean(sessionId), refetchInterval: busy ? 5_000 : false });
+  const wt = worktree.data;
+  const source = sessionId && wt?.exists ? { sessionId } : { ref: project.baselineBranch };
+  const files = useQuery({ ...getCodeTreeQuery(projectId, source), enabled: !sessionId || worktree.isSuccess, refetchInterval: busy ? 5_000 : false });
+  const tree = files.data;
+  const error = (worktree.error ?? files.error)?.message;
+  const loading = worktree.isFetching || files.isFetching;
   const [contextMenu, setContextMenu] = useState<FileContextMenuTarget | null>(null);
   const [renamingPath, setRenamingPath] = useState<string | null>(null);
-  // A request id drops stale responses — superseded refreshes, poll ticks, and
-  // (via the effect-cleanup bump) post-unmount completions.
-  const reqId = useRef(0);
-
   const load = useCallback(() => {
-    const id = ++reqId.current;
-    setLoading(true);
-    const request = async (): Promise<[SessionWorktree | null, CodeTree]> => {
-      if (!sessionId) {
-        return [null, await getCodeTree(projectId, { ref: project.baselineBranch })];
-      }
-      const worktree = await getSessionWorktree(sessionId);
-      const source = worktree.exists ? { sessionId } : { ref: project.baselineBranch };
-      return [worktree, await getCodeTree(projectId, source)];
-    };
-    request()
-      .then(([w, t]) => {
-        if (id !== reqId.current) return;
-        setWt(w);
-        setTree(t);
-        setError(null);
-      })
-      .catch((e: Error) => {
-        if (id !== reqId.current) return;
-        // Keep the last-good data — a transient git failure (index.lock while
-        // the agent commits) shouldn't blank the view.
-        setError(e.message);
-      })
-      .finally(() => {
-        if (id === reqId.current) setLoading(false);
-      });
-  }, [sessionId, projectId, project.baselineBranch]);
-
-  // Fetch on mount and whenever the bound session changes; the cleanup bump
-  // invalidates in-flight responses on session change and unmount.
+    if (sessionId) void queryClient.invalidateQueries(getSessionWorktreeQuery(sessionId));
+    void queryClient.invalidateQueries({ queryKey: workspaceKey("getCodeTree", projectId), predicate: (query) => !isImmutableQuery(query) });
+  }, [sessionId, projectId]);
+  const wasBusy = useRef(busy);
   useEffect(() => {
-    setWt(null);
-    setTree(null);
-    setError(null);
-    load();
-    return () => {
-      reqId.current++;
-    };
-  }, [load]);
-
-  useSessionBusyRefresh(projectId, sessionId, load);
+    if (wasBusy.current && !busy) load();
+    wasBusy.current = busy;
+  }, [busy, load]);
 
   const filesTree = useMemo(() => (tree ? buildTree(tree.entries) : null), [tree]);
 
@@ -181,7 +154,7 @@ export function WorktreeTab({
         githubTitle={githubBranch ? m.a11y_open_branch_github({ branch: ltr(githubBranch) }) : undefined}
         refreshing={loading}
         onRefresh={load}
-     />
+      />
       {error && (wt || tree) && <CodeTabNote>{m.worktree_tab_refresh_failed()} {ltr(error)}</CodeTabNote>}
       {!tree || (sessionId && !wt) ? (
         <CodeTabBody>
@@ -197,12 +170,12 @@ export function WorktreeTab({
                 <TruncatedDiffNotice
                   bytesRead={liveWorktree.diff.bytesRead}
                   byteLimit={liveWorktree.diff.byteLimit}
-               />
+                />
               )}
               <GitDiffExplorer
                 diff={liveWorktree.diff.diff}
                 partial={liveWorktree.diff.truncated}
-             />
+              />
             </>
           )}
         </CodeTabBody>
@@ -233,7 +206,7 @@ export function WorktreeTab({
                   void manage(path, { action: "rename", newName: name });
                 }}
                 onCancelRename={() => setRenamingPath(null)}
-             />
+              />
             </div>
           )}
         </CodeTabBody>
@@ -251,12 +224,12 @@ export function WorktreeTab({
           onCopyPath={() => copyPath(contextMenu.path)}
           onDelete={canManageFiles
             ? () => {
-                if (window.confirm(m.file_tree_delete_confirm({ path: ltr(contextMenu.path) })))
-                  void manage(contextMenu.path, { action: "delete" });
-              }
+              if (window.confirm(m.file_tree_delete_confirm({ path: ltr(contextMenu.path) })))
+                void manage(contextMenu.path, { action: "delete" });
+            }
             : undefined}
           onClose={() => setContextMenu(null)}
-       />
+        />
       )}
     </div>
   );

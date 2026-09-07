@@ -1,3 +1,14 @@
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { queryClient } from "../queries/client";
+import {
+  githubAccountQuery,
+  githubProjectRepoPreviewQuery,
+  repoAccessQuery,
+  getProjectPathStatusQuery,
+  resolvePaperQuery,
+  searchPapersQuery,
+} from "../queries/projects";
+import { getProjectDefaultsQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
@@ -5,22 +16,23 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, CircleAlert, FolderOpen } from "lucide-react";
 import {
   createProject,
-  githubAccount,
-  githubProjectRepoPreview,
-  getProjectDefaults,
-  getProjectPathStatus,
   pickProjectFolder,
-  repoAccess,
-  resolvePaper,
-  searchPapers,
   type PaperHit,
   type Project,
-  type ProjectPathStatus,
   type ResolvedPaper,
   prewarmStarterPrompts,
 } from "../api";
 import { Button } from "./ui";
 import { PaperTitle } from "./PaperTitle";
+
+function useDebouncedValue(value: string, delay: number) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
 
 function slugify(text: string, maxLength?: number): string {
   const slug = text
@@ -73,27 +85,15 @@ export function NewProjectForm({
   const [nameTouched, setNameTouched] = useState(false);
   const [path, setPath] = useState("");
   const [pathTouched, setPathTouched] = useState(false);
-  const [pathStatus, setPathStatus] = useState<ProjectPathStatus | null>(null);
-  const [pathError, setPathError] = useState<string | null>(null);
-  const [checkingPath, setCheckingPath] = useState(false);
   const [pickingFolder, setPickingFolder] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
-  const [githubLogin, setGithubLogin] = useState<string | null | undefined>(undefined);
-  const [githubRepoName, setGithubRepoName] = useState("research-project");
-  const [writableGithubRepo, setWritableGithubRepo] = useState<string | null>(null);
-  const [githubRepoPreviewPending, setGithubRepoPreviewPending] = useState(false);
-  const [githubAccessPending, setGithubAccessPending] = useState(false);
   const [paperQuery, setPaperQuery] = useState("");
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
-  const [hits, setHits] = useState<PaperHit[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [searchedPaperQuery, setSearchedPaperQuery] = useState("");
-  const [pathCheckNonce, setPathCheckNonce] = useState(0);
+  const [choosingPaper, setChoosingPaper] = useState(false);
   const seq = useRef(0);
-  const pathSeq = useRef(0);
   const folderPickSeq = useRef(0);
   const drafts = useRef<Record<Mode, ProjectDraft>>({
     blank: { name: "", nameTouched: false, path: "", pathTouched: false },
@@ -108,138 +108,65 @@ export function NewProjectForm({
     : mode === "paper" && paper && !pathTouched
       ? automaticPaperProjectPath
       : path;
+  const checkedPath = useDebouncedValue(projectPath.trim(), 200);
+  const pathQuery = useQuery({ ...getProjectPathStatusQuery(checkedPath), enabled: Boolean(checkedPath) && checkedPath === projectPath.trim() });
+  const pathStatus = checkedPath === projectPath.trim() ? pathQuery.data ?? null : null;
+  const pathError = checkedPath === projectPath.trim() ? pathQuery.error?.message ?? null : null;
+  const checkingPath = Boolean(projectPath.trim()) && (checkedPath !== projectPath.trim() || pathQuery.isFetching);
   const existingGithubRepo = paperGithubRepo ?? (
     mode === "folder" && pathStatus?.githubOwner && pathStatus.githubRepo
       ? { owner: pathStatus.githubOwner, repo: pathStatus.githubRepo }
       : null
   );
 
+  const accountQuery = useQuery(githubAccountQuery());
+  const githubLogin = accountQuery.data?.login ?? (accountQuery.isPending ? undefined : null);
+  const defaultsQuery = useQuery(getProjectDefaultsQuery());
+  const appliedDefaults = useRef(false);
   useEffect(() => {
-    void githubAccount()
-      .then(({ login }) => setGithubLogin(login))
-      .catch(() => setGithubLogin(null));
-    void getProjectDefaults()
-      .then((defaults) => setGithubSyncEnabled(defaults.githubForNewProjects))
-      .catch(() => undefined);
-  }, []);
-
+    if (appliedDefaults.current || !defaultsQuery.data) return;
+    appliedDefaults.current = true;
+    setGithubSyncEnabled(defaultsQuery.data.githubForNewProjects);
+  }, [defaultsQuery.data]);
+  const previewName = useDebouncedValue(name.trim(), 150);
+  const previewQuery = useQuery({ ...githubProjectRepoPreviewQuery(previewName), enabled: previewName === name.trim() });
+  const githubRepoName = previewName === name.trim() ? previewQuery.data?.repo ?? slugify(name, 48) : slugify(name, 48);
+  const githubRepoPreviewPending = previewName !== name.trim() || previewQuery.isFetching;
+  const accessQuery = useQuery({ ...repoAccessQuery(existingGithubRepo?.owner ?? "", existingGithubRepo?.repo ?? ""), enabled: Boolean(existingGithubRepo), subscribed: Boolean(existingGithubRepo) });
+  const githubAccessPending = Boolean(existingGithubRepo) && accessQuery.isFetching;
+  const writableGithubRepo = existingGithubRepo && accessQuery.data?.canPush ? `github.com/${existingGithubRepo.owner}/${existingGithubRepo.repo}` : null;
+  const searchInput = useDebouncedValue(paperQuery.trim(), 350);
+  const paperId = parsePaperId(searchInput);
+  const canSearch = mode === "paper" && !paper && searchInput === paperQuery.trim();
+  const searchQuery = useQuery({ ...searchPapersQuery(searchInput), enabled: canSearch && !paperId && searchInput.length >= 3, subscribed: canSearch && !paperId && searchInput.length >= 3 });
+  const resolveQuery = useQuery({ ...resolvePaperQuery(paperId ?? ""), enabled: canSearch && Boolean(paperId), subscribed: canSearch && Boolean(paperId) });
+  const hits: PaperHit[] = canSearch && !paperId ? searchQuery.data ?? [] : [];
+  const searchedPaperQuery = canSearch && searchQuery.isSuccess ? searchInput : "";
+  const searching = choosingPaper || (mode === "paper" && !paper && (searchInput !== paperQuery.trim() || (paperId ? resolveQuery.isFetching : searchQuery.isFetching)));
   useEffect(() => {
-    let current = true;
-    setGithubRepoPreviewPending(true);
-    const timer = setTimeout(() => {
-      void githubProjectRepoPreview(name.trim())
-        .then(({ repo }) => current && setGithubRepoName(repo))
-        .catch(() => current && setGithubRepoName(slugify(name, 48)))
-        .finally(() => current && setGithubRepoPreviewPending(false));
-    }, 150);
-    return () => {
-      current = false;
-      clearTimeout(timer);
-    };
-  }, [name]);
-
+    if (!canSearch || !paperId || !resolveQuery.data) return;
+    setPaper(resolveQuery.data);
+    if (!nameTouched) setName(resolveQuery.data.title?.trim() || resolveQuery.data.paperId);
+  }, [canSearch, paperId, resolveQuery.data, nameTouched]);
   useEffect(() => {
-    let current = true;
-    setWritableGithubRepo(null);
-    setGithubAccessPending(Boolean(existingGithubRepo));
-    if (!existingGithubRepo) return;
-    void repoAccess(existingGithubRepo.owner, existingGithubRepo.repo)
-      .then(({ canPush }) => {
-        if (current && canPush) {
-          setWritableGithubRepo(`github.com/${existingGithubRepo.owner}/${existingGithubRepo.repo}`);
-        }
-      })
-      .catch(() => undefined)
-      .finally(() => current && setGithubAccessPending(false));
-    return () => {
-      current = false;
-    };
-  }, [existingGithubRepo?.owner, existingGithubRepo?.repo]);
-
-  useEffect(() => {
-    const request = ++pathSeq.current;
-    const trimmedPath = projectPath.trim();
-    if (!trimmedPath) {
-      setPathStatus(null);
-      setPathError(null);
-      setCheckingPath(false);
-      return;
-    }
-    setCheckingPath(true);
-    setPathError(null);
-    const timer = setTimeout(() => {
-      void getProjectPathStatus(trimmedPath)
-        .then((status) => {
-          if (request === pathSeq.current) setPathStatus(status);
-        })
-        .catch((err) => {
-          if (request !== pathSeq.current) return;
-          setPathStatus(null);
-          setPathError(err instanceof Error ? err.message : String(err));
-        })
-        .finally(() => {
-          if (request === pathSeq.current) setCheckingPath(false);
-        });
-    }, 200);
-    return () => clearTimeout(timer);
-  }, [mode, pathCheckNonce, projectPath]);
-
-  useEffect(() => {
-    const request = ++seq.current;
-    if (mode !== "paper" || paper) {
-      setSearching(false);
-      return;
-    }
-    const query = paperQuery.trim();
-    const id = parsePaperId(query);
-    if (!id && query.length < 3) {
-      setHits([]);
-      setSearchedPaperQuery("");
-      setSearching(false);
-      return;
-    }
-    setError(null);
-    setSearching(true);
-    setHits([]);
-    setSearchedPaperQuery("");
-    const timer = setTimeout(() => {
-      if (id) {
-        void resolvePaper(id)
-          .then((resolved) => {
-            if (request !== seq.current) return;
-            setPaper(resolved);
-            if (!nameTouched) setName(resolved.title?.trim() || resolved.paperId);
-          })
-          .catch((err) => request === seq.current && setError(err instanceof Error ? err.message : String(err)))
-          .finally(() => request === seq.current && setSearching(false));
-        return;
-      }
-      void searchPapers(query)
-        .then((results) => {
-          if (request !== seq.current) return;
-          setHits(results);
-          setSearchedPaperQuery(query);
-        })
-        .catch((err) => request === seq.current && setError(err instanceof Error ? err.message : String(err)))
-        .finally(() => request === seq.current && setSearching(false));
-    }, 350);
-    return () => clearTimeout(timer);
-  }, [mode, paper, paperQuery, nameTouched]);
+    const error = paperId ? resolveQuery.error : searchQuery.error;
+    if (canSearch && error) setError(error.message);
+  }, [canSearch, paperId, resolveQuery.error, searchQuery.error]);
+  const createMutation = useMutation({ mutationFn: createProject });
 
   async function choosePaper(paperId: string) {
     const request = ++seq.current;
-    setSearching(true);
+    setChoosingPaper(true);
     setError(null);
     try {
-      const resolved = await resolvePaper(paperId);
+      const resolved = await queryClient.fetchQuery(resolvePaperQuery(paperId));
       if (request !== seq.current) return;
       setPaper(resolved);
-      setHits([]);
       if (!nameTouched) setName(resolved.title?.trim() || resolved.paperId);
     } catch (err) {
       if (request === seq.current) setError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (request === seq.current) setSearching(false);
+      if (request === seq.current) setChoosingPaper(false);
     }
   }
 
@@ -248,9 +175,7 @@ export function NewProjectForm({
     folderPickSeq.current += 1;
     setPaper(null);
     setPaperQuery("");
-    setHits([]);
-    setSearchedPaperQuery("");
-    setSearching(false);
+    setChoosingPaper(false);
     setPickingFolder(false);
     setPath("");
     setPathTouched(false);
@@ -271,9 +196,7 @@ export function NewProjectForm({
     const nextDraft = drafts.current[next];
     setMode(next);
     setError(null);
-    setPathError(null);
-    setPathStatus(null);
-    setSearching(false);
+    setChoosingPaper(false);
     setPickingFolder(false);
     setName(nextDraft.name);
     setNameTouched(nextDraft.nameTouched);
@@ -290,10 +213,8 @@ export function NewProjectForm({
       const selected = await pickProjectFolder();
       if (request !== folderPickSeq.current || !selected) return;
       setPathTouched(true);
-      setPathStatus(null);
-      setCheckingPath(true);
       setPath(selected);
-      setPathCheckNonce((nonce) => nonce + 1);
+      void queryClient.invalidateQueries(getProjectPathStatusQuery(selected));
       if (mode === "folder" && !nameTouched) {
         const folderName = selected.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
         if (folderName) setName(folderName);
@@ -313,7 +234,14 @@ export function NewProjectForm({
     setPending(true);
     setError(null);
     try {
-      const result = await createProject({
+      const status = await queryClient.fetchQuery({ ...getProjectPathStatusQuery(projectPath.trim()), staleTime: 0 });
+      if (status.exists && status.directory === false) throw new Error(m.new_project_destination_is_file());
+      if (mode === "blank" && status.exists) throw new Error(m.new_project_folder_exists());
+      if (mode === "paper" && status.empty === false) throw new Error(m.new_project_paper_needs_empty_folder());
+      if (githubSyncEnabled && existingGithubRepo) {
+        await queryClient.fetchQuery({ ...repoAccessQuery(existingGithubRepo.owner, existingGithubRepo.repo), staleTime: 0 }).catch(() => null);
+      }
+      const result = await createMutation.mutateAsync({
         name: name.trim(),
         path: projectPath.trim(),
         createFolder: mode !== "folder",
@@ -383,19 +311,19 @@ export function NewProjectForm({
   const blankDestinationError = pathTouched && !projectPath.trim()
     ? m.new_project_location_required()
     : invalidProjectDestination
-    ? m.new_project_destination_is_file()
-    : existingBlankFolder
-      ? m.new_project_folder_exists()
-      : null;
+      ? m.new_project_destination_is_file()
+      : existingBlankFolder
+        ? m.new_project_folder_exists()
+        : null;
   const paperDestinationError = pathTouched && !projectPath.trim()
     ? m.new_project_location_required()
     : invalidProjectDestination
-    ? m.new_project_destination_is_file()
-    : nonemptyPaperCloneFolder
-      ? m.new_project_paper_needs_empty_folder()
-      : unusableBlankPaperFolder
-        ? m.new_project_blank_paper_needs_folder()
-        : null;
+      ? m.new_project_destination_is_file()
+      : nonemptyPaperCloneFolder
+        ? m.new_project_paper_needs_empty_folder()
+        : unusableBlankPaperFolder
+          ? m.new_project_blank_paper_needs_folder()
+          : null;
   const canCreate =
     Boolean(name.trim() && projectPath.trim()) &&
     !pending &&
@@ -468,11 +396,10 @@ export function NewProjectForm({
             value={paperQuery}
             onChange={(event) => {
               setError(null);
-              setSearchedPaperQuery("");
               setPaperQuery(event.target.value);
             }}
             placeholder={m.new_project_form_search_for_a_paper_by_ar_xiv_id()}
-         />
+          />
           {!hasNoPaperResults && (
             <span className="repo-hint">{searching ? m.new_project_searching_alphaxiv() : m.new_project_public_repo_cloned()}</span>
           )}
@@ -528,7 +455,7 @@ export function NewProjectForm({
                   setName(event.target.value);
                 }}
                 placeholder={m.new_project_form_my_research()}
-             />
+              />
             </label>
           )}
           {mode === "paper" ? (
@@ -541,13 +468,12 @@ export function NewProjectForm({
                 value={projectPath}
                 onChange={(event) => {
                   setPathTouched(true);
-                  setPathStatus(null);
                   setPath(event.target.value);
                 }}
                 aria-describedby={paperDestinationHasError ? "paper-destination-description" : undefined}
                 placeholder="~/OpenResearch/paper-title"
                 spellCheck={false}
-             />
+              />
               {checkingPath && (
                 <span className="sr-only" role="status" aria-live="polite">{m.new_project_form_checking_project_location()}</span>
               )}
@@ -582,7 +508,6 @@ export function NewProjectForm({
                 value={path}
                 onChange={(event) => {
                   setPathTouched(true);
-                  setPathStatus(null);
                   setPath(event.target.value);
                 }}
                 placeholder="/home/user/project"
@@ -598,13 +523,12 @@ export function NewProjectForm({
                 value={projectPath}
                 onChange={(event) => {
                   setPathTouched(true);
-                  setPathStatus(null);
                   setPath(event.target.value);
                 }}
                 placeholder="~/OpenResearch/my-research"
                 aria-describedby={blankDestinationHasError ? "blank-destination-description" : undefined}
                 spellCheck={false}
-             />
+              />
               {checkingPath && (
                 <span className="sr-only" role="status" aria-live="polite">{m.new_project_form_checking_project_location()}</span>
               )}
@@ -626,7 +550,7 @@ export function NewProjectForm({
                   setName(event.target.value);
                 }}
                 placeholder={m.new_project_form_my_research()}
-             />
+              />
             </label>
           )}
           {gitMissing && (
@@ -676,7 +600,7 @@ export function NewProjectForm({
                   checked={githubSyncEnabled}
                   onChange={(event) => setGithubSyncEnabled(event.target.checked)}
                   disabled={pending}
-               />
+                />
                 <strong className="text-base font-medium leading-[1.3] text-text">
                   {m.new_project_form_sync_experiments_to_git_hub()}
                 </strong>
