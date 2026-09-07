@@ -86,9 +86,8 @@ python3 -m venv .venv-figs
 .venv-figs/bin/python figs/loss_curve.py
 ```
 
-Use the equivalent `Scripts/python.exe` path on Windows. Keep the environment
-out of Git (add `.venv-figs/` to `.gitignore` if needed); do not install uv or
-modify the system Python for plotting.
+Keep the environment out of Git (add `.venv-figs/` to `.gitignore` if needed);
+do not install uv or modify the system Python for plotting.
 
 ## Where the figure goes, and how to cite it
 

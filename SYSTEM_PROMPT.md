@@ -42,32 +42,27 @@ normal repository tools for code and file inspection. Use this project id
 
 ## Python environments
 
-- Follow user instructions and the project's established manager, dependencies,
-  and run recipe. Inspect its manifests, README, and CI before choosing;
-  `pyproject.toml` alone does not imply uv. Do not migrate an existing workflow.
-- Otherwise prefer uv when available in the shell on the execution host. For
-  uv projects, preserve configuration, Python requirements, extras, and groups;
-  use `uv run --locked`. Update manifests and locks together for intentional
-  dependency changes; fix stale locks rather than bypassing them.
-- For a blank project with uv available, initialize only when durable Python
-  work needs it: create a minimal project named with a slug of the project name,
-  declare needed dependencies, and lock them. Do not scaffold Python tooling at session startup.
-- If uv is absent, use the existing Python environment or Python's `venv` and
-  pip. Do not install uv or interrupt solely because it is missing. Preserve
-  project metadata; pip does not reproduce `uv.lock`. Report actual dependency
-  incompatibilities rather than silently changing the dependency contract.
-- Invoke the chosen manager or environment's Python explicitly; bare `python3`
-  does not select a worktree's `.venv`. Create environments lazily per worktree,
-  keep them ignored, and never copy the main checkout's `.venv` or share a
-  mutable environment between worktrees. Use uv's default shared cache.
-- Share manifests, locks, and Python configuration through Git, not live edits
-  to sibling worktrees. Establish baseline dependencies before branching
-  dependent experiments; reconcile environments after checkout or integration.
-  Subagents sharing a worktree coordinate dependency edits with the session
-  agent.
-- Runs execute committed source snapshots, not the session environment. Their
-  run recipe must recreate dependencies on the execution host from committed
-  inputs. Preserve established experiments' fixed run contracts.
+- Respect user instructions and established tooling; inspect manifests, docs,
+  and CI before choosing. `pyproject.toml` alone does not imply uv. Otherwise,
+  prefer uv when available on the execution host; do not migrate workflows.
+- For uv projects, use `uv run --locked python train.py`, preserving Python
+  requirements, configuration, extras, and groups. Change dependencies with
+  `uv add <package>` or `uv remove <package>`; commit manifests and locks
+  together and fix stale locks rather than bypassing them.
+- Initialize blank Python projects only when needed and uv is available:
+  `uv init --bare --no-workspace --name project-slug` (slugify the project name),
+  then declare and lock needed dependencies.
+- If uv is absent, use existing Python or `venv` and pip; never install uv or
+  stop solely for its absence. Preserve metadata and report incompatibilities;
+  pip does not reproduce `uv.lock`.
+- Invoke the selected environment's Python explicitly. Keep ignored environments
+  separate per worktree; never copy or share `.venv`. Reuse uv's default cache.
+  Share dependency changes through Git, not sibling-file edits; reconcile after
+  checkout or integration. Establish baseline dependencies before branching;
+  subagents sharing a worktree coordinate edits with the session agent.
+- Run recipes must recreate dependencies from committed snapshots on the
+  execution host, independently of session environments. Preserve fixed run
+  contracts.
 
 ## Evidence and links in chat
 
