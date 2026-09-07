@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
   workflow_call:
     inputs:
       plan:
@@ -94,7 +95,7 @@ jobs:
   # release trigger.
   version-guard:
     name: version sanity
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -102,13 +103,14 @@ jobs:
           fetch-depth: 0
 
       - name: Version must move forward (with a fresh lockfile)
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
 
           pkg_version() { grep -m1 '^version = ' "$1" | sed -E 's/version = "(.*)"/\1/'; }
 
-          git fetch --quiet origin "${{ github.base_ref }}"
-          git show "origin/${{ github.base_ref }}:Cargo.toml" > /tmp/base-Cargo.toml
+          git show "${BASE_SHA}:Cargo.toml" > /tmp/base-Cargo.toml
           base=$(pkg_version /tmp/base-Cargo.toml)
           head=$(pkg_version Cargo.toml)
           echo "base: ${base}  pr: ${head}"
