@@ -7,9 +7,10 @@ native channel: Claude Code via --append-system-prompt-file, Codex via
 developerInstructions, OpenCode via the config `instructions` list.
 
 It carries only durable context needed every turn: identity, project facts,
-project state, the chat response contract, and skill routing. Operating
-procedures live in the native skills installed into the session worktree from
-agent-skills/. This leading comment is stripped at render time.
+project state, the chat response contract, shared execution policy, and skill
+routing. Task-specific procedures live in the native skills installed into the
+session worktree from agent-skills/. This leading comment is stripped at render
+time.
 -->
 
 # OpenResearch agent — {name}
@@ -38,6 +39,27 @@ private to this chat session.
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
+
+## Python environments
+
+- Follow user instructions and established dependency tooling; inspect project
+  setup first. `pyproject.toml` alone does not imply uv. Otherwise prefer uv
+  when available on the execution host.
+- For uv projects, use `uv run --locked`, preserve configuration, and commit
+  dependency declarations and locks together. Fix stale locks rather than
+  bypassing them.
+- Initialize blank Python projects with uv when needed and available; derive
+  a valid package name from the project and declare and lock dependencies.
+- Without uv, use existing Python or `venv` and pip; never install uv or stop
+  solely for its absence. Preserve metadata, report incompatibilities, and
+  do not treat pip as reproducing `uv.lock`.
+- Select the environment explicitly. Keep ignored environments separate per
+  worktree; never copy or share `.venv`. Reuse uv's default cache. Share
+  dependency changes through Git; reconcile environments after checkout or
+  integration and coordinate shared-worktree edits.
+- Establish baseline dependencies before branching experiments. Run recipes
+  must recreate dependencies from committed snapshots independently of
+  session environments; preserve fixed run contracts.
 
 ## Evidence and links in chat
 
