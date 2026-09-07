@@ -62,14 +62,33 @@ under the artifacts directory needs its own copy there, or the import fails.
 (That works from any directory. Check the file is non-empty before importing
 it — the redirect creates the target before the lookup runs.)
 
-Then find an interpreter that has matplotlib, in this order — do not install
-into the project's environment without asking:
+Select the Python environment before running the plot, following the session
+playbook's Python policy: respect user instructions and established tooling.
+If the plot imports project code, use that project's dependency workflow; do
+not override its packages with an unrelated uv overlay.
+
+Reuse an established environment that already provides the plotting libraries.
+Otherwise, for an independent plot, prefer this when uv is available and
+permitted by the user and project workflow:
 
 ```sh
-python -c "import matplotlib"                      # the project env already has it
-uv run --with matplotlib --with numpy python figs/loss_curve.py
-python3 -m venv .venv-figs && .venv-figs/bin/pip install matplotlib numpy
+uv run --no-project --with matplotlib --with numpy python figs/loss_curve.py
 ```
+
+For saved scripts with inline dependency metadata, use
+`uv run --no-project figs/loss_curve.py` so uv reads that metadata.
+If uv is absent, reuse a suitable Python environment or create an
+ignored plotting environment in your worktree and run its Python explicitly:
+
+```sh
+python3 -m venv .venv-figs
+.venv-figs/bin/python -m pip install matplotlib numpy
+.venv-figs/bin/python figs/loss_curve.py
+```
+
+Use the equivalent `Scripts/python.exe` path on Windows. Keep the environment
+out of Git (add `.venv-figs/` to `.gitignore` if needed); do not install uv or
+modify the system Python for plotting.
 
 ## Where the figure goes, and how to cite it
 

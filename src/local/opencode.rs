@@ -712,6 +712,14 @@ mod tests {
     }
 
     #[test]
+    fn playbook_carries_python_environment_policy() {
+        let md = sample_playbook();
+        assert!(md.contains("## Python environments"));
+        assert!(md.contains("use `uv run --locked`"));
+        assert!(md.contains("If uv is absent"));
+    }
+
+    #[test]
     fn playbook_short_circuits_orientation_for_a_fresh_project() {
         let md = sample_playbook();
         assert!(md.contains("## Project state"));

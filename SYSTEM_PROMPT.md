@@ -7,9 +7,10 @@ native channel: Claude Code via --append-system-prompt-file, Codex via
 developerInstructions, OpenCode via the config `instructions` list.
 
 It carries only durable context needed every turn: identity, project facts,
-project state, the chat response contract, and skill routing. Operating
-procedures live in the native skills installed into the session worktree from
-agent-skills/. This leading comment is stripped at render time.
+project state, the chat response contract, shared execution policy, and skill
+routing. Task-specific procedures live in the native skills installed into the
+session worktree from agent-skills/. This leading comment is stripped at render
+time.
 -->
 
 # OpenResearch agent — {name}
@@ -38,6 +39,35 @@ private to this chat session.
 Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
+
+## Python environments
+
+- Follow user instructions and the project's established manager, dependencies,
+  and run recipe. Inspect its manifests, README, and CI before choosing;
+  `pyproject.toml` alone does not imply uv. Do not migrate an existing workflow.
+- Otherwise prefer uv when available in the shell on the execution host. For
+  uv projects, preserve configuration, Python requirements, extras, and groups;
+  use `uv run --locked`. Update manifests and locks together for intentional
+  dependency changes; fix stale locks rather than bypassing them.
+- For a blank project with uv available, initialize only when durable Python
+  work needs it: create a minimal project named with a slug of the project name,
+  declare needed dependencies, and lock them. Do not scaffold Python tooling at session startup.
+- If uv is absent, use the existing Python environment or Python's `venv` and
+  pip. Do not install uv or interrupt solely because it is missing. Preserve
+  project metadata; pip does not reproduce `uv.lock`. Report actual dependency
+  incompatibilities rather than silently changing the dependency contract.
+- Invoke the chosen manager or environment's Python explicitly; bare `python3`
+  does not select a worktree's `.venv`. Create environments lazily per worktree,
+  keep them ignored, and never copy the main checkout's `.venv` or share a
+  mutable environment between worktrees. Use uv's default shared cache.
+- Share manifests, locks, and Python configuration through Git, not live edits
+  to sibling worktrees. Establish baseline dependencies before branching
+  dependent experiments; reconcile environments after checkout or integration.
+  Subagents sharing a worktree coordinate dependency edits with the session
+  agent.
+- Runs execute committed source snapshots, not the session environment. Their
+  run recipe must recreate dependencies on the execution host from committed
+  inputs. Preserve established experiments' fixed run contracts.
 
 ## Evidence and links in chat
 

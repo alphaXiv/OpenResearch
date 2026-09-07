@@ -13,12 +13,17 @@ everything below assumes them.
 
 ## Before the first launch
 
-If the project has no completed runs, ask the user how they run the code before
-launching. Ask for the environment setup (conda, venv, uv, modules), dependency
-installation, the exact train or evaluation command they use today, and any
-compute-specific requirements. Do not reverse-engineer or guess this setup from
-the repository. Encode the durable recipe in the project's run command so later
-sessions do not need to ask again.
+Inspect user instructions, the existing run command, project manifests, README,
+and CI for environment setup and execution. Follow
+the session playbook's Python defaults where no workflow is established; do
+not replace an existing manager. Ask only about an unresolved train/evaluation
+command, conflicting workflows, or compute-specific requirements.
+
+Encode the durable setup and execution recipe in the project's run command,
+following the playbook's Python policy. Runs execute committed snapshots (see
+`orx-compute`), so the recipe must recreate dependencies on the execution host
+from committed inputs without relying on the session's environment. Preserve
+established experiments' fixed run contracts.
 
 ## Provisional until it answers — repair, don't branch
 
