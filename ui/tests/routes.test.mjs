@@ -147,3 +147,69 @@ test("malformed pane cleanup removes only the invalid pane and leaves valid desc
   assert.equal(normalizedPaneSearch(`?${valid}`), null);
   assert.equal(normalizedPaneSearch(`?${valid}&${valid}`), "");
 });
+
+function resumeEffect(bindings) {
+  const source = ts.createSourceFile("routePages.tsx", readFileSync(new URL("../src/routePages.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const resume = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name.text === "Resume");
+  const effect = resume.body.statements.find(node => ts.isExpressionStatement(node) && ts.isCallExpression(node.expression) && node.expression.expression.getText(source) === "useEffect");
+  assert.ok(effect, "Resume effect must exist");
+  const code = ts.transpileModule(`return ${effect.expression.arguments[0].getText(source)}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  return new Function(...Object.keys(bindings), code)(...Object.values(bindings));
+}
+
+for (const projectId of [undefined, "p"]) {
+  for (const cancellation of ["observer removed", "write invalidation", "route left"]) {
+    test(`${projectId ? "project" : "global"} resume handles ${cancellation} without a navigation error`, async () => {
+      const client = new query.QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity } } });
+      let first = true, signal, attempt = 0, error = null, navigated;
+      const api = resumeApi(null);
+      const name = projectId ? "getProjectUiState" : "getUiState";
+      const read = api[name];
+      api[name] = (...args) => {
+        if (!first) return read(...args);
+        first = false;
+        signal = args.at(-1);
+        return new Promise(() => {});
+      };
+      const locations = loadModule("routeResume.ts", api);
+      const setup = resumeEffect({ ...locations, client, projectId, isCancelledError: query.isCancelledError,
+        setError: value => { error = value; }, setAttempt: update => { attempt = update(attempt); },
+        navigate: ({ href }) => { navigated = href; },
+      });
+      const cleanup = setup();
+      const queryKey = client.getQueryCache().findAll().find(entry => entry.queryKey[2] === name).queryKey;
+      if (cancellation === "route left") cleanup();
+      if (cancellation === "observer removed") {
+        const observer = new query.QueryObserver(client, { queryKey, enabled: false });
+        observer.subscribe(() => {})();
+      } else await client.cancelQueries({ queryKey });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(signal.aborted, true);
+      assert.equal(error, null);
+      assert.equal(attempt, cancellation === "route left" ? 0 : 1);
+      if (cancellation !== "route left") {
+        cleanup();
+        const finish = setup();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.equal(navigated, projectId ? "/projects/p/tasks/new" : "/projects");
+        finish();
+      } else assert.equal(navigated, undefined);
+      client.clear();
+    });
+  }
+}
+
+test("resume still exposes real failures instead of automatically retrying them", async () => {
+  const failure = new Error("HTTP 503");
+  let error, attempts = 0;
+  const setup = resumeEffect({ projectId: "p", client: {},
+    projectResumeLocation: async () => { throw failure; }, globalResumeLocation: async () => "/projects",
+    isCancelledError: query.isCancelledError, navigate: () => assert.fail("must not navigate"),
+    setError: value => { error = value; }, setAttempt: () => { attempts++; },
+  });
+  const cleanup = setup();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(error, failure);
+  assert.equal(attempts, 0);
+  cleanup();
+});

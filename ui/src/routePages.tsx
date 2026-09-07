@@ -1,5 +1,5 @@
 import { setScopedQueryData } from "./queries/client";
-import { useQuery } from "@tanstack/react-query";
+import { isCancelledError, useQuery } from "@tanstack/react-query";
 import { listProjectsQuery, getUiStateQuery } from "./queries/projects";
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
@@ -51,7 +51,10 @@ function Resume({ projectId }: { projectId?: string }) {
     void (projectId ? projectResumeLocation(projectId, client) : globalResumeLocation(client))
       .then((href) => { if (current) void navigate({ href, replace: true }); })
       .catch((cause: unknown) => {
-        if (current) setError(cause instanceof Error ? cause : new Error(String(cause)));
+        if (!current) return;
+        // A shared read can be cancelled by invalidation or the last observer leaving.
+        if (isCancelledError(cause)) setAttempt((value) => value + 1);
+        else setError(cause instanceof Error ? cause : new Error(String(cause)));
       });
     return () => { current = false; };
   }, [projectId, attempt, navigate, client]);
