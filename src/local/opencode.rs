@@ -766,8 +766,11 @@ mod tests {
     fn reports_skill_owns_artifact_output_policy() {
         let md = sample_playbook();
         let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
-        assert!(reports.content.contains("descriptive filename"));
-        assert!(reports.content.contains("artifacts root"));
+        assert!(md.contains("`orx-reports` before creating or organizing artifacts"));
+        assert!(reports.content.contains("Reuse the relevant folder"));
+        assert!(reports
+            .content
+            .contains("<file path=\"artifacts/transformer-sweep/figures/patch-size.svg\" />"));
         assert!(!md.contains("PROJECT.md"));
     }
 

@@ -80,7 +80,7 @@ link.
 | The figure is for | Write it to | Cite it as |
 | --- | --- | --- |
 | A paper (`.tex`) | `figs/` beside the `.tex` in the working tree — `\includegraphics` resolves paths relative to the source, and the artifacts directory is not beside it | `<file path="figs/loss_curve.pdf" />` — repository-relative, **no** `artifacts/` prefix |
-| A report, a summary, an answer in chat | The artifacts directory from the session playbook, per the `orx-reports` module | `<file path="artifacts/loss_curve.pdf" />` |
+| A report, a summary, an answer in chat | Load `orx-reports` and use the relevant topic or deliverable folder under the artifacts directory, e.g. `transformer-sweep/figures/` | `<file path="artifacts/transformer-sweep/figures/loss_curve.pdf" />` |
 
 **The tag must match the destination.** A figure written to the worktree but
 cited with an `artifacts/` prefix is looked for in the artifacts directory and
@@ -186,9 +186,8 @@ Pick by the question the figure answers, not by the shape you have in mind.
 | What is the method, architecture, or pipeline? | [references/diagram.md](references/diagram.md) |
 
 Every reference's template writes to `figs/`, which is the paper destination.
-For a report or a chat answer, put both the script and its `save()` stem under
-the artifacts directory — they stay together either way — and cite the output
-with the `artifacts/` prefix.
+For a report or a chat answer, adapt the template's script and output paths to
+the folder chosen per `orx-reports`.
 
 Do not read references for figures you are not making. If an installed
 reference cannot be read, `orx skill figures/<name>` prints it.
