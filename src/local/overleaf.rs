@@ -221,7 +221,7 @@ pub fn collect(tex: &Path) -> Result<Payload> {
     let dir = tex
         .parent()
         .ok_or_else(|| anyhow!("the paper has no parent directory"))?;
-    let root = std::fs::canonicalize(dir)?;
+    let root = crate::paths::canonicalize(dir)?;
     let main = tex
         .file_name()
         .ok_or_else(|| anyhow!("the paper has no file name"))?
@@ -294,7 +294,7 @@ fn resolve(root: &Path, reference: &str) -> Option<(String, PathBuf)> {
     if trimmed.split('/').any(|part| part.starts_with('.')) {
         return None;
     }
-    let path = std::fs::canonicalize(root.join(trimmed)).ok()?;
+    let path = crate::paths::canonicalize(root.join(trimmed)).ok()?;
     if !path.is_file() || !path.starts_with(root) {
         return None;
     }
@@ -809,7 +809,7 @@ fn plan(
                 // `confined_path` is lexical; this is the same canonicalized
                 // boundary `collect` applies, so a symlinked folder cannot make
                 // a "keep this copy" send something from outside the paper.
-                match std::fs::canonicalize(&local_path) {
+                match crate::paths::canonicalize(&local_path) {
                     Ok(real) if real.starts_with(&payload.dir) => {
                         plan.forced.insert(rel.clone(), real);
                     }
@@ -1104,7 +1104,7 @@ fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
                 None => break,
             }
         }
-        if !std::fs::canonicalize(existing)?.starts_with(dir) {
+        if !crate::paths::canonicalize(existing)?.starts_with(dir) {
             return Err(anyhow!(
                 "{} resolves outside the paper's folder",
                 parent.display()

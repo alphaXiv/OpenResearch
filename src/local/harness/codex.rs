@@ -3083,7 +3083,7 @@ async fn shared_git_dir(workspace: &Path) -> Option<PathBuf> {
 /// `dir` as an absolute, symlink-free path; `git rev-parse` answers relative
 /// to the workspace for a regular clone (`.git`) and absolute for a worktree.
 fn absolute_git_dir(workspace: &Path, dir: &Path) -> Option<PathBuf> {
-    workspace.join(dir).canonicalize().ok()
+    crate::paths::canonicalize(workspace.join(dir)).ok()
 }
 
 /// The orx data dir as a sandbox writable root. The `orx` CLI the agent
@@ -3100,7 +3100,7 @@ fn absolute_git_dir(workspace: &Path, dir: &Path) -> Option<PathBuf> {
 pub(crate) fn ensure_orx_data_dir() -> Option<PathBuf> {
     let dir = crate::store::data_dir();
     std::fs::create_dir_all(&dir).ok()?;
-    dir.canonicalize().ok()
+    crate::paths::canonicalize(&dir).ok()
 }
 
 /// The exact lifecycle lock file required by every stateful `orx` command.
@@ -3108,7 +3108,7 @@ pub(crate) fn ensure_orx_data_dir() -> Option<PathBuf> {
 fn ensure_orx_lifecycle_lock() -> Option<PathBuf> {
     let lock = crate::store::open_lifecycle_lock().ok()?;
     drop(lock);
-    crate::store::lifecycle_lock_path().canonicalize().ok()
+    crate::paths::canonicalize(crate::store::lifecycle_lock_path()).ok()
 }
 
 /// Session reasoning id → Codex `model_reasoning_effort` value. See
@@ -4903,12 +4903,12 @@ requires_openai_auth = false
         // Worktree: rev-parse answers with the hub clone's absolute path.
         assert_eq!(
             absolute_git_dir(&workspace, &hub_git),
-            Some(hub_git.canonicalize().unwrap())
+            Some(crate::paths::canonicalize(&hub_git).unwrap())
         );
         // Regular clone: rev-parse answers `.git`, relative to the workspace.
         assert_eq!(
             absolute_git_dir(&workspace, Path::new(".git")),
-            Some(workspace.join(".git").canonicalize().unwrap())
+            Some(crate::paths::canonicalize(workspace.join(".git")).unwrap())
         );
         // No git dir at all → no writable root (flag omitted, fail-safe).
         assert_eq!(absolute_git_dir(&workspace, Path::new("missing")), None);

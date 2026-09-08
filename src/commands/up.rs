@@ -2422,7 +2422,7 @@ fn resolve_checkout_root(
                 .filter(|sess| sess.project_id == project.id)
                 .ok_or_else(|| not_found("chat session"))?;
             let dir = local::git::existing_session_worktree_path(project, &session.id);
-            match std::fs::canonicalize(&dir) {
+            match crate::paths::canonicalize(&dir) {
                 Ok(p) => Some(p),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => return Err(ApiError::from(anyhow!("session worktree unavailable: {e}"))),
@@ -2433,7 +2433,7 @@ fn resolve_checkout_root(
     match worktree {
         Some(r) => Ok((r, "worktree")),
         None => Ok((
-            std::fs::canonicalize(&project.repo_path)
+            crate::paths::canonicalize(&project.repo_path)
                 .map_err(|e| ApiError::from(anyhow!("repo clone unavailable: {e}")))?,
             "clone",
         )),
@@ -2711,7 +2711,7 @@ async fn project_file(
         }
         let (root, root_kind) = resolve_checkout_root(&store, &project, q.session_id.as_deref())?;
         // Canonicalize so symlinks can't escape the checkout.
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Json(ProjectFileResponse::missing(
@@ -2874,10 +2874,10 @@ fn manage_local_file(
     if protect_git_dir && touches_git_dir(&rel_path) {
         return Err(bad_request("cannot manage files under .git"));
     }
-    let root = std::fs::canonicalize(root)
+    let root = crate::paths::canonicalize(root)
         .map_err(|e| ApiError::from(anyhow!("file root unavailable: {e}")))?;
     let source = root.join(&rel_path);
-    let resolved = std::fs::canonicalize(&source).map_err(|e| match e.kind() {
+    let resolved = crate::paths::canonicalize(&source).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => not_found("file"),
         _ => ApiError::from(anyhow!("file unavailable: {e}")),
     })?;
@@ -2892,7 +2892,7 @@ fn manage_local_file(
     }
 
     let parent = source.parent().ok_or_else(|| bad_request("invalid path"))?;
-    let parent = std::fs::canonicalize(parent)
+    let parent = crate::paths::canonicalize(parent)
         .map_err(|e| ApiError::from(anyhow!("parent directory unavailable: {e}")))?;
     if !parent.starts_with(&root) {
         return Err(bad_request("path escapes file root"));
@@ -2945,7 +2945,7 @@ fn manage_local_file(
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(bad_request("a file with that name already exists"));
         }
-        Ok(_) => match std::fs::canonicalize(&destination) {
+        Ok(_) => match crate::paths::canonicalize(&destination) {
             Ok(path) if path == resolved => {}
             Ok(_) | Err(_) => return Err(bad_request("a file with that name already exists")),
         },
@@ -3025,7 +3025,7 @@ async fn write_project_file(
         }
         // Canonicalize the existing target so a symlinked path can't escape the
         // checkout; a missing file means the editor's copy is stale.
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if req.expected_version.is_some() {
@@ -3108,7 +3108,7 @@ async fn open_project_file(
             .get_local_project(&id)?
             .ok_or_else(|| not_found("project"))?;
         let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
             Err(e) => return Err(ApiError::from(anyhow!("open failed: {e}"))),
@@ -3424,7 +3424,7 @@ fn resolve_project_tex(
             "this session's worktree is no longer available — reload the file",
         ));
     }
-    let full = match std::fs::canonicalize(root.join(&rel_path)) {
+    let full = match crate::paths::canonicalize(root.join(&rel_path)) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
         Err(e) => return Err(ApiError::from(anyhow!("could not read the file: {e}"))),
@@ -3527,7 +3527,7 @@ async fn project_raw_file(
         }
 
         let (root, _) = resolve_checkout_root(&store, &project, q.session_id.as_deref())?;
-        let full = std::fs::canonicalize(root.join(rel_path)).map_err(|e| {
+        let full = crate::paths::canonicalize(root.join(rel_path)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 not_found("file")
             } else {
@@ -3625,7 +3625,7 @@ async fn absolute_file(
         use std::io::Read as _;
         let (display, abs) = validated_absolute_file_path(&q.path)?;
         let presentation = local::files::presentation_for_path(&display);
-        let full = match std::fs::canonicalize(&abs) {
+        let full = match crate::paths::canonicalize(&abs) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Json(ProjectFileResponse::missing(
@@ -3697,7 +3697,7 @@ async fn absolute_raw_file(
     let (type_path, file) = tokio::task::spawn_blocking(
         move || -> std::result::Result<(String, std::fs::File), ApiError> {
             let (_, abs) = validated_absolute_file_path(&q.path)?;
-            let full = std::fs::canonicalize(&abs).map_err(|e| {
+            let full = crate::paths::canonicalize(&abs).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     not_found("file")
                 } else {
@@ -6661,7 +6661,7 @@ async fn run_shell_command(
         // The worktree the harness will create on its first turn, so a command
         // run before any message acts on the same checkout the agent sees.
         match local::git::ensure_session_worktree(&project, &session.id) {
-            Ok(dir) => Ok(std::fs::canonicalize(&dir).unwrap_or(dir)),
+            Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
             Err(error) => {
                 eprintln!("orx up: session worktree unavailable, using the clone: {error}");
                 resolve_checkout_root(&store, &project, Some(&session_id)).map(|(root, _)| root)
@@ -6918,7 +6918,7 @@ async fn chat_attachment(
         if !metadata.is_file() {
             return Err(not_found("attachment"));
         }
-        let resolved = std::fs::canonicalize(&path).map_err(|_| not_found("attachment"))?;
+        let resolved = crate::paths::canonicalize(&path).map_err(|_| not_found("attachment"))?;
         Ok((resolved.to_string_lossy().into_owned(), file))
     })
     .await

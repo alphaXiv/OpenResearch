@@ -312,7 +312,7 @@ mod tests {
         assert_eq!(project.baseline_branch, "main");
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(&project_path).unwrap()
+            crate::paths::canonicalize(&project_path).unwrap()
         );
         assert!(git::remotes(&project_path).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(root);
@@ -364,7 +364,7 @@ mod tests {
 
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(project_path).unwrap()
+            crate::paths::canonicalize(project_path).unwrap()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -393,7 +393,7 @@ mod tests {
         // The nested folder is its own repository, not the enclosing checkout.
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(&project_path).unwrap()
+            crate::paths::canonicalize(&project_path).unwrap()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -440,7 +440,7 @@ mod tests {
         // The paper is committed to the nested folder's own repository.
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(&nested).unwrap()
+            crate::paths::canonicalize(&nested).unwrap()
         );
         assert_eq!(
             git_output(&nested, &["ls-tree", "-r", "--name-only", "HEAD"]),
@@ -1009,7 +1009,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(&dirty).unwrap()
+            crate::paths::canonicalize(&dirty).unwrap()
         );
         assert!(!git::is_clean(&dirty).unwrap());
 
@@ -1126,7 +1126,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(project_path).unwrap()
+            crate::paths::canonicalize(project_path).unwrap()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1158,7 +1158,7 @@ mod tests {
 
         assert_eq!(
             Path::new(&project.repo_path),
-            std::fs::canonicalize(&project_path).unwrap()
+            crate::paths::canonicalize(&project_path).unwrap()
         );
         assert!(project_path.join(".gitignore").exists());
         assert_eq!(

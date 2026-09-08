@@ -282,7 +282,7 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     }
     if let Some(receipt) = load_receipt()? {
         let prefix = PathBuf::from(&receipt.install_prefix);
-        let prefix = prefix.canonicalize().unwrap_or(prefix);
+        let prefix = crate::paths::canonicalize(&prefix).unwrap_or(prefix);
         return Ok(InstallChannel::Installer { receipt, prefix });
     }
     if exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin")) {
@@ -296,8 +296,7 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
 /// because the bundle's `orx` symlink must resolve to the real executable
 /// before its `Contents/MacOS` parent can be recognized.
 fn current_exe() -> Result<PathBuf> {
-    std::env::current_exe()?
-        .canonicalize()
+    crate::paths::canonicalize(std::env::current_exe()?)
         .map_err(|e| anyhow!("Could not resolve the running executable: {}", e))
 }
 

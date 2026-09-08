@@ -63,7 +63,7 @@ pub fn validate_target(target: &Path, intent: TargetIntent) -> Result<ValidateRe
 
     let current = store::data_dir();
     // Normalize both for comparison without requiring the target to exist yet.
-    let current_norm = current.canonicalize().unwrap_or_else(|_| current.clone());
+    let current_norm = crate::paths::canonicalize(&current).unwrap_or_else(|_| current.clone());
     if paths_equal(target, &current_norm) {
         return Err(anyhow!("That's already the current data directory."));
     }
@@ -325,9 +325,11 @@ fn dir_size(dir: &Path) -> u64 {
 
 /// Case/normalization-tolerant path equality after best-effort canonicalization.
 fn paths_equal(a: &Path, b: &Path) -> bool {
-    let ca = a.canonicalize();
+    let ca = crate::paths::canonicalize(a);
     match ca {
-        Ok(ca) => ca == *b || ca == b.canonicalize().unwrap_or_else(|_| b.to_path_buf()),
+        Ok(ca) => {
+            ca == *b || ca == crate::paths::canonicalize(b).unwrap_or_else(|_| b.to_path_buf())
+        }
         Err(_) => a == b,
     }
 }

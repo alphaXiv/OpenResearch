@@ -333,7 +333,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("secret.env"), b"TOKEN=1").unwrap();
         std::os::unix::fs::symlink("secret.env", dir.join("logo.png")).unwrap();
-        let resolved = std::fs::canonicalize(dir.join("logo.png")).unwrap();
+        let resolved = crate::paths::canonicalize(dir.join("logo.png")).unwrap();
 
         let response = disk_response(
             &resolved.to_string_lossy(),

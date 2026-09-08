@@ -846,8 +846,7 @@ fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
 pub(crate) fn canonical_data_dir() -> Result<PathBuf> {
     let data_dir = crate::store::data_dir();
     std::fs::create_dir_all(&data_dir)?;
-    data_dir
-        .canonicalize()
+    crate::paths::canonicalize(&data_dir)
         .map_err(|error| anyhow!("Could not resolve {}: {error}", data_dir.display()))
 }
 
@@ -923,7 +922,7 @@ fn directory_writable(_path: &Path) -> bool {
 }
 
 fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
-    if let Ok(path) = path.canonicalize() {
+    if let Ok(path) = crate::paths::canonicalize(path) {
         return Ok(path);
     }
     let mut current = path;
@@ -938,7 +937,7 @@ fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
             .parent()
             .ok_or_else(|| anyhow!("OpenResearch data directory must have a parent."))?;
     }
-    let mut normalized = current.canonicalize()?;
+    let mut normalized = crate::paths::canonicalize(current)?;
     for component in missing.into_iter().rev() {
         normalized.push(component);
     }
@@ -1045,7 +1044,7 @@ mod tests {
     #[test]
     fn server_lock_is_shared_but_control_socket_is_node_local() {
         let data_dir = std::env::temp_dir().join(format!("orx-lock-test-{}", uuid::Uuid::new_v4()));
-        let parent = data_dir.parent().unwrap().canonicalize().unwrap();
+        let parent = crate::paths::canonicalize(data_dir.parent().unwrap()).unwrap();
         assert_eq!(
             shared_path(&data_dir, "lock").unwrap().parent(),
             Some(parent.as_path())

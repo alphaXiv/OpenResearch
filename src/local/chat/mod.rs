@@ -7650,7 +7650,7 @@ fn orx_bin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
     // the un-canonicalized path still names the right directory.
-    let exe = exe.canonicalize().unwrap_or(exe);
+    let exe = crate::paths::canonicalize(&exe).unwrap_or(exe);
     exe.parent()
         .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains(':'))
         .map(std::path::Path::to_path_buf)

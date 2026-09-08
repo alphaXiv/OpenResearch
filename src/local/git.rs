@@ -197,7 +197,7 @@ pub fn repository_state(path: &Path) -> RepositoryState {
 /// Whether `path` is the root of its own work tree, rather than a folder that
 /// merely sits inside an enclosing checkout.
 pub fn is_repository_root(path: &Path) -> bool {
-    match (repository_root(path), std::fs::canonicalize(path)) {
+    match (repository_root(path), crate::paths::canonicalize(path)) {
         (Ok(root), Ok(path)) => root == path,
         _ => false,
     }
@@ -209,7 +209,7 @@ pub fn is_repository_root(path: &Path) -> bool {
 pub fn own_repository_state(path: &Path) -> RepositoryState {
     let state = repository_state(path);
     if matches!(
-        (repository_root(path), std::fs::canonicalize(path)),
+        (repository_root(path), crate::paths::canonicalize(path)),
         (Ok(root), Ok(path)) if root != path
     ) {
         return RepositoryState::NotRepository;
@@ -219,7 +219,7 @@ pub fn own_repository_state(path: &Path) -> RepositoryState {
 
 pub fn repository_root(path: &Path) -> Result<PathBuf> {
     let root = git(Some(path), &["rev-parse", "--show-toplevel"])?;
-    std::fs::canonicalize(root).map_err(Into::into)
+    crate::paths::canonicalize(root).map_err(Into::into)
 }
 
 pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
@@ -230,7 +230,7 @@ pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(value)
     };
-    std::fs::canonicalize(resolved).map_err(Into::into)
+    crate::paths::canonicalize(resolved).map_err(Into::into)
 }
 
 pub(crate) struct TemporaryDirectory(PathBuf);
@@ -260,32 +260,7 @@ fn repository_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(value)
     };
-    Ok(plain_path(std::fs::canonicalize(resolved)?))
-}
-
-#[cfg(not(windows))]
-fn plain_path(path: PathBuf) -> PathBuf {
-    path
-}
-
-/// Windows `canonicalize` answers with a `\\?\C:\…` verbatim path, and git
-/// rejects those outright ("not a git repository"), so every import of an
-/// existing repository fails until the prefix comes off. Only drive paths have
-/// a plain form; UNC and device paths keep theirs.
-#[cfg(windows)]
-fn plain_path(path: PathBuf) -> PathBuf {
-    let Some(rest) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\")) else {
-        return path;
-    };
-    let mut chars = rest.chars();
-    let drive = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && chars.next() == Some(':')
-        && chars.next() == Some('\\');
-    if drive {
-        PathBuf::from(rest)
-    } else {
-        path
-    }
+    crate::paths::canonicalize(resolved).map_err(Into::into)
 }
 
 fn git_context_bytes(
@@ -796,7 +771,7 @@ fn initialize(path: &Path, state: RepositoryState) -> Result<()> {
     let root = if state == RepositoryState::Unborn {
         repository_root(path)?
     } else {
-        std::fs::canonicalize(path)?
+        crate::paths::canonicalize(path)?
     };
     let snapshot = prepare_initial_snapshot(&root)?;
 

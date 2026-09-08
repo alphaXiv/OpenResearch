@@ -244,7 +244,7 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
         Err(error) => return Err(error.into()),
     }
     prepare_links(&root, &legacy, &sources)?;
-    Ok(root.canonicalize().unwrap_or(root))
+    Ok(crate::paths::canonicalize(&root).unwrap_or(root))
 }
 
 fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {

@@ -25,6 +25,7 @@ mod jobs;
 #[allow(dead_code)]
 mod local;
 mod output;
+mod paths;
 mod plane;
 mod remote;
 mod store;
