@@ -1363,7 +1363,7 @@ impl ChatHost {
         command: String,
         cwd: PathBuf,
     ) -> Result<WireMessage> {
-        let mut spawn = tokio::process::Command::new("bash");
+        let mut spawn = tokio::process::Command::new(crate::local::bash::program());
         spawn
             .arg("-c")
             .arg(&command)
@@ -7579,7 +7579,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     if let Some(dir) = orx_bin_dir() {
         let mut path = dir.into_os_string();
         if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
-            path.push(":");
+            path.push(crate::local::shell_env::PATH_LIST_SEPARATOR);
             path.push(existing);
         }
         cmd.env("PATH", path);

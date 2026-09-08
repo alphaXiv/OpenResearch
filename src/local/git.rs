@@ -1480,6 +1480,15 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
 
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
+/// The empty path handed to git to disable a config file or a hooks directory.
+/// Git for Windows does not translate `/dev/null`, and reads a literal
+/// `\dev\null` as a missing relative path — which silently re-enables the
+/// repository's own hooks.
+#[cfg(not(windows))]
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
+#[cfg(windows)]
+pub(crate) const NULL_DEVICE: &str = "NUL";
+
 fn redact_remote_urls(text: &str) -> String {
     text.split_whitespace()
         .map(|word| {
@@ -1514,7 +1523,7 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
         .env("GIT_CONFIG_KEY_1", "credential.helper")
         .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
         .env("GIT_CONFIG_KEY_2", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_2", "/dev/null");
+        .env("GIT_CONFIG_VALUE_2", NULL_DEVICE);
     #[cfg(unix)]
     command.process_group(0);
     command
@@ -1914,7 +1923,7 @@ pub fn working_tree_diff_against(repo: &Path, base: Option<&str>) -> Result<Diff
         }
         if let Ok(chunk) = git_bytes(
             repo,
-            &["--no-pager", "diff", "--no-index", "--", "/dev/null", f],
+            &["--no-pager", "diff", "--no-index", "--", NULL_DEVICE, f],
             &[1],
         ) {
             bytes.extend_from_slice(&chunk);

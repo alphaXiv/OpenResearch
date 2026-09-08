@@ -96,7 +96,7 @@ pub fn install(force: bool) -> Result<Installed> {
         Err(_) => {}
     }
 
-    std::os::unix::fs::symlink(&target, &link).map_err(|e| {
+    crate::local::native_store::create_symlink(&target, &link).map_err(|e| {
         anyhow!(
             "Could not link {} -> {}: {}",
             link.display(),

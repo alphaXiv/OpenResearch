@@ -394,7 +394,7 @@ fn remove_link(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(source, destination)
 }
 
@@ -411,7 +411,7 @@ pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> std::io::Result
 }
 
 #[cfg(windows)]
-fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
     if source.is_dir() {
         std::os::windows::fs::symlink_dir(source, destination)
     } else {

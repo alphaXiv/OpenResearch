@@ -70,7 +70,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let mut cmd = std::process::Command::new("bash");
+    let mut cmd = std::process::Command::new(crate::local::bash::program());
     cmd.arg("run.sh")
         .envs(&spec.secret_env)
         .current_dir(&dir)
@@ -93,6 +93,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 /// Is the recorded process still alive? `ps` rather than `kill -0`: a zombie
 /// (dead but not yet reaped by a still-living spawner) answers `kill -0` yet
 /// is not running. No libc dependency; works on macOS and Linux.
+#[cfg(not(windows))]
 fn pid_alive(pid: &str) -> bool {
     match std::process::Command::new("ps")
         .args(["-o", "stat=", "-p", pid])
@@ -105,6 +106,32 @@ fn pid_alive(pid: &str) -> bool {
             !stat.is_empty() && !stat.starts_with('Z')
         }
         _ => false,
+    }
+}
+
+/// Windows has no `ps`, and every run would otherwise read as dead the moment
+/// it was submitted. A zero-timeout wait rather than `GetExitCodeProcess`: a
+/// process that genuinely exits with 259 is indistinguishable from a live one
+/// through the exit code.
+#[cfg(windows)]
+fn pid_alive(pid: &str) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    let Ok(pid) = pid.trim().parse::<u32>() else {
+        return false;
+    };
+    // SAFETY: plain syscalls; the handle is closed on every path out.
+    unsafe {
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let waited = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        waited == WAIT_TIMEOUT
     }
 }
 

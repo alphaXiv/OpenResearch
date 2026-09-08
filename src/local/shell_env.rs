@@ -50,6 +50,12 @@ pub fn search_path() -> Option<OsString> {
     var("PATH")
 }
 
+/// What separates PATH entries when composing one for a child.
+#[cfg(not(windows))]
+pub const PATH_LIST_SEPARATOR: &str = ":";
+#[cfg(windows)]
+pub const PATH_LIST_SEPARATOR: &str = ";";
+
 /// Where `binary` lives, or None when this machine has no such tool. The path
 /// is returned as it sits on PATH; a caller that needs the real binary behind a
 /// symlink composes with `resolve_symlinks`.
@@ -64,8 +70,36 @@ fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
     // pick up a binary.
     std::env::split_paths(paths)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(binary))
+        .flat_map(|dir| {
+            candidate_names(binary)
+                .into_iter()
+                .map(move |name| dir.join(name))
+        })
         .find(|candidate| candidate.is_file())
+}
+
+/// The filenames `binary` may have inside one PATH directory, in the order to
+/// try them.
+#[cfg(not(windows))]
+fn candidate_names(binary: &str) -> Vec<String> {
+    vec![binary.to_string()]
+}
+
+/// A Windows executable carries an extension from PATHEXT and an npm-installed
+/// CLI ships a `.cmd` shim, so the bare name every harness looks for — `claude`,
+/// `codex`, `opencode` — matches nothing and the picker reports them all absent.
+#[cfg(windows)]
+fn candidate_names(binary: &str) -> Vec<String> {
+    // Already extended (`bash.exe`): taken as written, the way cmd.exe does.
+    if std::path::Path::new(binary).extension().is_some() {
+        return vec![binary.to_string()];
+    }
+    std::env::var("PATHEXT")
+        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+        .split(';')
+        .filter(|ext| ext.starts_with('.'))
+        .map(|ext| format!("{binary}{}", ext.to_ascii_lowercase()))
+        .collect()
 }
 
 /// Hand the imported variables to a child process. Every `orx` child re-resolves
@@ -131,25 +165,57 @@ mod tests {
         format!("nvm loaded\n{M}{payload}{M}")
     }
 
+    /// What a bare `tool` is actually called on disk on each platform.
+    #[cfg(windows)]
+    const TOOL: &str = "tool.exe";
+    #[cfg(not(windows))]
+    const TOOL: &str = "tool";
+
     #[test]
     fn the_search_skips_relative_entries_and_takes_the_first_absolute_hit() {
         let root = std::env::temp_dir().join(format!("orx-path-search-{}", std::process::id()));
         let (early, late) = (root.join("early"), root.join("late"));
         std::fs::create_dir_all(&early).expect("early");
         std::fs::create_dir_all(&late).expect("late");
-        std::fs::write(early.join("tool"), "").expect("early tool");
-        std::fs::write(late.join("tool"), "").expect("late tool");
+        std::fs::write(early.join(TOOL), "").expect("early tool");
+        std::fs::write(late.join(TOOL), "").expect("late tool");
 
         let paths =
             std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
                 .expect("join");
-        assert_eq!(search_in(&paths, "tool"), Some(early.join("tool")));
+        assert_eq!(search_in(&paths, "tool"), Some(early.join(TOOL)));
         assert_eq!(search_in(&paths, "absent"), None);
 
         // A relative entry is rejected even when it does resolve: cargo runs
         // tests from the package root, so `src/main.rs` is a real hit here.
         let relative = std::env::join_paths([PathBuf::from("src")]).expect("join");
         assert_eq!(search_in(&relative, "main.rs"), None);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The harnesses are all looked up by bare name, so an extensionless search
+    /// on Windows reports every one of them missing.
+    #[cfg(windows)]
+    #[test]
+    fn the_search_extends_a_bare_name_and_prefers_the_earlier_path_entry() {
+        let root = std::env::temp_dir().join(format!("orx-path-ext-{}", std::process::id()));
+        let (early, late) = (root.join("early"), root.join("late"));
+        std::fs::create_dir_all(&early).expect("early");
+        std::fs::create_dir_all(&late).expect("late");
+        // Only the later directory holds the `.exe`; the earlier one holds a
+        // `.cmd` shim, which PATHEXT orders after it.
+        std::fs::write(early.join("claude.cmd"), "").expect("shim");
+        std::fs::write(late.join("claude.exe"), "").expect("exe");
+
+        let paths = std::env::join_paths([early.clone(), late.clone()]).expect("join");
+        assert_eq!(search_in(&paths, "claude"), Some(early.join("claude.cmd")));
+        // An extension already on the name is taken as written, so the `.cmd`
+        // sitting earlier on PATH is not a candidate at all.
+        assert_eq!(
+            search_in(&paths, "claude.exe"),
+            Some(late.join("claude.exe"))
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
