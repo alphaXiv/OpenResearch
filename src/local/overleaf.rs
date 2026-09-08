@@ -1869,8 +1869,15 @@ mod tests {
 
     #[test]
     fn the_upload_page_posts_every_file_as_a_data_url() {
+        // `"` is reserved in a Windows filename; `&` is not, and still has to be
+        // escaped to stay inside the attribute.
+        #[cfg(windows)]
+        let (risky, escaped) = ("pa&per.tex", "pa&amp;per.tex");
+        #[cfg(not(windows))]
+        let (risky, escaped) = ("pa\"per.tex", "pa&quot;per.tex");
+
         let temporary = TemporaryDirectory::new("orx-overleaf-test").unwrap();
-        let tex = temporary.path().join("pa\"per.tex");
+        let tex = temporary.path().join(risky);
         std::fs::write(&tex, b"% !TeX program = lualatex\nhi").unwrap();
         let payload = collect(&tex).unwrap();
 
@@ -1878,8 +1885,8 @@ mod tests {
         assert!(html.contains("action=\"https://www.overleaf.com/docs\""));
         assert!(html.contains("data:text/plain;base64,"));
         assert!(html.contains("name=\"engine\" value=\"lualatex\""));
-        // A quote in a file name must not break out of the attribute.
-        assert!(html.contains("pa&quot;per.tex"));
-        assert!(!html.contains("value=\"pa\"per.tex\""));
+        // The raw character must not break out of the attribute.
+        assert!(html.contains(escaped));
+        assert!(!html.contains(&format!("value=\"{risky}\"")));
     }
 }

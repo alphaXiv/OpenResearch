@@ -7941,6 +7941,8 @@ mod cap_tests {
         assert!(!safe_session_name("...").is_empty());
     }
 
+    // BASH_ENV hooks over POSIX paths; Git Bash sees a different filesystem root.
+    #[cfg(unix)]
     #[test]
     fn shell_hooks_tolerate_nounset_and_preserve_spaced_bash_env() {
         let root = std::env::temp_dir().join(format!("orx-shell-hook-{}", uuid::Uuid::new_v4()));

@@ -2849,6 +2849,20 @@ fn duplicate_file_name(name: &str, number: usize) -> String {
     }
 }
 
+/// Relative paths cross the API `/`-separated, the way the dashboard sends them
+/// in. A Windows `PathBuf` renders with backslashes, and the next request would
+/// carry those straight back.
+#[cfg(windows)]
+fn api_rel_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+/// Unaltered off Windows, where a backslash is an ordinary filename character.
+#[cfg(not(windows))]
+fn api_rel_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 fn manage_local_file(
     root: &std::path::Path,
     rel: &str,
@@ -2947,7 +2961,7 @@ fn manage_local_file(
         }
         FileAction::Delete => unreachable!(),
     }
-    Ok(destination_rel.to_string_lossy().into_owned())
+    Ok(api_rel_path(&destination_rel))
 }
 
 async fn manage_project_file(
@@ -7902,12 +7916,14 @@ mod tests {
 
     #[test]
     fn absolute_file_paths_require_an_absolute_path() {
+        #[cfg(windows)]
+        let absolute = r"C:\Windows\System32\drivers\etc\hosts";
+        #[cfg(not(windows))]
+        let absolute = "/etc/hosts";
+
         assert_eq!(
-            abs_path("  /etc/hosts  "),
-            Ok((
-                "/etc/hosts".to_string(),
-                std::path::PathBuf::from("/etc/hosts")
-            )),
+            abs_path(&format!("  {absolute}  ")),
+            Ok((absolute.to_string(), std::path::PathBuf::from(absolute))),
         );
         for path in ["", "   ", "relative/path", "../secret", &"/x".repeat(3000)] {
             assert!(abs_path(path).is_err(), "accepted {path:?}");

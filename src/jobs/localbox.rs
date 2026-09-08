@@ -222,6 +222,33 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
     let pid = pid.trim().to_string();
+    #[cfg(windows)]
+    return terminate_tree(&pid);
+    #[cfg(not(windows))]
+    terminate_group(&pid)
+}
+
+/// Windows has no process group to signal, so the tree is walked instead:
+/// `/T` takes the children a cancelled run leaves behind — the python the
+/// launcher started — which is the whole point of TERMing the group on unix.
+#[cfg(windows)]
+fn terminate_tree(pid: &str) -> Result<()> {
+    let killed = std::process::Command::new("taskkill")
+        .args(["/PID", pid, "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !killed {
+        return Err(anyhow!("Could not terminate local process tree {pid}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn terminate_group(pid: &str) -> Result<()> {
+    let pid = pid.to_string();
     let group = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())

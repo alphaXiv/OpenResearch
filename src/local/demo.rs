@@ -1229,11 +1229,16 @@ fn build_worktree(root: &Path) -> Result<()> {
     git(root, &["config", "core.autocrlf", "false"])?;
     git(root, &["config", "core.filemode", "true"])?;
     git(root, &["add", "-A"])?;
+    // NTFS has no executable bit, so on Windows the mode reaches the tree only
+    // through the index — and without it the commit ids drift off the hardcoded
+    // BASELINE_SHA/EXPERIMENT_SHA the demo validates itself against.
+    git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
     commit(root, "Import nanochat demo baseline")?;
     git(root, &["checkout", "-b", BRANCH])?;
     write_assets::<ExperimentAssets>(root)?;
     set_executable(root.join("runs/runcpu.sh"))?;
     git(root, &["add", "-A"])?;
+    git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
     commit(root, "Make the CPU pipeline portable and memory-safe")?;
     git(root, &["checkout", "main"])?;
     Ok(())

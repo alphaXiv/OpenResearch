@@ -274,7 +274,8 @@ mod tests {
             .unwrap()
             .as_ref();
         let cursor = all.iter().find(|h| h.id() == "cursor").unwrap().as_ref();
-        let body = describe_targets(&[claude, cursor]);
+        // Console output keeps the platform's own separator; compare on one form.
+        let body = describe_targets(&[claude, cursor]).replace('\\', "/");
         let lines: Vec<&str> = body.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("Claude Code"));
