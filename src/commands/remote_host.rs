@@ -1,5 +1,11 @@
 //! Persistent SSH remote host and its private same-user control channel.
 
+// Windows compiles the control-channel half of this module out, leaving its
+// constants, helpers and request types unreferenced. They are kept whole rather
+// than gated item by item — the gating would be bulkier than the code it
+// guards, and the half returns intact once the channel has a Windows transport.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};

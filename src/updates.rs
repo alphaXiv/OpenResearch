@@ -751,6 +751,7 @@ pub fn relaunch(_port: u16) -> std::io::Error {
 
 /// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
 /// new file at `<path>`, which is what to exec.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn relaunch_target(exe: PathBuf) -> PathBuf {
     exe.to_str()
         .and_then(|exe| exe.strip_suffix(" (deleted)"))
@@ -760,6 +761,7 @@ fn relaunch_target(exe: PathBuf) -> PathBuf {
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
 /// restart reloads itself, so a second tab would only be clutter.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = args.collect();
     if !args.iter().any(|arg| arg == "--no-browser") {
