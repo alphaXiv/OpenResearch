@@ -1,0 +1,10 @@
+# LF in the working tree on every platform, not just in the repository.
+#
+# Git for Windows defaults to core.autocrlf=true, and SYSTEM_PROMPT.md and the
+# agent-skills SKILL.md files are include_str!'d into the binary at build time.
+# A CRLF checkout therefore ships a binary whose own `\n`-boundary parsing
+# fails: playbook_md() stops stripping the template's leading HTML comment and
+# prepends it to every agent's system prompt.
+#
+# Binary files are detected and left alone by `text=auto`.
+* text=auto eol=lf
