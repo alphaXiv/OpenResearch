@@ -1376,7 +1376,7 @@ impl ChatHost {
         spawn.process_group(0);
         prepare_env(&mut spawn);
         let mut exit_code = None;
-        let mut signal = None;
+        let mut signal: Option<i64> = None;
         let mut timed_out = false;
         let (mut output, mut error) = match spawn.spawn() {
             Err(error) => (String::new(), format!("could not start bash: {error}")),
@@ -7975,6 +7975,7 @@ mod cap_tests {
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ZSH_EXECUTION_STRING-}"));
     }
 
+    #[cfg(unix)]
     fn write_orx_stub(dir: &std::path::Path, marker: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
@@ -7985,6 +7986,7 @@ mod cap_tests {
 
     /// A stale `orx` on a directory a user startup file prepends, ahead of the
     /// one `prepare_env` fronted.
+    #[cfg(unix)]
     fn path_guard_fixture(root: &std::path::Path) -> (PathBuf, String, String) {
         let ours = root.join("ours");
         let decoy = root.join("decoy");
@@ -8002,6 +8004,7 @@ mod cap_tests {
     /// The hooks branch on the chat target vars, which a `cargo test` run from
     /// inside a chat session would otherwise inherit; interactive zsh wants a
     /// `TERM` it can name.
+    #[cfg(unix)]
     fn shell_output(mut cmd: std::process::Command) -> String {
         let out = cmd
             .env_remove(CHAT_TARGET_FILE_ENV)
@@ -8017,6 +8020,7 @@ mod cap_tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_guard_refronts_orx_after_a_bash_hook_prepends_its_own_bin() {
         let root = std::env::temp_dir().join(format!("orx-path-guard-{}", uuid::Uuid::new_v4()));
@@ -8050,6 +8054,7 @@ mod cap_tests {
         assert_eq!(unguarded, "decoy", "the user hook's prepend never ran");
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_guard_refronts_orx_after_a_zsh_startup_file_prepends_its_own_bin() {
         if !std::process::Command::new("zsh")

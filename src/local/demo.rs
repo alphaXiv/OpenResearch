@@ -1429,6 +1429,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn set_executable(path: PathBuf) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

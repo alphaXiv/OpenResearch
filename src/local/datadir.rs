@@ -224,6 +224,7 @@ pub fn move_data_dir(
             }
             // EXDEV: the ancestor-walk mis-judged the device (e.g. the volume
             // mounts *at* the target). Fall through to the copy path.
+            #[cfg(unix)]
             Err(e) if e.raw_os_error() == Some(libc::EXDEV) => {}
             Err(e) => return Err(anyhow!("Rename to {} failed: {e}", target.display())),
         }

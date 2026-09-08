@@ -1352,6 +1352,7 @@ mod tests {
         let _ = fs::remove_dir_all(&wt);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unchanged_skill_is_not_recopied_into_the_session() {
         use std::os::unix::fs::MetadataExt;

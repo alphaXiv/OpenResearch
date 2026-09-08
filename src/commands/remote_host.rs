@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
@@ -250,6 +251,24 @@ impl ControlServer {
     }
 }
 
+/// Attaching to a persistent host talks over a Unix domain socket, so on
+/// Windows `orx up` serves locally and `--remote-host` is refused up front
+/// rather than starting a host nothing can attach to.
+#[cfg(not(unix))]
+pub(crate) async fn start_control_server(
+    _descriptor: HostDescriptor,
+    _auth: RemoteAuth,
+    _chat: Arc<ChatHost>,
+    _stopping: Arc<AtomicBool>,
+    _stop: watch::Sender<bool>,
+) -> Result<ControlServer> {
+    Err(anyhow!(
+        "Running as a persistent remote host needs a Unix domain socket for its control \
+         channel, which Windows does not provide."
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) async fn start_control_server(
     descriptor: HostDescriptor,
     auth: RemoteAuth,
@@ -312,6 +331,7 @@ pub(crate) async fn start_control_server(
     })
 }
 
+#[cfg(unix)]
 async fn handle_control(
     stream: UnixStream,
     descriptor: HostDescriptor,
@@ -526,6 +546,7 @@ async fn print_status() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn attach(expected_instance: &str) -> Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     let token = tokio::time::timeout(Duration::from_secs(10), read_bounded_line(&mut input))
@@ -628,6 +649,7 @@ async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
     .map_err(|_| anyhow!("Timed out waiting for the previous OpenResearch host to stop."))?
 }
 
+#[cfg(unix)]
 async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<ControlResponse> {
     tokio::time::timeout(CONTROL_TIMEOUT, async {
         let mut stream = UnixStream::connect(control_socket_path(data_dir)?).await?;
@@ -640,6 +662,7 @@ async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<C
     .map_err(|_| anyhow!("Timed out contacting the persistent OpenResearch host."))?
 }
 
+#[cfg(unix)]
 async fn write_request(stream: &mut UnixStream, request: &ControlRequest) -> Result<()> {
     stream
         .write_all(serde_json::to_string(request)?.as_bytes())
@@ -649,6 +672,7 @@ async fn write_request(stream: &mut UnixStream, request: &ControlRequest) -> Res
     Ok(())
 }
 
+#[cfg(unix)]
 async fn write_response(stream: &mut UnixStream, response: &ControlResponse) -> Result<()> {
     stream
         .write_all(serde_json::to_string(response)?.as_bytes())
@@ -945,6 +969,30 @@ fn metadata_mode(metadata: &std::fs::Metadata) -> u32 {
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+// Windows has no uid or mode, so `ensure_private_dir` keeps only its symlink
+// and directory checks there. What it stops enforcing is covered by the default
+// ACL on a user's profile, which is where the runtime directory lives — but
+// this is a weaker guarantee than the unix path makes, not an equivalent one.
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    0
+}
+
+#[cfg(not(unix))]
+fn metadata_uid(_metadata: &std::fs::Metadata) -> u32 {
+    effective_uid()
+}
+
+#[cfg(not(unix))]
+fn metadata_mode(_metadata: &std::fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
