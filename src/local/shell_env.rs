@@ -63,6 +63,16 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
 }
 
+/// Where `binary` lives inside `dir`, if anywhere. The installer drop locations
+/// the harnesses fall back to are written as bare names, which name no file at
+/// all on Windows.
+pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
+    candidate_names(binary)
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Split from the PATH lookup so the search is testable without a probe.
 fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
     // A relative entry (`""`, meaning cwd, or `bin`) names no fixed directory —

@@ -36,9 +36,9 @@ pub fn find_opencode() -> Result<PathBuf> {
         return Ok(found);
     }
     if let Some(home) = dirs::home_dir() {
-        let fallback = home.join(".opencode").join("bin").join("opencode");
-        if fallback.is_file() {
-            return Ok(fallback);
+        let dir = home.join(".opencode").join("bin");
+        if let Some(found) = crate::local::shell_env::find_in_dir(&dir, "opencode") {
+            return Ok(found);
         }
     }
     Err(anyhow!(
