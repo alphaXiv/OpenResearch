@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run the suite against a branch before it has a PR — the Windows job below
+  # is the only Windows machine most changes will meet.
+  workflow_dispatch:
 
 # Cancel in-flight runs for the same ref when new commits land.
 concurrency:
