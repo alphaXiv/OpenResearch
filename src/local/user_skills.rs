@@ -1262,7 +1262,7 @@ mod tests {
 
         // Once the collision is resolved the retired tree goes entirely, junk at
         // either level included — otherwise this walk runs on every call forever.
-        fs::remove_dir_all(root.join("projects/p1/dup")).unwrap();
+        let _ = fs::remove_dir_all(root.join("projects/p1/dup"));
         migrate_project_scoped(&root);
         assert!(!root.join("projects").exists());
         let _ = fs::remove_dir_all(&root);
@@ -1406,7 +1406,7 @@ mod tests {
 
         // So does an edit to SKILL.md of exactly the same length — the tally
         // can't see that one, so `dest` is rebuilt first to isolate it.
-        fs::remove_dir_all(&dest).unwrap();
+        let _ = fs::remove_dir_all(&dest);
         copy_dir_all(&src, &dest).unwrap();
         assert!(dest_matches_source(&src, fingerprint(&src), &dest));
         fs::write(src.join("SKILL.md"), skill_md("samf")).unwrap();

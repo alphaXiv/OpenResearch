@@ -411,7 +411,7 @@ mod tests {
         std::fs::write(base.join("a.txt"), b"hello").unwrap(); // 5
         std::fs::write(base.join("sub/b.txt"), b"world!!").unwrap(); // 7
         assert_eq!(dir_size(&base), 12);
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -436,6 +436,6 @@ mod tests {
             std::fs::read(dst.join("run-logs/r.log")).unwrap(),
             b"log line\n"
         );
-        std::fs::remove_dir_all(&base).unwrap();
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

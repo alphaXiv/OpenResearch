@@ -260,7 +260,32 @@ fn repository_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(value)
     };
-    std::fs::canonicalize(resolved).map_err(Into::into)
+    Ok(plain_path(std::fs::canonicalize(resolved)?))
+}
+
+#[cfg(not(windows))]
+fn plain_path(path: PathBuf) -> PathBuf {
+    path
+}
+
+/// Windows `canonicalize` answers with a `\\?\C:\…` verbatim path, and git
+/// rejects those outright ("not a git repository"), so every import of an
+/// existing repository fails until the prefix comes off. Only drive paths have
+/// a plain form; UNC and device paths keep theirs.
+#[cfg(windows)]
+fn plain_path(path: PathBuf) -> PathBuf {
+    let Some(rest) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\")) else {
+        return path;
+    };
+    let mut chars = rest.chars();
+    let drive = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && chars.next() == Some('\\');
+    if drive {
+        PathBuf::from(rest)
+    } else {
+        path
+    }
 }
 
 fn git_context_bytes(
@@ -2319,7 +2344,7 @@ mod tests {
             own_repository_state(&nested),
             RepositoryState::NotRepository
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -2344,7 +2369,7 @@ mod tests {
             snapshot.included_bytes,
             target.as_os_str().to_string_lossy().len() as u64
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(target_os = "linux")]
@@ -2366,7 +2391,7 @@ mod tests {
         let snapshot = initial_snapshot(&root).unwrap();
 
         assert_eq!(snapshot.excluded_paths, vec![raw_name]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A throwaway git repo under the temp dir with one seed commit on `main`.
@@ -2411,7 +2436,7 @@ mod tests {
             .unwrap();
         assert_eq!(actual, bytes);
         assert!(!truncated);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn statuses(files: &[ChangedFile]) -> Vec<(String, ChangedStatus)> {

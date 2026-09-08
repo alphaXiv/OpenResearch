@@ -500,7 +500,7 @@ mod tests {
         for bad in ["../x", "/etc/passwd", "a/../b", "a/./b", "", "a\\b"] {
             assert!(resolve_contained(&base, bad).is_err(), "accepted {bad:?}");
         }
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -508,7 +508,7 @@ mod tests {
         let (root, base, outside) = scratch();
         symlink(outside.join("secret.txt"), base.join("link.txt")).unwrap();
         assert!(resolve_contained(&base, "link.txt").is_err());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -516,7 +516,7 @@ mod tests {
         let (root, base, outside) = scratch();
         symlink(&outside, base.join("sub")).unwrap();
         assert!(resolve_contained(&base, "sub/secret.txt").is_err());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
         symlink("real.txt", base.join("alias.txt")).unwrap();
         let resolved = resolve_contained(&base, "alias.txt").unwrap();
         assert_eq!(std::fs::read_to_string(resolved).unwrap(), "data");
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
         std::fs::create_dir(base.join("exp")).unwrap();
         std::fs::write(base.join("exp/report.md"), "# T").unwrap();
         assert!(resolve_contained(&base, "exp/report.md").is_ok());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -550,7 +550,7 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["alias.txt", "real.txt"]);
         assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -565,7 +565,7 @@ mod tests {
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["baseline", "notes", "project", "summary.md"]);
         assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -584,7 +584,7 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(names, ["analysis.md", "report.md"]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -2985,7 +2985,7 @@ mod tests {
         assert_eq!(tests[0].host, "legacy-connect");
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3094,7 +3094,7 @@ mod tests {
             assert!(store.project_workspace_state("first").unwrap().is_none());
         }
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4245,7 +4245,7 @@ mod tests {
             .all(|wakeup| wakeup.run.id != "run_done"));
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4300,7 +4300,7 @@ mod tests {
 
         drop(second);
         drop(first);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4328,7 +4328,7 @@ mod tests {
         );
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4357,7 +4357,7 @@ mod tests {
 
         drop(second);
         drop(first);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4384,7 +4384,7 @@ mod tests {
         assert_eq!(ids, ["run_running", "run_starting"]);
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

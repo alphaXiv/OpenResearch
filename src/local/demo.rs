@@ -1739,7 +1739,7 @@ mod tests {
         assert!(!log.contains("/Users/"));
         assert!(!log.contains("Traceback"));
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1793,7 +1793,7 @@ mod tests {
             .join("cpu-apple-silicon-pipeline-results.md")
             .is_file());
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1808,7 +1808,7 @@ mod tests {
             git(&first, &["rev-parse", "refs/heads/main"]).unwrap(),
             git(&second, &["rev-parse", "refs/heads/main"]).unwrap()
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1839,7 +1839,7 @@ mod tests {
             git(&repo, &["remote", "get-url", "origin"]).unwrap(),
             moved.join("demo-repos/nanochat.git").to_string_lossy()
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1861,8 +1861,8 @@ mod tests {
             },
         )
         .unwrap();
-        std::fs::remove_dir_all(&worktrees).unwrap();
-        std::fs::remove_dir_all(&repo).unwrap();
+        let _ = std::fs::remove_dir_all(&worktrees);
+        let _ = std::fs::remove_dir_all(&repo);
 
         crate::local::git::restore_local_repository(
             &repo,
@@ -1891,7 +1891,7 @@ mod tests {
             );
         }
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1909,6 +1909,6 @@ mod tests {
             "user data"
         );
         assert!(!repo.join(".git").exists());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

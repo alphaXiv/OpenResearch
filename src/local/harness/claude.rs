@@ -2130,7 +2130,7 @@ mod tests {
                 0o600
             );
         }
-        std::fs::remove_dir_all(repo).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     /// Plugins live in the version cache or a marketplace checkout, and a

@@ -221,7 +221,7 @@ mod tests {
             std::fs::read_to_string(root.join("files/result.txt")).unwrap(),
             "keep"
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -240,6 +240,6 @@ mod tests {
         drop(exclusive.try_write().unwrap());
         drop(exclusive);
         drop(shared);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

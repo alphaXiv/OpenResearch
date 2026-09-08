@@ -9069,7 +9069,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             1
         );
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9099,7 +9099,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         );
         assert!(!host.is_busy("parent").await);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9274,7 +9274,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             1
         );
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -9498,7 +9498,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             .unwrap();
 
         assert!(!host.is_busy("owner").await);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9523,7 +9523,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
         assert!(!host.is_busy("owner").await);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9550,7 +9550,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         let store = Store::open_at(dir.clone()).unwrap();
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -9778,7 +9778,7 @@ mod steering_tests {
         // The chip shows what the user typed, and the queue path re-expands it.
         assert_eq!(queued[0]["text"], "/plan the migration");
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9908,6 +9908,6 @@ mod steering_tests {
         assert!(tx.send(steer("too late")).is_err());
         assert_eq!(host.queued_items("owner")[0]["text"], "still here");
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

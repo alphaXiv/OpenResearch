@@ -161,6 +161,13 @@ mod tests {
 
     const M: &str = "__ORX_ENV_abc123__";
 
+    /// `parse_probe` insists on one absolute PATH entry, and what counts as
+    /// absolute differs by platform.
+    #[cfg(windows)]
+    const PATH_VALUE: &str = r"C:\tools\bin;C:\Windows";
+    #[cfg(not(windows))]
+    const PATH_VALUE: &str = "/opt/homebrew/bin:/usr/bin";
+
     fn fenced(payload: &str) -> String {
         format!("nvm loaded\n{M}{payload}{M}")
     }
@@ -223,13 +230,13 @@ mod tests {
     #[test]
     fn reads_every_imported_variable() {
         let vars = parse_probe(
-            &fenced(
-                "/opt/homebrew/bin:/usr/bin\0/data\0/share\0/config\0/open.db\0/claude\0/secure\0/codex\0",
-            ),
+            &fenced(&format!(
+                "{PATH_VALUE}\0/data\0/share\0/config\0/open.db\0/claude\0/secure\0/codex\0"
+            )),
             M,
         )
         .unwrap();
-        assert_eq!(vars["PATH"], OsString::from("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(vars["PATH"], OsString::from(PATH_VALUE));
         assert_eq!(vars["ORX_DATA_DIR"], OsString::from("/data"));
         assert_eq!(vars["XDG_DATA_HOME"], OsString::from("/share"));
         assert_eq!(vars["XDG_CONFIG_HOME"], OsString::from("/config"));
@@ -244,8 +251,8 @@ mod tests {
 
     #[test]
     fn unset_variables_are_dropped_so_lookups_fall_through() {
-        let vars = parse_probe(&fenced("/usr/bin\0\0\0\0\0\0\0\0"), M).unwrap();
-        assert_eq!(vars["PATH"], OsString::from("/usr/bin"));
+        let vars = parse_probe(&fenced(&format!("{PATH_VALUE}\0\0\0\0\0\0\0\0")), M).unwrap();
+        assert_eq!(vars["PATH"], OsString::from(PATH_VALUE));
         assert!(!vars.contains_key("ORX_DATA_DIR"));
         assert!(!vars.contains_key("OPENCODE_DB"));
         assert!(!vars.contains_key("CLAUDE_CONFIG_DIR"));

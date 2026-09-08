@@ -7554,7 +7554,7 @@ mod tests {
 
         assert_eq!(body["gitState"], "unborn");
         assert_eq!(body["initialized"], true);
-        std::fs::remove_dir_all(path).unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]
@@ -7875,7 +7875,7 @@ mod tests {
                 manage_local_file(&root, "git-link/config", FileAction::Delete, None, true,)
                     .is_err()
             );
-            std::fs::remove_dir_all(outside).unwrap();
+            let _ = std::fs::remove_dir_all(outside);
         }
         let case_renamed = manage_local_file(
             &root,
@@ -7891,7 +7891,7 @@ mod tests {
         assert!(std::fs::read_dir(root.join("reports"))
             .unwrap()
             .any(|entry| entry.unwrap().file_name() == "SUMMARY.md"));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     // ApiError has no Debug, so `.unwrap()` on the Err path won't compile; drop

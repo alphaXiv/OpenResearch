@@ -196,6 +196,6 @@ mod tests {
         project.repo_path = repo.to_string_lossy().into_owned();
         assert_eq!(unique_slug(&store, &project, "project").unwrap(), "project");
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }
