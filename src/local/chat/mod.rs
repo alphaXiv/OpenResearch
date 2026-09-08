@@ -1376,6 +1376,8 @@ impl ChatHost {
         spawn.process_group(0);
         prepare_env(&mut spawn);
         let mut exit_code = None;
+        // Only the cfg(unix) block below ever assigns it.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut signal: Option<i64> = None;
         let mut timed_out = false;
         let (mut output, mut error) = match spawn.spawn() {

@@ -4,13 +4,17 @@ use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -461,6 +465,7 @@ async fn handle_control(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn stop_preview(chat: &ChatHost, auth: &RemoteAuth) -> StopPreview {
     StopPreview {
         active_turn_count: chat.busy_sessions().await.len(),
@@ -473,6 +478,16 @@ async fn stop_preview(chat: &ChatHost, auth: &RemoteAuth) -> StopPreview {
     }
 }
 
+/// The whole `orx remote-host` surface talks over the control socket.
+#[cfg(not(unix))]
+pub(crate) async fn run(_args: RemoteHostArgs) -> Result<()> {
+    Err(anyhow!(
+        "`orx remote-host` needs a Unix domain socket for its control channel, which Windows \
+         does not provide."
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
     match args.command {
         RemoteHostCommand::Ensure { expected_instance } => ensure(expected_instance).await,
@@ -482,6 +497,7 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 async fn ensure(expected_instance: Option<String>) -> Result<()> {
     let data_dir = canonical_data_dir()?;
     match live_descriptor(&data_dir).await {
@@ -536,6 +552,7 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
     print_descriptor(&started)
 }
 
+#[cfg(unix)]
 async fn print_status() -> Result<()> {
     let data_dir = canonical_data_dir()?;
     let response = control_exchange(&data_dir, &ControlRequest::Status).await?;
@@ -589,6 +606,7 @@ async fn attach(expected_instance: &str) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 async fn stop() -> Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     let request: StopRequest = serde_json::from_str(&read_bounded_line(&mut input).await?)?;
@@ -605,12 +623,14 @@ async fn stop() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 enum LiveHost {
     Running(HostDescriptor),
     Stopping(HostDescriptor),
     Missing,
 }
 
+#[cfg(unix)]
 async fn live_descriptor(data_dir: &Path) -> LiveHost {
     let Ok(response) = control_exchange(data_dir, &ControlRequest::Status).await else {
         return LiveHost::Missing;
@@ -625,6 +645,7 @@ async fn live_descriptor(data_dir: &Path) -> LiveHost {
     }
 }
 
+#[cfg(unix)]
 fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
     let path = shared_path(data_dir, "lock")?;
     let lock = open_lock(&path)?;
@@ -636,6 +657,7 @@ fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
     result
 }
 
+#[cfg(unix)]
 async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
     tokio::time::timeout(START_TIMEOUT, async {
         loop {
@@ -1012,6 +1034,8 @@ mod tests {
         assert!(auth.matches_callback(&digest("callback")));
     }
 
+    // Asserts the /tmp/orx-<uid> runtime layout, which is unix's alone.
+    #[cfg(unix)]
     #[test]
     fn server_lock_is_shared_but_control_socket_is_node_local() {
         let data_dir = std::env::temp_dir().join(format!("orx-lock-test-{}", uuid::Uuid::new_v4()));
