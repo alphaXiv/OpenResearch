@@ -233,17 +233,21 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
 /// launcher started — which is the whole point of TERMing the group on unix.
 #[cfg(windows)]
 fn terminate_tree(pid: &str) -> Result<()> {
-    let killed = std::process::Command::new("taskkill")
+    // `/T` reports a non-zero status when any descendant has already exited on
+    // its own, which says nothing about the run. Whether the leader is still
+    // alive does, so that is what the outcome is read from.
+    let _ = std::process::Command::new("taskkill")
         .args(["/PID", pid, "/T", "/F"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
-    if !killed {
-        return Err(anyhow!("Could not terminate local process tree {pid}"));
+        .status();
+    for _ in 0..50 {
+        if !pid_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    Ok(())
+    Err(anyhow!("Could not terminate local process tree {pid}"))
 }
 
 #[cfg(not(windows))]

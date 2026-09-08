@@ -176,7 +176,9 @@ pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
         return None;
     }
     Store::open().ok()?.get_local_project(PROJECT_ID).ok()??;
-    let origin = crate::store::data_dir().join("demo-repos/nanochat.git");
+    let origin = crate::store::data_dir()
+        .join("demo-repos")
+        .join("nanochat.git");
     origin.exists().then_some(origin)
 }
 
@@ -212,7 +214,7 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     if !repo.join(".git").is_dir() {
         return Ok(());
     }
-    let bare = data_root.join("demo-repos/nanochat.git");
+    let bare = data_root.join("demo-repos").join("nanochat.git");
     if !matches!(
         git(&bare, &["rev-parse", "--is-bare-repository"]).as_deref(),
         Ok("true")
@@ -1609,7 +1611,7 @@ mod tests {
             );
             assert_eq!(
                 git(
-                    &data.join("demo-repos/nanochat.git"),
+                    &data.join("demo-repos").join("nanochat.git"),
                     &[
                         "rev-parse",
                         &format!("refs/heads/{}", follow_up.branch_name)
@@ -1690,7 +1692,7 @@ mod tests {
             .parts_json
             .contains(data.to_string_lossy().as_ref()));
         assert!(repo.join(".git").is_dir());
-        let bare = data.join("demo-repos/nanochat.git");
+        let bare = data.join("demo-repos").join("nanochat.git");
         assert!(bare.join("HEAD").is_file());
         assert_eq!(
             git(&bare, &["symbolic-ref", "HEAD"]).unwrap(),
@@ -1848,7 +1850,10 @@ mod tests {
 
         assert_eq!(
             git(&repo, &["remote", "get-url", "origin"]).unwrap(),
-            moved.join("demo-repos/nanochat.git").to_string_lossy()
+            moved
+                .join("demo-repos")
+                .join("nanochat.git")
+                .to_string_lossy()
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1877,7 +1882,7 @@ mod tests {
 
         crate::local::git::restore_local_repository(
             &repo,
-            &data.join("demo-repos/nanochat.git"),
+            &data.join("demo-repos").join("nanochat.git"),
             "main",
         )
         .unwrap();

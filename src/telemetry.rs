@@ -709,20 +709,25 @@ async fn deliver_payload(path: Option<PathBuf>, payload: serde_json::Value) {
     if !is_enabled(flag()) {
         return;
     }
-    deliver_queued_payload(path, payload).await;
+    let _ = deliver_queued_payload(path, payload).await;
 }
 
-async fn deliver_queued_payload(path: Option<PathBuf>, payload: serde_json::Value) {
-    if post_payload(&payload).await != DeliveryOutcome::Retryable {
+async fn deliver_queued_payload(
+    path: Option<PathBuf>,
+    payload: serde_json::Value,
+) -> DeliveryOutcome {
+    let outcome = post_payload(&payload).await;
+    if outcome != DeliveryOutcome::Retryable {
         if let Some(path) = path {
             let _ = std::fs::remove_file(path);
         }
     }
+    outcome
 }
 
 async fn deliver_retry_payload(path: PathBuf, payload: serde_json::Value) {
     if is_consent_payload(&payload) {
-        deliver_queued_payload(Some(path), payload).await;
+        let _ = deliver_queued_payload(Some(path), payload).await;
     } else {
         deliver_payload(Some(path), payload).await;
     }
@@ -1653,11 +1658,11 @@ mod tests {
                 build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
             let path = outbox_dir().join(format!("{event_id}.json"));
             std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
-            deliver_queued_payload(Some(path.clone()), payload).await;
+            let outcome = deliver_queued_payload(Some(path.clone()), payload).await;
             assert_eq!(
                 path.exists(),
                 should_remain,
-                "removing it again says {:?}",
+                "delivered as {outcome:?}; removing it again says {:?}",
                 std::fs::remove_file(&path)
             );
         }
