@@ -1654,7 +1654,12 @@ mod tests {
             let path = outbox_dir().join(format!("{event_id}.json"));
             std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
             deliver_queued_payload(Some(path.clone()), payload).await;
-            assert_eq!(path.exists(), should_remain);
+            assert_eq!(
+                path.exists(),
+                should_remain,
+                "removing it again says {:?}",
+                std::fs::remove_file(&path)
+            );
         }
         server.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1699,7 +1704,11 @@ mod tests {
         );
         std::fs::write(&consent_path, serde_json::to_vec(&consent).unwrap()).unwrap();
         deliver_retry_payload(consent_path.clone(), consent).await;
-        assert!(!consent_path.exists());
+        assert!(
+            !consent_path.exists(),
+            "removing it again says {:?}",
+            std::fs::remove_file(&consent_path)
+        );
 
         server.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);

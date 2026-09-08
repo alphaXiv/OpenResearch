@@ -1227,6 +1227,12 @@ fn build_worktree(root: &Path) -> Result<()> {
     git(root, &["-c", "init.defaultObjectFormat=sha1", "init"])?;
     git(root, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     git(root, &["config", "core.autocrlf", "false"])?;
+    // NTFS reports every file as 0644, so trusting the filesystem would make the
+    // exec bit set below read as a permanent local modification and block the
+    // checkout back to main. The index is the authority instead.
+    #[cfg(windows)]
+    git(root, &["config", "core.filemode", "false"])?;
+    #[cfg(not(windows))]
     git(root, &["config", "core.filemode", "true"])?;
     git(root, &["add", "-A"])?;
     // NTFS has no executable bit, so on Windows the mode reaches the tree only
