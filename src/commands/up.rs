@@ -554,6 +554,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/telemetry",
             get(telemetry_settings).post(set_telemetry_settings),
         )
+        .route("/api/telemetry/event", post(record_ui_event))
         .route(
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
@@ -4930,6 +4931,55 @@ async fn telemetry_settings() -> ApiResult {
     tokio::task::spawn_blocking(|| Ok(Json(telemetry_settings_json())))
         .await
         .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+/// A product event raised by the UI rather than by a command. Every field is
+/// matched against a fixed allowlist in `telemetry`, so this local endpoint
+/// cannot emit arbitrary telemetry.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiEventReq {
+    name: String,
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    experiment: Option<String>,
+    #[serde(default)]
+    slot: Option<u8>,
+    #[serde(default)]
+    surface: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
+    match req.name.as_str() {
+        "onboarding_step_viewed" => {
+            if let Some(step) = req.step.as_deref() {
+                crate::telemetry::capture_onboarding_step_viewed(step);
+            }
+        }
+        "demo_experiment_started" => {
+            if let (Some(kind), Some(experiment)) = (req.kind.as_deref(), req.experiment.as_deref())
+            {
+                crate::telemetry::capture_demo_experiment_started(kind, experiment);
+            }
+        }
+        "project_starter_clicked" => {
+            if let Some(slot) = req.slot {
+                crate::telemetry::capture_project_starter_clicked(slot);
+            }
+        }
+        "first_action" => {
+            if let (Some(surface), Some(action)) = (req.surface.as_deref(), req.action.as_deref()) {
+                crate::telemetry::capture_first_action(surface, action);
+            }
+        }
+        _ => return Ok(Json(json!({ "ok": false }))),
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]

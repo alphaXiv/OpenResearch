@@ -75,6 +75,8 @@ import {
   deleteChatSession,
   DEMO_FIGURE_SESSION_ID,
   DEMO_LITERATURE_SESSION_ID,
+  captureUiEvent,
+  DEMO_EXPERIMENT_LABELS,
   DEMO_PROJECT_ID,
   forkChatTurn,
   fmtNumber,
@@ -93,6 +95,7 @@ import {
   setChatSessionArchived,
   setChatSessionPermissionMode,
   setChatSessionPlanMode,
+  type FirstActionSurface,
   type ChatImageAttachment,
   type ChatMessage,
   type ChatPart,
@@ -4996,6 +4999,9 @@ export function ChatPanel({
   });
   const starterPrompts = starterQuery.data?.prompts ?? null;
   const starterLoading = starterHarness !== null && starterQuery.isPending;
+  // The demo project is the only surface that isn't a user-created project.
+  const telemetrySurface: FirstActionSurface =
+    projectId === DEMO_PROJECT_ID ? "demo" : "project";
   const applyStarterPrompt = (prompt: string) => {
     setDraft(prompt);
     setSkillMenuDismissed(false);
@@ -5046,6 +5052,11 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
+    captureUiEvent({
+      name: "first_action",
+      surface: telemetrySurface,
+      action: "typed_prompt",
+    });
     if (preparingSend.current) return;
     // Slash tokens stay in the wire form: the server resolves every selected
     // skill and supplies this exact message as their shared request context.
@@ -5759,7 +5770,22 @@ export function ChatPanel({
             revealTitle={titleReveals.get(s.id)}
             onOpen={() => {
               onActiveSessionChange(s.id);
-              if (projectId === DEMO_PROJECT_ID) markDemoSessionRead(s.id);
+              if (projectId === DEMO_PROJECT_ID) {
+                markDemoSessionRead(s.id);
+                const experiment = DEMO_EXPERIMENT_LABELS[s.id];
+                if (experiment) {
+                  captureUiEvent({
+                    name: "demo_experiment_started",
+                    kind: "curated",
+                    experiment,
+                  });
+                  captureUiEvent({
+                    name: "first_action",
+                    surface: "demo",
+                    action: "open_experiment",
+                  });
+                }
+              }
               setUnreadSessionIds((current) => {
                 if (!current.has(s.id)) return current;
                 const next = new Set(current);
@@ -5928,7 +5954,15 @@ export function ChatPanel({
                       key={index}
                       type="button"
                       className={`flex min-h-22 w-full min-w-0 cursor-pointer flex-col items-start justify-center gap-1.5 rounded-xl border bg-background px-5 py-4 text-start font-sans transition-colors duration-120 ease-standard hover:bg-surface ${tone.box}`}
-                      onClick={() => applyStarterPrompt(item.prompt)}
+                      onClick={() => {
+                        captureUiEvent({ name: "project_starter_clicked", slot: index + 1 });
+                        captureUiEvent({
+                          name: "first_action",
+                          surface: telemetrySurface,
+                          action: "starter_click",
+                        });
+                        applyStarterPrompt(item.prompt);
+                      }}
                     >
                       <span className="flex items-center gap-2.5 text-base font-medium text-text">
                         <Icon size={17} className={tone.icon} />
