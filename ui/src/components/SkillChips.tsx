@@ -1,3 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
+
+import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import {
   Fragment,
@@ -11,7 +14,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { getSkillContent, type SkillInfo } from "../api";
+import { type SkillInfo } from "../api";
 import { splitCommandTokens } from "../planCommand";
 import { Md } from "./Md";
 import { Badge } from "./ui";
@@ -40,20 +43,6 @@ const MIRRORED_PROPERTIES = [
   "border-bottom-width",
   "border-left-width",
 ];
-
-const skillContentCache = new Map<string, Promise<string>>();
-
-function loadSkillContent(name: string, projectId: string): Promise<string> {
-  const key = `${projectId}\u0000${name}`;
-  const cached = skillContentCache.get(key);
-  if (cached) return cached;
-  const request = getSkillContent(name, projectId).catch((error: unknown) => {
-    skillContentCache.delete(key);
-    throw error;
-  });
-  skillContentCache.set(key, request);
-  return request;
-}
 
 function chipSegments(
   text: string,
@@ -120,8 +109,9 @@ function ComposerSkillToken({
   const closeTimer = useRef<number | null>(null);
   const cardId = useId();
   const [open, setOpen] = useState(false);
-  const [content, setContent] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const preview = useQuery({ ...getSkillContentQuery(name, projectId), enabled: open, subscribed: open });
+  const content = preview.data ?? null;
+  const loading = preview.isFetching;
   const [position, setPosition] = useState<CSSProperties>({});
 
   const clearClose = () => {
@@ -144,12 +134,7 @@ function ComposerSkillToken({
     clearClose();
     placeCard();
     setOpen(true);
-    if (content !== null || loading) return;
-    setLoading(true);
-    loadSkillContent(name, projectId)
-      .then(setContent)
-      .catch(() => setContent(null))
-      .finally(() => setLoading(false));
+
   };
   const scheduleClose = () => {
     clearClose();
@@ -314,7 +299,7 @@ export function ComposerSkillChips({
         textarea.clientWidth +
         parseFloat(computed.borderLeftWidth) +
         parseFloat(computed.borderRightWidth)
-      }px`;
+        }px`;
     };
     sync();
     const observer = new ResizeObserver(sync);
@@ -358,7 +343,7 @@ export function ComposerSkillChips({
               skill={skill}
               projectId={projectId}
               textareaRef={textareaRef}
-           />
+            />
           ) : (
             <span key={`${key}:${end}`} aria-hidden="true" className="bg-background text-skill-blue">
               <span className="text-skill-blue-slash">/</span>

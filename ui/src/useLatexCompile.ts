@@ -3,8 +3,12 @@
 // Split out of FileViewer, which already carries three file sources, an editor
 // and five render modes.
 
+import { useQuery } from "@tanstack/react-query";
+
+import { getLatexEngineQuery } from "./queries/files";
+
 import { useCallback, useEffect, useRef, useState } from "react";
-import { compileLatex, getLatexEngine } from "./api";
+import { compileLatex } from "./api";
 import { m } from "./paraglide/messages.js";
 
 interface CompiledPdf {
@@ -67,9 +71,10 @@ export function useLatexCompile({
   /** The live edit buffer, which is what a compile should reflect. */
   source: string;
 }): LatexCompile {
-  const [engine, setEngine] = useState<string | null | undefined>(undefined);
-  const [installHint, setInstallHint] = useState<string | null>(null);
-  const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const engineQuery = useQuery({ ...getLatexEngineQuery(), enabled, subscribed: enabled });
+  const engine = engineQuery.data?.engine ?? (engineQuery.isPending ? undefined : null);
+  const installHint = engineQuery.data?.hint ?? null;
+  const installCommand = engineQuery.data?.installCommand ?? null;
   const [compiling, setCompiling] = useState(false);
   const [compiled, setCompiled] = useState<CompiledPdf | null>(null);
   const [log, setLog] = useState<string | null>(null);
@@ -86,24 +91,6 @@ export function useLatexCompile({
   // Read at call time, so typing doesn't rebuild `compile` on every keystroke.
   const sourceRef = useRef(source);
   sourceRef.current = source;
-
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    getLatexEngine()
-      .then((result) => {
-        if (cancelled) return;
-        setEngine(result.engine);
-        setInstallHint(result.hint);
-        setInstallCommand(result.installCommand);
-      })
-      .catch(() => {
-        if (!cancelled) setEngine(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled]);
 
   // The in-flight guard lives in a ref, not in a setState updater: React
   // double-invokes updaters under StrictMode, so a guard inside one lets two

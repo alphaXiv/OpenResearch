@@ -1,17 +1,21 @@
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  refreshHarnesses,
+  getHarnessesQuery,
+  getProfileQuery,
+} from "../queries/settings";
+import { queryClient } from "../queries/client";
+import { getProjectPathStatusQuery, searchPapersQuery, resolvePaperQuery } from "../queries/projects";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
-  getHarnesses,
-  getProfile,
-  getProjectPathStatus,
   harnessModelLabel,
   completeOnboarding,
   reasoningFor,
-  resolvePaper,
-  searchPapers,
   type AgentSelection,
   type Harness,
   type HarnessId,
@@ -21,7 +25,7 @@ import {
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
-import { onHarnessAuth } from "../events";
+
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
@@ -72,9 +76,13 @@ export function Onboarding({
   onDone: (project: Project, selection: AgentSelection) => void;
   preferredAgent: AgentSelection | null;
 }) {
+  const completeOnboardingMutation = useMutation({ mutationFn: (args: Parameters<typeof completeOnboarding>) => completeOnboarding(...args) });
+
   const [step, setStep] = useState<0 | 1 | 2>(0);
-  const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
-  const [gitVersion, setGitVersion] = useState<string | null>();
+  const harnessQuery = useQuery(getHarnessesQuery());
+  const pathQuery = useQuery(getProjectPathStatusQuery());
+  const harnesses = harnessQuery.data ?? null;
+  const gitVersion = pathQuery.data?.gitVersion;
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [preferredHarness, setPreferredHarness] = useState<HarnessId | null>(null);
@@ -105,24 +113,18 @@ export function Onboarding({
     setChecking(true);
     setHarnessError(false);
     setGitError(false);
-    setGitVersion(undefined);
     const fresh = () => seq === loadSeq.current;
     void Promise.allSettled([
-      getHarnesses(refresh, retryRejected).then((h) => fresh() && setHarnesses(h)),
-      getProjectPathStatus().then((status) => fresh() && setGitVersion(status.gitVersion)),
+      refreshHarnesses(refresh, retryRejected),
+      queryClient.fetchQuery({ ...getProjectPathStatusQuery(), staleTime: refresh ? 0 : 30_000 }),
     ])
       .then(([harness, gitStatus]) => {
         if (!fresh()) return;
-        // Clear the stale answer too, so "errored", "loading" and "loaded"
-        // stay mutually exclusive — otherwise a failed re-check leaves old
-        // cards on screen saying "not signed in" while the gate un-gates.
         if (harness.status === "rejected") {
           setHarnessError(true);
-          setHarnesses(null);
         }
         if (gitStatus.status === "rejected") {
           setGitError(true);
-          setGitVersion(undefined);
         }
       })
       .finally(() => fresh() && setChecking(false));
@@ -137,21 +139,11 @@ export function Onboarding({
       return saved?.id ?? ready[0]?.id ?? null;
     });
   }, [harnesses, preferredAgent]);
-  useEffect(
-    () =>
-      onHarnessAuth(() => {
-        void getHarnesses(true)
-          .then((next) => {
-            setHarnesses(next);
-            setHarnessError(false);
-          })
-          .catch(() => setHarnessError(true));
-      }),
-    [],
-  );
+  useEffect(() => setHarnessError(harnessQuery.isError), [harnessQuery.isError, harnessQuery.dataUpdatedAt]);
+  useEffect(() => setGitError(pathQuery.isError), [pathQuery.isError, pathQuery.dataUpdatedAt]);
   // Prefill from any saved profile — best-effort, never gates the step.
   useEffect(() => {
-    void getProfile()
+    void queryClient.fetchQuery(getProfileQuery())
       .then((p) => {
         setResearchAreas(p.researchAreas);
         setOtherArea(p.otherArea ?? "");
@@ -172,7 +164,7 @@ export function Onboarding({
     const seq = ++paperSeq.current;
     setSearchingPapers(true);
     const t = setTimeout(() => {
-      searchPapers(q)
+      queryClient.fetchQuery(searchPapersQuery(q))
         .then((res) => seq === paperSeq.current && setPaperHits(res))
         .catch(() => seq === paperSeq.current && setPaperHits([]))
         .finally(() => seq === paperSeq.current && setSearchingPapers(false));
@@ -192,7 +184,7 @@ export function Onboarding({
     // The search hit's title is a Google-scraped string — truncated, id-prefixed,
     // sometimes reworded. Resolve the canonical title and correct it in place.
     if (!duplicate) {
-      void resolvePaper(h.paperId)
+      void queryClient.fetchQuery(resolvePaperQuery(h.paperId))
         .then((r) => {
           const title = r.title?.trim();
           if (!title) return;
@@ -218,12 +210,12 @@ export function Onboarding({
     setFinishing(true);
     setFinishError(null);
     try {
-      const completion = await completeOnboarding(selection, {
+      const completion = await completeOnboardingMutation.mutateAsync([selection, {
         researchAreas,
         otherArea: researchAreas.includes("Other") ? otherArea : null,
         background: background || null,
         papers,
-      });
+      }]);
       onDone(completion.project, completion.selection);
     } catch (error) {
       setFinishError(error instanceof Error ? error.message : String(error));
@@ -238,12 +230,12 @@ export function Onboarding({
         step === 0
           ? "[&_.home-inner]:max-w-300 [&_.home-inner]:pt-0 [&_.home-inner]:pb-0"
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
-      }`}
+        }`}
     >
       <div
         className={`home-inner max-w-155 my-0 mx-auto ${
           step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
-        }`}
+          }`}
       >
         {step === 0 ? (
           <div className="onb-intro relative flex min-h-dvh flex-col justify-center gap-4 py-12 min-[1120px]:grid min-[1120px]:grid-cols-[minmax(0,_1.1fr)_minmax(28rem,_1fr)] min-[1120px]:grid-rows-[auto_auto] min-[1120px]:content-center min-[1120px]:gap-x-20 min-[1120px]:gap-y-10">
@@ -259,7 +251,7 @@ export function Onboarding({
               <div
                 aria-hidden="true"
                 className="absolute -inset-14 rounded-full bg-primary-subtle opacity-70 blur-3xl"
-             />
+              />
               <ul className="onb-intro-list relative flex flex-col gap-4 m-0 p-0 list-none">
                 <li className="rounded-2xl border border-border bg-background p-6 shadow-card">
                   <span>
@@ -327,7 +319,7 @@ export function Onboarding({
                     h={h}
                     selected={preferredHarness === h.id}
                     onSelect={() => setPreferredHarness(h.id)}
-                 />
+                  />
                 ))
               ) : harnessError ? (
                 // Never a spinner next to an error — detection isn't running.
@@ -358,10 +350,10 @@ export function Onboarding({
                 gitError ||
                 gitVersion === null ||
                 (harnesses !== null && !anyAgentReady)) && (
-                <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
-                  <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
-                </Button>
-              )}
+                  <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
+                    <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
+                  </Button>
+                )}
               <div className="flex-1" />
               <Button variant="primary"
                 onClick={() => setStep(2)}
@@ -406,7 +398,7 @@ export function Onboarding({
                           checked={researchAreas.includes(area.id)}
                           onChange={() => toggleResearchArea(area.id)}
                           disabled={finishing}
-                       />
+                        />
                         <span>{area.label()}</span>
                       </label>
                     ))}
@@ -419,7 +411,7 @@ export function Onboarding({
                       disabled={finishing}
                       placeholder={m.onboarding_tell_us_your_other_research_area()}
                       aria-label={m.onboarding_other_research_area()}
-                   />
+                    />
                   )}
                 </fieldset>
                 <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-background">
@@ -433,7 +425,7 @@ export function Onboarding({
                   disabled={finishing}
                   rows={4}
                   placeholder={m.onboarding_e_g_i_work_on_sample_efficient_rl()}
-               />
+                />
                 <label className="onb-field-label text-base font-medium mb-1.5" htmlFor="onb-paper-search">
                   {m.onboarding_representative_papers()}
                 </label>
@@ -447,7 +439,7 @@ export function Onboarding({
                     onChange={(e) => setPaperQuery(e.target.value)}
                     disabled={finishing}
                     placeholder={m.onboarding_search_alpha_xiv_by_title_to_link_a()}
-                 />
+                  />
                   {searchingPapers ? (
                     <div className={ONB_CARD_META_CLASS_NAME}>{m.onboarding_searching_alpha_xiv()}</div>
                   ) : paperHits.length > 0 ? (
@@ -575,10 +567,10 @@ function AgentCard({
   const meta = [
     version,
     h.models.length > 0 &&
-      `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
-        .slice(0, 3)
-        .map((m) => harnessModelLabel(m))
-        .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
+    `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
+      .slice(0, 3)
+      .map((m) => harnessModelLabel(m))
+      .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
   ]
     .filter(Boolean)
     .join(" · ");

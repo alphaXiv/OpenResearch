@@ -9,6 +9,7 @@
 
 pub mod agent_skills;
 pub mod bash;
+pub mod browser_cookies;
 pub mod chat;
 pub mod claude;
 pub mod codex;
@@ -30,6 +31,7 @@ pub mod native_store;
 pub mod opencode;
 pub mod openresearch;
 pub mod overleaf;
+pub mod overleaf_live;
 pub mod projects;
 pub mod ray;
 pub mod resolve;

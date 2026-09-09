@@ -93,6 +93,7 @@ async fn ensure_default_public_key(ssh_dir: &std::path::Path) -> Result<String> 
                 .open(&public)
                 .await?;
             file.write_all(&output.stdout).await?;
+            file.flush().await?;
         }
     }
     if !private.is_file() {

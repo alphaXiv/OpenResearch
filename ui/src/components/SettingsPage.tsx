@@ -1,4 +1,35 @@
 import {
+  setScopedQueryData,
+  workspaceScope,
+  isCurrentScope,
+  queryClient,
+} from "../queries/client";
+import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
+
+import {
+  getHarnessesQuery,
+  refreshHarnesses,
+  getK8sSettingsQuery,
+  getModalSettingsQuery,
+  getSshMasterStatusQuery,
+  getSshHostsQuery,
+  getSlurmSettingsQuery,
+  getRaySettingsQuery,
+  getOpenResearchSettingsQuery,
+  getLocalMachineQuery,
+  getComputeSettingsQuery,
+  getTinkerSettingsQuery,
+  getHfSettingsQuery,
+  getEnvVarsQuery,
+  getTelemetryQuery,
+  getProjectDefaultsQuery,
+  getProjectGitStatusQuery,
+  getDataDirQuery,
+} from "../queries/settings";
+
+import { getOverleafSettingsQuery } from "../queries/files";
+import { listRunsQuery } from "../queries/projects";
+import {
   ArrowLeft,
   ArrowRight,
   ChevronDown,
@@ -18,31 +49,15 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   fmtNumber,
-  getComputeSettings,
-  getEnvVars,
-  getProjectGitStatus,
-  getProjectDefaults,
-  getTelemetry,
-  getHarnesses,
-  getHfSettings,
-  getTinkerSettings,
-  getK8sSettings,
-  getLocalMachine,
-  getModalSettings,
-  getOpenResearchSettings,
-  getOverleafSettings,
-  getRaySettings,
-  getSlurmSettings,
-  getSshHosts,
-  getSshMasterStatus,
-  listRuns,
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
+  saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
@@ -54,7 +69,6 @@ import {
   saveRaySettings,
   saveSlurmSettings,
   setEnvVar,
-  getDataDir,
   validateDataDir,
   moveDataDir,
   type DataDirSettings,
@@ -66,6 +80,7 @@ import {
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
+  type OverleafSettings,
   type Project,
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
@@ -77,13 +92,11 @@ import {
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
-  type OpenResearchSettings,
   type RayPreflight,
   type RaySettings,
   type Run,
   type SlurmPreflight,
   type SlurmSettings,
-  type SshHost,
   type SshPreflight,
   applyUpdate,
   harnessModelLabel,
@@ -92,7 +105,7 @@ import {
   type InstallChannel,
   type InstalledCli,
 } from "../api";
-import { onDataDirMove, onHarnessAuth } from "../events";
+import { onDataDirMove } from "../events";
 import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
@@ -107,7 +120,20 @@ import { OptionPicker } from "./ModelPicker";
 import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshConfigDialog } from "./SshConfigDialog";
-import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
+import {
+  Badge,
+  Button,
+  ButtonLink,
+  IconButton,
+  IconButtonLink,
+  Input,
+  LoadingRow,
+  showAlert,
+  Spinner,
+  Switch,
+  Tooltip,
+  type BadgeVariant,
+} from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
   "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
@@ -270,19 +296,17 @@ function AuthLabel({ h }: { h: Harness }) {
 }
 
 function HarnessesTab() {
-  const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
+  const harnessesOptions = getHarnessesQuery();
+  const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
-    getHarnesses(refresh, retryRejected)
-      .then(setHarnesses)
+    refreshHarnesses(refresh, retryRejected)
       .catch(() => {})
       .finally(() => setRefreshing(false));
   };
-  useEffect(() => load(false), []);
-  useEffect(() => onHarnessAuth(() => load(true)), []);
 
   const h = harnesses?.find((x) => x.id === active);
 
@@ -370,8 +394,15 @@ function K8sSection({
 }: {
   onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
 }) {
-  const [settings, setSettings] = useState<K8sSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
+
+  const settingsOptions = getK8sSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<K8sSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [context, setContext] = useState("");
   const [namespace, setNamespace] = useState("");
   const [saving, setSaving] = useState(false);
@@ -384,11 +415,17 @@ function K8sSection({
     setNamespace(s.namespace);
   };
 
+  const previousSettings = useRef<K8sSettings | null>(null);
   useEffect(() => {
-    getK8sSettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (
+      context === (previous.context ?? "") && namespace.trim() === previous.namespace
+    ))) {
+      setContext(settings.context ?? "");
+      setNamespace(settings.namespace ?? "");
+    }
+  }, [settings, context, namespace]);
 
   const unchanged =
     settings !== null &&
@@ -404,7 +441,7 @@ function K8sSection({
     if (checking || saving || !unchanged) return;
     setChecking(true);
     try {
-      setSettings(await getK8sSettings());
+      await queryClient.fetchQuery({ ...getK8sSettingsQuery(), staleTime: 0 });
     } catch (err) {
       showAlert(err instanceof Error ? err.message : String(err), "error");
     } finally {
@@ -418,7 +455,7 @@ function K8sSection({
     setSaving(true);
     setError(null);
     try {
-      apply(await saveK8sSettings({ context, namespace: namespace.trim() }));
+      apply(await saveK8sSettingsMutation.mutateAsync({ context, namespace: namespace.trim() }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -470,7 +507,7 @@ function K8sSection({
                 dropDown
                 disabled={saving || checking}
                 onSelect={setContext}
-             />
+              />
             </label>
             <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
               {m.settings_page_namespace()}
@@ -482,7 +519,7 @@ function K8sSection({
                 placeholder={m.settings_page_default()}
                 autoComplete="off"
                 spellCheck={false}
-             />
+              />
             </label>
             {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
             <div className="flex justify-end gap-2">
@@ -503,33 +540,32 @@ function K8sSection({
 // --- compute (modal) ------------------------------------------------------------
 
 function ModalSection() {
-  const [s, setS] = useState<ModalSettings | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
+
+  const sOptions = getModalSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s = sQuery.data ?? null;
+  const setS = (value: React.SetStateAction<ModalSettings | null>) => {
+    setScopedQueryData(sOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? sQuery.error?.message ?? null;
   const [tokenId, setTokenId] = useState("");
   const [tokenSecret, setTokenSecret] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const loading = sQuery.isPending || refreshing;
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    getModalSettings()
-      .then((next) => { if (active) setS(next); })
-      .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, []);
 
   async function refresh() {
     if (loading || saving) return;
-    setLoading(true);
+    setRefreshing(true);
     setError(null);
     try {
-      setS(await getModalSettings());
+      await queryClient.fetchQuery({ ...getModalSettingsQuery(), staleTime: 0 });
     } catch (err) {
-      setS(null);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      setRefreshing(false);
     }
   }
 
@@ -539,7 +575,7 @@ function ModalSection() {
     setSaving(true);
     setError(null);
     try {
-      setS(await saveModalToken(tokenId.trim(), tokenSecret.trim()));
+      setS(await saveModalTokenMutation.mutateAsync([tokenId.trim(), tokenSecret.trim()]));
       setTokenId("");
       setTokenSecret("");
     } catch (err) {
@@ -551,7 +587,7 @@ function ModalSection() {
 
   return (
     <>
-      {loading ? (
+      {!s && loading ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_checking_modal()}
         </LoadingRow>
@@ -601,46 +637,13 @@ const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-acce
 const SSH_MASTER_POLL_MS = 5_000;
 
 function useSshMasterStatuses(hosts: string[]) {
-  const [statuses, setStatuses] = useState<Record<string, boolean>>({});
-  const hostsKey = hosts.join("\0");
-
-  useEffect(() => {
-    const activeHosts = hostsKey ? hostsKey.split("\0") : [];
-    if (activeHosts.length === 0) {
-      setStatuses({});
-      return;
-    }
-    let cancelled = false;
-    const refresh = async () => {
-      const results = await Promise.all(activeHosts.map(async (host) => {
-        try {
-          return [host, (await getSshMasterStatus(host)).running] as const;
-        } catch {
-          return null;
-        }
-      }));
-      if (cancelled) return;
-      setStatuses((current) => {
-        const next: Record<string, boolean> = {};
-        for (const result of results) {
-          if (result) next[result[0]] = result[1];
-        }
-        // Preserve the last known value when only one status request fails.
-        for (const host of activeHosts) {
-          if (next[host] === undefined && current[host] !== undefined) next[host] = current[host];
-        }
-        return next;
-      });
-    };
-    void refresh();
-    const interval = window.setInterval(refresh, SSH_MASTER_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [hostsKey]);
-
-  const markRunning = (host: string) => setStatuses((current) => ({ ...current, [host]: true }));
+  const scope = workspaceScope();
+  const options = hosts.map((host) => getSshMasterStatusQuery(host));
+  const queries = useQueries({ queries: options.map((query) => ({ ...query, refetchInterval: SSH_MASTER_POLL_MS })) });
+  const statuses = Object.fromEntries(hosts.flatMap((host, index) => queries[index].data ? [[host, queries[index].data.running]] : []));
+  const markRunning = (host: string) => {
+    if (isCurrentScope(scope)) setScopedQueryData(getSshMasterStatusQuery(host).queryKey, { running: true });
+  };
   return [statuses, markRunning] as const;
 }
 
@@ -676,9 +679,10 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
 }
 
 function SshSection({ remote = false }: { remote?: boolean }) {
-  const [hosts, setHosts] = useState<SshHost[] | null>(null);
+  const hostsOptions = getSshHostsQuery();
+  const hostsQuery = useQuery(hostsOptions);
+  const hosts = hostsQuery.data ?? (hostsQuery.isError ? [] : null);
   const [configOpen, setConfigOpen] = useState(false);
-  const [configVersion, setConfigVersion] = useState(0);
   const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
@@ -691,12 +695,6 @@ function SshSection({ remote = false }: { remote?: boolean }) {
     })
     .map((host) => host.host) ?? [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
-
-  useEffect(() => {
-    getSshHosts()
-      .then(setHosts)
-      .catch(() => setHosts([]));
-  }, [configVersion]);
 
   function connect(host: string) {
     setConnectionFailed(false);
@@ -757,7 +755,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                         <ChevronDown
                           size={15}
                           className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
-                       />
+                        />
                       </button>
                     ) : (
                       <span className="w-5 flex-none" aria-hidden="true" />
@@ -788,8 +786,8 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                         : hostTest?.reachable === false
                           ? m.app_retry()
                           : hostTest
-                          ? m.settings_reconnect()
-                          : m.settings_connect()}
+                            ? m.settings_reconnect()
+                            : m.settings_connect()}
                     </Button>
                   </div>}
                 </div>
@@ -836,7 +834,6 @@ function SshSection({ remote = false }: { remote?: boolean }) {
       {configOpen && (
         <SshConfigDialog
           onClose={() => setConfigOpen(false)}
-          onSaved={() => setConfigVersion((version) => version + 1)}
         />
       )}
     </>
@@ -857,8 +854,15 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
 }
 
 function SlurmSection({ remote = false }: { remote?: boolean }) {
-  const [settings, setSettings] = useState<SlurmSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
+
+  const settingsOptions = getSlurmSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<SlurmSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [host, setHost] = useState("");
   const [partition, setPartition] = useState("");
   const [account, setAccount] = useState("");
@@ -886,11 +890,22 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
     setTimeLimit(s.timeLimit ?? "");
   };
 
+  const previousSettings = useRef<SlurmSettings | null>(null);
   useEffect(() => {
-    getSlurmSettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (
+      host === (previous.host ?? "")
+      && partition.trim() === (previous.partition ?? "")
+      && account.trim() === (previous.account ?? "")
+      && timeLimit.trim() === (previous.timeLimit ?? "")
+    ))) {
+      setHost(settings.host ?? "");
+      setPartition(settings.partition ?? "");
+      setAccount(settings.account ?? "");
+      setTimeLimit(settings.timeLimit ?? "");
+    }
+  }, [settings, host, partition, account, timeLimit]);
 
   const unchanged =
     settings !== null &&
@@ -906,7 +921,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
     setError(null);
     try {
       apply(
-        await saveSlurmSettings({
+        await saveSlurmSettingsMutation.mutateAsync({
           host,
           partition: partition.trim(),
           account: account.trim(),
@@ -953,7 +968,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                     setConnecting(false);
                     setConnectionFailed(false);
                   }}
-               />
+                />
               </label>
             </div>
             <div className="actions">
@@ -1000,7 +1015,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                     placeholder={m.settings_page_cluster_default()}
                     autoComplete="off"
                     spellCheck={false}
-                 />
+                  />
                   <datalist id="slurm-partitions">
                     {test?.partitions.map((p) => <option key={p} value={p} />)}
                   </datalist>
@@ -1014,7 +1029,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                     placeholder={m.settings_page_cluster_default()}
                     autoComplete="off"
                     spellCheck={false}
-                 />
+                  />
                 </label>
               </div>
               <label className="mt-3 block max-w-xl">
@@ -1026,7 +1041,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
                   placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
                   autoComplete="off"
                   spellCheck={false}
-               />
+                />
               </label>
             </div>
             {error && <div className="error">{error}</div>}
@@ -1067,8 +1082,15 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
 }
 
 function RaySection() {
-  const [settings, setSettings] = useState<RaySettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
+
+  const settingsOptions = getRaySettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<RaySettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [address, setAddress] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1080,11 +1102,14 @@ function RaySection() {
     setAddress(s.address ?? "");
   };
 
+  const previousSettings = useRef<RaySettings | null>(null);
   useEffect(() => {
-    getRaySettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (address === (previous.address ?? "")))) {
+      setAddress(settings.address ?? "");
+    }
+  }, [settings, address]);
 
   const unchanged = settings !== null && address === (settings.address ?? "");
 
@@ -1094,7 +1119,7 @@ function RaySection() {
     setSaving(true);
     setError(null);
     try {
-      apply(await saveRaySettings({ address }));
+      apply(await saveRaySettingsMutation.mutateAsync({ address }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1140,7 +1165,7 @@ function RaySection() {
                 placeholder="http://127.0.0.1:8265"
                 autoComplete="off"
                 spellCheck={false}
-             />
+              />
             </label>
             <p className="m-0 text-sm text-subtext">
               {m.settings_page_effective_url()}: {ltr(settings.resolvedAddress)} · {m.settings_page_source()}: {settings.source}
@@ -1193,28 +1218,14 @@ function localMachineSummary(hw: LocalMachine) {
 // --- compute (openresearch) ---------------------------------------------------------
 
 function OpenResearchSection({ remote }: { remote: boolean }) {
-  const [s, setS] = useState<OpenResearchSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(true);
+  const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const s = settingsQuery.data;
+  const loadError = settingsQuery.error?.message;
+  const busy = settingsQuery.isFetching;
   const [loginAttempt, setLoginAttempt] = useState(0);
   const [terminalLogin, setTerminalLogin] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
-
-  async function refresh() {
-    setBusy(true);
-    setLoadError(null);
-    try {
-      setS(await getOpenResearchSettings());
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    void refresh();
-  }, [remote]);
+  const refresh = () => settingsQuery.refetch();
 
   return (
     <>
@@ -1225,7 +1236,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              {busy || signingIn ? (
+              {(!s && busy) || signingIn ? (
                 <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
               ) : loadError ? (
                 <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
@@ -1243,7 +1254,7 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
             <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {busy || !s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
+              {!s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1395,6 +1406,8 @@ function DefaultDestinationEditor({
   projectId?: string;
   onSaved: (settings: ComputeSettings) => void;
 }) {
+  const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
+
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
   const savedFlavor = settings.defaultFlavor ?? "";
   const [backend, setBackend] = useState(savedBackend);
@@ -1435,7 +1448,7 @@ function DefaultDestinationEditor({
     setError(null);
     try {
       onSaved(
-        await setComputeDefault({
+        await setComputeDefaultMutation.mutateAsync({
           backend: nextBackend,
           flavor: nextFlavored ? nextFlavor.trim() || null : null,
           projectId,
@@ -1496,7 +1509,7 @@ function DefaultDestinationEditor({
               return target ? <BackendLogo kind={TARGET_KIND[target.id]} size={16} /> : null;
             }}
             onSelect={changeBackend}
-         />
+          />
           {flavored && (
             <div>
               {customFlavor ? (
@@ -1521,7 +1534,7 @@ function DefaultDestinationEditor({
                     autoComplete="off"
                     spellCheck={false}
                     disabled={saving}
-                 />
+                  />
                   <button
                     type="button"
                     className="absolute inset-y-0 end-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
@@ -1554,7 +1567,7 @@ function DefaultDestinationEditor({
                   dropDown
                   disabled={saving}
                   onSelect={changeFlavor}
-               />
+                />
               )}
             </div>
           )}
@@ -1756,54 +1769,22 @@ function ComputeTab({
   onOpenEnvironment: () => void;
   remote: boolean;
 }) {
-  const [settings, setSettings] = useState<ComputeSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const settingsOptions = getComputeSettingsQuery(project?.id);
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<ComputeSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [selectedTarget, setSelectedTarget] = useState<ComputeTargetId | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [localMachine, setLocalMachine] = useState<LocalMachine | null>(null);
-  const [localMachineError, setLocalMachineError] = useState<string | null>(null);
-  // Monotonic guard: a POST response applied via `apply` must not be
-  // overwritten by a slower background GET that was already in flight.
-  const seqRef = useRef(0);
-
-  useEffect(() => {
-    seqRef.current++;
-    setSettings(null);
-    setSelectedTarget(null);
-    setLoadError(null);
-    setError(null);
-  }, [project?.id]);
-
-  useEffect(() => {
-    getLocalMachine()
-      .then(setLocalMachine)
-      .catch((err) => setLocalMachineError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  // Returning to the directory refreshes summaries changed on a backend page.
-  useEffect(() => {
-    const seq = ++seqRef.current;
-    getComputeSettings(project?.id)
-      .then((s) => {
-        if (seq !== seqRef.current) return;
-        setSettings(s);
-        setLoadError(null);
-      })
-      .catch((err) => {
-        if (seq !== seqRef.current) return;
-        // Only the very first load may brick the tab; a failed background
-        // refresh of already-rendered rows goes to the transient banner.
-        const msg = err instanceof Error ? err.message : String(err);
-        setSettings((cur) => {
-          if (cur === null) setLoadError(msg);
-          else setError(msg);
-          return cur;
-        });
-      });
-  }, [selectedTarget, project?.id]);
+  const localMachineOptions = getLocalMachineQuery();
+  const localMachineQuery = useQuery(localMachineOptions);
+  const localMachine = localMachineQuery.data ?? null;
+  const localMachineError = localMachineQuery.error?.message ?? null;
+  useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
 
   const apply = (s: ComputeSettings) => {
-    seqRef.current++; // supersede any in-flight background GET
     setSettings(s);
     setError(null);
   };
@@ -1813,8 +1794,8 @@ function ComputeTab({
   const defaultBackend = settings?.configuredDefaultBackend ?? settings?.defaultBackend;
   const orderedTargets = targets
     ? [...targets].sort(
-        (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
-      )
+      (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
+    )
     : null;
   const configuredTargets = orderedTargets?.filter((target) => target.configured) ?? [];
   const availableTargets = orderedTargets?.filter((target) => !target.configured) ?? [];
@@ -1826,7 +1807,7 @@ function ComputeTab({
       summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
       onOpen={target.id === "local" ? undefined : () => setSelectedTarget(target.id)}
       onOpenEnvironment={onOpenEnvironment}
-   />
+    />
   );
   const selected = selectedTarget
     ? settings?.targets.find((target) => target.id === selectedTarget)
@@ -1839,7 +1820,7 @@ function ComputeTab({
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
         remote={remote}
-     />
+      />
     );
   }
 
@@ -1863,7 +1844,7 @@ function ComputeTab({
             settings={settings}
             projectId={project?.id}
             onSaved={apply}
-         />
+          />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1888,33 +1869,32 @@ function ComputeTab({
 // --- compute (tinker) ----------------------------------------------------------
 
 function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
+
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setError] = useState<string | null>(null);
 
-  const [settings, setSettings] = useState<TinkerSettings | null>(null);
-  const [checking, setChecking] = useState(true);
-
-  useEffect(() => {
-    let active = true;
-    getTinkerSettings()
-      .then((next) => { if (active) setSettings(next); })
-      .catch((err) => { if (active) setError(err instanceof Error ? err.message : String(err)); })
-      .finally(() => { if (active) setChecking(false); });
-    return () => { active = false; };
-  }, []);
+  const settingsOptions = getTinkerSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const error = actionError ?? settingsQuery.error?.message ?? null;
+  const setSettings = (value: React.SetStateAction<TinkerSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [refreshing, setRefreshing] = useState(false);
+  const checking = settingsQuery.isPending || refreshing;
 
   async function refresh() {
     if (checking || saving) return;
-    setChecking(true);
+    setRefreshing(true);
     setError(null);
-    setSettings(null);
     try {
-      setSettings(await getTinkerSettings());
+      await queryClient.fetchQuery({ ...getTinkerSettingsQuery(), staleTime: 0 });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setChecking(false);
+      setRefreshing(false);
     }
   }
 
@@ -1924,7 +1904,7 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
     setSaving(true);
     setError(null);
     try {
-      setSettings(await saveTinkerKey(apiKey.trim()));
+      setSettings(await saveTinkerKeyMutation.mutateAsync(apiKey.trim()));
       setApiKey("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1935,14 +1915,14 @@ function TinkerSection({ target }: { target: ComputeTargetSummary }) {
 
   return (
     <>
-      {checking ? <LoadingRow><Spinner /> {m.common_checking()}</LoadingRow> : settings && <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+      {!settings && checking ? <LoadingRow><Spinner /> {m.common_checking()}</LoadingRow> : settings && <dl className="m-0 flex items-center justify-between gap-4 text-sm">
         <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
         <dd className="m-0">
           <Badge variant={settings.validationStatus === "valid" ? "success" : settings.validationStatus === "invalid" ? "error" : "warning"}>
             {settings.validationStatus === "valid" ? m.settings_page_ready()
               : settings.validationStatus === "invalid" ? m.settings_tinker_invalid_key()
-              : settings.validationStatus === "billingRequired" ? m.settings_tinker_billing_required()
-              : m.settings_page_not_configured()}
+                : settings.validationStatus === "billingRequired" ? m.settings_tinker_billing_required()
+                  : m.settings_page_not_configured()}
           </Badge>
         </dd>
       </dl>}
@@ -1997,36 +1977,28 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
 }
 
 function HfSection() {
-  const [settings, setSettings] = useState<HfSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
+
+  const settingsOptions = getHfSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<HfSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [token, setToken] = useState("");
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // A save that lands before the slow mount fetch resolves must win over it.
-  const savedRef = useRef(false);
-
-  // Fetched on mount (every visit remounts) so a token set anywhere else —
-  // the Environment tab, `hf auth login`, the process env — shows up here.
-  useEffect(() => {
-    getHfSettings()
-      .then((s) => {
-        if (!savedRef.current) setSettings(s);
-      })
-      .catch((err) => {
-        if (!savedRef.current) setLoadError(err instanceof Error ? err.message : String(err));
-      });
-  }, []);
 
   async function refresh() {
     if (saving || refreshing || (!settings && !loadError)) return;
     setRefreshing(true);
-    setLoadError(null);
+    setError(null);
     try {
-      setSettings(await getHfSettings());
-      savedRef.current = false;
+      await queryClient.fetchQuery({ ...getHfSettingsQuery(), staleTime: 0 });
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
       setRefreshing(false);
     }
@@ -2038,10 +2010,9 @@ function HfSection() {
     setSaving(true);
     setError(null);
     try {
-      const next = await saveHfToken(token.trim());
-      savedRef.current = true;
+      const next = await saveHfTokenMutation.mutateAsync(token.trim());
       setSettings(next);
-      setLoadError(null);
+      setError(null);
       setToken("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -2069,11 +2040,11 @@ function HfSection() {
             </div>}
             {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
               (settings.validationStatus === "valid" && settings.jobsWrite !== null)) && (
-              <div className="flex items-center justify-between gap-4">
-                <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
-                <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
-              </div>
-            )}
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+                  <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
+                </div>
+              )}
           </dl>
           {settings.validationStatus === "unreachable" && settings.validationError && (
             <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
@@ -2099,7 +2070,7 @@ function HfSection() {
             onChange={(e) => setToken(e.target.value)}
             placeholder={settings?.maskedToken ?? m.settings_page_hf()}
             autoComplete="off"
-         />
+          />
         </label>
         {error && <div className="error">{error}</div>}
         <div className="flex justify-end gap-2">
@@ -2154,6 +2125,9 @@ function EnvRow({
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
 }) {
+  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
+  const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
+
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -2161,7 +2135,7 @@ function EnvRow({
     if (!value.trim() || saving) return;
     setSaving(true);
     try {
-      onVars(await setEnvVar(name, value.trim()));
+      onVars(await setEnvVarMutation.mutateAsync([name, value.trim()]));
       setValue("");
     } catch (err) {
       showEnvError(name, err);
@@ -2174,7 +2148,7 @@ function EnvRow({
     if (saving) return;
     setSaving(true);
     try {
-      onVars(await deleteEnvVar(name));
+      onVars(await deleteEnvVarMutation.mutateAsync(name));
     } catch (err) {
       showEnvError(name, err);
     } finally {
@@ -2210,7 +2184,7 @@ function EnvRow({
               aria-label={m.a11y_value_for({ name: ltr(name) })}
               autoComplete="new-password"
               disabled={saving}
-           />
+            />
           )}
         </td>
         <td>
@@ -2246,6 +2220,8 @@ function AddVarRow({
   onVars: (vars: EnvVar[]) => void;
   onDone: () => void;
 }) {
+  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
+
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2254,7 +2230,7 @@ function AddVarRow({
     if (!key.trim() || !value.trim() || saving) return;
     setSaving(true);
     try {
-      onVars(await setEnvVar(key.trim(), value.trim()));
+      onVars(await setEnvVarMutation.mutateAsync([key.trim(), value.trim()]));
       onDone();
     } catch (err) {
       showEnvError(key.trim(), err);
@@ -2288,7 +2264,7 @@ function AddVarRow({
             autoComplete="off"
             spellCheck={false}
             disabled={saving}
-         />
+          />
         </td>
         <td>
           <Input
@@ -2302,7 +2278,7 @@ function AddVarRow({
             aria-label={m.settings_page_new_variable_value()}
             autoComplete="new-password"
             disabled={saving}
-         />
+          />
         </td>
         <td>
           <Button size="small"
@@ -2327,15 +2303,14 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
-  const [vars, setVars] = useState<EnvVar[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const varsOptions = getEnvVarsQuery();
+  const varsQuery = useQuery(varsOptions);
+  const vars = varsQuery.data ?? null;
+  const setVars = (value: React.SetStateAction<EnvVar[] | null>) => {
+    setScopedQueryData(varsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = vars ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
-
-  useEffect(() => {
-    getEnvVars()
-      .then(setVars)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
 
   // Recommended keys first (fixed order), then custom variables in file order.
   const customKeys =
@@ -2371,7 +2346,7 @@ function EnvVarsSection() {
                   name={name}
                   entry={vars.find((v) => v.key === name)}
                   onVars={setVars}
-               />
+                />
               ))}
               {adding && (
                 <AddVarRow onVars={setVars} onDone={() => setAdding(false)} />
@@ -2391,10 +2366,10 @@ const THEME_OPTIONS: {
   label: () => string;
   icon: typeof Monitor;
 }[] = [
-  { value: "system", label: m.settings_theme_system, icon: Monitor },
-  { value: "light", label: m.settings_theme_light, icon: Sun },
-  { value: "dark", label: m.settings_theme_dark, icon: Moon },
-];
+    { value: "system", label: m.settings_theme_system, icon: Monitor },
+    { value: "light", label: m.settings_theme_light, icon: Sun },
+    { value: "dark", label: m.settings_theme_dark, icon: Moon },
+  ];
 
 const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "en", label: "English" },
@@ -2467,7 +2442,7 @@ function AppearanceTab() {
               onSelect={(next) => {
                 if (isLocale(next)) setLocale(next);
               }}
-           />
+            />
           </div>
         </div>
       </div>
@@ -2494,6 +2469,8 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
+  const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
+
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
   // all of them, since they mutate overlapping state.
@@ -2590,7 +2567,7 @@ function UpdatesTab() {
                 aria-label={m.settings_page_install_updates_automatically()}
                 disabled={locked}
                 onClick={() =>
-                  void run("auto", () => setAutoUpdateApi(!status.autoUpdate).then(apply))
+                  void run("auto", () => setAutoUpdateApiMutation.mutateAsync([!status.autoUpdate]).then(apply))
                 }
               />
             </div>
@@ -2643,21 +2620,23 @@ function UpdatesTab() {
 }
 
 function TelemetryTab() {
-  const [settings, setSettings] = useState<TelemetrySettings | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
 
-  useEffect(() => {
-    void getTelemetry()
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  const settingsOptions = getTelemetryQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<TelemetrySettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? settingsQuery.error?.message ?? null;
 
   const toggle = () => {
     if (!settings || saving) return;
     setSaving(true);
     setError(null);
-    void setTelemetry(!settings.preferenceEnabled)
+    void setTelemetryMutation.mutateAsync(!settings.preferenceEnabled)
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2711,6 +2690,8 @@ function InstallCliRow({
   disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
+  const installCliMutation = useMutation({ mutationFn: installCli });
+
   const [result, setResult] = useState<InstalledCli | null>(null);
   // Set once a plain install was refused for an existing orx on PATH; the retry
   // is what makes the backend's "re-run with --force" reachable from here.
@@ -2718,7 +2699,7 @@ function InstallCliRow({
 
   const install = (force: boolean) =>
     void run("cli", () =>
-      installCli(force)
+      installCliMutation.mutateAsync(force)
         .then((r) => {
           setResult(r);
           setNeedsForce(false);
@@ -2765,24 +2746,26 @@ function InstallCliRow({
 // --- project defaults ----------------------------------------------------------
 
 function ProjectDefaultsTab() {
-  const [settings, setSettings] = useState<ProjectDefaultsSettings | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
-  const load = () => {
-    setError(null);
-    return getProjectDefaults()
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  const settingsOptions = getProjectDefaultsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<ProjectDefaultsSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
   };
-  useEffect(() => void load(), []);
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? settingsQuery.error?.message ?? null;
+
+  const load = async () => { await settingsQuery.refetch({ cancelRefetch: false }); };
 
   const toggle = () => {
     if (!settings || saving) return;
     const enabled = !settings.githubForNewProjects;
     setSaving(true);
     setError(null);
-    void setProjectDefaults(enabled, true)
+    void setProjectDefaultsMutation.mutateAsync([enabled, true])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2864,18 +2847,28 @@ function GitHubCliHelp({
   );
 }
 
-/** The Overleaf Git authentication token is machine-wide. Which Overleaf
- * *project* a paper pushes to is per-paper, and lives on the .tex tab. */
+/** The Overleaf Git authentication token and session cookie are machine-wide.
+ * Which Overleaf *project* a paper pushes to is per-paper, and lives on the
+ * .tex tab. */
 function OverleafCard() {
-  const [hasToken, setHasToken] = useState<boolean | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const deleteOverleafTokenMutation = useMutation({ mutationFn: deleteOverleafToken });
+  const deleteOverleafSessionMutation = useMutation({ mutationFn: deleteOverleafSession });
 
-  useEffect(() => {
-    getOverleafSettings()
-      .then((s) => setHasToken(s.hasToken))
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  const tokenOptions = getOverleafSettingsQuery();
+  const settings = useQuery(tokenOptions);
+  const hasToken = settings.data?.hasToken ?? null;
+  const hasSession = settings.data?.hasSession ?? null;
+  const patch = (next: Partial<OverleafSettings>) =>
+    setScopedQueryData(tokenOptions.queryKey, {
+      hasToken: hasToken ?? false,
+      hasSession: hasSession ?? false,
+      ...next,
+    });
+  const setHasToken = (value: boolean) => patch({ hasToken: value });
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+
+  const error = actionError ?? settings.error?.message;
 
   return (
     <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
@@ -2898,7 +2891,7 @@ function OverleafCard() {
             onClick={() => {
               setSaving(true);
               setError(null);
-              void deleteOverleafToken()
+              void deleteOverleafTokenMutation.mutateAsync()
                 .then((s) => setHasToken(s.hasToken))
                 .catch((err) => setError(err instanceof Error ? err.message : String(err)))
                 .finally(() => setSaving(false));
@@ -2913,7 +2906,43 @@ function OverleafCard() {
           onSaved={(result) => setHasToken(result.hasToken)}
           placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
-       />
+        />
+      )}
+      <div className={KV_CLASS_NAME}>
+        <span className="k">{m.settings_page_session_cookie()}</span>
+        <span className="v">
+          <Badge variant={hasSession ? "success" : "default"}>
+            {hasSession === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasSession ? m.settings_saved() : m.settings_not_set()}
+          </Badge>
+        </span>
+      </div>
+      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
+        {m.settings_page_session_cookie_help()}
+      </p>
+      {hasSession ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button
+            disabled={saving}
+            onClick={() => {
+              setSaving(true);
+              setError(null);
+              void deleteOverleafSessionMutation.mutateAsync()
+                .then((s) => patch({ hasSession: s.hasSession }))
+                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                .finally(() => setSaving(false));
+            }}
+          >
+            {saving ? m.settings_removing() : m.settings_remove_session()}
+          </Button>
+        </div>
+      ) : (
+        <TokenForm
+          save={(session) => saveOverleafSession(session)}
+          onSaved={(result) => patch({ hasSession: result.hasSession })}
+          placeholder={m.overleaf_session_cookie()}
+          createHref="https://www.overleaf.com/project"
+          createLabel={m.overleaf_open_overleaf()}
+        />
       )}
       {error && <div className="error">{error}</div>}
     </div>
@@ -2929,32 +2958,23 @@ function GitTab({
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
 }) {
-  const [status, setStatus] = useState<ProjectGitStatus | null>(null);
+  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
+
+  const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
+  const statusQuery = useQuery(statusOptions);
+  const status = statusQuery.data ?? null;
+  const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
+    setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? statusQuery.error?.message ?? null;
   const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
-  const seqRef = useRef(0);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
 
-  const load = (clear = true) => {
-    const request = ++seqRef.current;
-    if (clear) setStatus(null);
-    setError(null);
-    if (!project) return Promise.resolve();
-    return getProjectGitStatus(project.id)
-      .then((projectStatus) => {
-        if (request !== seqRef.current) return;
-        setStatus(projectStatus);
-      })
-      .catch((err) => {
-        if (request === seqRef.current) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      });
-  };
-  useEffect(() => void load(), [project?.id]);
+  const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
   const syncErrorMessage = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -2978,7 +2998,7 @@ function GitTab({
       .then((result) => {
         setStatus(result.git);
         onProjectUpdate(result.project);
-        void getProjectDefaults()
+        void queryClient.fetchQuery(getProjectDefaultsQuery())
           .then((defaults) => {
             if (!defaults.githubForNewProjects && !defaults.githubDefaultPromptSeen) {
               setDefaultPromptOpen(true);
@@ -2993,7 +3013,7 @@ function GitTab({
   const finishDefaultPrompt = (enabled: boolean) => {
     setDefaultPromptSaving(true);
     setDefaultPromptError(null);
-    void setProjectDefaults(enabled, true)
+    void setProjectDefaultsMutation.mutateAsync([enabled, true])
       .then(() => setDefaultPromptOpen(false))
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));
@@ -3035,7 +3055,7 @@ function GitTab({
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load(false)} />
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load()} />
               </div>
             )}
             {status.github.authenticated && !status.github.enabled && (
@@ -3120,27 +3140,19 @@ type MoveState =
   | { kind: "error"; message: string };
 
 function StorageTab() {
-  const [settings, setSettings] = useState<DataDirSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const settingsOptions = getDataDirQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [path, setPath] = useState("");
   const [checking, setChecking] = useState(false);
   const [validation, setValidation] = useState<DataDirValidation | null>(null);
   const [move, setMove] = useState<MoveState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
 
-  const load = () =>
-    getDataDir()
-      .then((s) => {
-        setSettings(s);
-        // Seed the input to the current path only when empty — preserves an
-        // in-progress edit, and (after a move clears it) re-seeds to the new path.
-        setPath((p) => (p ? p : s.current));
-      })
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-
   useEffect(() => {
-    void load();
-  }, []);
+    if (settings) setPath((current) => current || settings.current);
+  }, [settings]);
 
   // Subscribe to move progress streamed over the shared SSE.
   useEffect(() => {
@@ -3160,9 +3172,8 @@ function StorageTab() {
       } else if (ev.type === "done") {
         setMove({ kind: "done", oldPathLeft: ev.oldPathLeft });
         setValidation(null);
-        // Clear so load()'s empty-guard re-seeds the input to the new path.
+        // The acknowledged snapshot seeds the new path.
         setPath("");
-        void load();
       } else if (ev.type === "error") {
         setMove({ kind: "error", message: ev.error });
       }
@@ -3250,7 +3261,7 @@ function StorageTab() {
                   autoComplete="off"
                   spellCheck={false}
                   disabled={move.kind === "moving"}
-               />
+                />
               </label>
 
               {validation && !validation.error && validation.ok && (
@@ -3277,7 +3288,7 @@ function StorageTab() {
                       </span>
                     ) : undefined
                   }
-               />
+                />
               )}
               {move.kind === "done" && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
@@ -3384,9 +3395,10 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
 }
 
 function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
-  const [instances, setInstances] = useState<Run[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
+  const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
+  const error = query.error?.message;
+  const refreshing = query.isFetching;
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -3396,25 +3408,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
     return () => clearInterval(t);
   }, []);
 
-  // Point-in-time snapshot: the page refetches on every open and Refresh updates it in place.
-  const load = () => {
-    if (!projectId) {
-      setInstances([]);
-      return;
-    }
-    setRefreshing(true);
-    listRuns(projectId)
-      .then((rows) => {
-        setInstances(rows);
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-        setInstances((prev) => prev ?? []);
-      })
-      .finally(() => setRefreshing(false));
-  };
-  useEffect(() => load(), [projectId]);
+  const load = () => { if (projectId) void query.refetch(); };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
@@ -3449,9 +3443,10 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 }
 
 function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
-  const [instances, setInstances] = useState<Run[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
+  const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
+  const error = query.error?.message;
+  const refreshing = query.isFetching;
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -3459,24 +3454,7 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
     return () => clearInterval(timer);
   }, []);
 
-  const load = () => {
-    if (!projectId) {
-      setInstances([]);
-      return;
-    }
-    setRefreshing(true);
-    listRuns(projectId)
-      .then((rows) => {
-        setInstances(rows.sort((a, b) => b.createdAt - a.createdAt));
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-        setInstances((current) => current ?? []);
-      })
-      .finally(() => setRefreshing(false));
-  };
-  useEffect(load, [projectId]);
+  const load = () => { if (projectId) void query.refetch(); };
 
   return (
     <>
@@ -3493,7 +3471,7 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
       {!instances ? (
         <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
-        <InstancesTable instances={instances} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
+        <InstancesTable instances={[...instances].sort((a, b) => b.createdAt - a.createdAt)} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
       )}
     </>
   );
@@ -3602,7 +3580,7 @@ export function SettingsView({
           onViewHistory={() => onSelectTab("instances")}
           onOpenEnvironment={() => onSelectTab("environment")}
           remote={remote}
-       />
+        />
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
@@ -3617,7 +3595,7 @@ export function SettingsView({
         <GitTab
           project={project}
           onProjectUpdate={onProjectUpdate}
-       />
+        />
       )}
     </div>
   );

@@ -1,4 +1,7 @@
-import { getProjectUiState, getUiState, isDemoProjectId, listChatSessions, listProjects, type ChatSession } from "./api";
+import { queryClient } from "./queries/client";
+import { getUiStateQuery, listProjectsQuery, getProjectUiStateQuery } from "./queries/projects";
+import { listChatSessionsQuery } from "./queries/chat";
+import { isDemoProjectId, type ChatSession } from "./api";
 import { defaultTaskWorkspace } from "./workspaceTabs";
 import { getTaskWorkspace, parseDestination, safeLocation, taskLocation } from "./workspaceState";
 import { getRememberedGlobalWorkspace } from "./workspacePersistence";
@@ -10,26 +13,26 @@ function validSessionLocation(location: string, sessions: ChatSession[]): boolea
     session.id === destination.sessionId && session.projectId === destination.projectId)));
 }
 
-export async function globalResumeLocation(): Promise<string> {
-  const [state, projects] = await Promise.all([getUiState(), listProjects()]);
+export async function globalResumeLocation(client = queryClient): Promise<string> {
+  const [state, projects] = await Promise.all([client.fetchQuery(getUiStateQuery()), client.fetchQuery(listProjectsQuery())]);
   const location = safeLocation((getRememberedGlobalWorkspace() ?? state.workspace)?.lastLocation);
   if (!location) return "/projects";
   const destination = parseDestination(location.split("?")[0]);
   if (!destination?.projectId) return "/projects";
   if (!projects.some((project) => project.id === destination.projectId)) return "/projects";
-  if (destination.sessionId && !validSessionLocation(location, await listChatSessions(destination.projectId)))
+  if (destination.sessionId && !validSessionLocation(location, await client.fetchQuery(listChatSessionsQuery(destination.projectId))))
     return "/projects";
   return location;
 }
 
-export async function projectResumeLocation(projectId: string): Promise<string> {
-  const [loaded, sessions] = await Promise.all([getProjectUiState(projectId), listChatSessions(projectId)]);
+export async function projectResumeLocation(projectId: string, client = queryClient): Promise<string> {
+  const [loaded, sessions] = await Promise.all([client.fetchQuery(getProjectUiStateQuery(projectId)), client.fetchQuery(listChatSessionsQuery(projectId))]);
   const state = getCachedProjectWorkspace(projectId) ?? loaded;
   const location = safeLocation(state?.lastLocation);
   if (location && parseDestination(location.split("?")[0])?.projectId === projectId
     && validSessionLocation(location, sessions)) return location;
   const newest = sessions.find((session) => !session.archived);
-  const defaults = isDemoProjectId(projectId) ? defaultTaskWorkspace(newest?.id, !(await getUiState()).tourCompleted) : undefined;
+  const defaults = isDemoProjectId(projectId) ? defaultTaskWorkspace(newest?.id, !(await client.fetchQuery(getUiStateQuery())).tourCompleted) : undefined;
   const task = getTaskWorkspace(state, newest?.id ?? "new");
   const rememberedPane = task ? task.active : defaults?.active;
   return taskLocation(projectId, newest?.id ?? null, rememberedPane);

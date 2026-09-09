@@ -2667,6 +2667,15 @@ pub struct OverleafLink {
     pub root: String,
 }
 
+impl OverleafLink {
+    pub fn project(&self) -> crate::local::overleaf::Project {
+        crate::local::overleaf::Project {
+            id: self.overleaf_project_id.clone(),
+            host: self.host.clone(),
+        }
+    }
+}
+
 /// Most recent preflight result per ssh host alias (Settings → Compute → SSH).
 /// Serializes to the wire shape the UI's `SshPreflight` type expects; `host`
 /// is the row key only (the API embeds results under their host entry).

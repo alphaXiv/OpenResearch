@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+import { getRunDiffQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
@@ -9,7 +11,7 @@ import { ltr } from "../i18n";
 // node's own views, so keyboard/touch users lose a shortcut, not a capability.
 // Client-only (portals straight into document.body).
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
@@ -17,7 +19,6 @@ import {
   backendKind,
   fmtDuration,
   fmtNumber,
-  getRunDiff,
   runDisplayStatus,
   timeAgo,
   type Experiment,
@@ -156,61 +157,37 @@ export function ExpHoverCard({
     { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height, anchor: side, distance: GAP },
     measure,
   );
-  const [diffStat, setDiffStat] = useState<DiffStat | null>(null);
-
-  // Diffstat of the branch vs its parent — only defined for non-baseline runs
-  // that committed something (the endpoint 400s otherwise).
   const diffRunId = exp.parentExperimentId && latestRun?.commitSha ? latestRun.id : null;
-  useEffect(() => {
-    // Reset on every run change so a previous run's stat can't linger next
-    // to the new run's status while (or if) the new fetch resolves.
-    setDiffStat(null);
-    if (!diffRunId) return;
-    let cancelled = false;
-    getRunDiff(diffRunId)
-      .then((p) => {
-        // Same parser and counting helpers as the Changes tab, so renames,
-        // quoted paths and binary files are counted and labeled identically.
-        let text = p.diff;
-        if (p.truncated) {
-          // The backend byte-caps mid-line, which can crash the parser (a cut
-          // inside an @@ header) — drop the trailing partial file so the
-          // counts stay honest lower bounds.
-          const cut = text.lastIndexOf("\ndiff --git ");
-          text = cut !== -1 ? text.slice(0, cut + 1) : text.slice(0, text.lastIndexOf("\n") + 1);
-        }
-        let files: FileData[] = [];
-        try {
-          files = text.trim() ? parseDiff(text) : [];
-        } catch {
-          return; // malformed even after trimming — skip the row
-        }
-        // A truncated single-file diff can trim down to a bare header that
-        // parses as one file with no hunks; "≥ +0 −0 · 1+ files" is noise.
-        if (p.truncated && files.every((f) => f.hunks.length === 0)) return;
-        let additions = 0;
-        let deletions = 0;
-        for (const f of files) {
-          const c = countChanges(f);
-          additions += c.additions;
-          deletions += c.deletions;
-        }
-        if (!cancelled) {
-          setDiffStat({
-            fileCount: files.length,
-            additions,
-            deletions,
-            truncated: p.truncated,
-          });
-        }
-      })
-      .catch(() => {
-        // Diffstat is a nice-to-have; drop the row on fetch or parse failure.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [diffRunId]);
+  const { data: diff } = useQuery({ ...getRunDiffQuery(diffRunId ?? ""), enabled: Boolean(diffRunId), subscribed: Boolean(diffRunId) });
+  const diffStat = useMemo<DiffStat | null>(() => {
+    if (!diff) return null;
+    const p = diff;
+    let text = p.diff;
+    if (p.truncated) {
+      // The backend byte-caps mid-line, which can crash the parser (a cut
+      // inside an @@ header) — drop the trailing partial file so the
+      // counts stay honest lower bounds.
+      const cut = text.lastIndexOf("\ndiff --git ");
+      text = cut !== -1 ? text.slice(0, cut + 1) : text.slice(0, text.lastIndexOf("\n") + 1);
+    }
+    let files: FileData[] = [];
+    try {
+      files = text.trim() ? parseDiff(text) : [];
+    } catch {
+      return null; // malformed even after trimming — skip the row
+    }
+    // A truncated single-file diff can trim down to a bare header that
+    // parses as one file with no hunks; "≥ +0 −0 · 1+ files" is noise.
+    if (p.truncated && files.every((f) => f.hunks.length === 0)) return null;
+    let additions = 0;
+    let deletions = 0;
+    for (const f of files) {
+      const c = countChanges(f);
+      additions += c.additions;
+      deletions += c.deletions;
+    }
+    return { fileCount: files.length, additions, deletions, truncated: p.truncated };
+  }, [diff]);
 
   const counts = { done: 0, failed: 0, cancelled: 0, live: 0 };
   for (const r of runs) {

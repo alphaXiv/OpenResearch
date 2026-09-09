@@ -44,6 +44,17 @@ portable-pty = "0.9"
 # async fns in the Harness trait (object-safe `dyn Harness` in the registry).
 async-trait = "0.1"
 sha2 = "0.10"
+# Import the Overleaf editor session cookie from a local browser store, so the
+# user need not paste it. Chromium on macOS encrypts cookies with AES-128-CBC
+# under a Keychain-held key (PBKDF2-HMAC-SHA1). Pure-Rust RustCrypto crates, so
+# the static musl builds are untouched.
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
+# Overleaf live sync speaks the editor's socket.io channel. rustls + webpki
+# roots for the same musl reasons as reqwest above; already in the tree via axum.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree

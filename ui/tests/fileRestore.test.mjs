@@ -1,3 +1,4 @@
+import { queryModules } from "./queryModules.mjs";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -28,6 +29,11 @@ function viewerHooks(restored) {
       slots[index] ??= { current: initial };
       return slots[index];
     },
+    useMemo(factory, deps) {
+      const index = cursor++;
+      if (!same(slots[index]?.deps, deps)) slots[index] = { deps, value: factory() };
+      return slots[index].value;
+    },
     useCallback(callback, deps) {
       const index = cursor++;
       if (!same(slots[index]?.deps, deps)) slots[index] = { deps, callback };
@@ -51,7 +57,7 @@ function viewerHooks(restored) {
       calls.compile++;
       return { ok: true, pdfPath: "paper.pdf", hadErrors: false, note: null };
     },
-    getOverleafState: async () => ({ hasToken: true, link }),
+    getOverleafState: async () => ({ hasToken: true, hasSession: false, link }),
     getOverleafStatus: async () => { calls.status++; return { remoteChanged: true }; },
     syncOverleaf: async () => {
       calls.sync++;
@@ -60,6 +66,25 @@ function viewerHooks(restored) {
     overleafUploadUrl: () => "https://overleaf.com/upload",
     linkOverleaf: async () => ({ hasToken: true, link }),
     saveOverleafToken: async () => ({ hasToken: true }),
+    saveOverleafSession: async () => ({ hasSession: true }),
+    importOverleafSession: async () => ({ hasSession: true, source: "Firefox" }),
+    startOverleafLive: async () => ({ key: "k", status: null }),
+    stopOverleafLive: async () => ({ key: "k", status: null }),
+  };
+  const queries = queryModules(api);
+  const queryHooks = {
+    useQuery(options) {
+      const [, render] = react.useState(0);
+      const key = JSON.stringify(options.queryKey);
+      react.useEffect(() => queries.client.getQueryCache().subscribe((event) => {
+        if (JSON.stringify(event.query.queryKey) === key) render((n) => n + 1);
+      }), [key]);
+      react.useEffect(() => {
+        if (options.enabled !== false) void queries.client.fetchQuery(options).catch(() => {});
+      }, [key, options.enabled]);
+      const state = queries.client.getQueryState(options.queryKey);
+      return { data: state?.data, error: state?.error, isPending: !state || state.status === "pending" };
+    },
   };
   function loadHook(name) {
     const source = readFileSync(new URL(`../src/${name}.ts`, import.meta.url), "utf8");
@@ -70,8 +95,13 @@ function viewerHooks(restored) {
     new Function("require", "exports", "setInterval", "clearInterval", compiled)(
       (id) => {
         if (id === "react") return react;
+        if (id === "@tanstack/react-query") return queryHooks;
+        if (id.startsWith("./queries/")) return queries.load(id.slice("./queries/".length));
         if (id === "./api") return api;
         if (id === "./paraglide/messages.js") return { m: {} };
+        // The Overleaf hook listens for live-channel events; no channel opens
+        // here, so the subscription is a no-op.
+        if (id === "./events") return { onOverleafEvent: () => () => {} };
         throw new Error(`Unexpected dependency: ${id}`);
       },
       exports,

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::error::{anyhow, Result};
-use crate::store::{Store, StoredChatMessage, StoredChatSession, StoredRun};
+use crate::store::{now_ms, Store, StoredChatMessage, StoredChatSession, StoredRun};
 
 use super::chat::{WirePart, WireToolState};
 use super::model::{LocalExperiment, LocalProject};
@@ -127,6 +127,8 @@ The `evidence/` directory contains the real checkpoint metadata, trained tokeniz
 "#;
 
 const RUN_LOG: &str = include_str!("../../demo/nanochat/run-output.txt");
+// The log's own timestamps run 10:51:52 -> 14:33:21; the seeded run must span them.
+const RUN_LOG_SPAN_MIN: i64 = 222;
 
 #[derive(RustEmbed)]
 #[folder = "demo/nanochat/base/"]
@@ -239,6 +241,9 @@ fn seed_at(
     repo: &Path,
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
+    // Seeded history is dated from onboarding so the demo reads as recent work. The
+    // bundled run log and commit dates stay absolute; the commits are SHA-pinned.
+    let seeded_at = now_ms();
     let bare = data_root.join("demo-repos").join("nanochat.git");
     let commit_sha = install_repository(repo, &bare)?;
 
@@ -271,8 +276,8 @@ fn seed_at(
         repo_path: repo.to_string_lossy().into_owned(),
         run_command: Some("bash runs/runcpu.sh".into()),
         paper_id: None,
-        created_at: 1_785_812_413_316,
-        updated_at: 1_785_879_263_859,
+        created_at: ago(seeded_at, 250, 0),
+        updated_at: ago(seeded_at, 6, 0),
     };
     let experiment = LocalExperiment {
         id: EXPERIMENT_ID.into(),
@@ -287,8 +292,8 @@ fn seed_at(
         ),
         run_command: project.run_command.clone().unwrap_or_default(),
         agent_status: "idle".into(),
-        created_at: 1_785_824_322_614,
-        updated_at: 1_785_879_252_272,
+        created_at: ago(seeded_at, 240, 0),
+        updated_at: ago(seeded_at, 9, 0),
         chat_session_id: Some(SESSION_ID.into()),
     };
     let lr_probe = LocalExperiment {
@@ -306,8 +311,8 @@ fn seed_at(
                 "{PROBE_SETUP} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04"
             ),
             agent_status: "idle".into(),
-            created_at: 1_785_879_300_000,
-            updated_at: 1_785_879_300_000,
+            created_at: ago(seeded_at, 8, 0),
+            updated_at: ago(seeded_at, 8, 0),
             chat_session_id: None,
         };
     let vocab_probe = LocalExperiment {
@@ -325,10 +330,12 @@ fn seed_at(
                 "{PROBE_SETUP} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}"
             ),
             agent_status: "idle".into(),
-            created_at: 1_785_879_360_000,
-            updated_at: 1_785_879_360_000,
+            created_at: ago(seeded_at, 6, 0),
+            updated_at: ago(seeded_at, 6, 0),
             chat_session_id: None,
         };
+    // created_at and run_ended_at must stay RUN_LOG_SPAN_MIN apart.
+    let run_ended_at = ago(seeded_at, 10, 0);
     let run = StoredRun {
         id: RUN_ID.into(),
         experiment_id: EXPERIMENT_ID.into(),
@@ -336,9 +343,9 @@ fn seed_at(
         status: "done".into(),
         backend_json: json!({ "kind": "local_job", "jobId": "demo:nanochat" }).to_string(),
         command: project.run_command.clone().unwrap_or_default(),
-        created_at: 1_785_865_810_129,
-        updated_at: 1_785_879_208_664,
-        ended_at: Some(1_785_879_208_664),
+        created_at: ago(seeded_at, 234, 0),
+        updated_at: run_ended_at,
+        ended_at: Some(run_ended_at),
         exit_code: Some(0),
         commit_sha: Some(commit_sha.clone()),
         result_markdown: Some(RESULT_MARKDOWN.into()),
@@ -363,15 +370,16 @@ fn seed_at(
         bootstrap_context: Some(BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
-        created_at: 1_785_824_322_614,
-        updated_at: 1_785_879_263_859,
+        created_at: ago(seeded_at, 240, 0),
+        // Sessions list by updated_at DESC, the order validate_snapshot asserts.
+        updated_at: ago(seeded_at, 9, 30),
     };
     let user = StoredChatMessage {
         id: USER_MESSAGE_ID.into(),
         session_id: SESSION_ID.into(),
         role: "user".into(),
         parts_json: serde_json::to_string(&vec![WirePart::text("user-prompt", USER_PROMPT)])?,
-        created_at: 1_785_824_322_627,
+        created_at: ago(seeded_at, 239, 50),
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
@@ -381,7 +389,7 @@ fn seed_at(
         session_id: SESSION_ID.into(),
         role: "assistant".into(),
         parts_json: serde_json::to_string(&assistant_parts(&selection.harness))?,
-        created_at: 1_785_824_322_629,
+        created_at: ago(seeded_at, 9, 30),
         parent_id: Some(USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
@@ -404,8 +412,8 @@ fn seed_at(
         bootstrap_context: Some(FIGURE_BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(FIGURE_ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
-        created_at: 1_785_824_322_630,
-        updated_at: 1_785_879_263_858,
+        created_at: ago(seeded_at, 70, 0),
+        updated_at: ago(seeded_at, 69, 40),
     };
     let figure_user = StoredChatMessage {
         id: FIGURE_USER_MESSAGE_ID.into(),
@@ -415,7 +423,7 @@ fn seed_at(
             "figure-user-prompt",
             FIGURE_USER_PROMPT,
         )])?,
-        created_at: 1_785_824_322_631,
+        created_at: ago(seeded_at, 69, 50),
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
@@ -425,7 +433,7 @@ fn seed_at(
         session_id: FIGURE_SESSION_ID.into(),
         role: "assistant".into(),
         parts_json: serde_json::to_string(&figure_assistant_parts(&selection.harness))?,
-        created_at: 1_785_824_322_633,
+        created_at: ago(seeded_at, 69, 40),
         parent_id: Some(FIGURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
@@ -448,8 +456,8 @@ fn seed_at(
         bootstrap_context: Some(LITERATURE_BOOTSTRAP_CONTEXT.into()),
         active_leaf_id: Some(LITERATURE_ASSISTANT_MESSAGE_ID.into()),
         parent_session_id: None,
-        created_at: 1_785_824_322_634,
-        updated_at: 1_785_879_263_857,
+        created_at: ago(seeded_at, 95, 0),
+        updated_at: ago(seeded_at, 94, 40),
     };
     let literature_user = StoredChatMessage {
         id: LITERATURE_USER_MESSAGE_ID.into(),
@@ -459,7 +467,7 @@ fn seed_at(
             "literature-user-prompt",
             LITERATURE_USER_PROMPT,
         )])?,
-        created_at: 1_785_824_322_635,
+        created_at: ago(seeded_at, 94, 50),
         parent_id: None,
         base_native_session_id: None,
         result_native_session_id: None,
@@ -469,7 +477,7 @@ fn seed_at(
         session_id: LITERATURE_SESSION_ID.into(),
         role: "assistant".into(),
         parts_json: serde_json::to_string(&literature_assistant_parts(&selection.harness))?,
-        created_at: 1_785_824_322_636,
+        created_at: ago(seeded_at, 94, 40),
         parent_id: Some(LITERATURE_USER_MESSAGE_ID.into()),
         base_native_session_id: None,
         result_native_session_id: None,
@@ -509,6 +517,10 @@ fn seed_at(
         ],
     )?;
     validate_snapshot(store, repo, newly_created)
+}
+
+fn ago(seeded_at: i64, minutes: i64, seconds: i64) -> i64 {
+    seeded_at - minutes * 60_000 - seconds * 1_000
 }
 
 fn demo_project_slug(store: &Store) -> Result<String> {
@@ -1621,14 +1633,25 @@ mod tests {
                 EXPERIMENT_SHA
             );
         }
-        assert_eq!(store.list_runs_by_project(PROJECT_ID).unwrap().len(), 1);
-        assert_eq!(
-            store
-                .list_chat_sessions_by_project(PROJECT_ID)
-                .unwrap()
-                .len(),
-            3
+        let runs = store.list_runs_by_project(PROJECT_ID).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert!(
+            runs[0].ended_at.unwrap() - runs[0].created_at >= RUN_LOG_SPAN_MIN * 60_000,
+            "the seeded run is shorter than the log it ships with"
         );
+        let sessions = store.list_chat_sessions_by_project(PROJECT_ID).unwrap();
+        assert_eq!(sessions.len(), 3);
+        for session in &sessions {
+            for message in store.list_chat_messages(&session.id).unwrap() {
+                assert!(
+                    message.created_at >= session.created_at
+                        && message.created_at <= session.updated_at,
+                    "message {} falls outside session {}",
+                    message.id,
+                    session.id
+                );
+            }
+        }
         let run = store.get_run(RUN_ID).unwrap().unwrap();
         assert_eq!(run.status, "done");
         assert_eq!(run.exit_code, Some(0));
