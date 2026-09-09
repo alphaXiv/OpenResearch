@@ -216,8 +216,9 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
     Ok(seen)
 }
 
-/// Cancel = TERM the process group (pid == pgid under `process_group(0)`);
-/// fall back to the pid alone if the group kill is refused.
+/// Cancel = TERM the process group (pid == pgid under `process_group(0)`),
+/// falling back to the pid alone if the group kill is refused; Windows has no
+/// group, so the tree is walked instead.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
@@ -256,7 +257,6 @@ fn terminate_tree(pid: &str) -> Result<()> {
 
 #[cfg(not(windows))]
 fn terminate_group(pid: &str) -> Result<()> {
-    let pid = pid.to_string();
     let group = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
@@ -266,7 +266,7 @@ fn terminate_group(pid: &str) -> Result<()> {
         .unwrap_or(false);
     if !group {
         let process = std::process::Command::new("kill")
-            .args(["-TERM", &pid])
+            .args(["-TERM", pid])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

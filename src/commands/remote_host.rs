@@ -262,8 +262,8 @@ impl ControlServer {
 }
 
 /// Attaching to a persistent host talks over a Unix domain socket, so on
-/// Windows `orx up` serves locally and `--remote-host` is refused up front
-/// rather than starting a host nothing can attach to.
+/// Windows `orx up` serves locally and `--remote-host` is refused rather than
+/// starting a host nothing can attach to.
 #[cfg(not(unix))]
 pub(crate) async fn start_control_server(
     _descriptor: HostDescriptor,
@@ -838,14 +838,15 @@ fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
-    if !file.metadata()?.is_file() {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
         return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
     }
-    // Ownership and mode are unix's to check; Windows has neither, and the lock
-    // lives under the user's profile where the default ACL is what protects it.
+    // Windows has no uid or mode to check, so a lock under an ORX_DATA_DIR the
+    // user shares with someone else is guarded by its ACL alone.
     #[cfg(unix)]
     {
-        if metadata_uid(&file.metadata()?) != effective_uid() {
+        if metadata_uid(&metadata) != effective_uid() {
             return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
         }
         set_mode(path, 0o600)?;

@@ -419,12 +419,10 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
-    #[cfg(unix)]
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn native_store_smoke_test() {
         let root = std::env::temp_dir().join(format!("orx-native-store-{}", uuid::Uuid::new_v4()));

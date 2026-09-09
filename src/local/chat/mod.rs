@@ -7774,9 +7774,13 @@ pub fn set_chat_session_env(
             cmd.env_remove(UP_AUTH_TOKEN_ENV);
         }
     }
-    // Not on Windows: PATH_GUARD reads this into a `:`-joined PATH, which a
-    // drive letter splits in two. prepare_env still fronts the directory.
-    match orx_bin_dir().filter(|_| !cfg!(windows)) {
+    // PATH_GUARD reads this into a `:`-joined PATH, which a drive letter splits
+    // in two. prepare_env still fronts the directory on Windows, but nothing
+    // re-fronts it once the user's own startup files have run.
+    #[cfg(windows)]
+    cmd.env_remove(BIN_DIR_ENV);
+    #[cfg(not(windows))]
+    match orx_bin_dir() {
         Some(dir) => {
             cmd.env(BIN_DIR_ENV, dir);
         }
