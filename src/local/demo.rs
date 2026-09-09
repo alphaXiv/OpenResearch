@@ -36,7 +36,28 @@ const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
 // Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
-const PROBE_SETUP: &str = "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" && (command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && ([ -d .venv ] || uv venv) && uv sync --extra cpu && source .venv/bin/activate && python -m nanochat.dataset -n 8";
+//
+// Runs under Git Bash on Windows, where two things differ: uv has no shell
+// installer, and it lays the venv out as `Scripts/` rather than `bin/`. Both
+// forms of the activation are tried, since either platform may have either
+// layout depending on how the venv was made.
+fn probe_setup() -> String {
+    let install_uv = if cfg!(windows) {
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
+    } else {
+        "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    };
+    format!(
+        "export PATH=\"$HOME/.local/bin:$PATH\" \
+         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+         && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
+         && (command -v uv >/dev/null || {install_uv}) \
+         && ([ -d .venv ] || uv venv) \
+         && uv sync --extra cpu \
+         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
+         && python -m nanochat.dataset -n 8"
+    )
+}
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
@@ -308,7 +329,8 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04"
+                "{} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04",
+                probe_setup()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
@@ -327,7 +349,8 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}"
+                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}",
+                probe_setup()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 6, 0),
@@ -1834,6 +1857,17 @@ mod tests {
             .is_file());
         drop(store);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The setup runs under Git Bash on Windows, where uv lays the venv out as
+    /// `Scripts/`, and the whole thing is one `&&` chain on a single line.
+    #[test]
+    fn probe_setup_runs_on_either_venv_layout() {
+        let setup = probe_setup();
+        assert!(setup.contains(". .venv/bin/activate"), "{setup}");
+        assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
+        assert!(!setup.contains('\n'), "{setup}");
+        assert!(!setup.contains("  "), "double space: {setup}");
     }
 
     #[test]
