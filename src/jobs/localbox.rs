@@ -71,6 +71,11 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     }
 
     let mut cmd = std::process::Command::new(crate::local::bash::program());
+    if let Some(path) =
+        crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
+    {
+        cmd.env("PATH", path);
+    }
     cmd.arg("run.sh")
         .envs(&spec.secret_env)
         .current_dir(&dir)

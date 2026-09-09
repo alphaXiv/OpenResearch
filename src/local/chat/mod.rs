@@ -1392,6 +1392,11 @@ impl ChatHost {
         #[cfg(unix)]
         spawn.process_group(0);
         prepare_env(&mut spawn);
+        if let Some(path) = crate::local::bash::path_with_toolchain(
+            child_path().or_else(crate::local::shell_env::search_path),
+        ) {
+            spawn.env("PATH", path);
+        }
         let mut exit_code = None;
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut signal: Option<i64> = None;
@@ -7596,13 +7601,19 @@ pub async fn watch_runs(
 /// out to `orx`), the shell environment app mode imported, and the
 /// dashboard-managed env vars, real env winning. Only the starting order —
 /// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
+/// The PATH a child gets: this orx first, so an agent shelling out to `orx`
+/// reaches the running one.
+fn child_path() -> Option<std::ffi::OsString> {
+    let mut path = orx_bin_dir()?.into_os_string();
+    if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
+        path.push(crate::local::shell_env::PATH_LIST_SEPARATOR);
+        path.push(existing);
+    }
+    Some(path)
+}
+
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
-    if let Some(dir) = orx_bin_dir() {
-        let mut path = dir.into_os_string();
-        if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
-            path.push(crate::local::shell_env::PATH_LIST_SEPARATOR);
-            path.push(existing);
-        }
+    if let Some(path) = child_path() {
         cmd.env("PATH", path);
     }
     // So an agent's `orx exp run` resolves the same store the dashboard is
