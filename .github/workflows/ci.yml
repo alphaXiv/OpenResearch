@@ -94,6 +94,10 @@ jobs:
   # and ui/dist is committed, so no Node here.
   windows:
     name: windows build, test
+    # `plan` is only ever passed by release.yml, so this keeps Windows gating
+    # pull requests without letting a regression there hold up a macOS or Linux
+    # release, which ships no Windows artifact.
+    if: ${{ !inputs.plan }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
