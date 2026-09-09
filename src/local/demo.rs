@@ -1377,7 +1377,10 @@ fn write_assets<T: RustEmbed>(root: &Path) -> Result<()> {
 }
 
 fn commit(repo: &Path, message: &str) -> Result<()> {
-    let hooks = format!("core.hooksPath={}", crate::local::git::NULL_DEVICE);
+    let hooks = format!(
+        "core.hooksPath={}",
+        crate::local::git::empty_config_file().display()
+    );
     git(
         repo,
         &[
@@ -1414,11 +1417,12 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     ] {
         command.env_remove(name);
     }
-    let null = crate::local::git::NULL_DEVICE;
+    let empty = crate::local::git::empty_config_file();
+    let empty = empty.display();
     let (attributes, excludes, hooks) = (
-        format!("core.attributesFile={null}"),
-        format!("core.excludesFile={null}"),
-        format!("core.hooksPath={null}"),
+        format!("core.attributesFile={empty}"),
+        format!("core.excludesFile={empty}"),
+        format!("core.hooksPath={empty}"),
     );
     let out = command
         .current_dir(dir)
@@ -1433,7 +1437,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", null)
+        .env("GIT_CONFIG_GLOBAL", crate::local::git::empty_config_file())
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "OpenResearch Demo")
         .env("GIT_AUTHOR_EMAIL", "demo@openresearch.sh")

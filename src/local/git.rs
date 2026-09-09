@@ -1486,12 +1486,38 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
 
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
-/// The null device, as git spells it on this platform: Windows git recognizes
-/// `NUL` in `diff --no-index`, and reads it as empty for a config path.
+/// The null device as `diff --no-index` spells it, which is the only place git
+/// takes one — it recognizes `NUL` there before touching the path. Anywhere a
+/// path is *read*, use [`empty_config_file`] instead.
 #[cfg(not(windows))]
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]
 pub(crate) const NULL_DEVICE: &str = "NUL";
+
+/// An empty file to point `GIT_CONFIG_GLOBAL` and the `core.*File` settings at.
+///
+/// Not the null device: Windows cannot `access()` `NUL` by name, and git fatals
+/// with "unable to access 'NUL': Invalid argument" rather than reading it empty.
+/// A real file behaves the same on every platform — and pointing `hooksPath` at
+/// one disables hooks, since git finds no hook inside it.
+pub(crate) fn empty_config_file() -> PathBuf {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = crate::config::config_dir().join("empty.gitconfig");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Left alone if it is already there; a failure leaves a path that does
+        // not exist, which git skips the way it skips an absent global config.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path);
+        path
+    })
+    .clone()
+}
 
 fn redact_remote_urls(text: &str) -> String {
     text.split_whitespace()
@@ -1527,7 +1553,7 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
         .env("GIT_CONFIG_KEY_1", "credential.helper")
         .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
         .env("GIT_CONFIG_KEY_2", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_2", NULL_DEVICE);
+        .env("GIT_CONFIG_VALUE_2", empty_config_file());
     #[cfg(unix)]
     command.process_group(0);
     command
