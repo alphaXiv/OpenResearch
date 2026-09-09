@@ -13,12 +13,14 @@ import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
+  captureUiEvent,
   harnessModelLabel,
   completeOnboarding,
   reasoningFor,
   type AgentSelection,
   type Harness,
   type HarnessId,
+  type OnboardingStep,
   type LinkedPaper,
   type PaperHit,
   type Project,
@@ -69,6 +71,10 @@ const RESEARCH_AREAS = [
  * installation. The data-dir choice lives in
  * Settings → Storage (which can also *move* existing data); usage analytics is
  * opt-out via Settings or `orx telemetry off`. */
+/** In order — the API funnel keys on these names for all time, so renumbering
+ * the screens must not redefine a historical step. */
+const ONBOARDING_STEP_NAMES: readonly OnboardingStep[] = ["welcome", "environment", "profile"];
+
 export function Onboarding({
   onDone,
   preferredAgent,
@@ -79,6 +85,10 @@ export function Onboarding({
   const completeOnboardingMutation = useMutation({ mutationFn: (args: Parameters<typeof completeOnboarding>) => completeOnboarding(...args) });
 
   const [step, setStep] = useState<0 | 1 | 2>(0);
+  useEffect(() => {
+    const name = ONBOARDING_STEP_NAMES[step];
+    if (name) captureUiEvent({ name: "onboarding_step_viewed", step: name });
+  }, [step]);
   const harnessQuery = useQuery(getHarnessesQuery());
   const pathQuery = useQuery(getProjectPathStatusQuery());
   const harnesses = harnessQuery.data ?? null;

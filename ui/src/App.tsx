@@ -81,7 +81,9 @@ import {
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
   DEMO_RUN_EXPERIMENT_PROMPT,
+  captureUiEvent,
   isDemoProjectId,
+  type FirstAction,
   openProject,
   updateUiState,
   type AgentSelection,
@@ -707,11 +709,29 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const projectIdRef = useRef(projectId);
   projectIdRef.current = projectId;
 
+  // The CLI keeps only the earliest report per surface, so these are safe to
+  // fire on every open.
+  const reportFirstAction = useCallback(
+    (action: FirstAction) => {
+      if (!projectId) return;
+      captureUiEvent({
+        name: "first_action",
+        surface: isDemoProjectId(projectId) ? "demo" : "project",
+        action,
+      });
+    },
+    [projectId],
+  );
+  useEffect(() => {
+    if (mainView !== "chat" && mainView !== "skills") reportFirstAction("open_settings");
+  }, [mainView, reportFirstAction]);
+
   const openExperimentsTab = useCallback((replace = false) => {
     if (replace && (!navigationRef.current.isTask || navigationRef.current.pane)) return;
+    reportFirstAction("open_experiment");
     setExperimentsTabOpen(true);
     navigatePane({ kind: "home", view: "experiments" }, replace);
-  }, [navigatePane]);
+  }, [navigatePane, reportFirstAction]);
 
   const loadInitialState = () => {
     void projectsQuery.refetch();
@@ -867,6 +887,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     intent: TabOpenIntent = "preview",
     runId?: string,
   ) => {
+    reportFirstAction("open_experiment");
     const tab = { id, view };
     setExpTabs((prev) => (prev.some((t) => sameExpTab(t, tab)) ? prev : [...prev, tab]));
     openRightTab(tab, intent, runId);
