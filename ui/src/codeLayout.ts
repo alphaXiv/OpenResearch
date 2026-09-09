@@ -6,9 +6,9 @@
 // Preflight isn't imported (see tailwind.css), so the UA's
 // `pre, code { font-family: monospace }` beats an inherited font — every code
 // element needs these spelled out rather than relying on an ancestor.
-export const CODE_TEXT_CLASS_NAME = "font-mono text-sm leading-[1.55] [tab-size:4]";
+export const CODE_TEXT_CLASS_NAME = "code-source-text";
 
-export const CODE_WRAP_CLASS_NAME = "whitespace-pre-wrap break-words";
+export const CODE_WRAP_CLASS_NAME = "code-source-wrap";
 
 export const CODE_GUTTER_CLASS_NAME = "file-view-gutter text-right text-muted select-none";
 

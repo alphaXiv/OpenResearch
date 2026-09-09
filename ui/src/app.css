@@ -16,13 +16,8 @@
   unicode-bidi: plaintext;
 }
 
-/* The exception preserves DirFooter's RTL front-ellipsis truncation trick. */
-:where(pre, code:not(.path-front-ellipsis), .font-mono, .xterm, .openresearch-diff) {
+:where(pre, code, .font-mono, .code-source-text, .xterm, .openresearch-diff) {
   direction: ltr;
-  unicode-bidi: isolate;
-}
-
-.path-front-ellipsis {
   unicode-bidi: isolate;
 }
 
@@ -299,4 +294,31 @@
     filter: blur(4px);
     transform: translateY(0.15em);
   }
+}
+
+/* Reserve room for the three compact workspace buttons. */
+.workspace-body .chat-header {
+  padding-inline-end: 8.5rem;
+}
+
+.workspace-card-visible .chat-pane {
+  padding-inline-end: 16rem;
+}
+
+.workspace-card-visible .chat-header {
+  padding-inline-end: 1rem;
+}
+
+.workspace-card-visible .workspace-tools {
+  top: 1.25rem;
+}
+
+.code-source-text,
+.openresearch-diff .diff-line {
+  @apply font-mono text-sm leading-[1.55] [tab-size:4];
+}
+
+.code-source-wrap,
+.openresearch-diff .diff-code {
+  @apply whitespace-pre-wrap break-normal break-words;
 }

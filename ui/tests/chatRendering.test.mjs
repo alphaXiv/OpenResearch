@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  unreadAfterBusyChange,
   partIsVisible,
   partsTailToolId,
   streamTailIsText,
@@ -42,4 +43,15 @@ test("thinking replaces a text tail while steer and status parts do not", () => 
   assert.equal(streamTailIsText([message(text, { id: "reasoning", type: "reasoning" })]), false);
   assert.equal(streamTailIsText([message(text, { id: "steer", type: "steer" })]), true);
   assert.equal(streamTailIsText([message(text, { id: "turn-retry", type: "tool" })]), true);
+});
+
+test("completion marks only unseen existing chats unread and opening clears the dot", () => {
+  const sessions = [{ id: "active" }, { id: "background" }];
+  const busy = new Set(["active", "background", "deleted"]);
+  const initial = new Set();
+  assert.equal(unreadAfterBusyChange(initial, busy, busy, sessions, "active"), initial);
+  const finished = unreadAfterBusyChange(initial, busy, new Set(), sessions, "active");
+  assert.deepEqual([...finished], ["background"]);
+  assert.deepEqual([...unreadAfterBusyChange(finished, new Set(), new Set(), sessions, "background")], []);
+  assert.deepEqual([...unreadAfterBusyChange(initial, new Set(["active"]), new Set(), sessions, null)], ["active"]);
 });

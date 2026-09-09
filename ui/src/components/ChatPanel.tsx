@@ -44,7 +44,6 @@ import {
   MoreHorizontal,
   PanelLeft,
   Paperclip,
-  Package,
   Pencil,
   Plus,
   Search,
@@ -110,6 +109,7 @@ import {
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
+  unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
   partsTailToolId,
@@ -746,17 +746,6 @@ const EMPTY_SESSIONS: ChatSession[] = [];
 const EMPTY_RECOVERY_OVERRIDES = {};
 
 // --- rendering ---------------------------------------------------------------
-
-function relTime(ts: number | undefined): string {
-  if (!ts) return "";
-  const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (seconds < 60) return m.relative_now_short();
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return m.relative_minutes_short({ value: fmtNumber(minutes) });
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return m.relative_hours_short({ value: fmtNumber(hours) });
-  return m.relative_days_short({ value: fmtNumber(Math.floor(hours / 24)) });
-}
 
 /** The last path segment, for compact display ("src/a/b.rs" → "b.rs"). */
 function baseName(path: string): string {
@@ -2950,7 +2939,7 @@ const Message = memo(function Message({
         onFork(message.id, next);
       };
       return (
-        <div className="msg-user-group self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
+        <div className="msg-user-group ms-auto self-end flex w-full max-w-[88%] flex-col items-end gap-1.5">
           <div className="msg-user-edit w-full bg-surface rounded-[16px] py-2.5 px-[15px] flex flex-col gap-2">
             <textarea
               dir="auto"
@@ -2987,7 +2976,7 @@ const Message = memo(function Message({
       );
     }
     return (
-      <div className="msg-user-group group/turn self-end flex max-w-[88%] flex-col items-end gap-1.5">
+      <div className="msg-user-group group/turn ms-auto self-end flex max-w-[88%] flex-col items-end gap-1.5">
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
@@ -3080,7 +3069,7 @@ function ShellExchangeCard({ part }: { part: ChatPart }) {
       ? m.chat_bash_exit_code({ code: fmtNumber(exitCode) })
       : null;
   return (
-    <div className="msg-shell self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
+    <div className="msg-shell ms-auto self-end flex w-full max-w-[88%] flex-col items-stretch gap-1.5">
       <div dir="ltr" className="max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base">
         <div className="flex items-start gap-2 font-mono text-sm text-text whitespace-pre-wrap wrap-anywhere">
           <span className="sr-only">{m.chat_panel_bash()} </span>
@@ -3875,7 +3864,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot]:w-3.5 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:text-ellipsis [&_.session-title]:whitespace-nowrap [&.unread_.session-title]:font-semibold [&_.session-time]:text-xs [&_.session-time]:text-muted [&_.session-time]:shrink-0 [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-within_.session-menu-btn]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-time]:hidden [&:focus-within_.session-time]:hidden [&.menu-open_.session-time]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-time]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
@@ -3903,13 +3892,6 @@ function SessionRow({
         }
       }}
     >
-      <span className="session-dot">
-        {busy ? (
-          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
-        ) : (
-          unread && <span className="unread-dot" />
-        )}
-      </span>
       {session.parentSessionId && !editing && (
         <Users className="text-muted shrink-0" size={12} aria-hidden />
       )}
@@ -3942,7 +3924,13 @@ function SessionRow({
           />
         </span>
       )}
-      <span className="session-time">{relTime(session.updatedAt)}</span>
+      <span className="session-dot">
+        {busy ? (
+          <span className={`busy-dot ${waiting ? "waiting" : ""}`} />
+        ) : (
+          unread && <span className="unread-dot" />
+        )}
+      </span>
       <button
         className="session-menu-btn"
         title={m.chat_panel_session_options()}
@@ -4129,11 +4117,6 @@ export function ChatPanel({
   onShowRail,
   mainView,
   onSelectMainView,
-  experimentsActive,
-  filesActive,
-  artifactsActive,
-  onOpenExperiments,
-  onOpenArtifacts,
   onOpenFile,
   onOpenRun,
   runExperimentName,
@@ -4141,7 +4124,6 @@ export function ChatPanel({
   experimentName,
   onOpenPlan,
   onOpenSubagent,
-  onOpenWorktree,
   runtime,
   onOpenDemoWelcome,
   composerPrefill = null,
@@ -4162,11 +4144,6 @@ export function ChatPanel({
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
   mainView: "chat" | "skills" | SettingsTab;
   onSelectMainView: (view: "chat" | "skills" | SettingsTab) => void;
-  experimentsActive: boolean;
-  filesActive: boolean;
-  artifactsActive: boolean;
-  onOpenExperiments: () => void;
-  onOpenArtifacts: () => void;
   /** Open a project file in the right pane (chat tool rows are clickable).
    * `sessionId` is the chat session the click came from, so relative paths
    * can resolve against that session's worktree. */
@@ -4202,8 +4179,6 @@ export function ChatPanel({
     label: string | undefined,
     intent: TabOpenIntent,
   ) => void;
-  /** Open the pinned Files home for the active session. */
-  onOpenWorktree: () => void;
   runtime: RuntimeInfo;
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
@@ -4779,6 +4754,16 @@ export function ChatPanel({
   const activeLeafId = activeId ? (state.activeLeafBySession[activeId] ?? null) : null;
   activeLeafRef.current = activeLeafId;
   const messages = useMemo(() => activePath(allMessages, activeLeafId), [allMessages, activeLeafId]);
+  const previousBusySessions = useRef({ projectId, ids: state.busySessions });
+  useEffect(() => {
+    const previous = previousBusySessions.current;
+    previousBusySessions.current = { projectId, ids: state.busySessions };
+    if (previous.projectId !== projectId) return;
+    setUnreadSessionIds((current) => unreadAfterBusyChange(
+      current, previous.ids, state.busySessions, sessions, mainView === "chat" ? activeId : null,
+    ));
+  }, [projectId, state.busySessions, sessions, activeId, mainView]);
+
   const busy = activeId ? state.busySessions.has(activeId) : false;
   const canFork = !busy && !!activeHarness?.agentReady;
   const hasPendingTailTool = busy && streamTailTool(messages) != null;
@@ -5661,7 +5646,7 @@ export function ChatPanel({
 
   const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
   const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
-  const newTaskShortcut = isApple ? "⌘ ⇧ Enter" : "Ctrl + Shift + Enter";
+  const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
   const startNewTask = useCallback(() => {
     setSessionFilter("active");
@@ -5695,31 +5680,18 @@ export function ChatPanel({
   }, [startNewTask]);
 
   const rail = (
-    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:py-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
+    <aside className="session-rail w-68 shrink-0 flex flex-col mt-5 me-3.5 mb-5 ms-0 bg-background min-h-0 [&_.rail-body]:flex-1 [&_.rail-body]:min-h-0 [&_.rail-body]:overflow-y-auto [&_.rail-body]:pt-0 [&_.rail-body]:pb-1 [&_.rail-body]:px-2 border border-border rounded-lg overflow-visible shadow-elevated">
       {railHeader}
-      {/* Workspace tools open beside chat; settings sections replace the middle pane. */}
       <nav className="rail-nav flex flex-col gap-0.5 p-2 shrink-0">
         <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${filesActive ? "active" : ""}`}
-          onClick={onOpenWorktree}
+          className="rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start hover:bg-surface [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
+          data-onboarding="new-session"
+          data-tip={newTaskShortcut}
+          aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
+          onClick={startNewTask}
         >
-          <FolderOpen size={15} />
-          {m.chat_panel_files()}
-        </button>
-        <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${artifactsActive ? "active" : ""}`}
-          data-onboarding="nav-artifacts"
-          onClick={onOpenArtifacts}
-        >
-          <Package size={15} />
-          {m.chat_panel_artifacts()}
-        </button>
-        <button
-          className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${experimentsActive ? "active" : ""}`}
-          onClick={onOpenExperiments}
-        >
-          <FlaskConical size={15} />
-          {m.chat_panel_experiments()}
+          <Plus size={15} />
+          {m.chat_panel_new_chat()}
         </button>
         <button
           className={`rail-nav-item flex items-center gap-2.5 py-[7px] px-2.5 text-base text-text rounded-md text-start [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium ${mainView === "skills" ? "active" : ""}`}
@@ -5740,21 +5712,11 @@ export function ChatPanel({
           </button>
         ))}
       </nav>
-      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-1.5 ps-4.5">
+      <div className="rail-section-head flex items-center justify-between shrink-0 pt-3.5 pe-2.5 pb-0 ps-4.5">
         <div className="rail-section-label p-0 text-sm font-medium text-subtext">
           {SESSION_FILTERS.find((f) => f.id === sessionFilter)?.railLabel() ?? m.chat_recents()}
         </div>
         <div className="rail-section-actions flex items-center gap-0.5">
-          <button
-            className="rail-section-new inline-flex items-center gap-1 py-[3px] px-1.5 rounded-sm text-subtext text-sm font-medium [&:hover]:text-text [&:hover]:bg-surface tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]"
-            data-onboarding="new-session"
-            data-tip={newTaskShortcut}
-            aria-keyshortcuts="Meta+Shift+Enter Control+Shift+Enter"
-            onClick={startNewTask}
-          >
-            <Plus size={13} />
-            {m.chat_panel_task()}
-          </button>
           <SessionFilterMenu value={sessionFilter} onChange={setSessionFilter} />
         </div>
       </div>
@@ -5786,12 +5748,6 @@ export function ChatPanel({
                   });
                 }
               }
-              setUnreadSessionIds((current) => {
-                if (!current.has(s.id)) return current;
-                const next = new Set(current);
-                next.delete(s.id);
-                return next;
-              });
             }}
             onRename={(title) => rename(s, title)}
             onSetArchived={(archived) => setArchived(s, archived)}
@@ -5843,18 +5799,14 @@ export function ChatPanel({
     </aside>
   );
 
-  // With the rail hidden, the header stretches to the full pane width
-  // (Claude-desktop style): the reopen toggle sits in the window's top-left
-  // corner with the title beside it, instead of riding the centered readable
-  // column.
-  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&.rail-hidden]:max-w-none [&.rail-hidden]:py-0 [&.rail-hidden]:px-0.5 [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none${railOpen ? "" : " rail-hidden"}`;
+  const headerClass = `chat-header flex items-center gap-2 py-0 px-4 bg-background shrink-0 h-12 relative z-4 w-full max-w-readable my-0 mx-auto [&::after]:content-[''] [&::after]:absolute [&::after]:top-full [&::after]:start-0 [&::after]:end-0 [&::after]:h-6 [&::after]:bg-[linear-gradient(to_bottom,_var(--base),_transparent)] [&::after]:pointer-events-none`;
   const railReopen = !railOpen && (
     <IconButton
       title={m.chat_panel_show_sidebar()}
       aria-label={m.chat_panel_show_sidebar()}
       onClick={onShowRail}
     >
-      <PanelLeft size={15} />
+      <PanelLeft size={20} />
     </IconButton>
   );
 
@@ -5863,7 +5815,7 @@ export function ChatPanel({
       <>
         {railOpen && rail}
         <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
-          {!railOpen && <div className={headerClass}>{railReopen}</div>}
+          {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
           <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">{children}</div>
         </section>
       </>
@@ -5873,11 +5825,12 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 mt-5">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={headerClass}>
+        <div className={railOpen ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] items-center"}>
           {railReopen}
+          <div className={headerClass}>
           <PaperTitle variant="header"
             title={activeSession ? activeSession.title?.trim() || m.chat_untitled() : m.chat_new_session()}
           >
@@ -5900,6 +5853,7 @@ export function ChatPanel({
               <HelpCircle size={15} />
             </IconButton>
           )}
+          </div>
         </div>
 
         {historyError ? (
