@@ -6,7 +6,7 @@
 //! forward itself: it starts `orx up` on the remote, tunnels the port to this
 //! machine, waits for the server to come up, and opens the browser.
 //!
-//! Transport is the `ssh` binary with the same ControlMaster/BatchMode options
+//! Transport is the `ssh` binary with the same multiplexing/BatchMode options
 //! the SSH job backend uses (`crate::jobs::ssh`); auth is the user's own
 //! `~/.ssh/config` + agent/keys — orx never reads a key.
 
@@ -2236,7 +2236,8 @@ pub(crate) fn forward_spec(local_port: u16, remote_port: u16) -> String {
 }
 
 /// Build `ssh <opts> -L <forward> -- <dest> <remote_cmd>` over the settings
-/// ControlMaster. The session launcher replaces stdin with its credential pipe.
+/// ControlMaster, where the platform has one. The session launcher replaces
+/// stdin with its credential pipe.
 pub(crate) fn ssh_forward_command(
     target: &SshTarget,
     forward: &str,
@@ -2566,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_reuses_control_master_and_exits_on_forward_failure() {
+    fn tunnel_uses_the_platform_control_master_and_exits_on_forward_failure() {
         let opts = crate::jobs::ssh::forward_args(
             &SshTarget::alias("mybox"),
             "127.0.0.1:7:localhost:7",

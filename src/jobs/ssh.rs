@@ -45,21 +45,19 @@ fn prepare_control_dir() -> Result<()> {
             dir.display()
         )
     })?;
-    {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let metadata = std::fs::symlink_metadata(&dir)?;
-        let uid = unsafe { libc::geteuid() };
-        if !metadata.file_type().is_dir() || metadata.uid() != uid {
-            return Err(anyhow!(
-                "SSH control path {} is not an owner-controlled directory.",
-                dir.display()
-            ));
-        }
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&dir, permissions)?;
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_dir() || metadata.uid() != uid {
+        return Err(anyhow!(
+            "SSH control path {} is not an owner-controlled directory.",
+            dir.display()
+        ));
     }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&dir, permissions)?;
     Ok(())
 }
 
@@ -148,7 +146,7 @@ fn control_path(target: &SshTarget) -> PathBuf {
 /// Shared ssh options: connection setup permits prompts; background work never
 /// does. On unix both modes share one control socket, kept for ten idle
 /// minutes, so a single interactive login covers later status, log and job
-/// commands; Windows cannot multiplex, so each call authenticates on its own.
+/// commands.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
@@ -587,7 +585,7 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 4 + multiplexing_opts(&target).len();
+        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
@@ -621,6 +619,15 @@ mod tests {
                 "LogLevel=ERROR",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiplexing_is_on_and_persistent() {
+        let opts = multiplexing_opts(&SshTarget::alias("cluster"));
+        assert_eq!(opts[0..2], ["-o", "ControlMaster=auto"]);
+        assert!(opts[3].starts_with("ControlPath="));
+        assert_eq!(opts[4..6], ["-o", "ControlPersist=600"]);
     }
 
     /// Present and off, not absent: a user's own ssh_config would otherwise

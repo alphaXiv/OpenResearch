@@ -147,7 +147,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
-        cmd.env("GIT_SSH_COMMAND", ssh_command("ssh -oBatchMode=yes"));
+        cmd.env("GIT_SSH_COMMAND", git_ssh_command("ssh -oBatchMode=yes"));
     }
     let out = cmd
         .args(args)
@@ -1482,12 +1482,12 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
 /// cannot do it — a ControlPath from the user's ssh_config would otherwise fail
 /// the connection (see `jobs::ssh::multiplexing_opts`).
 #[cfg(unix)]
-fn ssh_command(base: &str) -> String {
+fn git_ssh_command(base: &str) -> String {
     base.to_string()
 }
 
 #[cfg(not(unix))]
-fn ssh_command(base: &str) -> String {
+fn git_ssh_command(base: &str) -> String {
     format!("{base} -oControlMaster=no -oControlPath=none")
 }
 
@@ -1519,7 +1519,7 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
         command.env(
             "GIT_SSH_COMMAND",
-            ssh_command("ssh -oBatchMode=yes -oConnectTimeout=15"),
+            git_ssh_command("ssh -oBatchMode=yes -oConnectTimeout=15"),
         );
     }
     command
