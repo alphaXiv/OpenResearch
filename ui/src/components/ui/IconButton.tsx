@@ -6,7 +6,6 @@ const BASE = [
   "transition-[background,color] duration-120 ease-standard",
   "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2",
   "disabled:cursor-default disabled:opacity-45",
-  "[.chat-header.rail-hidden_>_&:first-child]:me-3",
 ].join(" ");
 
 type IconButtonSize = "default" | "small";

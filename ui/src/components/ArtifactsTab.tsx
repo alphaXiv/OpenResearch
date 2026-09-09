@@ -1,3 +1,4 @@
+import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { useQuery } from "@tanstack/react-query";
 import { queryClient } from "../queries/client";
 import { getArtifactFileTextQuery } from "../queries/files";
@@ -5,14 +6,11 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { getLocale } from "../paraglide/runtime.js";
 import {
-  Check,
   ChevronRight,
-  Copy,
   ExternalLink,
   Code,
   MousePointerClick,
   Package,
-  Settings2,
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
@@ -45,9 +43,6 @@ import {
   type FileContextMenuTarget,
 } from "./FileTreeActions";
 import { IconButton, IconButtonLink, LoadingRow, showAlert, Spinner } from "./ui";
-
-const TOOLTIP_ICON_BUTTON_CLASS_NAME =
-  "tip-up [&[data-tip]::after]:top-auto [&[data-tip]::after]:bottom-[calc(100%_+_6px)]";
 
 /** Any href with a URI scheme (https:, mailto:, data:, …) or a
  * protocol-relative // — i.e. not an artifact-relative path to resolve. */
@@ -505,39 +500,6 @@ function TreeRows({
   );
 }
 
-/** The artifacts directory path, copyable in the tree footer. */
-function DirFooter({ dir, onOpenStorage }: { dir: string; onOpenStorage?: () => void }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="ftree-footer shrink-0 flex items-center gap-0.5 py-[5px] px-2 border-t border-t-border-variant [&_code]:flex-1 [&_code]:min-w-0 [&_code]:[direction:rtl] [&_code]:text-left [&_code]:font-mono [&_code]:text-xs [&_code]:text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={ltr(dir)}>
-      <code className="path-front-ellipsis">{dir}</code>
-      <IconButton size="small"
-        className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
-        data-tip={copied ? m.common_copied() : m.artifacts_copy_path()}
-        aria-label={m.artifacts_tab_copy_artifacts_directory_path()}
-        onClick={() => {
-          void navigator.clipboard?.writeText(dir);
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1200);
-        }}
-      >
-        {copied ? <Check size={12} /> : <Copy size={12} />}
-      </IconButton>
-      {onOpenStorage && (
-        <IconButton size="small"
-          className={TOOLTIP_ICON_BUTTON_CLASS_NAME}
-          data-tip={m.artifacts_tab_storage_settings()}
-          data-tip-align="end"
-          aria-label={m.artifacts_tab_storage_settings()}
-          onClick={onOpenStorage}
-        >
-          <Settings2 size={12} />
-        </IconButton>
-      )}
-    </div>
-  );
-}
-
 /** Middle-pane Artifacts tab — a split explorer over the project's durable outputs
  * on disk. Tree on the left; the selected entry renders inline on the right
  * (markdown as documents, images and PDFs directly, code as highlighted source). */
@@ -546,14 +508,11 @@ export function ArtifactsTab({
   artifacts,
   onOpenFile,
   canRenameFile,
-  onOpenStorage,
 }: {
   project: Project;
   artifacts: ProjectArtifacts | null;
   onOpenFile: (path: string) => void;
   canRenameFile: (path: string) => boolean;
-  /** Navigate to Settings → Storage (where the data dir can be changed). */
-  onOpenStorage?: () => void;
 }) {
   const [selected, setSelected] = useState<string | null>(null);
   // Folders are open by default — including ones that appear later — so this
@@ -676,16 +635,11 @@ export function ArtifactsTab({
 
   if (artifacts.entries.length === 0) {
     return (
-      <div className="files-tab h-full min-h-0 flex bg-background">
-        <div className="files-empty-state flex-1 flex flex-col items-center justify-center gap-1.5 p-6 text-center text-muted [&_h3]:mt-1.5 [&_h3]:mx-0 [&_h3]:mb-0 [&_h3]:text-base [&_h3]:font-semibold [&_h3]:text-text [&_p]:m-0 [&_p]:max-w-105 [&_p]:text-sm [&_p]:leading-[1.55] [&_p]:text-subtext [&_.ftree-footer]:mt-2.5 [&_.ftree-footer]:max-w-full [&_.ftree-footer]:border [&_.ftree-footer]:border-border [&_.ftree-footer]:rounded-md [&_.ftree-footer]:py-1.5 [&_.ftree-footer]:px-2.5 [&_.ftree-footer]:bg-background [&_.ftree-footer_code]:max-w-95">
-          <Package size={28} strokeWidth={1.5} />
-          <h3>{m.artifacts_tab_no_artifacts_yet()}</h3>
-          <p>
-            {m.artifacts_tab_this_is_the_project_s_durable_output_space()}
-          </p>
-          <DirFooter dir={artifacts.dir} onOpenStorage={onOpenStorage} />
-        </div>
-      </div>
+      <WorkspaceEmptyState
+        icon={Package}
+        title={m.artifacts_tab_no_artifacts_yet()}
+        description={m.artifacts_tab_this_is_the_project_s_durable_output_space()}
+      />
     );
   }
 

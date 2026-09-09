@@ -93,6 +93,7 @@ import {
   type ChatMessage,
   type UiState,
 } from "./api";
+import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
 import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
@@ -221,6 +222,7 @@ type ExperimentsView = "tree" | "table";
 /** Floating panel sizing: keep both the panel and the chat column usable. */
 const PANEL_MIN_WIDTH = 360;
 const PANEL_MARGIN = 10;
+const WORKSPACE_CARD_MIN_WIDTH = 1448; // 1420px content plus the body’s 14px gutters.
 // Space the rest of the layout needs beside the panel: the 272px rail, the
 // chat column's minimum, and the gutters/margins between the three columns
 // (app-body padding 14×2, rail inner margin 14, end-pane inner margin 14).
@@ -416,6 +418,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // to (nearly) full screen. Width persists across sessions.
   const [panelMax, setPanelMax] = useState(false);
   const [panelWidth, setPanelWidth] = useState(initialPanelWidth);
+  const [workspaceWide, setWorkspaceWide] = useState(() => window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+  const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   // The agents rail is a floating panel too: fixed-width, collapsible.
   const [railOpen, setRailOpen] = useState(true);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
@@ -782,7 +786,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   // Shrinking the window can push a fixed-width panel past its usable max —
   // reclamp so it never overflows the viewport.
   useEffect(() => {
-    const onResize = () => setPanelWidth((w) => Math.min(w, panelMaxWidth()));
+    const onResize = () => {
+      setPanelWidth((w) => Math.min(w, panelMaxWidth()));
+      setWorkspaceWide(window.innerWidth >= WORKSPACE_CARD_MIN_WIDTH);
+    };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
@@ -1546,7 +1553,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <OfflineBanner />}
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
-      <div className="app-body flex flex-1 min-h-0 py-0 px-3.5">
+      <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
         {projectId && (
           <ChatPanel
             projectId={projectId}
@@ -1556,13 +1563,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onShowRail={() => setRailOpen(true)}
             mainView={mainView}
             onSelectMainView={selectMainView}
-            experimentsActive={
-              mainView === "chat" && panelOpen && rightTab === "experiments"
-            }
-            filesActive={mainView === "chat" && panelOpen && rightTab === "files"}
-            artifactsActive={mainView === "chat" && panelOpen && rightTab === "artifacts"}
-            onOpenExperiments={() => openExperimentsTab()}
-            onOpenArtifacts={openArtifactsTab}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
             runExperimentName={runExperimentName}
@@ -1570,7 +1570,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experimentName={experimentName}
             onOpenPlan={openPlanTab}
             onOpenSubagent={openSubagentTab}
-            onOpenWorktree={openWorktreeTab}
             composerPrefill={
               activeProject &&
                 isDemoProjectId(activeProject.id) &&
@@ -1601,6 +1600,24 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               />
             ) : null}
           </ChatPanel>
+        )}
+        {mainView === "chat" && (
+          <WorkspaceTools
+            expanded={workspaceCardVisible}
+            experiments={experiments}
+            runs={runs}
+            onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
+            rightOffset={panelOpen ? panelWidth + 28 : undefined}
+            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments") ? rightTab : null}
+            projectId={activeProject.id}
+            onCompute={() => selectMainView("compute")}
+            sessionId={activeSessionId}
+            busy={sessionsQuery.data?.some((session) => session.id === activeSessionId && session.busy) ?? false}
+            onChanges={() => { setFilesView("changes"); openWorktreeTab(); }}
+            onFiles={() => { setFilesView("files"); openWorktreeTab(); }}
+            onArtifacts={openArtifactsTab}
+            onExperiments={() => openExperimentsTab()}
+          />
         )}
         {mainView === "chat" && panelOpen && (
           <aside
@@ -1682,7 +1699,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     canRenameFile={(path) => !fileBuffersRef.current.get(
                       fileScrollKey(activeProject.id, activeSessionId, { path, source: "artifacts" }),
                     )?.needsProtection}
-                    onOpenStorage={runtime.kind === "ssh" ? undefined : () => selectMainView("storage")}
                   />
                 )}
               </TabBody>
