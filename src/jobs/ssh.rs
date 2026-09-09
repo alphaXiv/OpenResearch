@@ -33,11 +33,7 @@ fn control_dir() -> PathBuf {
     PathBuf::from("/tmp").join(format!("orx-ssh-{uid}-{:08x}", namespace.finish() as u32))
 }
 
-#[cfg(not(unix))]
-fn control_dir() -> PathBuf {
-    crate::config::config_dir().join("ssh-cm")
-}
-
+#[cfg(unix)]
 fn prepare_control_dir() -> Result<()> {
     let dir = control_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -62,6 +58,12 @@ fn prepare_control_dir() -> Result<()> {
         permissions.set_mode(0o700);
         std::fs::set_permissions(&dir, permissions)?;
     }
+    Ok(())
+}
+
+/// No socket to place, so nothing to prepare.
+#[cfg(not(unix))]
+fn prepare_control_dir() -> Result<()> {
     Ok(())
 }
 
@@ -131,6 +133,7 @@ impl SshTarget {
     }
 }
 
+#[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
@@ -150,15 +153,36 @@ fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+    ];
+    opts.extend(multiplexing_opts(target));
+    opts.extend(target.extra_opts.iter().cloned());
+    opts
+}
+
+#[cfg(unix)]
+fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
+    vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
         format!("ControlPath={}", control_path(target).display()),
         "-o".into(),
         "ControlPersist=600".into(),
-    ];
-    opts.extend(target.extra_opts.iter().cloned());
-    opts
+    ]
+}
+
+/// Win32-OpenSSH accepts these and then never creates a master, and a
+/// ControlPath it does honour from the user's own ssh_config fails the
+/// connection outright ("getsockname failed: Not a socket"). Turning it off
+/// explicitly is what overrides that config; omitting the options is not.
+#[cfg(not(unix))]
+fn multiplexing_opts(_target: &SshTarget) -> Vec<String> {
+    vec![
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
+    ]
 }
 
 /// Arguments for a long-lived local forward over the same authenticated
@@ -200,6 +224,13 @@ pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     Ok(args)
 }
 
+/// Win32-OpenSSH never creates a master, so there is never one running.
+#[cfg(not(unix))]
+pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     let path = control_path(target);
@@ -591,6 +622,19 @@ mod tests {
 
     /// Explicit targets on the same host but different ports must not share a
     /// ControlMaster socket — the opts are part of the ControlPath hash.
+    /// Off unix the options must be present and off, not absent: a user's own
+    /// ssh_config would otherwise re-enable a ControlPath that fails the
+    /// connection.
+    #[cfg(not(unix))]
+    #[test]
+    fn multiplexing_is_turned_off_rather_than_left_unset() {
+        let opts = ssh_opts(&SshTarget::alias("cluster"), true);
+        assert!(opts.contains(&"ControlMaster=no".to_string()));
+        assert!(opts.contains(&"ControlPath=none".to_string()));
+        assert!(!opts.iter().any(|opt| opt.starts_with("ControlPersist=")));
+    }
+
+    #[cfg(unix)]
     #[test]
     fn control_path_differs_per_port() {
         let control_path = |t: &SshTarget| {
@@ -623,6 +667,7 @@ mod tests {
         assert!(path.len() + 17 < 104, "{path}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn interactive_and_batch_modes_share_the_control_path() {
         let target = SshTarget::alias("cluster");
