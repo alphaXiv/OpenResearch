@@ -90,10 +90,8 @@ jobs:
       - name: Test
         run: cargo test --locked
 
-  # Windows is a supported build target but has no macOS/Linux twin here: the
-  # UI, i18n and dev-slot checks above are platform-independent, so this job
-  # covers only what differs — that the `#[cfg(windows)]` branches compile and
-  # their tests pass. No Node: ui/dist is committed and embedded.
+  # Only what differs by platform: the checks above are platform-independent,
+  # and ui/dist is committed, so no Node here.
   windows:
     name: windows build, test
     runs-on: windows-latest
@@ -119,8 +117,9 @@ jobs:
       - name: Upload orx.exe
         uses: actions/upload-artifact@v4
         with:
-          name: orx-windows-x86_64
+          name: orx-windows-x86_64-debug
           path: target/debug/orx.exe
+          if-no-files-found: error
 
   # Guards the version-bump release flow (release-on-bump.yml): the version in
   # Cargo.toml may only move forward, may not reuse an already-released tag,

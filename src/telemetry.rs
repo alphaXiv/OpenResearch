@@ -709,25 +709,20 @@ async fn deliver_payload(path: Option<PathBuf>, payload: serde_json::Value) {
     if !is_enabled(flag()) {
         return;
     }
-    let _ = deliver_queued_payload(path, payload).await;
+    deliver_queued_payload(path, payload).await;
 }
 
-async fn deliver_queued_payload(
-    path: Option<PathBuf>,
-    payload: serde_json::Value,
-) -> DeliveryOutcome {
-    let outcome = post_payload(&payload).await;
-    if outcome != DeliveryOutcome::Retryable {
+async fn deliver_queued_payload(path: Option<PathBuf>, payload: serde_json::Value) {
+    if post_payload(&payload).await != DeliveryOutcome::Retryable {
         if let Some(path) = path {
             let _ = std::fs::remove_file(path);
         }
     }
-    outcome
 }
 
 async fn deliver_retry_payload(path: PathBuf, payload: serde_json::Value) {
     if is_consent_payload(&payload) {
-        let _ = deliver_queued_payload(Some(path), payload).await;
+        deliver_queued_payload(Some(path), payload).await;
     } else {
         deliver_payload(Some(path), payload).await;
     }
@@ -1671,13 +1666,8 @@ mod tests {
                 build_payload_with_id("command", "install", event_id, json!({ "command": "run" }));
             let path = outbox_dir().join(format!("{event_id}.json"));
             std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
-            let outcome = deliver_queued_payload(Some(path.clone()), payload).await;
-            assert_eq!(
-                path.exists(),
-                should_remain,
-                "delivered as {outcome:?}; removing it again says {:?}",
-                std::fs::remove_file(&path)
-            );
+            deliver_queued_payload(Some(path.clone()), payload).await;
+            assert_eq!(path.exists(), should_remain);
         }
         server.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -1723,11 +1713,7 @@ mod tests {
         );
         std::fs::write(&consent_path, serde_json::to_vec(&consent).unwrap()).unwrap();
         deliver_retry_payload(consent_path.clone(), consent).await;
-        assert!(
-            !consent_path.exists(),
-            "removing it again says {:?}",
-            std::fs::remove_file(&consent_path)
-        );
+        assert!(!consent_path.exists());
 
         server.await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);

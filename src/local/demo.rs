@@ -1900,8 +1900,8 @@ mod tests {
             },
         )
         .unwrap();
-        let _ = std::fs::remove_dir_all(&worktrees);
-        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::remove_dir_all(&worktrees).expect("clear the worktrees");
+        std::fs::remove_dir_all(&repo).expect("clear the cached clone");
 
         crate::local::git::restore_local_repository(
             &repo,

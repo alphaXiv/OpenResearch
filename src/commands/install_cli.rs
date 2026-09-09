@@ -172,8 +172,7 @@ fn other_orx_on_path(link: &Path) -> Option<PathBuf> {
     let link_real = crate::paths::canonicalize(link);
     std::env::split_paths(&paths)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join("orx"))
-        .filter(|candidate| candidate.exists())
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "orx"))
         .find(
             |candidate| match (crate::paths::canonicalize(candidate), &link_real) {
                 (Ok(candidate), Ok(link)) => &candidate != link,

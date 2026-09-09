@@ -313,7 +313,11 @@ fn run_bibliography(
 ) -> Result<Run> {
     // cwd is the aux dir (bibtex refuses to write outside it), so `.` no longer
     // means the paper's directory — both search paths have to say so.
-    let search = format!("{}:", source_dir.to_string_lossy());
+    let search = format!(
+        "{}{}",
+        source_dir.to_string_lossy(),
+        crate::local::shell_env::PATH_LIST_SEPARATOR
+    );
     let mut command = tex_command(tool);
     command
         .arg(stem)

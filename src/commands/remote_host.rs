@@ -1,9 +1,9 @@
 //! Persistent SSH remote host and its private same-user control channel.
 
-// Windows compiles the control-channel half of this module out, leaving its
-// constants, helpers and request types unreferenced. They are kept whole rather
-// than gated item by item — the gating would be bulkier than the code it
-// guards, and the half returns intact once the channel has a Windows transport.
+// The control channel is a Unix domain socket, so Windows compiles that half of
+// the module out. Its entry points are gated; the constants, request types and
+// imports only they reach are left in place rather than gated one by one, since
+// the half returns intact once the channel has a Windows transport.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::HashSet;
@@ -747,6 +747,7 @@ fn print_descriptor(descriptor: &HostDescriptor) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)> {
     let executable = std::env::current_exe()?;
     let args = ["up", "--no-browser", "--remote-host", "--port", "0"];
@@ -784,6 +785,7 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
     Ok((child, log_path))
 }
 
+#[cfg(unix)]
 fn open_runtime_log(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -797,6 +799,7 @@ fn open_runtime_log(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 fn ensure_server_lock_free(data_dir: &Path) -> Result<()> {
     let path = shared_path(data_dir, "lock")?;
     let mut lock = open_lock(&path)?;
@@ -862,14 +865,17 @@ pub(crate) fn hostname() -> String {
         .unwrap_or_else(|| "remote host".into())
 }
 
+#[cfg(unix)]
 fn descriptor_path(data_dir: &Path) -> Result<PathBuf> {
     shared_path(data_dir, "json")
 }
 
+#[cfg(unix)]
 fn control_socket_path(data_dir: &Path) -> Result<PathBuf> {
     runtime_path(data_dir, "sock")
 }
 
+#[cfg(unix)]
 fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
     let root = PathBuf::from(format!("/tmp/orx-{}", effective_uid()));
     ensure_private_dir(&root)?;
@@ -944,6 +950,7 @@ fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
+#[cfg(unix)]
 fn ensure_private_dir(path: &Path) -> Result<()> {
     if path.exists() {
         let metadata = std::fs::symlink_metadata(path)?;
@@ -963,6 +970,7 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     set_mode(path, 0o700)
 }
 
+#[cfg(unix)]
 fn write_descriptor(path: &Path, descriptor: &HostDescriptor) -> Result<()> {
     crate::local::git::atomic_write_with_mode(
         path,
@@ -996,30 +1004,6 @@ fn metadata_mode(metadata: &std::fs::Metadata) -> u32 {
 fn set_mode(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-// Windows has no uid or mode, so `ensure_private_dir` keeps only its symlink
-// and directory checks there. What it stops enforcing is covered by the default
-// ACL on a user's profile, which is where the runtime directory lives — but
-// this is a weaker guarantee than the unix path makes, not an equivalent one.
-#[cfg(not(unix))]
-fn effective_uid() -> u32 {
-    0
-}
-
-#[cfg(not(unix))]
-fn metadata_uid(_metadata: &std::fs::Metadata) -> u32 {
-    effective_uid()
-}
-
-#[cfg(not(unix))]
-fn metadata_mode(_metadata: &std::fs::Metadata) -> u32 {
-    0
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 

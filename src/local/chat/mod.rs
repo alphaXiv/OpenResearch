@@ -1329,8 +1329,19 @@ fn kill_shell_group(pid: Option<u32>) {
     }
 }
 
+/// Windows has no group to signal, and the caller's second wait is untimed, so
+/// without this a timed-out command hangs the turn until the child exits.
 #[cfg(not(unix))]
-fn kill_shell_group(_pid: Option<u32>) {}
+fn kill_shell_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
 
 /// Drain one stream on its own task from the moment the child starts, so a
 /// chatty command never blocks on a full pipe while we wait for it.
@@ -1354,6 +1365,12 @@ async fn drained((mut handle, kept): (tokio::task::JoinHandle<()>, ShellStream))
     String::from_utf8_lossy(&kept).into_owned()
 }
 
+/// Appended to a failed bash spawn; empty where bash is expected to exist.
+#[cfg(windows)]
+const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
+#[cfg(not(windows))]
+const BASH_HINT: &str = "";
+
 impl ChatHost {
     /// Run a composer `!` command in `cwd` and record the exchange on the
     /// session's branch, where the next turn picks it up as context.
@@ -1376,12 +1393,14 @@ impl ChatHost {
         spawn.process_group(0);
         prepare_env(&mut spawn);
         let mut exit_code = None;
-        // Only the cfg(unix) block below ever assigns it.
         #[cfg_attr(not(unix), allow(unused_mut))]
         let mut signal: Option<i64> = None;
         let mut timed_out = false;
         let (mut output, mut error) = match spawn.spawn() {
-            Err(error) => (String::new(), format!("could not start bash: {error}")),
+            Err(error) => (
+                String::new(),
+                format!("could not start bash: {error}{}", BASH_HINT),
+            ),
             Ok(mut child) => {
                 let pid = child.id();
                 let stdout = drain_shell_stream(child.stdout.take());
@@ -7643,16 +7662,21 @@ const PATH_GUARD: &str =
      export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
      fi\n";
 
-/// Directory holding the running `orx`. A relative or colon-bearing directory
-/// is dropped rather than fronted: neither can be spelled in a `PATH` entry,
-/// and an empty one would mean the agent's cwd.
+/// Directory holding the running `orx`. A relative directory, or one carrying
+/// the platform's own `PATH` separator, is dropped rather than fronted: neither
+/// can be spelled in a `PATH` entry, and an empty one would mean the agent's cwd.
 fn orx_bin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
     // the un-canonicalized path still names the right directory.
     let exe = crate::paths::canonicalize(&exe).unwrap_or(exe);
     exe.parent()
-        .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains(':'))
+        .filter(|dir| {
+            dir.is_absolute()
+                && !dir
+                    .to_string_lossy()
+                    .contains(crate::local::shell_env::PATH_LIST_SEPARATOR)
+        })
         .map(std::path::Path::to_path_buf)
 }
 

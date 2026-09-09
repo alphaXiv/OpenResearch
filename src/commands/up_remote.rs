@@ -1790,7 +1790,7 @@ fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
     Ok(posix_parent(parent))
 }
 
-/// The root directory is its own parent; every other parent keeps its name.
+/// An empty remainder from `rsplit_once` is the root itself.
 fn posix_parent(parent: &str) -> String {
     if parent.is_empty() {
         "/".to_string()

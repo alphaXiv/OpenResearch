@@ -1190,6 +1190,11 @@ pub(crate) fn restore_local_repository(
     let origin_arg = origin.to_string_lossy().into_owned();
     let result: Result<()> = (|| {
         git(None, &["init", "--quiet", &tmp_arg])?;
+        // Git for Windows' system config turns autocrlf on, which would check
+        // out CRLF against LF blobs. Every later read of this clone disables
+        // system and global config, so it would then read as permanently dirty
+        // and the demo would reject the cache it had just restored.
+        git(Some(&tmp), &["config", "core.autocrlf", "false"])?;
         git(Some(&tmp), &["remote", "add", "origin", &origin_arg])?;
         git(
             Some(&tmp),
@@ -1480,10 +1485,8 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
 
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
-/// The empty path handed to git to disable a config file or a hooks directory.
-/// Git for Windows does not translate `/dev/null`, and reads a literal
-/// `\dev\null` as a missing relative path — which silently re-enables the
-/// repository's own hooks.
+/// The null device, as git spells it on this platform. `diff --no-index`
+/// recognizes `NUL` on Windows and `/dev/null` everywhere else.
 #[cfg(not(windows))]
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]

@@ -1,17 +1,17 @@
 //! Canonicalization that stays usable outside this process.
 //!
-//! Windows `std::fs::canonicalize` answers with a verbatim `\\?\C:\…` path,
-//! and this codebase hands canonicalized paths to things that do not accept
-//! one: git and the agent CLIs receive them as a working directory, Codex
-//! receives them as sandbox writable roots, and the dashboard shows them to the
-//! user. `CreateProcessW` rejects a verbatim `lpCurrentDirectory`, so a session
-//! whose checkout root came straight from `canonicalize` cannot run git at all.
+//! Windows `canonicalize` answers with a verbatim `\\?\C:\…` path, which
+//! `CreateProcessW` rejects as a working directory — so a session whose
+//! checkout root came straight from it cannot run git at all. Codex receives
+//! canonicalized paths as sandbox roots and the dashboard shows them to the
+//! user, both of which want the plain spelling too.
 //!
-//! Consistency matters as much as the form itself: containment checks compare a
-//! canonicalized child against a canonicalized root, so a codebase that mixes
-//! the two spellings denies access to paths that are genuinely inside. Every
-//! canonicalization goes through here for that reason.
+//! Every canonicalization in the crate goes through here, because containment
+//! checks compare a canonicalized child against a canonicalized root and a mix
+//! of the two spellings denies paths that are genuinely inside.
 
+#[cfg(windows)]
+use std::path::{Component, Prefix};
 use std::path::{Path, PathBuf};
 
 /// `std::fs::canonicalize`, minus the Windows verbatim prefix.
@@ -24,52 +24,62 @@ fn plain(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Only a drive path has a plain spelling; UNC and device paths keep theirs,
-/// where the prefix is the path rather than an encoding of it.
+/// Matched on the parsed prefix rather than the string: a name that is not
+/// valid UTF-8 has no `to_str`, and skipping it there would leave that one path
+/// verbatim while the root it is checked against is not.
 #[cfg(windows)]
 fn plain(path: PathBuf) -> PathBuf {
-    let Some(rest) = path.to_str().and_then(|path| path.strip_prefix(r"\\?\")) else {
+    let mut components = path.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
         return path;
     };
-    let mut chars = rest.chars();
-    let drive = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
-        && chars.next() == Some(':')
-        && chars.next() == Some('\\');
-    if drive {
-        PathBuf::from(rest)
-    } else {
-        path
-    }
+    let head = match prefix.kind() {
+        Prefix::VerbatimDisk(drive) => format!("{}:\\", drive as char),
+        // `\\?\UNC\server\share` is an encoding of `\\server\share`.
+        Prefix::VerbatimUNC(server, share) => format!(
+            "\\\\{}\\{}\\",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        ),
+        // A device path is itself, not an encoding of anything shorter.
+        _ => return path,
+    };
+    let mut out = PathBuf::from(head);
+    out.extend(components.filter(|part| !matches!(part, Component::RootDir)));
+    out
 }
 
+#[cfg(windows)]
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn canonicalizing_a_real_directory_keeps_it_usable_as_a_working_directory() {
-        let dir = canonicalize(std::env::temp_dir()).expect("temp dir");
-        assert!(
-            std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
-                .args(if cfg!(windows) {
-                    vec!["/C", "cd"]
-                } else {
-                    vec![]
-                })
-                .current_dir(&dir)
-                .output()
-                .is_ok()
-        );
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn a_verbatim_drive_path_loses_its_prefix_but_a_unc_one_does_not() {
+    fn a_verbatim_path_keeps_only_the_spelling_a_child_process_accepts() {
         assert_eq!(
             plain(PathBuf::from(r"\\?\C:\Users\me")),
             PathBuf::from(r"C:\Users\me")
         );
-        let unc = PathBuf::from(r"\\?\UNC\server\share");
-        assert_eq!(plain(unc.clone()), unc);
+        assert_eq!(
+            plain(PathBuf::from(r"\\?\UNC\server\share\dir")),
+            PathBuf::from(r"\\server\share\dir")
+        );
+        // Not an encoding of a shorter path, so it stays as it is.
+        let device = PathBuf::from(r"\\.\PIPE\orx");
+        assert_eq!(plain(device.clone()), device);
+        let plain_already = PathBuf::from(r"C:\Users\me");
+        assert_eq!(plain(plain_already.clone()), plain_already);
+    }
+
+    #[test]
+    fn a_canonicalized_directory_is_accepted_as_a_working_directory() {
+        let dir = canonicalize(std::env::temp_dir()).expect("temp dir");
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "cd"])
+            .current_dir(&dir)
+            .output()
+            .expect("cmd");
+        assert!(out.status.success());
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(r"\\?\"));
     }
 }

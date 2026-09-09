@@ -38,7 +38,10 @@ fn home_dir() -> PathBuf {
 
 pub fn opencode_db(store: NativeStore) -> PathBuf {
     match store {
-        NativeStore::Isolated => crate::store::data_dir().join("agents/opencode/opencode.db"),
+        NativeStore::Isolated => crate::store::data_dir()
+            .join("agents")
+            .join("opencode")
+            .join("opencode.db"),
         NativeStore::Legacy => user_env_path("OPENCODE_DB").unwrap_or_else(|| {
             user_env_path("XDG_DATA_HOME")
                 .unwrap_or_else(|| home_dir().join(".local/share"))

@@ -435,12 +435,12 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
 pub(crate) fn find_claude() -> Option<PathBuf> {
     find_on_path("claude").or_else(|| {
         let home = dirs::home_dir()?;
-        [[".claude", "local"], [".local", "bin"]]
-            .iter()
-            .find_map(|rel| {
-                let dir = rel.iter().fold(home.clone(), |dir, part| dir.join(part));
-                crate::local::shell_env::find_in_dir(&dir, "claude")
-            })
+        [
+            home.join(".claude").join("local"),
+            home.join(".local").join("bin"),
+        ]
+        .into_iter()
+        .find_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
     })
 }
 

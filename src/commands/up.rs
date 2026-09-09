@@ -2873,7 +2873,6 @@ fn api_rel_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Unaltered off Windows, where a backslash is an ordinary filename character.
 #[cfg(not(windows))]
 fn api_rel_path(path: &std::path::Path) -> String {
     path.to_string_lossy().into_owned()
@@ -3649,12 +3648,11 @@ async fn compile_project_latex(
         }
         let result = local::latex::compile(&full)?;
         let pdf_path = match result.pdf.as_deref() {
-            Some(pdf) => Some(
-                pdf.strip_prefix(&root)
-                    .map_err(|_| anyhow!("compiled PDF landed outside the checkout"))?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            ),
+            Some(pdf) => {
+                Some(api_rel_path(pdf.strip_prefix(&root).map_err(|_| {
+                    anyhow!("compiled PDF landed outside the checkout")
+                })?))
+            }
             None => None,
         };
         Ok(Json(json!({

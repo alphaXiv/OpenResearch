@@ -104,12 +104,20 @@ fn candidate_names(binary: &str) -> Vec<String> {
     if std::path::Path::new(binary).extension().is_some() {
         return vec![binary.to_string()];
     }
-    std::env::var("PATHEXT")
-        .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    let names: Vec<String> = pathext
         .split(';')
+        .map(str::trim)
         .filter(|ext| ext.starts_with('.'))
         .map(|ext| format!("{binary}{}", ext.to_ascii_lowercase()))
-        .collect()
+        .collect();
+    if names.is_empty() {
+        return [".com", ".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|ext| format!("{binary}{ext}"))
+            .collect();
+    }
+    names
 }
 
 /// Hand the imported variables to a child process. Every `orx` child re-resolves
