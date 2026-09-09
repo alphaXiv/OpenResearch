@@ -4192,7 +4192,11 @@ fn spawn_agent_preflight() {
                 } else if h.install_broken {
                     format!("{} — installed but failed to run", h.name)
                 } else if h.installed {
-                    format!("{} — not signed in", h.name)
+                    format!(
+                        "{} — {}",
+                        h.name,
+                        h.agent_note.as_deref().unwrap_or("not ready")
+                    )
                 } else {
                     format!("{} — not installed", h.name)
                 }
@@ -4201,7 +4205,7 @@ fn spawn_agent_preflight() {
         eprintln!("orx up: agents: {}", line.join(" · "));
         if !harnesses.iter().any(|h| h.agent_ready) {
             eprintln!(
-                "orx up: warning: no coding agent detected — install Claude Code, Codex or OpenCode and sign in to at least one of them."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex or OpenCode, then connect a local model or sign in."
             );
         }
     });

@@ -247,7 +247,7 @@
   "onboarding_searching_alpha_xiv": "正在搜索 alphaXiv…",
   "onboarding_selected": "已选择",
   "onboarding_setting_things_up": "正在设置…",
-  "onboarding_sign_in_to_at_least_one_agent_to": "请登录至少一个智能体以继续。",
+  "onboarding_sign_in_to_at_least_one_agent_to": "连接本地模型或登录一个智能体以继续。",
   "onboarding_signed_in": "已登录",
   "onboarding_step_1_of_2": "· 第 1 步，共 2 步",
   "onboarding_step_2_of_2": "· 第 2 步，共 2 步",
@@ -846,7 +846,7 @@
   "onboarding_area_physics": "物理学",
   "onboarding_area_other": "其他",
   "onboarding_waiting_tool_checks": "正在等待本地工具检查",
-  "onboarding_sign_in_agent_to_continue": "请至少登录一个编程智能体后再继续",
+  "onboarding_sign_in_agent_to_continue": "连接本地模型或登录编码智能体以继续",
   "onboarding_choose_preferred_agent": "请选择首选编程智能体",
   "onboarding_recheck_git_to_continue": "请重新检查 Git 后再继续",
   "onboarding_waiting_git_check": "正在等待 Git 检查",
@@ -1114,5 +1114,7 @@
   "settings_remove_session": "移除 cookie",
   "overleaf_sync_files_tip": "文本会实时同步。此操作用于同步图片等其他文件，并解决冲突。",
   "overleaf_paste_cookie": "改为粘贴",
-  "overleaf_replace_cookie_prompt": "添加新的 Overleaf 会话 cookie 即可继续实时跟随。"
+  "overleaf_replace_cookie_prompt": "添加新的 Overleaf 会话 cookie 即可继续实时跟随。",
+  "onboarding_local_models_setup": "使用 LM Studio、oMLX 或 Ollama 设置本地模型",
+  "onboarding_server_unavailable": "本地模型不可用"
 }

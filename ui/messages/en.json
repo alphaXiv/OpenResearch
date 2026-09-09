@@ -247,7 +247,7 @@
   "onboarding_searching_alpha_xiv": "Searching alphaXiv…",
   "onboarding_selected": "Selected",
   "onboarding_setting_things_up": "Setting things up…",
-  "onboarding_sign_in_to_at_least_one_agent_to": "Sign in to at least one agent to continue.",
+  "onboarding_sign_in_to_at_least_one_agent_to": "Connect a local model or sign in to an agent to continue.",
   "onboarding_signed_in": "Signed in",
   "onboarding_step_1_of_2": "· Step 1 of 2",
   "onboarding_step_2_of_2": "· Step 2 of 2",
@@ -846,7 +846,7 @@
   "onboarding_area_physics": "Physics",
   "onboarding_area_other": "Other",
   "onboarding_waiting_tool_checks": "Waiting for the local tool checks",
-  "onboarding_sign_in_agent_to_continue": "Sign in to at least one coding agent to continue",
+  "onboarding_sign_in_agent_to_continue": "Connect a local model or sign in to a coding agent to continue",
   "onboarding_choose_preferred_agent": "Choose your preferred coding agent",
   "onboarding_recheck_git_to_continue": "Re-check Git before continuing",
   "onboarding_waiting_git_check": "Waiting for the Git check",
@@ -1114,5 +1114,7 @@
   "settings_remove_session": "Remove cookie",
   "overleaf_sync_files_tip": "Text syncs live. This moves figures and other files, and settles conflicts.",
   "overleaf_paste_cookie": "Paste it instead",
-  "overleaf_replace_cookie_prompt": "Add a fresh Overleaf session cookie to start following again."
+  "overleaf_replace_cookie_prompt": "Add a fresh Overleaf session cookie to start following again.",
+  "onboarding_local_models_setup": "Set up local models with LM Studio, oMLX, or Ollama",
+  "onboarding_server_unavailable": "Local model unavailable"
 }

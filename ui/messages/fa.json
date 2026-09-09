@@ -247,7 +247,7 @@
   "onboarding_searching_alpha_xiv": "در حال جست‌وجوی alphaXiv…",
   "onboarding_selected": "انتخاب‌شده",
   "onboarding_setting_things_up": "در حال راه‌اندازی…",
-  "onboarding_sign_in_to_at_least_one_agent_to": "برای ادامه دست‌کم به یک عامل وارد شوید.",
+  "onboarding_sign_in_to_at_least_one_agent_to": "برای ادامه، یک مدل محلی متصل کنید یا به یک عامل وارد شوید.",
   "onboarding_signed_in": "وارد شده",
   "onboarding_step_1_of_2": "· مرحلهٔ ۱ از ۲",
   "onboarding_step_2_of_2": "· مرحلهٔ ۲ از ۲",
@@ -846,7 +846,7 @@
   "onboarding_area_physics": "فیزیک",
   "onboarding_area_other": "سایر",
   "onboarding_waiting_tool_checks": "در انتظار بررسی ابزارهای محلی",
-  "onboarding_sign_in_agent_to_continue": "برای ادامه، وارد دست‌کم یک عامل برنامه‌نویسی شوید",
+  "onboarding_sign_in_agent_to_continue": "برای ادامه، یک مدل محلی متصل کنید یا به یک عامل کدنویسی وارد شوید",
   "onboarding_choose_preferred_agent": "عامل برنامه‌نویسی ترجیحی خود را انتخاب کنید",
   "onboarding_recheck_git_to_continue": "پیش از ادامه Git را دوباره بررسی کنید",
   "onboarding_waiting_git_check": "در انتظار بررسی Git",
@@ -1114,5 +1114,7 @@
   "settings_remove_session": "حذف کوکی",
   "overleaf_sync_files_tip": "متن زنده همگام می‌شود. این کار تصویرها و دیگر فایل‌ها را جابه‌جا می‌کند و تعارض‌ها را حل می‌کند.",
   "overleaf_paste_cookie": "به‌جایش بچسبانید",
-  "overleaf_replace_cookie_prompt": "برای ادامهٔ دنبال کردن، کوکی نشست تازه‌ای از Overleaf اضافه کنید."
+  "overleaf_replace_cookie_prompt": "برای ادامهٔ دنبال کردن، کوکی نشست تازه‌ای از Overleaf اضافه کنید.",
+  "onboarding_local_models_setup": "راه‌اندازی مدل‌های محلی با LM Studio، oMLX یا Ollama",
+  "onboarding_server_unavailable": "مدل محلی در دسترس نیست"
 }

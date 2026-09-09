@@ -291,8 +291,8 @@ pub trait Harness: Send + Sync {
     }
 
     /// Generate a short (≤6 words) session title from the session's first user
-    /// message by spawning a short-lived headless child pinned to a cheap
-    /// configuration. `None` = can't or failed — the caller keeps the
+    /// message with a short-lived child, using the session model when the
+    /// harness honors it. `None` = can't or failed — the caller keeps the
     /// first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
@@ -300,9 +300,13 @@ pub trait Harness: Send + Sync {
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
+    async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
         let prompt = title::title_prompt(first_message);
-        let raw = self.one_shot(title::title_request(&prompt)).await?;
+        let request = OneShot {
+            model,
+            ..title::title_request(&prompt)
+        };
+        let raw = self.one_shot(request).await?;
         title::sanitize_title(&raw)
     }
 

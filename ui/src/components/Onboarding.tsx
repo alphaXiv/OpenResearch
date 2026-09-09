@@ -27,6 +27,7 @@ import {
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
+import { OptionPicker } from "./ModelPicker";
 
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
@@ -96,6 +97,7 @@ export function Onboarding({
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
   const [preferredHarness, setPreferredHarness] = useState<HarnessId | null>(null);
+  const [preferredModel, setPreferredModel] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const [researchAreas, setResearchAreas] = useState<string[]>([]);
   const [otherArea, setOtherArea] = useState("");
@@ -149,6 +151,9 @@ export function Onboarding({
       return saved?.id ?? ready[0]?.id ?? null;
     });
   }, [harnesses, preferredAgent]);
+  const selectedHarness = harnesses?.find((h) => h.id === preferredHarness);
+  const selectedModel = selectedHarness?.models.find((model) => model.id === preferredModel)?.id
+    ?? selectedHarness?.models[0]?.id ?? null;
   useEffect(() => setHarnessError(harnessQuery.isError), [harnessQuery.isError, harnessQuery.dataUpdatedAt]);
   useEffect(() => setGitError(pathQuery.isError), [pathQuery.isError, pathQuery.dataUpdatedAt]);
   // Prefill from any saved profile — best-effort, never gates the step.
@@ -216,7 +221,7 @@ export function Onboarding({
   const finishOnboarding = async () => {
     const harness = harnesses?.find((item) => item.id === preferredHarness && item.agentReady);
     if (!harness || finishing) return;
-    const selection = selectionFor(harness);
+    const selection = selectionFor(harness, selectedModel);
     setFinishing(true);
     setFinishError(null);
     try {
@@ -340,6 +345,24 @@ export function Onboarding({
                 </LoadingRow>
               )}
             </div>
+            {selectedHarness?.id === "opencode" && selectedHarness.agentReady && (
+              <div className="mt-4">
+                <OptionPicker
+                  choices={selectedHarness.models.map((model) => ({ id: model.id, label: harnessModelLabel(model) }))}
+                  value={selectedModel}
+                  title={m.model_picker_model()}
+                  header={m.model_picker_model()}
+                  variant="field"
+                  dropDown
+                  onSelect={setPreferredModel}
+                />
+              </div>
+            )}
+            <p className="mt-4 text-sm text-text">
+              <a className="underline" href="https://github.com/alphaXiv/openresearch-cli/blob/main/docs/local-models.md" target="_blank" rel="noreferrer">
+                {m.onboarding_local_models_setup()}
+              </a>
+            </p>
             {(gitVersion === null || gitError) && (
               <div className="onb-git-check mt-7" role="status" aria-live="polite">
                 <LocalGitCard gitVersion={gitVersion} error={gitError} />
@@ -356,14 +379,9 @@ export function Onboarding({
               <Button variant="ghost" onClick={() => setStep(0)}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
               </Button>
-              {(harnessError ||
-                gitError ||
-                gitVersion === null ||
-                (harnesses !== null && !anyAgentReady)) && (
-                  <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
-                    <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
-                  </Button>
-                )}
+              <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
+                <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
+              </Button>
               <div className="flex-1" />
               <Button variant="primary"
                 onClick={() => setStep(2)}
@@ -537,17 +555,17 @@ function cleanPaperTitle(title: string): string {
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
 function agentBadge(h: Harness): { tone: StatusTone; label: string } {
-  if (h.agentReady) return { tone: "success", label: m.onboarding_signed_in() };
+  if (h.agentReady) return { tone: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
+  if (h.authMethod === "local") return { tone: "warning", label: m.onboarding_server_unavailable() };
   if (h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
   if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
   if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
   return { tone: "neutral", label: m.onboarding_not_detected() };
 }
 
-function selectionFor(harness: Harness): AgentSelection {
-  const model = harness.models[0]?.id ?? null;
+function selectionFor(harness: Harness, model: string | null): AgentSelection {
   return {
     harness: harness.id,
     model,

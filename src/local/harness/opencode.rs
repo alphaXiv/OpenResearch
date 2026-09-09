@@ -74,15 +74,30 @@ impl Harness for OpenCode {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
+        let mut config = Value::Null;
         let bin = find_opencode().ok();
         if let Some(bin) = &bin {
             info.record_bin(bin, probe_bin(bin).await);
             // A binary that failed `--version` has no catalog to give either.
             if !info.install_broken {
-                models = opencode_models(bin).await;
+                let (catalog, resolved) = tokio::join!(
+                    opencode_models(bin),
+                    run_models(bin, &["debug", "config", "--pure"])
+                );
+                models = catalog;
+                config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
+                    Some(config) => config,
+                    None => {
+                        eprintln!("orx up: could not read OpenCode's resolved configuration; local model detection is unavailable");
+                        Value::Null
+                    }
+                };
             }
         }
-        let providers = opencode_providers();
+        let providers: Vec<_> = opencode_providers()
+            .into_iter()
+            .filter(|id| provider_enabled(&config, id))
+            .collect();
         if !providers.is_empty() {
             info.authenticated = true;
             info.auth_method = Some("oauth");
@@ -94,36 +109,55 @@ impl Harness for OpenCode {
         // but this process may not. Measured, not assumed: `opencode models`
         // still lists free/bundled models when signed out, so a non-empty
         // model list can't stand in for a credential.
-        const PROVIDER_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "GROQ_API_KEY",
-            "XAI_API_KEY",
-            "DEEPSEEK_API_KEY",
+        const PROVIDER_KEYS: &[(&str, &str)] = &[
+            ("anthropic", "ANTHROPIC_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+            ("openrouter", "OPENROUTER_API_KEY"),
+            ("google", "GEMINI_API_KEY"),
+            ("google", "GOOGLE_API_KEY"),
+            ("groq", "GROQ_API_KEY"),
+            ("xai", "XAI_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
         ];
         if !info.authenticated
-            && PROVIDER_KEYS
-                .iter()
-                .any(|k| super::detect::api_key(k).is_some())
+            && PROVIDER_KEYS.iter().any(|(id, key)| {
+                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
+            })
         {
             info.authenticated = true;
             info.auth_method = Some("apiKey");
         }
 
-        // Tightened from `installed` alone — opencode with no credential can't
-        // actually run a turn, and it was the one harness reporting Connected
-        // regardless. Behaviour change on upgrade: an install with neither
-        // auth.json nor a provider key above now reads "Not signed in", and
-        // since step 1 of onboarding gates on this, an opencode-only user is
-        // asked to sign in before continuing.
-        info.agent_ready = info.ready();
+        let local = local_providers(&config);
+        let available = available_local_models(&local).await;
+        let is_local =
+            |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
+        let missing_local = models
+            .iter()
+            .any(|model| is_local(model) && !available.contains(&model.id));
+        if missing_local {
+            info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
+        }
+        models.retain(|model| {
+            available.contains(&model.id) || (info.authenticated && !is_local(model))
+        });
+        // Onboarding and the composer seed their selection from the first model.
+        let default = config.get("model").and_then(Value::as_str);
+        models.sort_by_key(|model| Some(model.id.as_str()) != default);
+        if !info.authenticated && !local.is_empty() {
+            info.auth_method = Some("local");
+            info.account = Some("Local models · no sign-in required".to_string());
+        }
+        info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
         if info.agent_ready {
             // Hide the models of providers whose stored key a live request rejects.
+            let cloud_providers: Vec<_> = providers
+                .iter()
+                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
+                .cloned()
+                .collect();
             let dead = match &bin {
-                Some(bin) => dead_providers(bin, &providers, &models).await,
+                Some(bin) => dead_providers(bin, &cloud_providers, &models).await,
                 None => Vec::new(),
             };
             if !dead.is_empty() {
@@ -141,10 +175,14 @@ impl Harness for OpenCode {
                         .collect::<Vec<_>>()
                         .join(", "),
                 );
-                info.agent_note = Some(format!(
+                let note = format!(
                     "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
                     dead.join(", ")
-                ));
+                );
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(local_note) => format!("{local_note} {note}"),
+                    None => note,
+                });
             }
             // Every key rejected and nothing free left: nothing can run a turn.
             if models.is_empty() {
@@ -154,12 +192,25 @@ impl Harness for OpenCode {
             info.models = models;
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
+        } else if info.installed && !local.is_empty() {
+            info.agent_note = Some(if available.is_empty() {
+                "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
+            } else {
+                "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
+            }.to_string());
+        } else if info.installed && info.authenticated {
+            info.agent_note = Some(
+                "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
+                    .to_string(),
+            );
         } else if info.installed {
-            info.agent_note =
-                Some("Sign in with `opencode auth login` to chat with it here.".to_string());
+            info.agent_note = Some(
+                "Configure a local model in OpenCode, or sign in with `opencode auth login`."
+                    .to_string(),
+            );
         } else {
             info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then sign in with `opencode auth login`."
+                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
                     .to_string(),
             );
         }
@@ -367,6 +418,97 @@ fn model_provider(id: &str) -> &str {
     id.split_once('/').map(|(p, _)| p).unwrap_or(id)
 }
 
+fn local_providers(config: &Value) -> Vec<(&str, &Value)> {
+    config
+        .get("provider")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(id, provider)| {
+            provider_enabled(config, id)
+                && provider
+                    .pointer("/options/baseURL")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_loopback_url)
+        })
+        .map(|(id, provider)| (id.as_str(), provider))
+        .collect()
+}
+
+fn provider_enabled(config: &Value, id: &str) -> bool {
+    let contains = |key| {
+        config.get(key).and_then(Value::as_array).map(|providers| {
+            providers
+                .iter()
+                .any(|provider| provider.as_str() == Some(id))
+        })
+    };
+    contains("enabled_providers").unwrap_or(true)
+        && !contains("disabled_providers").unwrap_or(false)
+}
+
+fn is_loopback_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some_and(|host| {
+            host == "localhost"
+                || host
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+}
+
+async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String> {
+    let Ok(client) = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(3))
+        .build()
+    else {
+        return HashSet::new();
+    };
+    let client = &client;
+    let probes = providers.iter().map(|(id, provider)| async move {
+        let base = provider.pointer("/options/baseURL")?.as_str()?;
+        let mut request = client.get(format!("{}/models", base.trim_end_matches('/')));
+        if let Some(key) = provider.pointer("/options/apiKey").and_then(Value::as_str) {
+            request = request.bearer_auth(key);
+        }
+        let response = request
+            .send()
+            .await
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .json::<Value>()
+            .await
+            .ok()?;
+        let advertised = response.get("data")?.as_array()?;
+        let models = provider.get("models")?.as_object()?;
+        Some(
+            models
+                .iter()
+                .filter_map(|(model, options)| {
+                    let api_id = options.get("id").and_then(Value::as_str).unwrap_or(model);
+                    advertised
+                        .iter()
+                        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(api_id))
+                        .then(|| format!("{id}/{model}"))
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
+}
+
 /// `opencode models --verbose` — the ground truth for what the agent can run
 /// *and* for each model's reasoning `variants`.
 ///
@@ -449,6 +591,7 @@ async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null());
     crate::local::chat::prepare_env(&mut cmd);
+    cmd.env("NO_COLOR", "1");
     let fut = cmd.output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
         return None;
@@ -1407,6 +1550,63 @@ async fn handle_prompt_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_models_require_an_enabled_loopback_server_and_matching_model() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({"data": [{"id": "loaded"}]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut config = json!({
+            "enabled_providers": ["local"],
+            "provider": {
+                "local": {"options": {"baseURL": base}, "models": {
+                    "loaded": {}, "missing": {}, "alias": {"id": "loaded"}
+                }},
+                "disabled": {"options": {"baseURL": base}},
+                "cloud": {"options": {"baseURL": "https://example.com/v1"}}
+            }
+        });
+        let providers = local_providers(&config);
+        assert_eq!(providers.len(), 1);
+        let available = available_local_models(&providers).await;
+        assert_eq!(
+            available,
+            HashSet::from(["local/loaded".into(), "local/alias".into()])
+        );
+        assert!(!provider_enabled(&config, "openai"));
+        server.abort();
+        let _ = server.await;
+        assert!(available_local_models(&providers).await.is_empty());
+        config["disabled_providers"] = json!(["local"]);
+        assert!(local_providers(&config).is_empty());
+        for url in [
+            "http://localhost:1234/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:11434/v1",
+        ] {
+            assert!(is_loopback_url(url));
+        }
+        for url in [
+            "https://localhost.example/v1",
+            "http://127.0.0.1@example.com/v1",
+            "http://192.168.1.1/v1",
+            "file:///tmp/models",
+        ] {
+            assert!(!is_loopback_url(url));
+        }
+    }
 
     /// Trimmed-down real `opencode models --verbose` output (1.17.15): a header
     /// line per model followed by its pretty-printed JSON. Covers the three
