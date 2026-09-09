@@ -54,9 +54,17 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         .join("\n");
     // Same subshell shape as the ssh backend: an `exit`/`set -e` failure inside
     // `( … )` ends the subshell, not run.sh, so exit_code is always written.
+    // bash reads the `cd` target literally inside quotes, so a Windows path has
+    // to arrive forward-slashed; `C:/…` is a form Git Bash accepts.
+    let cd_target = dir.to_string_lossy();
+    let cd_target = if cfg!(windows) {
+        cd_target.replace('\\', "/")
+    } else {
+        cd_target.into_owned()
+    };
     let run_sh = format!(
         "#!/usr/bin/env bash\n{exports}\ncd {dir} || exit 97\n(\n{script}\n) > log 2>&1\necho $? > exit_code\n",
-        dir = sh_quote(&dir.to_string_lossy()),
+        dir = sh_quote(&cd_target),
         script = spec.script,
     );
     let run_sh_path = dir.join("run.sh");
