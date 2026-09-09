@@ -76,6 +76,28 @@ pub fn path_with_toolchain(_base: Option<std::ffi::OsString>) -> Option<std::ffi
     None
 }
 
+/// A local path as the shell reads it. `/c/Users/…` on Windows, unchanged
+/// elsewhere.
+///
+/// Forward slashes alone would not do: GNU tar reads the drive colon as a
+/// `host:path` remote spec and tries to resolve `C:` as a hostname.
+#[cfg(windows)]
+pub fn bash_path(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    let mut head = text.chars();
+    match (head.next(), head.next(), head.next()) {
+        (Some(drive), Some(':'), Some('/')) if drive.is_ascii_alphabetic() => {
+            format!("/{}/{}", drive.to_ascii_lowercase(), &text[3..])
+        }
+        _ => text,
+    }
+}
+
+#[cfg(not(windows))]
+pub fn bash_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// `C:\Windows\System32\bash.exe` is WSL's entry point, not a shell for this
 /// filesystem.
 #[cfg(windows)]
@@ -86,4 +108,23 @@ fn is_wsl_launcher(bash: &Path) -> bool {
             .to_ascii_lowercase()
             .ends_with(r"\system32")
     })
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_windows_path_reaches_the_shell_without_a_drive_colon() {
+        // A colon anywhere before the first slash makes GNU tar treat the
+        // argument as `host:path`.
+        assert_eq!(
+            bash_path(Path::new(r"C:\Users\me\source.tar")),
+            "/c/Users/me/source.tar"
+        );
+        assert_eq!(
+            bash_path(Path::new(r"\\server\share\x")),
+            "//server/share/x"
+        );
+    }
 }

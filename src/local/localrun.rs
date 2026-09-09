@@ -78,7 +78,8 @@ async fn submit_controller_run(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let script = crate::compute::snapshot_script(&source.path.to_string_lossy(), &run_command);
+    let script =
+        crate::compute::snapshot_script(&crate::local::bash::bash_path(&source.path), &run_command);
 
     // The run's env: everything the user synced (API keys), plus the tokens
     // the run script expects. Exported inside run.sh (written owner-only).
