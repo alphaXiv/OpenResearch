@@ -3,8 +3,10 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. Connections are multiplexed (ControlMaster) so the many status/log
-//! polls reuse one TCP session instead of a handshake apiece.
+//! key. On unix connections are multiplexed (ControlMaster) so the many
+//! status/log polls reuse one TCP session instead of a handshake apiece.
+//! Win32-OpenSSH cannot, so on Windows every call authenticates for itself —
+//! which needs a key in the agent, or one without a passphrase.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -14,6 +16,7 @@
 //! A restarted `orx supervise` reattaches purely from that directory.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -42,7 +45,6 @@ fn prepare_control_dir() -> Result<()> {
             dir.display()
         )
     })?;
-    #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
@@ -61,7 +63,6 @@ fn prepare_control_dir() -> Result<()> {
     Ok(())
 }
 
-/// No socket to place, so nothing to prepare.
 #[cfg(not(unix))]
 fn prepare_control_dir() -> Result<()> {
     Ok(())
@@ -145,8 +146,9 @@ fn control_path(target: &SshTarget) -> PathBuf {
 }
 
 /// Shared ssh options: connection setup permits prompts; background work never
-/// does. Both modes use the same control socket, kept for ten idle minutes, so
-/// one interactive login covers later status, log, and job commands.
+/// does. On unix both modes share one control socket, kept for ten idle
+/// minutes, so a single interactive login covers later status, log and job
+/// commands; Windows cannot multiplex, so each call authenticates on its own.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
@@ -171,10 +173,10 @@ fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
     ]
 }
 
-/// Win32-OpenSSH accepts these and then never creates a master, and a
-/// ControlPath it does honour from the user's own ssh_config fails the
-/// connection outright ("getsockname failed: Not a socket"). Turning it off
-/// explicitly is what overrides that config; omitting the options is not.
+/// Win32-OpenSSH has no multiplexing (PowerShell/Win32-OpenSSH#1328), and on
+/// the builds reported there a ControlPath inherited from the user's own
+/// ssh_config fails the connection with "getsockname failed: Not a socket".
+/// Only setting them explicitly overrides that config; omitting them does not.
 #[cfg(not(unix))]
 fn multiplexing_opts(_target: &SshTarget) -> Vec<String> {
     vec![
@@ -185,8 +187,8 @@ fn multiplexing_opts(_target: &SshTarget) -> Vec<String> {
     ]
 }
 
-/// Arguments for a long-lived local forward over the same authenticated
-/// ControlMaster used by settings and background jobs.
+/// Arguments for a long-lived local forward, riding the same authenticated
+/// ControlMaster as settings and background jobs where the platform has one.
 pub(crate) fn forward_args(
     target: &SshTarget,
     forward: &str,
@@ -216,7 +218,8 @@ pub(crate) fn forward_args(
 
 /// Arguments for the short interactive login opened by Settings. `true` ends
 /// the visible session after authentication while ControlPersist keeps its
-/// master connection available to the ordinary batch-mode calls below.
+/// master available to the batch-mode calls below — on Windows there is no
+/// master, so this only proves the host reachable and primes nothing.
 pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, false);
@@ -224,7 +227,6 @@ pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     Ok(args)
 }
 
-/// Win32-OpenSSH never creates a master, so there is never one running.
 #[cfg(not(unix))]
 pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
     Ok(false)
@@ -585,7 +587,8 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        assert_eq!(ssh_opts(&target, true).len(), 10);
+        let shared = 4 + multiplexing_opts(&target).len();
+        assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
     #[test]
@@ -620,20 +623,19 @@ mod tests {
         );
     }
 
-    /// Explicit targets on the same host but different ports must not share a
-    /// ControlMaster socket — the opts are part of the ControlPath hash.
-    /// Off unix the options must be present and off, not absent: a user's own
-    /// ssh_config would otherwise re-enable a ControlPath that fails the
-    /// connection.
+    /// Present and off, not absent: a user's own ssh_config would otherwise
+    /// re-enable a ControlPath that fails the connection.
     #[cfg(not(unix))]
     #[test]
-    fn multiplexing_is_turned_off_rather_than_left_unset() {
-        let opts = ssh_opts(&SshTarget::alias("cluster"), true);
-        assert!(opts.contains(&"ControlMaster=no".to_string()));
-        assert!(opts.contains(&"ControlPath=none".to_string()));
-        assert!(!opts.iter().any(|opt| opt.starts_with("ControlPersist=")));
+    fn multiplexing_is_disabled_not_omitted() {
+        assert_eq!(
+            multiplexing_opts(&SshTarget::alias("cluster")),
+            vec!["-o", "ControlMaster=no", "-o", "ControlPath=none"],
+        );
     }
 
+    /// Explicit targets on the same host but different ports must not share a
+    /// ControlMaster socket — the opts are part of the ControlPath hash.
     #[cfg(unix)]
     #[test]
     fn control_path_differs_per_port() {
@@ -679,6 +681,11 @@ mod tests {
         };
 
         assert_eq!(option(true), option(false));
+    }
+
+    #[test]
+    fn batch_mode_follows_the_mode_flag() {
+        let target = SshTarget::alias("cluster");
         assert!(ssh_opts(&target, true).contains(&"BatchMode=yes".to_string()));
         assert!(ssh_opts(&target, false).contains(&"BatchMode=no".to_string()));
     }
