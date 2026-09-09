@@ -1195,6 +1195,7 @@ pub(crate) fn restore_local_repository(
         // system and global config, so it would then read as permanently dirty
         // and the demo would reject the cache it had just restored.
         git(Some(&tmp), &["config", "core.autocrlf", "false"])?;
+        git(Some(&tmp), &["config", "core.eol", "lf"])?;
         git(Some(&tmp), &["remote", "add", "origin", &origin_arg])?;
         git(
             Some(&tmp),
@@ -1485,8 +1486,8 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
 
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
-/// The null device, as git spells it on this platform. `diff --no-index`
-/// recognizes `NUL` on Windows and `/dev/null` everywhere else.
+/// The null device, as git spells it on this platform: Windows git recognizes
+/// `NUL` in `diff --no-index`, and reads it as empty for a config path.
 #[cfg(not(windows))]
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]

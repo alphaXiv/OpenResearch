@@ -1399,7 +1399,7 @@ impl ChatHost {
         let (mut output, mut error) = match spawn.spawn() {
             Err(error) => (
                 String::new(),
-                format!("could not start bash: {error}{}", BASH_HINT),
+                format!("could not start bash: {error}{BASH_HINT}"),
             ),
             Ok(mut child) => {
                 let pid = child.id();
@@ -7774,7 +7774,9 @@ pub fn set_chat_session_env(
             cmd.env_remove(UP_AUTH_TOKEN_ENV);
         }
     }
-    match orx_bin_dir() {
+    // Not on Windows: PATH_GUARD reads this into a `:`-joined PATH, which a
+    // drive letter splits in two. prepare_env still fronts the directory.
+    match orx_bin_dir().filter(|_| !cfg!(windows)) {
         Some(dir) => {
             cmd.env(BIN_DIR_ENV, dir);
         }

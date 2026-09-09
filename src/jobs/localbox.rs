@@ -223,9 +223,13 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
     let pid = pid.trim().to_string();
     #[cfg(windows)]
-    return terminate_tree(&pid);
+    {
+        terminate_tree(&pid)
+    }
     #[cfg(not(windows))]
-    terminate_group(&pid)
+    {
+        terminate_group(&pid)
+    }
 }
 
 /// Windows has no process group to signal, so the tree is walked instead:

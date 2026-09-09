@@ -838,11 +838,18 @@ fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     let file = options.open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata_uid(&metadata) != effective_uid() {
+    if !file.metadata()?.is_file() {
         return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
     }
-    set_mode(path, 0o600)?;
+    // Ownership and mode are unix's to check; Windows has neither, and the lock
+    // lives under the user's profile where the default ACL is what protects it.
+    #[cfg(unix)]
+    {
+        if metadata_uid(&file.metadata()?) != effective_uid() {
+            return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
+        }
+        set_mode(path, 0o600)?;
+    }
     Ok(fd_lock::RwLock::new(file))
 }
 

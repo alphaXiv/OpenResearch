@@ -34,13 +34,16 @@ fn plain(path: PathBuf) -> PathBuf {
         return path;
     };
     let head = match prefix.kind() {
-        Prefix::VerbatimDisk(drive) => format!("{}:\\", drive as char),
+        Prefix::VerbatimDisk(drive) => std::ffi::OsString::from(format!("{}:\\", drive as char)),
         // `\\?\UNC\server\share` is an encoding of `\\server\share`.
-        Prefix::VerbatimUNC(server, share) => format!(
-            "\\\\{}\\{}\\",
-            server.to_string_lossy(),
-            share.to_string_lossy()
-        ),
+        Prefix::VerbatimUNC(server, share) => {
+            let mut head = std::ffi::OsString::from(r"\\");
+            head.push(server);
+            head.push(r"\");
+            head.push(share);
+            head.push(r"\");
+            head
+        }
         // A device path is itself, not an encoding of anything shorter.
         _ => return path,
     };
@@ -49,8 +52,7 @@ fn plain(path: PathBuf) -> PathBuf {
     out
 }
 
-#[cfg(windows)]
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 
