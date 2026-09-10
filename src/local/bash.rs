@@ -26,6 +26,25 @@ pub fn program() -> std::ffi::OsString {
         .unwrap_or_else(|| r"C:\Program Files\Git\bin\bash.exe".into())
 }
 
+/// Told at startup, not when the first run dies: Git for Windows supplies the
+/// only usable `bash` and coreutils on this platform, so without it experiments
+/// and the demo fail at their first command.
+#[cfg(windows)]
+pub fn missing_toolchain() -> Option<&'static str> {
+    let found = git_bash().is_some()
+        || crate::local::shell_env::find_on_path("bash")
+            .is_some_and(|bash| !is_wsl_launcher(&bash));
+    (!found).then_some(
+        "Git for Windows not found — orx needs the bash it ships to run experiments. \
+         Install it from https://git-scm.com/download/win, then restart orx.",
+    )
+}
+
+#[cfg(not(windows))]
+pub fn missing_toolchain() -> Option<&'static str> {
+    None
+}
+
 /// `<git>\cmd\git.exe` is what the installer puts on PATH, so the install root
 /// is two levels up.
 #[cfg(windows)]

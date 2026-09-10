@@ -26,14 +26,16 @@ brings its own Python.
 
 ## Install
 
-Download the installer from
-[Releases](https://github.com/alphaXiv/OpenResearch/releases) and run it, then:
+From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
+`orx-x86_64-pc-windows-msvc.zip`, extract it, and double-click `orx.exe`. It
+starts the dashboard at `http://127.0.0.1:4791` and opens your browser. Leave
+the console window open — closing it stops the server.
 
-```powershell
-orx up
-```
+If you would rather have `orx` on your `PATH` as a command, run the PowerShell
+installer attached to the same release instead.
 
-The dashboard opens at `http://127.0.0.1:4791`.
+> If the console window appears and vanishes, orx failed to start. Run
+> `orx.exe` from an open terminal to see why.
 
 ### The SmartScreen warning
 

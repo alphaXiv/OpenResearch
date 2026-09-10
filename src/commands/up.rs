@@ -174,6 +174,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
         eprint!("{}", session.instructions(actual_port));
     } else {
         eprintln!("orx up: dashboard on {url}");
+        if let Some(warning) = crate::local::bash::missing_toolchain() {
+            eprintln!("orx up: warning: {warning}");
+        }
         if !args.no_browser {
             browser::open_browser(&url);
         }
