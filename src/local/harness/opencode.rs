@@ -1239,21 +1239,25 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 // merge its parts as the authoritative versions.
                 let resp = resp?.error_for_status()?;
                 ctx.mark_delivery(DeliveryState::Accepted);
+                let message = resp.json::<Value>().await?;
+                if let Some(error) = opencode_response_error(&message) {
+                    ctx.mark_native_retry_exhausted();
+                    ctx.mark_terminal_failure("opencode_terminal", error);
+                    return Err(anyhow!("{error}"));
+                }
                 ctx.clear_retry_status();
-                if let Ok(message) = resp.json::<Value>().await {
-                    if !opencode_response_is_current(&message, turn_started_at) {
-                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
-                        ctx.mark_terminal_failure("opencode_stale_response", message);
-                        return Err(anyhow!(message));
-                    }
-                    if let Some(parts) = message.get("parts").and_then(Value::as_array) {
-                        for part in parts {
-                            if let Some(wire) = to_wire_part(part) {
-                                // Preserve children: the final `task` part carries
-                                // none, but its row already streamed the sub-agent
-                                // transcript into `children`.
-                                ctx.upsert_part_preserving_children(wire);
-                            }
+                if !opencode_response_is_current(&message, turn_started_at) {
+                    let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                    ctx.mark_terminal_failure("opencode_stale_response", message);
+                    return Err(anyhow!(message));
+                }
+                if let Some(parts) = message.get("parts").and_then(Value::as_array) {
+                    for part in parts {
+                        if let Some(wire) = to_wire_part(part) {
+                            // Preserve children: the final `task` part carries
+                            // none, but its row already streamed the sub-agent
+                            // transcript into `children`.
+                            ctx.upsert_part_preserving_children(wire);
                         }
                     }
                 }
@@ -1261,6 +1265,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+fn opencode_response_error(message: &Value) -> Option<&str> {
+    if let Some(error) = message
+        .pointer("/info/error")
+        .filter(|error| !error.is_null())
+    {
+        return Some(
+            error
+                .pointer("/data/message")
+                .or_else(|| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("OpenCode reported an error"),
+        );
+    }
+    (message.pointer("/info/summary").and_then(Value::as_bool) == Some(true)).then_some(
+        "OpenCode compacted the context but did not resume this turn. Continue the chat to resume.",
+    )
 }
 
 fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
@@ -1335,16 +1357,8 @@ fn handle_event(
             if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
                 return;
             }
-            let error = props.get("error").unwrap_or(props);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("OpenCode reported an error")
-                .to_string();
-            ctx.mark_native_retry_exhausted();
+            // OpenCode can emit this before recovering through automatic compaction.
             ctx.mark_delivery(DeliveryState::Accepted);
-            ctx.mark_terminal_failure("opencode_terminal", message.clone());
-            ctx.push_error(message);
         }
         // A `task` tool spawns a sub-agent in a child session; opencode announces
         // it with `session.created` carrying the child's `parentID` = our
@@ -1363,7 +1377,8 @@ fn handle_event(
         Some("message.updated") => {
             let info = props.get("info").unwrap_or(&Value::Null);
             let session = info.get("sessionID").and_then(Value::as_str);
-            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant")
+                && info.get("summary").and_then(Value::as_bool) != Some(true);
             if session == Some(native_id)
                 && info.get("role").and_then(Value::as_str) == Some("user")
             {
@@ -1423,7 +1438,12 @@ fn handle_event(
             }
         }
         Some("message.part.delta") => {
-            if props.get("field").and_then(Value::as_str) != Some("text") {
+            if props.get("field").and_then(Value::as_str) != Some("text")
+                || !props
+                    .get("messageID")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| assistant_msgs.contains(id))
+            {
                 return;
             }
             let session = props.get("sessionID").and_then(Value::as_str);
@@ -1989,6 +2009,37 @@ opencode/glm-5
             &mut HashMap::new(),
         );
         assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn compaction_recovery_does_not_surface_a_terminal_error_or_summary() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut messages = HashSet::new();
+        let mut sessions = HashMap::new();
+        for event in [
+            json!({"type":"session.error","properties":{"sessionID":"ses_x","error":{"name":"ContextOverflowError","data":{"message":"Too many tokens"}}}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"summary","sessionID":"ses_x","role":"assistant","summary":true}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"summary_text","messageID":"summary","sessionID":"ses_x","type":"text","text":"Internal summary"}}}),
+            json!({"type":"message.part.delta","properties":{"sessionID":"ses_x","messageID":"summary","partID":"summary_text","field":"text","delta":"hidden"}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"answer","sessionID":"ses_x","role":"assistant"}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"answer_text","messageID":"answer","sessionID":"ses_x","type":"text","text":"Run finished"}}}),
+        ] {
+            handle_event(&mut ctx, "ses_x", &event, &mut messages, &mut sessions);
+        }
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Run finished"));
+        assert_eq!(
+            opencode_response_error(&json!({"info":{"role":"assistant","finish":"stop"}})),
+            None
+        );
+        assert_eq!(
+            opencode_response_error(
+                &json!({"info":{"error":{"name":"APIError","data":{"message":"Invalid API key"}}}})
+            ),
+            Some("Invalid API key")
+        );
+        assert!(opencode_response_error(&json!({"info":{"summary":true}})).is_some());
     }
 
     #[test]
