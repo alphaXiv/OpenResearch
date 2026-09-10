@@ -1,3 +1,4 @@
+import { TARGET_LABELS } from "../computeTargets";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -117,6 +118,7 @@ import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshConfigDialog } from "./SshConfigDialog";
@@ -280,11 +282,12 @@ type Tab = SettingsTab;
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
-  if (h.agentReady) return { cls: "ok", variant: "success", label: m.settings_page_signed_in() };
+  if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
   if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
   if (h.installBroken) return { cls: "warn", variant: "warning", label: m.settings_page_install_broken() };
+  if (h.authMethod === "local") return { cls: "warn", variant: "warning", label: m.onboarding_server_unavailable() };
   if (h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.authState === "unsupported") return { cls: "warn", variant: "warning", label: m.settings_page_update_required() };
   return { cls: "warn", variant: "warning", label: m.settings_page_not_signed_in() };
@@ -292,6 +295,7 @@ function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label:
 
 function AuthLabel({ h }: { h: Harness }) {
   if (!h.authMethod) return <>—</>;
+  if (h.authMethod === "local") return <>{m.projects_local()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
@@ -373,6 +377,7 @@ function HarnessesTab() {
             </span>
           </div>
           {h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{renderNote(h.agentNote)}</p>}
+          {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
     </>
@@ -1331,18 +1336,6 @@ function OpenResearchSection({ remote }: { remote: boolean }) {
 }
 
 // --- compute -----------------------------------------------------------------
-
-const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
-  local: m.compute_target_local,
-  tinker: m.compute_target_tinker,
-  hf: m.compute_target_hf,
-  modal: m.compute_target_modal,
-  k8s: m.compute_target_k8s,
-  ssh: m.compute_target_ssh,
-  slurm: m.compute_target_slurm,
-  ray: m.compute_target_ray,
-  openresearch: m.compute_target_openresearch,
-};
 
 const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   local: m.compute_description_local,

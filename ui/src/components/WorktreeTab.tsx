@@ -1,3 +1,5 @@
+import { FolderOpen } from "lucide-react";
+import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { isImmutableQuery } from "../queries/invalidation";
 import { useQuery } from "@tanstack/react-query";
 import { listChatSessionsQuery } from "../queries/chat";
@@ -187,7 +189,11 @@ export function WorktreeTab({
           {!filesTree ? (
             <CodeTabNote>{m.worktree_tab_loading()}</CodeTabNote>
           ) : filesTree.dirs.size === 0 && filesTree.files.length === 0 ? (
-            <CodeTabNote>{m.worktree_tab_no_files()}</CodeTabNote>
+            <WorkspaceEmptyState
+              icon={FolderOpen}
+              title={m.worktree_tab_no_files()}
+              description={m.files_empty_description()}
+            />
           ) : (
             <div className="file-tree py-1.5 px-0 text-sm">
               <TreeLevel

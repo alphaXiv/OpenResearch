@@ -5081,6 +5081,7 @@ impl ChatHost {
         let sid = ctx.session_id.clone();
         let turn_id = ctx.turn_id.clone();
         let harness = ctx.harness.clone();
+        let model = ctx.model.clone();
         let (target_path, target_event_offset) = target_event_start(&sid, &ctx.assistant.id);
         ctx.target_event_path = Some(target_path);
         ctx.target_event_offset = target_event_offset;
@@ -5199,7 +5200,7 @@ impl ChatHost {
             }),
         );
         if let Some(seed) = title_seed {
-            self.spawn_title_generation(sid, harness, seed);
+            self.spawn_title_generation(sid, harness, seed, model);
         }
         guard.defuse();
         Ok(TurnSubmission::Started(turn_id))
@@ -5763,13 +5764,17 @@ impl ChatHost {
         session_id: String,
         harness_id: String,
         first_message: String,
+        model: Option<String>,
     ) {
         let host = self.clone();
         tokio::spawn(async move {
             let Some(harness) = crate::local::harness::chat_harness(&harness_id) else {
                 return;
             };
-            let Some(title) = harness.generate_title(&first_message).await else {
+            let Some(title) = harness
+                .generate_title(&first_message, model.as_deref())
+                .await
+            else {
                 return;
             };
             let Ok(store) = Store::open() else { return };

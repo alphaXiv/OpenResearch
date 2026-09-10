@@ -45,6 +45,7 @@ use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
+use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
 
@@ -74,15 +75,28 @@ impl Harness for OpenCode {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
+        let mut config = Value::Null;
         let bin = find_opencode().ok();
         if let Some(bin) = &bin {
             info.record_bin(bin, probe_bin(bin).await);
             // A binary that failed `--version` has no catalog to give either.
             if !info.install_broken {
-                models = opencode_models(bin).await;
+                let (catalog, resolved) = tokio::join!(
+                    opencode_models(bin),
+                    run_models(bin, &["debug", "config", "--pure"])
+                );
+                models = catalog;
+                config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
+                    Some(config) => config,
+                    None => Value::Null,
+                };
             }
         }
-        let providers = opencode_providers();
+        apply_configured_labels(&mut models, &config);
+        let providers: Vec<_> = opencode_providers()
+            .into_iter()
+            .filter(|id| provider_enabled(&config, id))
+            .collect();
         if !providers.is_empty() {
             info.authenticated = true;
             info.auth_method = Some("oauth");
@@ -94,36 +108,59 @@ impl Harness for OpenCode {
         // but this process may not. Measured, not assumed: `opencode models`
         // still lists free/bundled models when signed out, so a non-empty
         // model list can't stand in for a credential.
-        const PROVIDER_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "GROQ_API_KEY",
-            "XAI_API_KEY",
-            "DEEPSEEK_API_KEY",
+        const PROVIDER_KEYS: &[(&str, &str)] = &[
+            ("anthropic", "ANTHROPIC_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+            ("openrouter", "OPENROUTER_API_KEY"),
+            ("google", "GEMINI_API_KEY"),
+            ("google", "GOOGLE_API_KEY"),
+            ("groq", "GROQ_API_KEY"),
+            ("xai", "XAI_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
         ];
         if !info.authenticated
-            && PROVIDER_KEYS
-                .iter()
-                .any(|k| super::detect::api_key(k).is_some())
+            && PROVIDER_KEYS.iter().any(|(id, key)| {
+                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
+            })
         {
             info.authenticated = true;
             info.auth_method = Some("apiKey");
         }
 
-        // Tightened from `installed` alone — opencode with no credential can't
-        // actually run a turn, and it was the one harness reporting Connected
-        // regardless. Behaviour change on upgrade: an install with neither
-        // auth.json nor a provider key above now reads "Not signed in", and
-        // since step 1 of onboarding gates on this, an opencode-only user is
-        // asked to sign in before continuing.
-        info.agent_ready = info.ready();
+        let local = local_providers(&config);
+        let available = available_local_models(&local).await;
+        let is_local =
+            |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
+        let missing_local = models
+            .iter()
+            .any(|model| is_local(model) && !available.contains(&model.id));
+        if missing_local {
+            info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
+        }
+        models.retain(|model| {
+            available.contains(&model.id) || (info.authenticated && !is_local(model))
+        });
+        // Onboarding and the composer seed their selection from the first model.
+        let default = config.get("model").and_then(Value::as_str);
+        models.sort_by_key(|model| {
+            (
+                Some(model.id.as_str()) != default,
+                !model.id.starts_with("orx-local-"),
+            )
+        });
+        if !info.authenticated && !local.is_empty() {
+            info.auth_method = Some("local");
+        }
+        info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
         if info.agent_ready {
             // Hide the models of providers whose stored key a live request rejects.
+            let cloud_providers: Vec<_> = providers
+                .iter()
+                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
+                .cloned()
+                .collect();
             let dead = match &bin {
-                Some(bin) => dead_providers(bin, &providers, &models).await,
+                Some(bin) => dead_providers(bin, &cloud_providers, &models).await,
                 None => Vec::new(),
             };
             if !dead.is_empty() {
@@ -141,10 +178,14 @@ impl Harness for OpenCode {
                         .collect::<Vec<_>>()
                         .join(", "),
                 );
-                info.agent_note = Some(format!(
+                let note = format!(
                     "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
                     dead.join(", ")
-                ));
+                );
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(local_note) => format!("{local_note} {note}"),
+                    None => note,
+                });
             }
             // Every key rejected and nothing free left: nothing can run a turn.
             if models.is_empty() {
@@ -154,14 +195,33 @@ impl Harness for OpenCode {
             info.models = models;
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
-        } else if info.installed {
-            info.agent_note =
-                Some("Sign in with `opencode auth login` to chat with it here.".to_string());
-        } else {
+        } else if info.installed && !local.is_empty() {
+            info.agent_note = Some(if available.is_empty() {
+                "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
+            } else {
+                "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
+            }.to_string());
+        } else if info.installed && info.authenticated {
             info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then sign in with `opencode auth login`."
+                "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
                     .to_string(),
             );
+        } else if info.installed {
+            info.agent_note = Some(
+                "Configure a local model in OpenCode, or sign in with `opencode auth login`."
+                    .to_string(),
+            );
+        } else {
+            info.agent_note = Some(
+                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
+                    .to_string(),
+            );
+        }
+        if info.installed && !info.install_broken && !info.agent_ready && config.is_null() {
+            info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
+        }
+        if let Err(error) = crate::local::local_models::read() {
+            info.agent_note = Some(error.to_string());
         }
         Some(info)
     }
@@ -367,6 +427,87 @@ fn model_provider(id: &str) -> &str {
     id.split_once('/').map(|(p, _)| p).unwrap_or(id)
 }
 
+fn local_providers(config: &Value) -> Vec<(&str, &Value)> {
+    config
+        .get("provider")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(id, provider)| {
+            provider_enabled(config, id)
+                && provider
+                    .pointer("/options/baseURL")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_loopback_url)
+        })
+        .map(|(id, provider)| (id.as_str(), provider))
+        .collect()
+}
+
+fn provider_enabled(config: &Value, id: &str) -> bool {
+    let contains = |key| {
+        config.get(key).and_then(Value::as_array).map(|providers| {
+            providers
+                .iter()
+                .any(|provider| provider.as_str() == Some(id))
+        })
+    };
+    contains("enabled_providers").unwrap_or(true)
+        && !contains("disabled_providers").unwrap_or(false)
+}
+
+fn apply_configured_labels(models: &mut [ModelInfo], config: &Value) {
+    for model in models
+        .iter_mut()
+        .filter(|model| model.display_name.is_none())
+    {
+        if let Some((provider, id)) = model.id.split_once('/') {
+            model.display_name = config
+                .get("provider")
+                .and_then(|providers| providers.get(provider))
+                .and_then(|provider| provider.get("models"))
+                .and_then(|models| models.get(id))
+                .and_then(|model| model.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+}
+
+async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String> {
+    let probes = providers.iter().map(|(id, provider)| async move {
+        let advertised = crate::local::local_models::discover(&crate::local::local_models::Probe {
+            base_url: provider.pointer("/options/baseURL")?.as_str()?.to_owned(),
+            api_key: provider
+                .pointer("/options/apiKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .await
+        .ok()?;
+        let models = provider.get("models")?.as_object()?;
+        Some(
+            models
+                .iter()
+                .filter_map(|(model, options)| {
+                    let api_id = options.get("id").and_then(Value::as_str).unwrap_or(model);
+                    advertised
+                        .iter()
+                        .any(|entry| entry == api_id)
+                        .then(|| format!("{id}/{model}"))
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
+}
+
 /// `opencode models --verbose` — the ground truth for what the agent can run
 /// *and* for each model's reasoning `variants`.
 ///
@@ -431,7 +572,7 @@ async fn opencode_child(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .current_dir(std::env::temp_dir());
-    crate::local::chat::prepare_env(&mut cmd);
+    crate::local::local_models::prepare_env(&mut cmd, model).ok()?;
     cmd.env(
         "OPENCODE_DB",
         native_store::prepare_opencode(NativeStore::Isolated).ok()?,
@@ -448,7 +589,8 @@ async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null());
-    crate::local::chat::prepare_env(&mut cmd);
+    crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
+    cmd.env("NO_COLOR", "1");
     let fut = cmd.output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
         return None;
@@ -891,7 +1033,7 @@ async fn opencode_setup_attempt(
     let status = ctx
         .host
         .opencode
-        .ensure(&ctx.project, &ctx.session_id, store)
+        .ensure(&ctx.project, &ctx.session_id, store, ctx.model.as_deref())
         .await?;
     let port = status
         .port
@@ -1097,21 +1239,25 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 // merge its parts as the authoritative versions.
                 let resp = resp?.error_for_status()?;
                 ctx.mark_delivery(DeliveryState::Accepted);
+                let message = resp.json::<Value>().await?;
+                if let Some(error) = opencode_response_error(&message) {
+                    ctx.mark_native_retry_exhausted();
+                    ctx.mark_terminal_failure("opencode_terminal", error);
+                    return Err(anyhow!("{error}"));
+                }
                 ctx.clear_retry_status();
-                if let Ok(message) = resp.json::<Value>().await {
-                    if !opencode_response_is_current(&message, turn_started_at) {
-                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
-                        ctx.mark_terminal_failure("opencode_stale_response", message);
-                        return Err(anyhow!(message));
-                    }
-                    if let Some(parts) = message.get("parts").and_then(Value::as_array) {
-                        for part in parts {
-                            if let Some(wire) = to_wire_part(part) {
-                                // Preserve children: the final `task` part carries
-                                // none, but its row already streamed the sub-agent
-                                // transcript into `children`.
-                                ctx.upsert_part_preserving_children(wire);
-                            }
+                if !opencode_response_is_current(&message, turn_started_at) {
+                    let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                    ctx.mark_terminal_failure("opencode_stale_response", message);
+                    return Err(anyhow!(message));
+                }
+                if let Some(parts) = message.get("parts").and_then(Value::as_array) {
+                    for part in parts {
+                        if let Some(wire) = to_wire_part(part) {
+                            // Preserve children: the final `task` part carries
+                            // none, but its row already streamed the sub-agent
+                            // transcript into `children`.
+                            ctx.upsert_part_preserving_children(wire);
                         }
                     }
                 }
@@ -1119,6 +1265,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             }
         }
     }
+}
+
+fn opencode_response_error(message: &Value) -> Option<&str> {
+    if let Some(error) = message
+        .pointer("/info/error")
+        .filter(|error| !error.is_null())
+    {
+        return Some(
+            error
+                .pointer("/data/message")
+                .or_else(|| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("OpenCode reported an error"),
+        );
+    }
+    (message.pointer("/info/summary").and_then(Value::as_bool) == Some(true)).then_some(
+        "OpenCode compacted the context but did not resume this turn. Continue the chat to resume.",
+    )
 }
 
 fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
@@ -1193,16 +1357,8 @@ fn handle_event(
             if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
                 return;
             }
-            let error = props.get("error").unwrap_or(props);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("OpenCode reported an error")
-                .to_string();
-            ctx.mark_native_retry_exhausted();
+            // OpenCode can emit this before recovering through automatic compaction.
             ctx.mark_delivery(DeliveryState::Accepted);
-            ctx.mark_terminal_failure("opencode_terminal", message.clone());
-            ctx.push_error(message);
         }
         // A `task` tool spawns a sub-agent in a child session; opencode announces
         // it with `session.created` carrying the child's `parentID` = our
@@ -1221,7 +1377,8 @@ fn handle_event(
         Some("message.updated") => {
             let info = props.get("info").unwrap_or(&Value::Null);
             let session = info.get("sessionID").and_then(Value::as_str);
-            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant")
+                && info.get("summary").and_then(Value::as_bool) != Some(true);
             if session == Some(native_id)
                 && info.get("role").and_then(Value::as_str) == Some("user")
             {
@@ -1281,7 +1438,12 @@ fn handle_event(
             }
         }
         Some("message.part.delta") => {
-            if props.get("field").and_then(Value::as_str) != Some("text") {
+            if props.get("field").and_then(Value::as_str) != Some("text")
+                || !props
+                    .get("messageID")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| assistant_msgs.contains(id))
+            {
                 return;
             }
             let session = props.get("sessionID").and_then(Value::as_str);
@@ -1408,6 +1570,63 @@ async fn handle_prompt_event(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn local_models_require_an_enabled_loopback_server_and_matching_model() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({"data": [{"id": "loaded"}]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut config = json!({
+            "enabled_providers": ["local"],
+            "provider": {
+                "local": {"options": {"baseURL": base}, "models": {
+                    "loaded": {}, "missing": {}, "alias": {"id": "loaded"}
+                }},
+                "disabled": {"options": {"baseURL": base}},
+                "cloud": {"options": {"baseURL": "https://example.com/v1"}}
+            }
+        });
+        let providers = local_providers(&config);
+        assert_eq!(providers.len(), 1);
+        let available = available_local_models(&providers).await;
+        assert_eq!(
+            available,
+            HashSet::from(["local/loaded".into(), "local/alias".into()])
+        );
+        assert!(!provider_enabled(&config, "openai"));
+        server.abort();
+        let _ = server.await;
+        assert!(available_local_models(&providers).await.is_empty());
+        config["disabled_providers"] = json!(["local"]);
+        assert!(local_providers(&config).is_empty());
+        for url in [
+            "http://localhost:1234/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:11434/v1",
+        ] {
+            assert!(is_loopback_url(url));
+        }
+        for url in [
+            "https://localhost.example/v1",
+            "http://127.0.0.1@example.com/v1",
+            "http://192.168.1.1/v1",
+            "file:///tmp/models",
+        ] {
+            assert!(!is_loopback_url(url));
+        }
+    }
+
     /// Trimmed-down real `opencode models --verbose` output (1.17.15): a header
     /// line per model followed by its pretty-printed JSON. Covers the three
     /// cases that matter — a rich variants map, a *different* one on another
@@ -1455,6 +1674,23 @@ opencode/glm-5
 
     /// The core of issue #123 for opencode: variants are genuinely per-model,
     /// so each model gets its own list rather than a hard-coded union.
+    #[test]
+    fn plain_catalog_keeps_configured_local_labels() {
+        let mut models = vec![
+            ModelInfo::new("local/mlx/qwen"),
+            ModelInfo::new("cloud/claude").with_label(Some("Claude"), None),
+        ];
+        apply_configured_labels(
+            &mut models,
+            &json!({"provider":{"local":{"models":{"mlx/qwen":{"name":"Qwen · LM Studio (local)"}}}}}),
+        );
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("Qwen · LM Studio (local)")
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("Claude"));
+    }
+
     #[test]
     fn verbose_models_parse_per_model_variants() {
         let models = parse_verbose_models(VERBOSE_SAMPLE);
@@ -1773,6 +2009,37 @@ opencode/glm-5
             &mut HashMap::new(),
         );
         assert!(ctx.context_usage.is_none());
+    }
+
+    #[test]
+    fn compaction_recovery_does_not_surface_a_terminal_error_or_summary() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut messages = HashSet::new();
+        let mut sessions = HashMap::new();
+        for event in [
+            json!({"type":"session.error","properties":{"sessionID":"ses_x","error":{"name":"ContextOverflowError","data":{"message":"Too many tokens"}}}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"summary","sessionID":"ses_x","role":"assistant","summary":true}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"summary_text","messageID":"summary","sessionID":"ses_x","type":"text","text":"Internal summary"}}}),
+            json!({"type":"message.part.delta","properties":{"sessionID":"ses_x","messageID":"summary","partID":"summary_text","field":"text","delta":"hidden"}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"answer","sessionID":"ses_x","role":"assistant"}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"answer_text","messageID":"answer","sessionID":"ses_x","type":"text","text":"Run finished"}}}),
+        ] {
+            handle_event(&mut ctx, "ses_x", &event, &mut messages, &mut sessions);
+        }
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Run finished"));
+        assert_eq!(
+            opencode_response_error(&json!({"info":{"role":"assistant","finish":"stop"}})),
+            None
+        );
+        assert_eq!(
+            opencode_response_error(
+                &json!({"info":{"error":{"name":"APIError","data":{"message":"Invalid API key"}}}})
+            ),
+            Some("Invalid API key")
+        );
+        assert!(opencode_response_error(&json!({"info":{"summary":true}})).is_some());
     }
 
     #[test]

@@ -130,14 +130,14 @@ pub struct HarnessInfo {
     /// Live credential readiness. Account metadata never implies this state.
     pub auth_state: HarnessAuthState,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_method: Option<&'static str>, // "oauth" | "apiKey"
+    pub auth_method: Option<&'static str>, // "oauth" | "apiKey" | "local"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// Usable as a chat backend right now (installed, runs, and signed in).
+    /// Usable as a chat backend right now, including a reachable local provider.
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,

@@ -1,6 +1,7 @@
+import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
+import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
 import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
@@ -44,9 +45,11 @@ export function ExperimentsTable({
 
   if (sortedExperiments.length === 0) {
     return (
-      <div className="empty-state absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-6 text-center text-subtext [&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:leading-normal [&_p]:text-balance [&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext experiments-empty-state [&_p]:text-2xl">
-        <p>{emptyHint ?? m.experiments_none_yet()}</p>
-      </div>
+      <WorkspaceEmptyState
+        icon={FlaskConical}
+        title={emptyHint ?? m.experiments_none_yet()}
+        description={emptyHint ? undefined : m.experiments_empty_description()}
+      />
     );
   }
 

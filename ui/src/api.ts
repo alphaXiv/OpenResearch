@@ -16,6 +16,13 @@ export const isDemoProjectId = (id: string) => id.startsWith("demo_");
 export const DEMO_MAIN_SESSION_ID = "chat_demo_nanochat_v1";
 export const DEMO_FIGURE_SESSION_ID = "chat_demo_nanochat_figures_v1";
 export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
+
+/** Stable analytics labels for the bundled demo's recorded conversations. */
+export const DEMO_EXPERIMENT_LABELS: Record<string, string> = {
+  [DEMO_MAIN_SESSION_ID]: "cpu_end_to_end",
+  [DEMO_FIGURE_SESSION_ID]: "figures",
+  [DEMO_LITERATURE_SESSION_ID]: "literature",
+};
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
 export const DEMO_RUN_EXPERIMENT_PROMPT =
   "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
@@ -1422,6 +1429,29 @@ export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/a
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
+export type OnboardingStep = "welcome" | "environment" | "profile";
+export type FirstActionSurface = "demo" | "project";
+export type FirstAction =
+  | "starter_click"
+  | "typed_prompt"
+  | "open_experiment"
+  | "open_file"
+  | "run_experiment"
+  | "create_experiment"
+  | "open_settings";
+
+type UiEvent =
+  | { name: "onboarding_step_viewed"; step: OnboardingStep }
+  | { name: "demo_experiment_started"; kind: "curated" | "run"; experiment: string }
+  | { name: "project_starter_clicked"; slot: number }
+  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction };
+
+/** Product events raised by the UI. Fire-and-forget: analytics must never
+ * surface an error or block the interaction that triggered it. */
+export const captureUiEvent = (event: UiEvent): void => {
+  void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
+};
+
 export type HarnessId = "claude-code" | "codex" | "opencode";
 
 export interface HarnessModel {
@@ -1451,7 +1481,15 @@ export interface HarnessModel {
 
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
-export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabel(m.id);
+export function harnessModelLabel(model: HarnessModel): string {
+  if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
+  const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
+  const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
+    ? m.local_models_custom_endpoint()
+    : provider;
+  const label = modelLabel(model.id.replace(/-(?:FP|BF)\d+$/i, ""));
+  return endpoint ? `${label} · ${endpoint}` : label;
+}
 
 /** One selectable value in a composer toggle (permission mode / reasoning). */
 export interface OptionChoice {
@@ -1581,7 +1619,7 @@ export interface Harness {
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
-  authMethod?: "oauth" | "apiKey";
+  authMethod?: "oauth" | "apiKey" | "local";
   account?: string;
   org?: string;
   plan?: string;
@@ -2054,3 +2092,16 @@ export function backendDetail(backend: Run["backend"]): string {
   if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
   return "";
 }
+
+export interface LocalModelConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  models: Record<string, number>;
+}
+export const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
+export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
+export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
+export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
+export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));

@@ -1,4 +1,4 @@
-import type { ChatMessage, ChatPart } from "./api";
+import type { ChatMessage, ChatPart, ChatSession } from "./api";
 
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
@@ -51,4 +51,17 @@ export function streamTailIsText(messages: ChatMessage[]): boolean {
     return part.type === "text" && Boolean(part.text);
   }
   return false;
+}
+
+export function unreadAfterBusyChange(
+  current: ReadonlySet<string>, previousBusy: ReadonlySet<string>, busy: ReadonlySet<string>,
+  sessions: ChatSession[], visibleSessionId: string | null,
+): ReadonlySet<string> {
+  const finished = [...previousBusy].filter((id) => !busy.has(id)
+    && sessions.some((session) => session.id === id) && id !== visibleSessionId);
+  if (finished.length === 0 && !(visibleSessionId && current.has(visibleSessionId))) return current;
+  const next = new Set(current);
+  for (const id of finished) next.add(id);
+  if (visibleSessionId) next.delete(visibleSessionId);
+  return next;
 }

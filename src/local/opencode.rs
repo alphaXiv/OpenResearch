@@ -63,7 +63,7 @@ pub fn agent_log_path() -> PathBuf {
 /// headless turn never stalls on a TUI prompt; the interactive `question` tool
 /// is denied AND disabled (it would deadlock serve mode — nothing can answer
 /// it), repeated on the default `build` agent because the tool filter is
-/// agent-scoped. `model` only when the user passed `orx up --model`.
+/// agent-scoped. The model default keeps local subagents on the same endpoint.
 fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
@@ -468,7 +468,7 @@ async fn spawn_agent(
         .kill_on_drop(true);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
-    crate::local::chat::prepare_env(&mut cmd);
+    crate::local::local_models::prepare_env(&mut cmd, model)?;
     cmd.env("OPENCODE_DB", native_store::prepare_opencode(native_store)?);
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
@@ -507,7 +507,7 @@ async fn spawn_agent(
 /// orx session id, each running in that session's worktree. Share as
 /// `Arc<AgentHost>` in axum state.
 pub struct AgentHost {
-    /// `orx up --model` override, applied to every spawn.
+    /// `orx up --model` default when the session does not select a local model.
     model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
@@ -558,13 +558,18 @@ impl AgentHost {
         project: &LocalProject,
         session_id: &str,
         native_store: NativeStore,
+        model: Option<&str>,
     ) -> Result<AgentStatus> {
+        let model = model
+            .filter(|model| model.starts_with("orx-local-"))
+            .or(self.model_override.as_deref());
         let _spawning = self.spawn_lock.lock().await;
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
                     && agent.native_store == native_store
+                    && agent.model.as_deref() == model
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
                     return Ok(agent.status());
@@ -578,7 +583,7 @@ impl AgentHost {
         // (clone/fetch + health poll) is in flight instead of hanging.
         let agent = spawn_agent(
             project,
-            self.model_override.as_deref(),
+            model,
             session_id,
             self.up_port.get().copied(),
             native_store,

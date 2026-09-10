@@ -163,6 +163,10 @@ pub(crate) struct Settings {
     /// place; only the silent apply stops.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    /// Surfaces whose `first_action` event has already been sent, so a restart
+    /// cannot re-report a later action as the user's first one.
+    #[serde(default)]
+    pub first_action_reported: Vec<String>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -1013,6 +1017,86 @@ impl TelemetrySession {
 ///
 /// Non-blocking: the send is spawned and registered for the exit-time flush, so
 /// this returns immediately and never delays the command's own success output.
+/// Onboarding screens, in order; must match the API's
+/// `CLI_ANALYTICS_ONBOARDING_STEPS` or the event is rejected at ingest.
+pub(crate) const ONBOARDING_STEPS: [&str; 3] = ["welcome", "environment", "profile"];
+pub(crate) const DEMO_EXPERIMENT_KINDS: [&str; 2] = ["curated", "run"];
+/// Starter prompts are model-generated, so only the slot position is stable.
+/// The upper bound is headroom — the UI renders whatever the model returns.
+pub(crate) const STARTER_SLOTS: std::ops::RangeInclusive<u8> = 1..=8;
+pub(crate) const FIRST_ACTION_SURFACES: [&str; 2] = ["demo", "project"];
+pub(crate) const FIRST_ACTIONS: [&str; 7] = [
+    "starter_click",
+    "typed_prompt",
+    "open_experiment",
+    "open_file",
+    "run_experiment",
+    "create_experiment",
+    "open_settings",
+];
+
+pub(crate) fn capture_onboarding_step_viewed(step: &str) {
+    if !ONBOARDING_STEPS.contains(&step) {
+        return;
+    }
+    capture("onboarding_step_viewed", json!({ "step": step }));
+}
+
+/// `curated` replays a recorded demo conversation; `run` launches real compute.
+pub(crate) fn capture_demo_experiment_started(kind: &str, experiment: &str) {
+    if !DEMO_EXPERIMENT_KINDS.contains(&kind) || experiment.is_empty() {
+        return;
+    }
+    capture(
+        "demo_experiment_started",
+        json!({ "kind": kind, "experiment": experiment }),
+    );
+}
+
+pub(crate) fn capture_project_starter_clicked(slot: u8) {
+    if !STARTER_SLOTS.contains(&slot) {
+        return;
+    }
+    capture("project_starter_clicked", json!({ "slot": slot }));
+}
+
+/// First action on a surface, sent at most once per surface for the life of the
+/// install, so quitting and relaunching cannot promote a later action.
+pub(crate) fn capture_first_action(surface: &str, action: &str) {
+    if !FIRST_ACTION_SURFACES.contains(&surface) || !FIRST_ACTIONS.contains(&action) {
+        return;
+    }
+    // Check enablement before claiming: `capture` drops the event when telemetry
+    // is off, and claiming first would burn the slot for a later opt-in.
+    if !is_enabled(flag()) {
+        return;
+    }
+    if !claim_first_action_surface(surface) {
+        return;
+    }
+    capture(
+        "first_action",
+        json!({ "surface": surface, "action": action }),
+    );
+}
+
+/// Claim `surface`'s single first-action slot; true only for the winning caller.
+fn claim_first_action_surface(surface: &str) -> bool {
+    let mut claimed = false;
+    let _ = mutate_settings(|settings| {
+        if settings
+            .first_action_reported
+            .iter()
+            .any(|seen| seen == surface)
+        {
+            return;
+        }
+        settings.first_action_reported.push(surface.to_string());
+        claimed = true;
+    });
+    claimed
+}
+
 pub(crate) fn capture_experiment_started(kind: &str, local: bool, target: Option<&str>) {
     let mut extra = json!({ "kind": kind, "local": local });
     if let (Some(obj), Some(t)) = (extra.as_object_mut(), target) {
@@ -1516,6 +1600,62 @@ mod tests {
     }
 
     #[test]
+    fn first_action_claims_each_surface_once() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-first-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        assert!(claim_first_action_surface("project"));
+        assert!(!claim_first_action_surface("project"));
+        assert!(claim_first_action_surface("demo"));
+        assert_eq!(
+            load_settings()
+                .map(|s| s.first_action_reported)
+                .unwrap_or_default(),
+            vec!["project".to_string(), "demo".to_string()],
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_disabled_first_action_does_not_burn_the_surface() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-burn-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("ORX_NO_TELEMETRY", "1");
+
+        capture_first_action("project", "typed_prompt");
+        assert!(
+            load_settings()
+                .map(|s| s.first_action_reported.is_empty())
+                .unwrap_or(true),
+            "an opt-out must leave the slot free for a later opt-in"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dimension_events_reject_values_outside_the_allowlists() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-vocab-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        capture_first_action("website", "typed_prompt");
+        capture_first_action("project", "danced");
+        assert!(
+            load_settings()
+                .map(|s| s.first_action_reported.is_empty())
+                .unwrap_or(true),
+            "an unknown surface or action must never claim a slot"
+        );
+        assert!(!STARTER_SLOTS.contains(&0) && !STARTER_SLOTS.contains(&9));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn every_event_name_is_cli_prefixed() {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-prefix-{}", uuid::Uuid::new_v4()));
@@ -1538,6 +1678,10 @@ mod tests {
             ("skill_invoked", "cli_skill_invoked"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
+            ("onboarding_step_viewed", "cli_onboarding_step_viewed"),
+            ("demo_experiment_started", "cli_demo_experiment_started"),
+            ("project_starter_clicked", "cli_project_starter_clicked"),
+            ("first_action", "cli_first_action"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(

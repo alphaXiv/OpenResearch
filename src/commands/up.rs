@@ -554,6 +554,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/telemetry",
             get(telemetry_settings).post(set_telemetry_settings),
         )
+        .route("/api/telemetry/event", post(record_ui_event))
         .route(
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
@@ -610,6 +611,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/local-models",
+            get(list_local_models).post(connect_local_model),
+        )
+        .route("/api/local-models/discover", post(discover_local_models))
+        .route("/api/local-models/{id}/check", post(check_local_model))
+        .route(
+            "/api/local-models/{id}",
+            axum::routing::delete(remove_local_model),
+        )
         .route("/api/skills", get(list_skills))
         .route("/api/skills/{name}", get(get_skill))
         .route(
@@ -4203,7 +4214,11 @@ fn spawn_agent_preflight() {
                 } else if h.install_broken {
                     format!("{} — installed but failed to run", h.name)
                 } else if h.installed {
-                    format!("{} — not signed in", h.name)
+                    format!(
+                        "{} — {}",
+                        h.name,
+                        h.agent_note.as_deref().unwrap_or("not ready")
+                    )
                 } else {
                     format!("{} — not installed", h.name)
                 }
@@ -4212,7 +4227,7 @@ fn spawn_agent_preflight() {
         eprintln!("orx up: agents: {}", line.join(" · "));
         if !harnesses.iter().any(|h| h.agent_ready) {
             eprintln!(
-                "orx up: warning: no coding agent detected — install Claude Code, Codex or OpenCode and sign in to at least one of them."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex or OpenCode, then connect a local model or sign in."
             );
         }
     });
@@ -4942,6 +4957,55 @@ async fn telemetry_settings() -> ApiResult {
     tokio::task::spawn_blocking(|| Ok(Json(telemetry_settings_json())))
         .await
         .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+/// A product event raised by the UI rather than by a command. Every field is
+/// matched against a fixed allowlist in `telemetry`, so this local endpoint
+/// cannot emit arbitrary telemetry.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UiEventReq {
+    name: String,
+    #[serde(default)]
+    step: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    experiment: Option<String>,
+    #[serde(default)]
+    slot: Option<u8>,
+    #[serde(default)]
+    surface: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+async fn record_ui_event(Json(req): Json<UiEventReq>) -> ApiResult {
+    match req.name.as_str() {
+        "onboarding_step_viewed" => {
+            if let Some(step) = req.step.as_deref() {
+                crate::telemetry::capture_onboarding_step_viewed(step);
+            }
+        }
+        "demo_experiment_started" => {
+            if let (Some(kind), Some(experiment)) = (req.kind.as_deref(), req.experiment.as_deref())
+            {
+                crate::telemetry::capture_demo_experiment_started(kind, experiment);
+            }
+        }
+        "project_starter_clicked" => {
+            if let Some(slot) = req.slot {
+                crate::telemetry::capture_project_starter_clicked(slot);
+            }
+        }
+        "first_action" => {
+            if let (Some(surface), Some(action)) = (req.surface.as_deref(), req.action.as_deref()) {
+                crate::telemetry::capture_first_action(surface, action);
+            }
+        }
+        _ => return Ok(Json(json!({ "ok": false }))),
+    }
+    Ok(Json(json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]
@@ -6426,6 +6490,47 @@ async fn openresearch_settings() -> ApiResult {
         "sshKeyPath": ssh_key_path,
         "error": error,
     })))
+}
+
+async fn list_local_models() -> ApiResult {
+    Ok(Json(local::local_models::list()?))
+}
+
+async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> ApiResult {
+    let models = local::local_models::discover(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(json!({ "models": models })))
+}
+
+async fn check_local_model(Path(id): Path<String>) -> ApiResult {
+    let connection = local::local_models::read()?
+        .remove(&id)
+        .ok_or_else(|| not_found("local model connection"))?;
+    let models = local::local_models::discover(&local::local_models::Probe {
+        base_url: connection.base_url,
+        api_key: connection.api_key,
+    })
+    .await
+    .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(json!({ "models": models })))
+}
+
+async fn connect_local_model(
+    State(state): State<AppState>,
+    Json(req): Json<local::local_models::Connect>,
+) -> ApiResult {
+    let model = local::local_models::connect(req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({ "model": model })))
+}
+
+async fn remove_local_model(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    local::local_models::remove(&id)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // --- harnesses ---------------------------------------------------------------
