@@ -786,6 +786,7 @@ pub struct PaperArgs {
 // worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    install_panic_reporter();
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
     // server, browser) instead of parsing CLI args. Also require an empty argv so
     // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
@@ -880,32 +881,58 @@ async fn main() {
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
-        hold_console_open();
+        report_to_a_reader_with_no_console(&err.to_string());
         std::process::exit(1);
     }
 }
 
 /// A double-clicked `orx.exe` owns the console Explorer opened for it, so the
-/// window — and the error just printed into it — disappears the moment this
-/// process exits. Wait for the reader. Launched from an existing terminal, the
-/// shell is attached too and there is nothing to hold open.
+/// window — and the error just printed into it — is gone the instant this
+/// process exits, leaving the user with a flash and no idea why. Say it in a
+/// dialog, which outlives the console and needs no one to be reading stdin.
+///
+/// Launched from a terminal the shell is attached too, so the printed message
+/// survives on its own and a dialog would only be in the way.
 #[cfg(windows)]
-fn hold_console_open() {
-    use std::io::BufRead as _;
+fn report_to_a_reader_with_no_console(message: &str) {
     use windows_sys::Win32::System::Console::GetConsoleProcessList;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     let mut attached = [0u32; 2];
     // SAFETY: writes at most `attached.len()` process ids into `attached`.
     let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
-    if count != 1 {
+    if count > 1 {
         return;
     }
-    eprintln!("\nPress Enter to close this window.");
-    let _ = std::io::stdin().lock().read_line(&mut String::new());
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (body, title) = (wide(message), wide("OpenResearch could not start"));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
 }
 
 #[cfg(not(windows))]
-fn hold_console_open() {}
+fn report_to_a_reader_with_no_console(_message: &str) {}
+
+/// The other way this process dies with something to say. Without it a panic
+/// during startup is the same unexplained flash as a returned error was.
+/// Restricted to the main thread: a worker's panic has a running dashboard to
+/// report through, and must not stop on a dialog nobody asked for.
+fn install_panic_reporter() {
+    let inner = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        inner(info);
+        if std::thread::current().name() == Some("main") {
+            report_to_a_reader_with_no_console(&format!("{info}"));
+        }
+    }));
+}
 
 fn should_capture_command(command: &Command) -> bool {
     !matches!(
