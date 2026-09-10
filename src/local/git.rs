@@ -140,6 +140,22 @@ pub fn existing_session_worktree_path(
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
+/// Config carried by every git invocation that writes a working tree.
+///
+/// Windows refuses paths over 260 characters unless git is told to use the
+/// wide API, and a session worktree spends about a hundred of them on
+/// `worktrees/<project>/chat_<session>` before the repository's own paths
+/// begin — so a deep tree fails to check out partway through.
+#[cfg(windows)]
+fn long_paths() -> &'static [&'static str] {
+    &["-c", "core.longpaths=true"]
+}
+
+#[cfg(not(windows))]
+fn long_paths() -> &'static [&'static str] {
+    &[]
+}
+
 fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
@@ -150,6 +166,7 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
         cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
     }
     let out = cmd
+        .args(long_paths())
         .args(args)
         .output()
         .map_err(|e| anyhow!("Could not run git: {}", e))?;
@@ -858,6 +875,7 @@ pub fn clone_public(url: &str, path: &Path, shallow: bool) -> Result<()> {
         .env("GIT_ASKPASS", "")
         .env("SSH_ASKPASS", "")
         .env("SSH_ASKPASS_REQUIRE", "never")
+        .args(long_paths())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env_remove("GIT_CONFIG_COUNT")
@@ -1553,7 +1571,8 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
         .env("GIT_CONFIG_KEY_1", "credential.helper")
         .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
         .env("GIT_CONFIG_KEY_2", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_2", empty_config_file());
+        .env("GIT_CONFIG_VALUE_2", empty_config_file())
+        .args(long_paths());
     #[cfg(unix)]
     command.process_group(0);
     command
