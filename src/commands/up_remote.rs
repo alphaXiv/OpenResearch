@@ -2579,7 +2579,10 @@ mod tests {
         let joined = opts.join(" ");
         assert!(joined.contains("-o ExitOnForwardFailure=yes"));
         assert!(joined.contains("-o BatchMode=yes"));
+        #[cfg(unix)]
         assert!(joined.contains("-o ControlMaster=auto"));
+        #[cfg(not(unix))]
+        assert!(!joined.contains("Control"), "{joined}");
         assert!(opts.contains(&"-T".to_string()));
     }
 
