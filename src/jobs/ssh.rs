@@ -585,8 +585,12 @@ mod tests {
         let target = SshTarget::alias("mybox");
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
-        // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        assert_eq!(ssh_opts(&target, true).len(), 10);
+        // No `-p`/`-o Strict…` of its own — just BatchMode and ConnectTimeout,
+        // plus the multiplexing trio wherever ssh can multiplex.
+        assert_eq!(
+            ssh_opts(&target, true).len(),
+            if cfg!(unix) { 10 } else { 4 }
+        );
     }
 
     #[test]
