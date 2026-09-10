@@ -3,8 +3,10 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. Connections are multiplexed (ControlMaster) so the many status/log
-//! polls reuse one TCP session instead of a handshake apiece.
+//! key. On unix connections are multiplexed (ControlMaster) so the many
+//! status/log polls reuse one TCP session instead of a handshake apiece.
+//! Win32-OpenSSH cannot, so on Windows every call authenticates for itself —
+//! which needs a key in the agent, or one without a passphrase.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -14,6 +16,7 @@
 //! A restarted `orx supervise` reattaches purely from that directory.
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -33,11 +36,7 @@ fn control_dir() -> PathBuf {
     PathBuf::from("/tmp").join(format!("orx-ssh-{uid}-{:08x}", namespace.finish() as u32))
 }
 
-#[cfg(not(unix))]
-fn control_dir() -> PathBuf {
-    crate::config::config_dir().join("ssh-cm")
-}
-
+#[cfg(unix)]
 fn prepare_control_dir() -> Result<()> {
     let dir = control_dir();
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -46,22 +45,24 @@ fn prepare_control_dir() -> Result<()> {
             dir.display()
         )
     })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
-        let metadata = std::fs::symlink_metadata(&dir)?;
-        let uid = unsafe { libc::geteuid() };
-        if !metadata.file_type().is_dir() || metadata.uid() != uid {
-            return Err(anyhow!(
-                "SSH control path {} is not an owner-controlled directory.",
-                dir.display()
-            ));
-        }
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&dir, permissions)?;
+    let metadata = std::fs::symlink_metadata(&dir)?;
+    let uid = unsafe { libc::geteuid() };
+    if !metadata.file_type().is_dir() || metadata.uid() != uid {
+        return Err(anyhow!(
+            "SSH control path {} is not an owner-controlled directory.",
+            dir.display()
+        ));
     }
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&dir, permissions)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_control_dir() -> Result<()> {
     Ok(())
 }
 
@@ -131,6 +132,7 @@ impl SshTarget {
     }
 }
 
+#[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
     // the extra opts so different ports never share a control socket.
@@ -142,27 +144,49 @@ fn control_path(target: &SshTarget) -> PathBuf {
 }
 
 /// Shared ssh options: connection setup permits prompts; background work never
-/// does. Both modes use the same control socket, kept for ten idle minutes, so
-/// one interactive login covers later status, log, and job commands.
+/// does. On unix both modes share one control socket, kept for ten idle
+/// minutes, so a single interactive login covers later status, log and job
+/// commands.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+    ];
+    opts.extend(multiplexing_opts(target));
+    opts.extend(target.extra_opts.iter().cloned());
+    opts
+}
+
+#[cfg(unix)]
+fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
+    vec![
         "-o".into(),
         "ControlMaster=auto".into(),
         "-o".into(),
         format!("ControlPath={}", control_path(target).display()),
         "-o".into(),
         "ControlPersist=600".into(),
-    ];
-    opts.extend(target.extra_opts.iter().cloned());
-    opts
+    ]
 }
 
-/// Arguments for a long-lived local forward over the same authenticated
-/// ControlMaster used by settings and background jobs.
+/// Win32-OpenSSH has no multiplexing (PowerShell/Win32-OpenSSH#1328), and on
+/// the builds reported there a ControlPath inherited from the user's own
+/// ssh_config fails the connection with "getsockname failed: Not a socket".
+/// Only setting them explicitly overrides that config; omitting them does not.
+#[cfg(not(unix))]
+fn multiplexing_opts(_target: &SshTarget) -> Vec<String> {
+    vec![
+        "-o".into(),
+        "ControlMaster=no".into(),
+        "-o".into(),
+        "ControlPath=none".into(),
+    ]
+}
+
+/// Arguments for a long-lived local forward, riding the same authenticated
+/// ControlMaster as settings and background jobs where the platform has one.
 pub(crate) fn forward_args(
     target: &SshTarget,
     forward: &str,
@@ -192,7 +216,8 @@ pub(crate) fn forward_args(
 
 /// Arguments for the short interactive login opened by Settings. `true` ends
 /// the visible session after authentication while ControlPersist keeps its
-/// master connection available to the ordinary batch-mode calls below.
+/// master available to the batch-mode calls below — on Windows there is no
+/// master, so this only proves the host reachable and primes nothing.
 pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, false);
@@ -200,6 +225,12 @@ pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     Ok(args)
 }
 
+#[cfg(not(unix))]
+pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(unix)]
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
     let path = control_path(target);
@@ -554,7 +585,8 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        assert_eq!(ssh_opts(&target, true).len(), 10);
+        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
+        assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
     #[test]
@@ -589,8 +621,29 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn multiplexing_is_on_and_persistent() {
+        let opts = multiplexing_opts(&SshTarget::alias("cluster"));
+        assert_eq!(opts[0..2], ["-o", "ControlMaster=auto"]);
+        assert!(opts[3].starts_with("ControlPath="));
+        assert_eq!(opts[4..6], ["-o", "ControlPersist=600"]);
+    }
+
+    /// Present and off, not absent: a user's own ssh_config would otherwise
+    /// re-enable a ControlPath that fails the connection.
+    #[cfg(not(unix))]
+    #[test]
+    fn multiplexing_is_disabled_not_omitted() {
+        assert_eq!(
+            multiplexing_opts(&SshTarget::alias("cluster")),
+            vec!["-o", "ControlMaster=no", "-o", "ControlPath=none"],
+        );
+    }
+
     /// Explicit targets on the same host but different ports must not share a
     /// ControlMaster socket — the opts are part of the ControlPath hash.
+    #[cfg(unix)]
     #[test]
     fn control_path_differs_per_port() {
         let control_path = |t: &SshTarget| {
@@ -623,6 +676,7 @@ mod tests {
         assert!(path.len() + 17 < 104, "{path}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn interactive_and_batch_modes_share_the_control_path() {
         let target = SshTarget::alias("cluster");
@@ -634,6 +688,11 @@ mod tests {
         };
 
         assert_eq!(option(true), option(false));
+    }
+
+    #[test]
+    fn batch_mode_follows_the_mode_flag() {
+        let target = SshTarget::alias("cluster");
         assert!(ssh_opts(&target, true).contains(&"BatchMode=yes".to_string()));
         assert!(ssh_opts(&target, false).contains(&"BatchMode=no".to_string()));
     }
