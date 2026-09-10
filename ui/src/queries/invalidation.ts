@@ -83,6 +83,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   if (/\/(ui-state|open|prewarm|validate|preflight)$/.test(path)) return;
   const setting = /^\/api\/settings\/([^/]+)/.exec(path)?.[1];
   if (setting) { invalidate(settingsFamilies[setting] ?? [], scope); return; }
+  if (path.startsWith("/api/local-models") && !/\/(discover|check)$/.test(path)) { invalidate(["getLocalModels", "getHarnesses"], scope); return; }
   if (path === "/api/user-skills") { invalidate(["listUserSkills", "getSkills", "getSkillContent"], scope); return; }
   if (path === "/api/latex-templates") { invalidate(["listLatexTemplates"], scope); return; }
   if (path === "/api/overleaf/token") { invalidate(["getOverleafSettings", "getOverleafState", "getOverleafStatus"], scope); return; }

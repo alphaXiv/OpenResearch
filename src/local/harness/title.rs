@@ -22,8 +22,8 @@ const TITLE_MAX_CHARS: usize = 80;
 const TITLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The one-shot every harness runs for a title (the trait's default
-/// `generate_title`), around an already-built [`title_prompt`]: cheapest
-/// model, no tools, one short system line.
+/// `generate_title`), around an already-built [`title_prompt`]: cheap quality,
+/// no tools, one short system line. The caller supplies its session model.
 pub(crate) fn title_request(prompt: &str) -> super::OneShot<'_> {
     super::OneShot {
         system: "You generate short chat titles.",

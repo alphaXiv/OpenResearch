@@ -8,6 +8,7 @@ import { queryClient } from "../queries/client";
 import { getProjectPathStatusQuery, searchPapersQuery, resolvePaperQuery } from "../queries/projects";
 
 import { m } from "../paraglide/messages.js";
+import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
 import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
@@ -15,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   captureUiEvent,
   harnessModelLabel,
+  fmtNumber,
   completeOnboarding,
   reasoningFor,
   type AgentSelection,
@@ -27,6 +29,9 @@ import {
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
+import lmStudioLogo from "../assets/lm-studio-logo.svg";
+import ollamaLogo from "../assets/ollama-logo.png";
+import omlxLogo from "../assets/omlx-logo.svg";
 
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
@@ -216,7 +221,7 @@ export function Onboarding({
   const finishOnboarding = async () => {
     const harness = harnesses?.find((item) => item.id === preferredHarness && item.agentReady);
     if (!harness || finishing) return;
-    const selection = selectionFor(harness);
+    const selection = selectionFor(harness, harness.models[0]?.id ?? null);
     setFinishing(true);
     setFinishError(null);
     try {
@@ -321,6 +326,18 @@ export function Onboarding({
                 {m.onboarding_choose_a_coding_agent_to_continue()}
               </p>
             )}
+            {(gitVersion === null || gitError) && (
+              <div className="onb-git-check mt-7" role="status" aria-live="polite">
+                <LocalGitCard gitVersion={gitVersion} error={gitError} />
+                {gitError ? (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
+                ) : (
+                  <p className={GIT_RETRY_HINT_CLASS_NAME}>
+                    {m.onboarding_git_is_required_for_local_experiments_install_git()}
+                  </p>
+                )}
+              </div>
+            )}
             <div className="onb-cards flex flex-col gap-3.5">
               {harnesses !== null ? (
                 harnesses.map((h) => (
@@ -340,30 +357,13 @@ export function Onboarding({
                 </LoadingRow>
               )}
             </div>
-            {(gitVersion === null || gitError) && (
-              <div className="onb-git-check mt-7" role="status" aria-live="polite">
-                <LocalGitCard gitVersion={gitVersion} error={gitError} />
-                {gitError ? (
-                  <p className={GIT_RETRY_HINT_CLASS_NAME}>{m.onboarding_retry_connection()}</p>
-                ) : (
-                  <p className={GIT_RETRY_HINT_CLASS_NAME}>
-                    {m.onboarding_git_is_required_for_local_experiments_install_git()}
-                  </p>
-                )}
-              </div>
-            )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
               <Button variant="ghost" onClick={() => setStep(0)}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
               </Button>
-              {(harnessError ||
-                gitError ||
-                gitVersion === null ||
-                (harnesses !== null && !anyAgentReady)) && (
-                  <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
-                    <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
-                  </Button>
-                )}
+              <Button variant="ghost" onClick={() => load(true, true)} disabled={checking}>
+                <RefreshCw size={12} className={checking ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.onboarding_re_check()}
+              </Button>
               <div className="flex-1" />
               <Button variant="primary"
                 onClick={() => setStep(2)}
@@ -537,17 +537,17 @@ function cleanPaperTitle(title: string): string {
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
 function agentBadge(h: Harness): { tone: StatusTone; label: string } {
-  if (h.agentReady) return { tone: "success", label: m.onboarding_signed_in() };
+  if (h.agentReady) return { tone: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
+  if (h.authMethod === "local") return { tone: "warning", label: m.onboarding_server_unavailable() };
   if (h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
   if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
   if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
   return { tone: "neutral", label: m.onboarding_not_detected() };
 }
 
-function selectionFor(harness: Harness): AgentSelection {
-  const model = harness.models[0]?.id ?? null;
+function selectionFor(harness: Harness, model: string | null): AgentSelection {
   return {
     harness: harness.id,
     model,
@@ -575,12 +575,11 @@ function AgentCard({
     : badge;
   const version = h.version?.replace(/\s*\(.*\)$/, "");
   const meta = [
+    h.id === "opencode" && h.account !== "opencode" && h.account,
+    h.id === "opencode" && h.plan,
     version,
     h.models.length > 0 &&
-    `${h.models.length} model${h.models.length === 1 ? "" : "s"} — ${h.models
-      .slice(0, 3)
-      .map((m) => harnessModelLabel(m))
-      .join(", ")}${h.models.length > 3 ? ", …" : ""}`,
+    m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.map((model) => ltr(harnessModelLabel(model)))) }),
   ]
     .filter(Boolean)
     .join(" · ");
@@ -593,6 +592,23 @@ function AgentCard({
       <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
     </div>
   );
+  const localModelsNote = h.id === "opencode" && (
+    <div className="space-y-1 text-sm text-text">
+      <div className="font-medium">{m.onboarding_local_models_title()}</div>
+      <div>
+        {m.onboarding_local_models_compatible()}{" "}
+        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
+          <img src={lmStudioLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain" />LM Studio
+        </span>{", "}
+        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
+          <img src={ollamaLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain dark:invert" />Ollama
+        </span>{m.onboarding_local_models_and()}
+        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
+          <img src={omlxLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain" />oMLX
+        </span>.
+      </div>
+    </div>
+  );
   // An unready agent can't be selected — render it as a plain container, not a
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
@@ -600,6 +616,7 @@ function AgentCard({
       <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
         {head}
         <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
+        {localModelsNote}
       </div>
     );
   }
@@ -611,16 +628,19 @@ function AgentCard({
       onClick={onSelect}
     >
       {head}
-      <div className="onb-card-detail text-sm">
-        {h.account ?? m.onboarding_api_key()}
-        {h.plan ? ` · ${h.plan}` : ""}
-      </div>
+      {h.id !== "opencode" && (
+        <div className="onb-card-detail text-sm">
+          {h.account ?? m.onboarding_api_key()}
+          {h.plan ? ` · ${h.plan}` : ""}
+        </div>
+      )}
       <div
         className={`${ONB_CARD_META_CLASS_NAME} w-full overflow-hidden text-ellipsis whitespace-nowrap`}
         title={meta}
       >
         {meta}
       </div>
+      {localModelsNote}
     </button>
   );
 }

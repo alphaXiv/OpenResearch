@@ -173,3 +173,9 @@ export async function refreshHarnesses(refresh = false, retryRejected = false) {
   if (isCurrentScope(options.queryKey)) queryClient.setQueryData(options.queryKey, data);
   return data;
 }
+
+export const getLocalModelsQuery = () => queryOptions({
+  queryKey: workspaceKey("getLocalModels"),
+  queryFn: ({ signal }) => api.getLocalModels(signal),
+  staleTime: 30_000,
+});

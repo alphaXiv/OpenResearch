@@ -28,6 +28,9 @@ orx up
 
 `orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
+To use LM Studio, oMLX, Ollama, or a custom endpoint with OpenCode, see
+[connecting local models](docs/local-models.md).
+
 Create an account at [openresearch.sh](https://openresearch.sh) to receive email
 updates and use managed OpenResearch compute.
 

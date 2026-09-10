@@ -611,6 +611,16 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/local-models",
+            get(list_local_models).post(connect_local_model),
+        )
+        .route("/api/local-models/discover", post(discover_local_models))
+        .route("/api/local-models/{id}/check", post(check_local_model))
+        .route(
+            "/api/local-models/{id}",
+            axum::routing::delete(remove_local_model),
+        )
         .route("/api/skills", get(list_skills))
         .route("/api/skills/{name}", get(get_skill))
         .route(
@@ -4192,7 +4202,11 @@ fn spawn_agent_preflight() {
                 } else if h.install_broken {
                     format!("{} — installed but failed to run", h.name)
                 } else if h.installed {
-                    format!("{} — not signed in", h.name)
+                    format!(
+                        "{} — {}",
+                        h.name,
+                        h.agent_note.as_deref().unwrap_or("not ready")
+                    )
                 } else {
                     format!("{} — not installed", h.name)
                 }
@@ -4201,7 +4215,7 @@ fn spawn_agent_preflight() {
         eprintln!("orx up: agents: {}", line.join(" · "));
         if !harnesses.iter().any(|h| h.agent_ready) {
             eprintln!(
-                "orx up: warning: no coding agent detected — install Claude Code, Codex or OpenCode and sign in to at least one of them."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex or OpenCode, then connect a local model or sign in."
             );
         }
     });
@@ -6464,6 +6478,47 @@ async fn openresearch_settings() -> ApiResult {
         "sshKeyPath": ssh_key_path,
         "error": error,
     })))
+}
+
+async fn list_local_models() -> ApiResult {
+    Ok(Json(local::local_models::list()?))
+}
+
+async fn discover_local_models(Json(req): Json<local::local_models::Probe>) -> ApiResult {
+    let models = local::local_models::discover(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(json!({ "models": models })))
+}
+
+async fn check_local_model(Path(id): Path<String>) -> ApiResult {
+    let connection = local::local_models::read()?
+        .remove(&id)
+        .ok_or_else(|| not_found("local model connection"))?;
+    let models = local::local_models::discover(&local::local_models::Probe {
+        base_url: connection.base_url,
+        api_key: connection.api_key,
+    })
+    .await
+    .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(json!({ "models": models })))
+}
+
+async fn connect_local_model(
+    State(state): State<AppState>,
+    Json(req): Json<local::local_models::Connect>,
+) -> ApiResult {
+    let model = local::local_models::connect(req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({ "model": model })))
+}
+
+async fn remove_local_model(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    local::local_models::remove(&id)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({ "ok": true })))
 }
 
 // --- harnesses ---------------------------------------------------------------

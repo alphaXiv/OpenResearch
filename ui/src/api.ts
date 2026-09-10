@@ -1481,7 +1481,15 @@ export interface HarnessModel {
 
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
-export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabel(m.id);
+export function harnessModelLabel(model: HarnessModel): string {
+  if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
+  const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
+  const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
+    ? m.local_models_custom_endpoint()
+    : provider;
+  const label = modelLabel(model.id.replace(/-(?:FP|BF)\d+$/i, ""));
+  return endpoint ? `${label} · ${endpoint}` : label;
+}
 
 /** One selectable value in a composer toggle (permission mode / reasoning). */
 export interface OptionChoice {
@@ -1611,7 +1619,7 @@ export interface Harness {
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
-  authMethod?: "oauth" | "apiKey";
+  authMethod?: "oauth" | "apiKey" | "local";
   account?: string;
   org?: string;
   plan?: string;
@@ -2084,3 +2092,16 @@ export function backendDetail(backend: Run["backend"]): string {
   if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
   return "";
 }
+
+export interface LocalModelConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  models: Record<string, number>;
+}
+export const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
+export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
+export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
+export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
+export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));

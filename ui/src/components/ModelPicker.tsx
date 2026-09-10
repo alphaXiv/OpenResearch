@@ -1,9 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Zap } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
   harnessModelLabel,
@@ -23,6 +23,8 @@ import { HarnessLogo } from "./HarnessLogo";
 
 import { MenuItem } from "./ui";
 import { cn } from "./ui/cn";
+
+import { LocalModelSetup } from "./LocalModelSetup";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -125,6 +127,8 @@ export function ModelPicker({
   className?: string;
 }) {
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const queryClient = useQueryClient();
+  const [addingLocalModel, setAddingLocalModel] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
@@ -150,9 +154,9 @@ export function ModelPicker({
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
       let models = h.models;
-      if (q) models = models.filter((m) => m.id.toLowerCase().includes(q));
+      if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // opencode's long tail (openrouter etc.) stays behind the filter box.
-      else if (h.id === "opencode") models = models.slice(0, 6);
+      else if (h.id === "opencode") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -390,9 +394,6 @@ export function ModelPicker({
                             )}
                           </MenuItem>
                         ))}
-                        {hidden > 0 && (
-                          <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
-                        )}
                         {/* Free-form escape hatch: the catalogs are curated menus,
                         not the set of ids the CLIs accept — `--model
                         claude-opus-5` works on a CLI whose menu doesn't list
@@ -409,13 +410,27 @@ export function ModelPicker({
                           )}
                       </>
                     )}
+                    {harness.id === "opencode" && (
+                      <MenuItem type="button" className="font-medium" aria-haspopup="dialog" onClick={() => {
+                        close();
+                        triggerRef.current?.focus();
+                        setAddingLocalModel(true);
+                      }}>
+                        <span className="inline-flex items-center gap-1.5">
+                          {m.model_picker_add_local_model()}<Plus size={14} aria-hidden="true" />
+                        </span>
+                      </MenuItem>
+                    )}
+                    {harness.agentReady && hidden > 0 && (
+                      <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
+                    )}
                   </div>
                 ))}
                 {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>}
               </div>
               {lockHarness && value && harnesses.length > 1 && (
-                <div className="model-locked-note flex items-center gap-1.5 py-[7px] px-3 text-sm text-muted border-t border-t-border-variant [&_svg]:shrink-0">
-                  <Lock size={11} />
+                <div className="model-locked-note py-[7px] px-3 text-sm text-muted border-t border-t-border-variant">
+                  <Lock size={11} className="inline-block align-baseline me-1" aria-hidden="true" />
                   {m.model_picker_sessions_keep_their_harness_new_chat_to_switch()}
                 </div>
               )}
@@ -441,6 +456,14 @@ export function ModelPicker({
           )}
         </div>
       )}
+      {addingLocalModel && (
+          <LocalModelSetup dialogOnly installed={harnesses.find((harness) => harness.id === "opencode")?.installed ?? false}
+            onClose={() => setAddingLocalModel(false)}
+            onConnected={(model) => {
+              const harness = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((harness) => harness.id === "opencode");
+              if (harness && (!lockHarness || value?.harness === "opencode")) pick(harness, model);
+            }} />
+      )}
     </div>
   );
 }
@@ -460,7 +483,10 @@ export function OptionPicker({
   variant = "pill",
   title,
   numbered = false,
+  searchPlaceholder,
   renderIcon,
+  renderLabel,
+  floating = false,
   onSelect,
   className,
 }: {
@@ -479,11 +505,45 @@ export function OptionPicker({
   title?: string;
   /** Show 1-based number hints on the right (like the mode menu). */
   numbered?: boolean;
+  searchPlaceholder?: string;
   renderIcon?: (choice: OptionChoice) => ReactNode;
+  renderLabel?: (choice: OptionChoice) => ReactNode;
+  floating?: boolean;
   onSelect: (id: string) => void;
   className?: string;
 }) {
-  const { open, setOpen, ref } = usePopover();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const { open, setOpen, ref } = usePopover(buttonRef);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useState("");
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    const anchor = ref.current;
+    if (!open || !floating || !menu || !anchor) return;
+    if (!menu.matches(":popover-open")) {
+      menu.showPopover();
+      menu.querySelector("input")?.focus();
+    }
+    const position = () => {
+      const bounds = anchor.getBoundingClientRect();
+      const below = window.innerHeight - bounds.bottom - 12;
+      const above = bounds.top - 12;
+      const needed = Math.min(380, menu.scrollHeight);
+      const downward = dropDown ? below >= needed || below >= above : above < needed && below > above;
+      menu.style.width = `${bounds.width}px`;
+      menu.style.minWidth = "0";
+      menu.style.maxHeight = `${Math.max(0, Math.min(380, downward ? below : above))}px`;
+      menu.style.left = `${bounds.left}px`;
+      menu.style.top = `${downward ? bounds.bottom + 4 : bounds.top - menu.getBoundingClientRect().height - 4}px`;
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [open, floating, dropDown, filter, choices.length, ref]);
   if (choices.length === 0) return null;
 
   const effectiveId = value ?? defaultId ?? choices[0]?.id ?? null;
@@ -499,16 +559,19 @@ export function OptionPicker({
       ? defaultChoice
       : undefined;
   const rest = pinned ? choices.filter((c) => c.id !== pinned.id) : choices;
+  const visible = rest.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(filter.toLowerCase()));
   const label = current?.label ?? choices[0]?.label ?? "";
 
   const choose = (id: string) => {
     onSelect(id);
     setOpen(false);
+    buttonRef.current?.focus();
   };
 
   return (
     <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
       <button
+        ref={buttonRef}
         type="button"
         className={cn(
           variant === "field"
@@ -520,24 +583,28 @@ export function OptionPicker({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => { setFilter(""); setOpen((v) => !v); }}
       >
         <span className="inline-flex min-w-0 items-center gap-2">
           {current && renderIcon?.(current)}
-          <span className="truncate">{label}</span>
+          <span className="truncate">{current ? renderLabel?.(current) ?? label : label}</span>
         </span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
+        <div ref={menuRef} popover={floating ? "manual" : undefined}
+          style={floating ? { position: "fixed", inset: "auto", margin: 0 } : undefined}
+          className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full text-text" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
+          {searchPlaceholder && <input autoFocus aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
+          <div className="min-h-0 overflow-y-auto">
           {pinned && (
             <>
               <MenuItem type="button" onClick={() => choose(pinned.id)}>
                 <span className="inline-flex items-center gap-2">
                   {renderIcon?.(pinned)}
                   <span>
-                    {pinned.label}
+                    {renderLabel?.(pinned) ?? pinned.label}
                     {/* An unnamed sentinel's label already IS "Default", so the
                         usual marker would read "Default · Default" — say where
                         the behavior comes from instead. A named one ("Adaptive")
@@ -552,13 +619,13 @@ export function OptionPicker({
               <div className="option-sep h-px my-[5px] mx-1 bg-border-variant" />
             </>
           )}
-          {rest.map((c, i) => (
+          {visible.map((c, i) => (
             <MenuItem type="button" key={c.id} onClick={() => choose(c.id)}>
               <span className="flex min-w-0 items-center gap-2">
                 {renderIcon?.(c)}
                 <span className="flex min-w-0 flex-col items-start gap-0.5">
                   <span>
-                    {c.label}
+                    {renderLabel?.(c) ?? c.label}
                     {/* A concrete default renders inline, in ramp order, with just
                         the marker — it's one of the tiers, not a separate kind of
                         choice like the pinned sentinel above. */}
@@ -580,6 +647,7 @@ export function OptionPicker({
               )}
             </MenuItem>
           ))}
+          </div>
         </div>
       )}
     </div>
