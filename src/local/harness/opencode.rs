@@ -45,6 +45,7 @@ use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
+use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::find_opencode;
 
@@ -87,13 +88,11 @@ impl Harness for OpenCode {
                 models = catalog;
                 config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
                     Some(config) => config,
-                    None => {
-                        eprintln!("orx up: could not read OpenCode's resolved configuration; local model detection is unavailable");
-                        Value::Null
-                    }
+                    None => Value::Null,
                 };
             }
         }
+        apply_configured_labels(&mut models, &config);
         let providers: Vec<_> = opencode_providers()
             .into_iter()
             .filter(|id| provider_enabled(&config, id))
@@ -143,10 +142,14 @@ impl Harness for OpenCode {
         });
         // Onboarding and the composer seed their selection from the first model.
         let default = config.get("model").and_then(Value::as_str);
-        models.sort_by_key(|model| Some(model.id.as_str()) != default);
+        models.sort_by_key(|model| {
+            (
+                Some(model.id.as_str()) != default,
+                !model.id.starts_with("orx-local-"),
+            )
+        });
         if !info.authenticated && !local.is_empty() {
             info.auth_method = Some("local");
-            info.account = Some("Local models · no sign-in required".to_string());
         }
         info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
         if info.agent_ready {
@@ -213,6 +216,12 @@ impl Harness for OpenCode {
                 "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
                     .to_string(),
             );
+        }
+        if info.installed && !info.install_broken && !info.agent_ready && config.is_null() {
+            info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
+        }
+        if let Err(error) = crate::local::local_models::read() {
+            info.agent_note = Some(error.to_string());
         }
         Some(info)
     }
@@ -447,46 +456,36 @@ fn provider_enabled(config: &Value, id: &str) -> bool {
         && !contains("disabled_providers").unwrap_or(false)
 }
 
-fn is_loopback_url(value: &str) -> bool {
-    let Ok(url) = reqwest::Url::parse(value) else {
-        return false;
-    };
-    matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some_and(|host| {
-            host == "localhost"
-                || host
-                    .trim_matches(['[', ']'])
-                    .parse::<std::net::IpAddr>()
-                    .is_ok_and(|ip| ip.is_loopback())
-        })
+fn apply_configured_labels(models: &mut [ModelInfo], config: &Value) {
+    for model in models
+        .iter_mut()
+        .filter(|model| model.display_name.is_none())
+    {
+        if let Some((provider, id)) = model.id.split_once('/') {
+            model.display_name = config
+                .get("provider")
+                .and_then(|providers| providers.get(provider))
+                .and_then(|provider| provider.get("models"))
+                .and_then(|models| models.get(id))
+                .and_then(|model| model.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
 }
 
 async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String> {
-    let Ok(client) = reqwest::Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(3))
-        .build()
-    else {
-        return HashSet::new();
-    };
-    let client = &client;
     let probes = providers.iter().map(|(id, provider)| async move {
-        let base = provider.pointer("/options/baseURL")?.as_str()?;
-        let mut request = client.get(format!("{}/models", base.trim_end_matches('/')));
-        if let Some(key) = provider.pointer("/options/apiKey").and_then(Value::as_str) {
-            request = request.bearer_auth(key);
-        }
-        let response = request
-            .send()
-            .await
-            .ok()?
-            .error_for_status()
-            .ok()?
-            .json::<Value>()
-            .await
-            .ok()?;
-        let advertised = response.get("data")?.as_array()?;
+        let advertised = crate::local::local_models::discover(&crate::local::local_models::Probe {
+            base_url: provider.pointer("/options/baseURL")?.as_str()?.to_owned(),
+            api_key: provider
+                .pointer("/options/apiKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .await
+        .ok()?;
         let models = provider.get("models")?.as_object()?;
         Some(
             models
@@ -495,7 +494,7 @@ async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String>
                     let api_id = options.get("id").and_then(Value::as_str).unwrap_or(model);
                     advertised
                         .iter()
-                        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(api_id))
+                        .any(|entry| entry == api_id)
                         .then(|| format!("{id}/{model}"))
                 })
                 .collect::<Vec<_>>(),
@@ -573,7 +572,7 @@ async fn opencode_child(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .current_dir(std::env::temp_dir());
-    crate::local::chat::prepare_env(&mut cmd);
+    crate::local::local_models::prepare_env(&mut cmd, model).ok()?;
     cmd.env(
         "OPENCODE_DB",
         native_store::prepare_opencode(NativeStore::Isolated).ok()?,
@@ -590,7 +589,7 @@ async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null());
-    crate::local::chat::prepare_env(&mut cmd);
+    crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
     cmd.env("NO_COLOR", "1");
     let fut = cmd.output();
     let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
@@ -1034,7 +1033,7 @@ async fn opencode_setup_attempt(
     let status = ctx
         .host
         .opencode
-        .ensure(&ctx.project, &ctx.session_id, store)
+        .ensure(&ctx.project, &ctx.session_id, store, ctx.model.as_deref())
         .await?;
     let port = status
         .port
@@ -1655,6 +1654,23 @@ opencode/glm-5
 
     /// The core of issue #123 for opencode: variants are genuinely per-model,
     /// so each model gets its own list rather than a hard-coded union.
+    #[test]
+    fn plain_catalog_keeps_configured_local_labels() {
+        let mut models = vec![
+            ModelInfo::new("local/mlx/qwen"),
+            ModelInfo::new("cloud/claude").with_label(Some("Claude"), None),
+        ];
+        apply_configured_labels(
+            &mut models,
+            &json!({"provider":{"local":{"models":{"mlx/qwen":{"name":"Qwen · LM Studio (local)"}}}}}),
+        );
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("Qwen · LM Studio (local)")
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("Claude"));
+    }
+
     #[test]
     fn verbose_models_parse_per_model_variants() {
         let models = parse_verbose_models(VERBOSE_SAMPLE);

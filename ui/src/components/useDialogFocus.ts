@@ -21,6 +21,7 @@ export function useDialogFocus(
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (dialog.querySelector(":popover-open")) return;
         event.preventDefault();
         event.stopPropagation();
         onCloseRef.current();

@@ -291,9 +291,8 @@ pub trait Harness: Send + Sync {
     }
 
     /// Generate a short (≤6 words) session title from the session's first user
-    /// message with a short-lived child, using the session model when the
-    /// harness honors it. `None` = can't or failed — the caller keeps the
-    /// first-line placeholder.
+    /// message with a short-lived child, using the session model for OpenCode.
+    /// `None` = failed; the caller keeps the first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
     /// `one_shot` (Cursor) gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
@@ -303,7 +302,7 @@ pub trait Harness: Send + Sync {
     async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
         let prompt = title::title_prompt(first_message);
         let request = OneShot {
-            model,
+            model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
             ..title::title_request(&prompt)
         };
         let raw = self.one_shot(request).await?;
