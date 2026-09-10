@@ -38,8 +38,11 @@ The dashboard opens at `http://127.0.0.1:4791`.
 ### The SmartScreen warning
 
 `orx.exe` is not code-signed yet, so Windows shows "Windows protected your PC"
-on first run. Choose **More info** → **Run anyway**. This will happen to every
-tester on every download until signing is set up.
+on first run. Choose **More info** → **Run anyway**.
+
+Signing is planned, but it will not make this go away immediately: since 2024
+even an EV certificate has to earn SmartScreen reputation through download
+volume like any other, so early builds will keep showing the warning.
 
 ### Long paths
 
