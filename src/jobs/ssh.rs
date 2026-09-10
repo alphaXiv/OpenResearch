@@ -122,7 +122,7 @@ impl SshTarget {
                     "-o".into(),
                     "StrictHostKeyChecking=no".into(),
                     "-o".into(),
-                    "UserKnownHostsFile=/dev/null".into(),
+                    format!("UserKnownHostsFile={}", discarded_known_hosts().display()),
                     "-o".into(),
                     "LogLevel=ERROR".into(),
                 ]);
@@ -130,6 +130,19 @@ impl SshTarget {
         }
         Self { dest, extra_opts }
     }
+}
+
+/// Where a host key may be written and forgotten. Windows' OpenSSH has no
+/// `/dev/null` and would take the name literally, creating a `\dev\null` on
+/// whichever drive is current, so give it a scratch file of orx's own.
+#[cfg(unix)]
+fn discarded_known_hosts() -> PathBuf {
+    PathBuf::from("/dev/null")
+}
+
+#[cfg(not(unix))]
+fn discarded_known_hosts() -> std::path::PathBuf {
+    crate::config::config_dir().join("ephemeral-known-hosts")
 }
 
 #[cfg(unix)]
@@ -614,7 +627,7 @@ mod tests {
                 "-o",
                 "StrictHostKeyChecking=no",
                 "-o",
-                "UserKnownHostsFile=/dev/null",
+                &format!("UserKnownHostsFile={}", discarded_known_hosts().display()),
                 "-o",
                 "LogLevel=ERROR",
             ]
