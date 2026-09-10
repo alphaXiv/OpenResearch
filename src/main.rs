@@ -803,11 +803,20 @@ async fn main() {
     }
 
     let cli = Cli::parse();
-    let Some(command) = cli.command else {
+    let command = match cli.command {
+        Some(command) => command,
+        // Double-clicked from Explorer, where a usage dump goes to a console
+        // that closes with the process and reads as nothing happening. Start the
+        // dashboard, as the macOS .app does for the same gesture.
+        None if owns_its_console() => Cli::parse_from(["orx", "up"])
+            .command
+            .expect("`orx up` names a subcommand"),
         // Bare `orx`: print the command overview to stdout and exit 0.
-        use clap::CommandFactory;
-        Cli::command().print_help().ok();
-        return;
+        None => {
+            use clap::CommandFactory;
+            Cli::command().print_help().ok();
+            return;
+        }
     };
     // Outdated-version warning (skipped for the commands that manage updates
     // themselves). `start` prints the cached warning to stderr *now*,
@@ -893,15 +902,28 @@ async fn main() {
 ///
 /// Launched from a terminal the shell is attached too, so the printed message
 /// survives on its own and a dialog would only be in the way.
+/// Whether this process is the only one on its console — which is what Explorer
+/// hands a double-clicked exe, and means the window dies with us. A shell that
+/// launched us is attached to the same console, so anything typed there is not.
 #[cfg(windows)]
-fn report_to_a_reader_with_no_console(message: &str) {
+fn owns_its_console() -> bool {
     use windows_sys::Win32::System::Console::GetConsoleProcessList;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     let mut attached = [0u32; 2];
     // SAFETY: writes at most `attached.len()` process ids into `attached`.
-    let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
-    if count > 1 {
+    unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) == 1 }
+}
+
+#[cfg(not(windows))]
+fn owns_its_console() -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn report_to_a_reader_with_no_console(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    if !owns_its_console() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -1051,6 +1073,16 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    /// A double-clicked orx.exe reaches `up` through this parse; an argv clap
+    /// rejected would panic there instead of opening the dashboard.
+    #[test]
+    fn a_double_click_parses_as_a_local_up() {
+        assert!(matches!(
+            Cli::parse_from(["orx", "up"]).command,
+            Some(Command::Up(args)) if args.remote.is_none()
+        ));
+    }
 
     #[test]
     fn internal_commands_do_not_emit_command_telemetry() {
