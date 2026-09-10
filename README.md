@@ -28,6 +28,11 @@ orx up
 
 `orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
+On Windows, install from
+[Releases](https://github.com/alphaXiv/OpenResearch/releases) and read
+[the Windows notes](docs/windows.md) first — Git for Windows is required, and
+support is still in beta.
+
 To use LM Studio, oMLX, Ollama, or a custom endpoint with OpenCode, see
 [connecting local models](docs/local-models.md).
 
