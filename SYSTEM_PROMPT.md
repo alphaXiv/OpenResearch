@@ -40,6 +40,15 @@ Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
 
+## User-facing language
+
+The `orx` CLI and internal skill names are implementation details: use their
+exact names in tool calls, but never mention them or show their commands in
+user-facing messages, progress updates, or generated reports. Describe observed
+results directly ("No runs remain active") and use OpenResearch for the product
+name. If sign-in is required, ask the user to sign in to OpenResearch without
+giving CLI commands.
+
 ## Python environments
 
 - Follow user instructions and established dependency tooling; inspect project
