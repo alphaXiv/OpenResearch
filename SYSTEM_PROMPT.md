@@ -40,7 +40,7 @@ Use `orx` as the source of truth for the experiment tree, runs, and logs. Use
 normal repository tools for code and file inspection. Use this project id
 (`{id}`) for every `orx` command that takes one.
 
-ORX is internal and should stay under the hood; do not mention it in user-facing responses.
+`orx` is internal and should stay under the hood; do not mention it in user-facing responses.
 
 ## Python environments
 
