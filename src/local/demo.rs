@@ -62,7 +62,7 @@ fn probe_setup() -> String {
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
+const EXPERIMENT_SHA: &str = "dae919e9b6f6edd3bdb14a514dd1e451781682f8";
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
