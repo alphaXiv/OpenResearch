@@ -305,6 +305,12 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
             remove_link(destination)?;
         }
         Ok(metadata) if metadata.is_file() && source_metadata.is_file() && marker.is_file() => {
+            // Windows' hard-link fallback *is* the source, so there is nothing
+            // to adopt back and nothing in conflict.
+            if same_file::is_same_file(destination, source)? {
+                write_marker(&marker, source)?;
+                return Ok(());
+            }
             if std::fs::read_to_string(&marker).ok().as_deref() == file_hash(source)?.as_deref() {
                 adopt_managed_file(destination, source)?;
             } else {
@@ -410,12 +416,99 @@ pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> std::io::Result
     }
 }
 
+/// Windows hands out symlinks only to an elevated process or one running under
+/// Developer Mode; everyone else gets `ERROR_PRIVILEGE_NOT_HELD`. Fall back to
+/// the links that need no privilege: a junction for a directory, which reads
+/// back through `symlink_metadata`/`read_link` exactly like a symlink, and a
+/// hard link for a file, which does not — `reconcile_link` recognizes those.
 #[cfg(windows)]
 pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
+    let directory = source.is_dir();
+    let attempt = if directory {
         std::os::windows::fs::symlink_dir(source, destination)
     } else {
         std::os::windows::fs::symlink_file(source, destination)
+    };
+    match attempt {
+        Err(error)
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD as i32) => {}
+        result => return result,
+    }
+    if directory {
+        create_junction(source, destination)
+    } else {
+        std::fs::hard_link(source, destination)
+    }
+}
+
+/// `mklink /J` is the only junction maker short of raw reparse-point FFI. Both
+/// paths are quoted because a home directory name may hold a `cmd`
+/// metacharacter, and a Windows path can never hold the quote itself.
+#[cfg(windows)]
+fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let output = std::process::Command::new("cmd")
+        .arg("/d")
+        .arg("/c")
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            destination.display(),
+            source.display()
+        ))
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    Err(std::io::Error::other(format!(
+        "mklink /J: {}",
+        String::from_utf8_lossy(detail).trim()
+    )))
+}
+
+/// Windows links a file into the isolated home with a hard link when it refuses
+/// a symlink; the reconcile must not read that as a severed one. Runs
+/// everywhere, since hard links are not a Windows idea.
+#[cfg(test)]
+mod hard_link_tests {
+    use super::*;
+
+    #[test]
+    fn a_hard_linked_destination_survives_an_edit_through_the_source() {
+        let root = std::env::temp_dir().join(format!("orx-hard-link-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let source = legacy.join("config.toml");
+        let destination = isolated.join("config.toml");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::write(&source, "first").unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        write_marker(
+            &destination.with_file_name("config.toml.orx-managed-link"),
+            &source,
+        )
+        .unwrap();
+
+        std::fs::write(&source, "second").unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        assert!(same_file::is_same_file(&destination, &source).unwrap());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "second");
+        assert!(!std::fs::read_dir(&isolated)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".orx-conflict-")));
+        std::fs::remove_dir_all(root).ok();
     }
 }
 

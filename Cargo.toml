@@ -56,6 +56,11 @@ sha1 = "0.10"
 # roots for the same musl reasons as reqwest above; already in the tree via axum.
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
+# Windows links a file into the isolated agent home with a hard link when it
+# refuses a symlink, and only file identity tells one apart from a stale copy.
+# Already in the tree transitively (walkdir).
+same-file = "1.0"
+
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
 # transitively; taken as a direct dep only on unix, where we call it.
