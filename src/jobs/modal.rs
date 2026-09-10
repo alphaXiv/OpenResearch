@@ -418,8 +418,8 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
     // the launcher tails carries everything.
     let merged = format!("{{\n{}\n}} 2>&1", spec.script);
     // Default the sandbox's Python to unbuffered so the job's own prints stream
-    // live instead of block-buffering behind a pipe (see jobs::default_unbuffered).
-    let env = super::default_unbuffered(&spec.env);
+    // live instead of block-buffering behind a pipe (see jobs::default_python_env).
+    let env = super::default_python_env(&spec.env);
     let body = json!({
         "app": spec.app,
         "image": spec.image,

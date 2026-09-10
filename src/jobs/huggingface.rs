@@ -330,7 +330,7 @@ pub async fn run_job_with_source(
         "digest": digest,
         "image": spec.docker_image,
         "command": spec.command,
-        "environment": super::default_unbuffered(&spec.environment),
+        "environment": super::default_python_env(&spec.environment),
         "secrets": spec.secrets,
         "flavor": spec.flavor,
         "timeoutSeconds": spec.timeout_seconds,

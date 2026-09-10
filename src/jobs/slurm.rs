@@ -172,11 +172,11 @@ fn render_sbatch(spec: &SlurmJobSpec) -> String {
     // Default the payload's Python to unbuffered so its prints stream live
     // instead of block-buffering behind Slurm's --output redirect. Only the
     // sbatch payload runs the job — the login-node setup script (below) is a
-    // git clone, so it keeps the raw env (see jobs::default_unbuffered).
+    // git clone, so it keeps the raw env (see jobs::default_python_env).
     format!(
         "#!/usr/bin/env bash\n{directives}\n{exports}\n(\ncd repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > exit_code\nexit \"$code\"\n",
         directives = directives.join("\n"),
-        exports = render_exports(&super::default_unbuffered(&spec.env)),
+        exports = render_exports(&super::default_python_env(&spec.env)),
         command = spec.command,
     )
 }

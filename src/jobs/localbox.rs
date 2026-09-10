@@ -45,8 +45,8 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
     // Default the job's Python to unbuffered so its prints land in `log` (which
     // we tail) live instead of block-buffering behind the redirect (see
-    // jobs::default_unbuffered).
-    let env = super::default_unbuffered(&spec.env);
+    // jobs::default_python_env).
+    let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
         .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
