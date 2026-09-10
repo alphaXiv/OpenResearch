@@ -880,9 +880,32 @@ async fn main() {
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
+        hold_console_open();
         std::process::exit(1);
     }
 }
+
+/// A double-clicked `orx.exe` owns the console Explorer opened for it, so the
+/// window — and the error just printed into it — disappears the moment this
+/// process exits. Wait for the reader. Launched from an existing terminal, the
+/// shell is attached too and there is nothing to hold open.
+#[cfg(windows)]
+fn hold_console_open() {
+    use std::io::BufRead as _;
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut attached = [0u32; 2];
+    // SAFETY: writes at most `attached.len()` process ids into `attached`.
+    let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
+    if count != 1 {
+        return;
+    }
+    eprintln!("\nPress Enter to close this window.");
+    let _ = std::io::stdin().lock().read_line(&mut String::new());
+}
+
+#[cfg(not(windows))]
+fn hold_console_open() {}
 
 fn should_capture_command(command: &Command) -> bool {
     !matches!(

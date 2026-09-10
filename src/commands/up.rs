@@ -62,9 +62,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
             DashboardLockMode::Shared
         },
     )?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        // Clicking orx a second time must reach the dashboard already serving,
+        // not die on the port that dashboard is holding.
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+            if !dashboard_is_serving(port).await {
+                return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error));
+            }
+            let url = format!("http://127.0.0.1:{port}");
+            eprintln!("orx up: already running — opening {url}");
+            if !args.no_browser {
+                browser::open_browser(&url);
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
+    };
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -830,6 +844,23 @@ impl From<&StoredRun> for ApiRun {
 }
 
 // --- basic routes ---------------------------------------------------------
+
+/// Whether an OpenResearch dashboard, rather than some unrelated server, is what
+/// holds `port`. `dashboardProtocol` is the field no other service would answer.
+async fn dashboard_is_serving(port: u16) -> bool {
+    let Ok(response) = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/api/health"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response
+        .json::<Value>()
+        .await
+        .is_ok_and(|body| body.get("dashboardProtocol").is_some())
+}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
