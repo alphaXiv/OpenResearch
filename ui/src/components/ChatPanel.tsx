@@ -34,6 +34,7 @@ import {
   CircleX,
   Clock,
   CornerDownLeft,
+  Copy,
   FileText,
   FlaskConical,
   FolderOpen,
@@ -176,7 +177,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
+import { Button, IconButton, Input, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
 import { useDialogFocus } from "./useDialogFocus";
 import { PaperTitle } from "./PaperTitle";
 
@@ -2810,6 +2811,8 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
+  text,
+  createdAt,
   count,
   index,
   prevId,
@@ -2819,6 +2822,8 @@ function ForkControls({
   onEdit,
   editDisabled,
 }: {
+  text: string;
+  createdAt: number;
   count: number;
   index: number;
   prevId?: string;
@@ -2829,6 +2834,16 @@ function ForkControls({
   editDisabled: boolean;
 }) {
   const many = count > 1;
+  const sentAt = new Date(createdAt);
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+      await navigator.clipboard.writeText(text);
+      showAlert(m.common_copied(), "success");
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
   return (
     <div
       className={`fork-controls flex items-center gap-0.5 transition-opacity duration-80 ease-standard ${
@@ -2858,6 +2873,18 @@ function ForkControls({
           </IconButton>
         </>
       )}
+      <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
+        <Tooltip content={sentAt.toLocaleString(getLocale())}>
+          <time dateTime={sentAt.toISOString()} className="text-xs text-subtext tabular-nums me-2">
+            {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
+          </time>
+        </Tooltip>
+        <Tooltip content={m.md_copy()}>
+          <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
+            <Copy size={13} />
+          </IconButton>
+        </Tooltip>
+      </div>
       <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
         aria-label={m.chat_panel_edit_and_re_send()}
@@ -3030,6 +3057,8 @@ const Message = memo(function Message({
         </div>
         {forkCount !== undefined && (
           <ForkControls
+            text={text}
+            createdAt={message.createdAt}
             count={forkCount}
             index={forkIndex}
             prevId={forkPrevId}
