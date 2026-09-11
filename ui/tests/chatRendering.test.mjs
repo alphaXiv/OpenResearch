@@ -87,7 +87,7 @@ test("reasoning-only work never creates an empty disclosure", async () => {
 });
 
 test("Claude quota notices recognize typed errors and legacy duplicates without hiding real output", async () => {
-  const { isClaudeUsageLimitPart } = await import("../src/chatRendering.ts");
+  const { isUsageLimitPart } = await import("../src/chatRendering.ts");
   const text = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
   const sessionLimit = "You've hit your session limit · resets 3:10pm (America/Los_Angeles)";
   const duplicates = [
@@ -97,8 +97,27 @@ test("Claude quota notices recognize typed errors and legacy duplicates without 
     { type: "tool", tool: "error", state: { error: `claude: ${text}` } },
     { type: "tool", tool: "error", state: { input: { errorKind: "claude_usage_limit" } } },
   ];
-  assert.ok(duplicates.every(isClaudeUsageLimitPart));
-  assert.equal(isClaudeUsageLimitPart({ type: "text", text: "Earlier useful output" }), false);
-  assert.equal(isClaudeUsageLimitPart({ type: "tool", tool: "bash", state: { error: text } }), false);
-  assert.equal(isClaudeUsageLimitPart({ type: "tool", tool: "error", state: { error: "File not found" } }), false);
+  assert.ok(duplicates.every(isUsageLimitPart));
+  assert.equal(isUsageLimitPart({ type: "text", text: "Earlier useful output" }), false);
+  assert.equal(isUsageLimitPart({ type: "tool", tool: "bash", state: { error: text } }), false);
+  assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error: "File not found" } }), false);
+});
+
+
+test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {
+  const { isUsageLimitPart } = await import("../src/chatRendering.ts");
+  for (const error of [
+    "You've hit your usage limit. Try again later.",
+    'Limit reached\n\ncodexErrorInfo: "usageLimitExceeded"',
+    "You exceeded your current quota, please check your plan and billing details.",
+    "Rate limit reached for model. Please try again later.",
+    "Insufficient credits",
+  ]) {
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error } }), true);
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "bash", state: { error } }), false);
+    assert.equal(isUsageLimitPart({ type: "text", text: error }), false);
+  }
+  for (const error of ["Invalid API key", "Context length exceeded", "Connection refused"]) {
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error } }), false);
+  }
 });

@@ -113,7 +113,7 @@ import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
-  isClaudeUsageLimitPart,
+  isUsageLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
@@ -3062,9 +3062,9 @@ const Message = memo(function Message({
       </div>
     );
   }
-  const usageLimit = message.parts.find((part) => part.type === "tool" && isClaudeUsageLimitPart(part));
+  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
   const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
-  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isClaudeUsageLimitPart(part)));
+  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       <AssistantTurn message={message} parts={regularParts} options={{
