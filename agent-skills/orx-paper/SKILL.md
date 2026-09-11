@@ -15,6 +15,8 @@ write real content into it, then link it in chat using the session playbook's
 evidence-and-links contract so the user can open the rendered document. An
 outline in chat gives them nothing to render.
 
+To add a reusable template to OpenResearch, load `orx-customize`.
+
 ## Check for a template before writing a preamble
 
 The user may have uploaded their own LaTeX template — a conference class, a lab

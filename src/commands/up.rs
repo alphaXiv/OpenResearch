@@ -996,6 +996,7 @@ async fn complete_onboarding(
 
 #[derive(Deserialize)]
 struct SkillsQ {
+    harness: Option<String>,
     /// The open project, so a built-in skill's instructions can account for it.
     project: Option<String>,
 }
@@ -1003,25 +1004,32 @@ struct SkillsQ {
 /// Slash-skills the composer's `/` dropdown offers (expanded server-side): the
 /// built-in catalog plus the user's own — uploaded here or mirrored from a
 /// coding agent.
-async fn list_skills() -> Json<Value> {
-    let mut skills: Vec<Value> = crate::local::skills::CATALOG
-        .iter()
-        .map(|s| {
-            json!({
+async fn list_skills(Query(q): Query<SkillsQ>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let importing = crate::local::user_skills::refresh_imports();
+        let mut skills: Vec<Value> = crate::local::skills::CATALOG
+            .iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "source": "builtin",
+                })
+            })
+            .collect();
+        for s in crate::local::user_skills::list_for_harness(q.harness.as_deref()) {
+            skills.push(json!({
                 "name": s.name,
                 "description": s.description,
-                "source": "builtin",
-            })
-        })
-        .collect();
-    for s in crate::local::user_skills::list() {
-        skills.push(json!({
-            "name": s.name,
-            "description": s.description,
-            "source": "user",
-        }));
-    }
-    Json(json!({ "skills": skills }))
+                "source": "user",
+                "plugin": s.plugin,
+                "harness": q.harness,
+            }));
+        }
+        Json(json!({ "skills": skills, "importing": importing }))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))
 }
 
 async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiResult {
@@ -1039,7 +1047,13 @@ async fn get_skill(Path(name): Path<String>, Query(q): Query<SkillsQ>) -> ApiRes
     if let Some(content) = crate::local::skills::instructions(&name, false, github_enabled) {
         return Ok(Json(json!({ "name": name, "content": content })));
     }
-    let content = crate::local::user_skills::content(&name).ok_or_else(|| not_found("skill"))?;
+    let skill_name = name.clone();
+    let content = tokio::task::spawn_blocking(move || {
+        crate::local::user_skills::content(&skill_name, q.harness.as_deref())
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))?
+    .ok_or_else(|| not_found("skill"))?;
     Ok(Json(json!({ "name": name, "content": content })))
 }
 
@@ -1057,11 +1071,16 @@ fn user_skill_json(s: &crate::local::user_skills::UserSkill) -> Value {
 /// Everything the Customize tab lists: uploads plus the skills mirrored from the
 /// coding agents installed on this machine.
 async fn list_user_skills() -> ApiResult {
-    let skills: Vec<Value> = crate::local::user_skills::list()
-        .iter()
-        .map(user_skill_json)
-        .collect();
-    Ok(Json(json!({ "skills": skills })))
+    tokio::task::spawn_blocking(|| {
+        let importing = crate::local::user_skills::refresh_imports();
+        let skills: Vec<Value> = crate::local::user_skills::list()
+            .iter()
+            .map(user_skill_json)
+            .collect();
+        Json(json!({ "skills": skills, "importing": importing }))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!(e)))
 }
 
 #[derive(Deserialize)]
@@ -1078,17 +1097,8 @@ async fn upload_user_skill(Json(req): Json<UploadSkillReq>) -> ApiResult {
         .decode(req.content_base64.trim())
         .map_err(|e| bad_request(format!("invalid file data: {e}")))?;
 
-    let lower = req.filename.to_ascii_lowercase();
-    let saved = if lower.ends_with(".zip") {
-        crate::local::user_skills::save_zip(&bytes)
-    } else if lower.ends_with(".md") || lower.ends_with(".markdown") {
-        crate::local::user_skills::save_skill_md(&bytes)
-    } else {
-        return Err(bad_request(
-            "upload a SKILL.md file or a .zip of a skill folder",
-        ));
-    }
-    .map_err(bad_request)?;
+    let saved =
+        crate::local::user_skills::save_upload(&req.filename, &bytes).map_err(bad_request)?;
 
     Ok(Json(json!({ "skill": user_skill_json(&saved) })))
 }
@@ -1099,7 +1109,10 @@ struct DeleteByNameQ {
 }
 
 async fn delete_user_skill(Query(q): Query<DeleteByNameQ>) -> ApiResult {
-    crate::local::user_skills::delete(&q.name).map_err(bad_request)?;
+    tokio::task::spawn_blocking(move || crate::local::user_skills::delete(&q.name))
+        .await
+        .map_err(|e| ApiError::from(anyhow!(e)))?
+        .map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
 }
 

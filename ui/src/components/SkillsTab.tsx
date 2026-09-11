@@ -4,7 +4,7 @@ import { listUserSkillsQuery, listLatexTemplatesQuery } from "../queries/setting
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { RefreshCw, Trash2, Upload } from "lucide-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
   deleteLatexTemplate,
   deleteUserSkill,
@@ -25,7 +25,7 @@ const CARD_CLASS_NAME =
 const CARD_SUB_CLASS_NAME = "mt-0 mx-0 mb-3 text-sm leading-relaxed text-text";
 const SKILL_ROW_CLASS_NAME =
   "flex items-start gap-3 py-2.5 border-t border-t-border first:border-t-0";
-const SKILL_NAME_CLASS_NAME = "font-mono text-base font-medium text-text";
+const SKILL_NAME_CLASS_NAME = "text-sm font-normal text-text";
 const ROW_DETAIL_CLASS_NAME = "mt-1 mb-0 text-sm leading-relaxed text-text";
 
 /** Read a File into base64 (strips the `data:...;base64,` prefix). */
@@ -135,8 +135,7 @@ function RowMeta({ bytes, updatedAt }: { bytes: number; updatedAt: number }) {
   );
 }
 
-/** One skill. A skill mirrored from a coding agent is managed where it lives,
- * so it carries that agent's badge instead of a delete button. */
+/** Uploaded and discovered skills can both be removed from ORX. */
 function SkillRow({
   skill,
   onError,
@@ -148,29 +147,28 @@ function SkillRow({
 
   const busy = deleteUserSkillMutation.isPending;
   return (
-    <div className={SKILL_ROW_CLASS_NAME}>
+    <div className="flex items-center gap-2 py-1 border-t border-t-border first:border-t-0">
       <div className="flex-1 min-w-0 flex items-center gap-2">
-        <code className={SKILL_NAME_CLASS_NAME}>/{skill.name}</code>
-        {skill.origin && <Badge>{skill.origin}</Badge>}
+        <span className={SKILL_NAME_CLASS_NAME}>{skill.name}</span>
+        {skill.origin && <Badge size="small">{skill.origin}</Badge>}
       </div>
       <RowMeta bytes={skill.bytes} updatedAt={skill.updatedAt} />
-      {!skill.origin && (
-        <IconButton
-          data-tip={m.skills_tab_delete_skill()}
-          data-tip-align="end"
-          aria-label={m.skills_delete_skill_label({ name: ltr(skill.name) })}
-          disabled={busy}
-          onClick={() => {
-            if (!window.confirm(m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
-            deleteUserSkillMutation.mutateAsync(skill.name)
-              .catch((e) => {
-                onError(e instanceof Error ? e.message : String(e));
-              });
-          }}
-        >
-          <Trash2 size={13} />
-        </IconButton>
-      )}
+      <IconButton
+        size="small"
+        data-tip={skill.origin ? m.skills_remove_imported() : m.skills_tab_delete_skill()}
+        data-tip-align="end"
+        aria-label={skill.origin ? m.skills_remove_imported_label({ name: ltr(skill.name) }) : m.skills_delete_skill_label({ name: ltr(skill.name) })}
+        disabled={busy}
+        onClick={() => {
+          if (!window.confirm(skill.origin ? m.skills_remove_imported_confirm({ name: ltr(skill.name) }) : m.skills_delete_skill_confirm({ name: ltr(skill.name) }))) return;
+          deleteUserSkillMutation.mutateAsync(skill.name)
+            .catch((e) => {
+              onError(e instanceof Error ? e.message : String(e));
+            });
+        }}
+      >
+        <Trash2 size={13} />
+      </IconButton>
     </div>
   );
 }
@@ -225,6 +223,23 @@ function SkillsCard() {
 
   const skillsQuery = useQuery(listUserSkillsQuery());
   const skills = skillsQuery.data;
+  const listRef = useRef<HTMLDivElement>(null);
+  const [hasMoreAbove, setHasMoreAbove] = useState(false);
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
+  const updateScrollFade = useCallback(() => {
+    const list = listRef.current;
+    setHasMoreAbove(!!list && list.scrollTop > 1);
+    setHasMoreBelow(!!list && list.scrollHeight - list.scrollTop - list.clientHeight > 1);
+  }, []);
+
+  useLayoutEffect(() => {
+    updateScrollFade();
+    const list = listRef.current;
+    if (!list) return;
+    const observer = new ResizeObserver(updateScrollFade);
+    observer.observe(list);
+    return () => observer.disconnect();
+  }, [skills, updateScrollFade]);
   const refreshing = skillsQuery.isFetching;
   const loadError = skillsQuery.error?.message;
   const [busy, setBusy] = useState(false);
@@ -279,7 +294,7 @@ function SkillsCard() {
       <DropZone
         accept=".md,.markdown,.zip"
         busy={busy}
-        prompt={m.skills_drop_skill()}
+        prompt={<><span>{m.skills_drop_skill()}</span><span className="block ps-4 mt-1 text-text">{m.skills_agent_alternative()}</span></>}
         onFile={(file) => void upload(file)}
       />
 
@@ -301,10 +316,18 @@ function SkillsCard() {
       )) : skills.length === 0 ? (
         <div className="pt-3 text-sm text-subtext">{m.skills_tab_no_skills_yet()}</div>
       ) : (
-        <div className="flex flex-col mt-1">
-          {skills.map((s) => (
-            <SkillRow key={s.name} skill={s} onError={setError} />
-          ))}
+        <div className="relative mt-1">
+          <div ref={listRef} onScroll={updateScrollFade} className="flex flex-col max-h-120 overflow-y-auto overscroll-contain">
+            {skills.map((s) => (
+              <SkillRow key={s.name} skill={s} onError={setError} />
+            ))}
+          </div>
+          {hasMoreAbove && (
+            <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 top-0 h-10 bg-gradient-to-b from-background to-transparent" />
+          )}
+          {hasMoreBelow && (
+            <div aria-hidden="true" className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-background to-transparent" />
+          )}
         </div>
       )}
     </section>
@@ -361,7 +384,7 @@ function LatexTemplatesCard() {
       <DropZone
         accept=".tex,.zip"
         busy={busy}
-        prompt={m.skills_drop_template()}
+        prompt={<><span>{m.skills_drop_template()}</span><span className="block ps-4 mt-1 text-text">{m.templates_agent_alternative()}</span></>}
         onFile={(file) => void upload(file)}
       />
 

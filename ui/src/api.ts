@@ -1643,17 +1643,19 @@ export const getHarnesses = (refresh = false, retryRejected = false, signal?: Ab
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
+  plugin?: string | null;
+  harness?: string | null;
   description: string;
   /** Built-in composer commands share the menu with harness/user skills. */
   source?: "builtin" | "user" | "command";
 }
 
-export const getSkills = (signal?: AbortSignal) => get<{ skills: SkillInfo[] }>("/api/skills", signal).then((r) => r.skills);
+export const getSkills = (signal?: AbortSignal, harness?: string) => get<{ skills: SkillInfo[]; importing: boolean }>(`/api/skills${harness ? `?harness=${encodeURIComponent(harness)}` : ""}`, signal);
 
-export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal) =>
+export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal, harness?: string | null) =>
   get<{ content: string }>(
     `/api/skills/${encodeURIComponent(name)}${
-      projectId ? `?project=${encodeURIComponent(projectId)}` : ""
+      `?${new URLSearchParams({ ...(projectId ? { project: projectId } : {}), ...(harness ? { harness } : {}) })}`
     }`,
     signal,
   ).then((r) => r.content);
@@ -1693,7 +1695,7 @@ export interface UserSkill {
 }
 
 export const listUserSkills = (signal?: AbortSignal) =>
-  get<{ skills: UserSkill[] }>("/api/user-skills", signal).then((r) => r.skills);
+  get<{ skills: UserSkill[]; importing: boolean }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */

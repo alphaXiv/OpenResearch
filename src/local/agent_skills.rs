@@ -100,6 +100,7 @@ const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
 const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
@@ -189,6 +190,12 @@ const S_REPORTS: AgentSkill = AgentSkill {
     content: REPORTS,
     resources: &[],
 };
+const S_CUSTOMIZE: AgentSkill = AgentSkill {
+    name: "orx-customize",
+    description: "Save reusable skills and LaTeX templates with `orx skills add` and `orx templates add`. Use when the user asks to create, import, or add a skill or template to OpenResearch for use across projects.",
+    content: CUSTOMIZE,
+    resources: &[],
+};
 const S_PAPER: AgentSkill = AgentSkill {
     name: "orx-paper",
     description: "Draft an academic paper or preprint as LaTeX. Create a .tex file in the project working tree, where it renders for the user and compiles to PDF. Use for a paper, preprint, manuscript, arXiv or submission draft, or a section of one; generic reports and result summaries belong to `orx-reports`.",
@@ -228,6 +235,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
+            &S_CUSTOMIZE,
             &S_LIT,
         ],
         SkillSet::Full => vec![
@@ -241,6 +249,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
+            &S_CUSTOMIZE,
             &S_LIT,
         ],
     }
@@ -482,6 +491,7 @@ mod tests {
             "instances",
             "evidence",
             "reports",
+            "customize",
         ] {
             let local = find(name, SkillSet::Local).expect("local skill");
             let full = find(name, SkillSet::Full).expect("full skill");

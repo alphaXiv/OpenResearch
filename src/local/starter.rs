@@ -211,7 +211,7 @@ async fn generate_uncached(
 }
 
 /// The user's preferred chat agent, else the first harness that is ready.
-async fn resolve_agent() -> Option<Agent> {
+pub(crate) async fn resolve_agent() -> Option<Agent> {
     let preferred = tokio::task::spawn_blocking(|| {
         crate::store::Store::open()
             .and_then(|store| store.ui_state())

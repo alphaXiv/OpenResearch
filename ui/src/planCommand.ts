@@ -1,6 +1,14 @@
 import type { SkillInfo } from "./api";
 import { m } from "./paraglide/messages.js";
 
+export function commandDisplayName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1).replaceAll("-", " ");
+}
+
+export function commandLabel(skill: SkillInfo): string {
+  return `${skill.plugin ? `${commandDisplayName(skill.plugin)}: ` : ""}${commandDisplayName(skill.name)}`;
+}
+
 export const PLAN_COMMAND: SkillInfo = {
   name: "plan",
   get description() {
@@ -66,13 +74,7 @@ export function insertSlashCommand(
   marginSpaces = 1,
 ): { text: string; cursor: number } {
   const margin = " ".repeat(marginSpaces);
-  let before = text.slice(0, context.start);
-  if (marginSpaces > 1 && /[ \t]$/.test(before)) {
-    before = before.replace(/[ \t]+$/, (spaces) => {
-      if (spaces.includes("\t")) return spaces;
-      return spaces.length >= marginSpaces ? spaces : margin;
-    });
-  }
+  const before = text.slice(0, context.start);
   let after = text.slice(context.end);
   if (!after) {
     after = margin;
@@ -113,9 +115,11 @@ export function commandsForHarness(
   const availableSkills = skills.filter(
     (skill) => skill.name.toLowerCase() !== PLAN_COMMAND.name,
   );
-  return planActivation
-    ? [PLAN_COMMAND, ...availableSkills]
-    : availableSkills;
+  if (planActivation) availableSkills.push(PLAN_COMMAND);
+  return availableSkills.sort((a, b) => {
+    const group = Number(b.source === "command") - Number(a.source === "command");
+    return group || commandLabel(a).localeCompare(commandLabel(b), undefined, { sensitivity: "base" });
+  });
 }
 
 export function parsePlanCommand(

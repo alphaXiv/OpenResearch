@@ -2318,7 +2318,11 @@ fn slash_skill_name(token: &str) -> Option<String> {
     Some(name.to_ascii_lowercase())
 }
 
-fn selected_slash_skills(project: &LocalProject, text: &str) -> (Vec<SelectedSlashSkill>, bool) {
+fn selected_slash_skills(
+    project: &LocalProject,
+    text: &str,
+    harness: Option<&str>,
+) -> (Vec<SelectedSlashSkill>, bool) {
     let has_request = text
         .split_whitespace()
         .filter(|token| slash_skill_name(token).is_none())
@@ -2347,7 +2351,7 @@ fn selected_slash_skills(project: &LocalProject, text: &str) -> (Vec<SelectedSla
                     instructions,
                 });
             }
-        } else if let Some(instructions) = crate::local::user_skills::instructions(&name) {
+        } else if let Some(instructions) = crate::local::user_skills::instructions(&name, harness) {
             seen.insert(name);
             selected.push(SelectedSlashSkill::User { instructions });
         }
@@ -2357,7 +2361,7 @@ fn selected_slash_skills(project: &LocalProject, text: &str) -> (Vec<SelectedSla
 
 /// Bundled catalog only: user skill names are free text and stay local.
 pub(crate) fn builtin_slash_skill_names(project: &LocalProject, text: &str) -> Vec<&'static str> {
-    selected_slash_skills(project, text)
+    selected_slash_skills(project, text, None)
         .0
         .into_iter()
         .filter_map(|skill| match skill {
@@ -2369,8 +2373,8 @@ pub(crate) fn builtin_slash_skill_names(project: &LocalProject, text: &str) -> V
 
 /// Slash tokens select supplementary instructions. The transcript keeps the
 /// exact message, while every recognized selection shares that complete request.
-fn expand_slash_skills(project: &LocalProject, text: &str) -> String {
-    let (selected, has_request) = selected_slash_skills(project, text);
+fn expand_slash_skills(project: &LocalProject, text: &str, harness: Option<&str>) -> String {
+    let (selected, has_request) = selected_slash_skills(project, text, harness);
     if selected.is_empty() {
         return text.to_string();
     }
@@ -2419,7 +2423,7 @@ mod slash_skill_tests {
     fn expands_multiple_inline_skills_with_one_shared_request() {
         let text =
             "Compare LoRA methods /LIT-REVIEW and draft the result /write-paper for an ML audience";
-        let expanded = expand_slash_skills(&project(), text);
+        let expanded = expand_slash_skills(&project(), text, None);
         assert!(expanded.contains("# Literature retrieval"));
         assert!(expanded.contains("Load the `orx-paper` skill first"));
         assert_eq!(expanded.matches("User request:").count(), 1);
@@ -2429,11 +2433,11 @@ mod slash_skill_tests {
     #[test]
     fn deduplicates_selected_skills_and_preserves_unknown_slashes() {
         let text = "/lit-review compare /unknown against prior work /lit-review";
-        let expanded = expand_slash_skills(&project(), text);
+        let expanded = expand_slash_skills(&project(), text, None);
         assert_eq!(expanded.matches("# Literature retrieval").count(), 1);
         assert!(expanded.ends_with(text));
         assert_eq!(
-            expand_slash_skills(&project(), "plain /unknown text"),
+            expand_slash_skills(&project(), "plain /unknown text", None),
             "plain /unknown text"
         );
         assert_eq!(
@@ -2447,11 +2451,11 @@ mod slash_skill_tests {
 
     #[test]
     fn a_bare_selection_uses_the_workflows_empty_request_behavior() {
-        let expanded = expand_slash_skills(&project(), "/lit-review");
+        let expanded = expand_slash_skills(&project(), "/lit-review", None);
         assert!(expanded.contains("ask the user what topic to review"));
         assert!(!expanded.contains("User request:"));
 
-        let punctuation = expand_slash_skills(&project(), "/lit-review /unknown .");
+        let punctuation = expand_slash_skills(&project(), "/lit-review /unknown .", None);
         assert!(punctuation.contains("ask the user what topic to review"));
         assert!(!punctuation.contains("User request:"));
     }
@@ -3885,7 +3889,7 @@ impl ChatHost {
                 let project = store.get_local_project(&session.project_id)?;
                 let message = SteerMessage {
                     text: project
-                        .map(|project| expand_slash_skills(&project, &text))
+                        .map(|project| expand_slash_skills(&project, &text, Some(&session.harness)))
                         .unwrap_or_else(|| text.clone()),
                     display: text.clone(),
                 };
@@ -4917,8 +4921,9 @@ impl ChatHost {
         // Slash-skills: the transcript keeps the `/name` the user typed; the
         // harness gets the expanded prompt.
         let mut turn_text = prepared_input.unwrap_or_else(|| {
-            let expanded =
-                contextualize_messages(messages, |text| expand_slash_skills(&project, text));
+            let expanded = contextualize_messages(messages, |text| {
+                expand_slash_skills(&project, text, Some(&session.harness))
+            });
             with_turn_context(
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
