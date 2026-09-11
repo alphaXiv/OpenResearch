@@ -109,18 +109,11 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
 | `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
 
-### Save reusable skills and templates
-
-When the user asks to save a reusable skill or LaTeX template, create the file
-in the working directory, then run `orx skills add ./SKILL.md` (or a skill ZIP)
-or `orx templates add ./conference-style.tex` (or a template ZIP with supporting
-files). Skill names come from frontmatter `name:`; template names come from their
-filenames, so choose a descriptive template filename.
-These commands save across projects in the active OpenResearch data directory.
-Same-name entries are fully replaced, including supporting files; report the
-saved name and any replacement. Discovered native skills stay harness-managed;
-these commands create explicit OpenResearch uploads. Session copies refresh on
-subsequent turns; do not promise an immediate skill reload in the running harness.
+### Skills & templates — module `orx-customize`
+| Command | What it does |
+|---|---|
+| `orx skills add <path>` | Save a reusable skill from a `SKILL.md` file or skill ZIP across projects. |
+| `orx templates add <path>` | Save a reusable LaTeX template from a `.tex` file or template ZIP across projects. |
 
 ### Meta
 | Command | What it does |
@@ -141,6 +134,7 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-evidence** — capture and inspect experiment results through run logs.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
 - **orx-figures** — publication-quality figures in matplotlib or TikZ. Load it **before** writing any plotting code, then read the one reference for that figure type.
+- **orx-customize** — add reusable skills and LaTeX templates across projects.
 - **orx-paper** — draft a paper or preprint as LaTeX that renders and compiles to PDF.
 - **orx-lit-review** — main-agent cross-corpus retrieval, source-selective follow-up policy, and paper content; the preferred starting point for academic/research queries.
 

@@ -30,19 +30,6 @@ private to this chat session.
   `orx-figures` before writing plotting code; default matplotlib output is not
   publishable
 
-## Save reusable skills and templates
-
-When the user asks to save a reusable skill or LaTeX template, create the file
-in the working directory, then run `orx skills add ./SKILL.md` (or a skill ZIP)
-or `orx templates add ./conference-style.tex` (or a template ZIP with supporting
-files). Skill names come from frontmatter `name:`; template names come from their
-filenames, so choose a descriptive template filename.
-These commands save across projects in the active OpenResearch data directory.
-Same-name entries are fully replaced, including supporting files; report the
-saved name and any replacement. Discovered native skills stay harness-managed;
-these commands create explicit OpenResearch uploads. Session copies refresh on
-subsequent turns; do not promise an immediate skill reload in the running harness.
-
 ## Project state
 
 {project_state}
