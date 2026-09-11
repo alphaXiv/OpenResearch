@@ -1774,7 +1774,8 @@ fn parse_remote_install_paths(output: &str) -> Option<RemoteInstallPaths> {
 /// The parent directory of a path on the *remote* machine, checked as a string: the remote
 /// is POSIX, and Windows `Path` rules would reject it or rejoin it with backslashes.
 fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
-    if !path.starts_with('/') || path.split('/').any(|part| part == "." || part == "..") {
+    // Only `..` is refused; an interior `.` (which a probe can report) was always allowed.
+    if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
         return Err(anyhow!("{label} must be an absolute path without . or .."));
     }
     let (parent, last) = path
@@ -2594,6 +2595,15 @@ mod tests {
         // dest then the remote command follow the separator, in that order.
         assert_eq!(args[sep + 1], "mybox");
         assert_eq!(args[sep + 2], "orx up");
+    }
+
+    #[test]
+    fn remote_storage_roots_allow_dot_but_not_dot_dot() {
+        assert_eq!(
+            storage_root("/home/u/./orx/orx.db", "orx.db", "Database").unwrap(),
+            "/home/u/./orx"
+        );
+        assert!(storage_root("/home/u/../orx/orx.db", "orx.db", "Database").is_err());
     }
 
     #[test]

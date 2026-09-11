@@ -111,7 +111,7 @@ fn pid_alive(pid: &str) -> bool {
     }
 }
 
-/// Windows has no `ps`. Waits rather than reading the exit code, where a real 259 reads as live.
+/// Windows has no `ps`. A zero-timeout wait, not the exit code, where a real 259 reads as live.
 #[cfg(windows)]
 fn pid_alive(pid: &str) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};

@@ -3,9 +3,9 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. Connections are multiplexed (ControlMaster) so the many status/log
+//! key. On unix, connections are multiplexed (ControlMaster) so the many status/log
 //! polls reuse one TCP session instead of a handshake apiece.
-//! Win32-OpenSSH cannot multiplex, so on Windows each call authenticates for itself.
+//! Win32-OpenSSH cannot, so on Windows background calls need an agent key or no passphrase.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -153,7 +153,8 @@ fn control_path(target: &SshTarget) -> PathBuf {
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
-/// Shared ssh options: setup may prompt, background work never does; on unix both share one socket.
+/// Shared ssh options: setup may prompt, background work never does; on unix one shared
+/// socket lets a single login cover both.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
@@ -611,9 +612,9 @@ mod tests {
         let (head, known_hosts, tail) = (&t.extra_opts[..5], &t.extra_opts[5], &t.extra_opts[6..]);
         assert_eq!(head, ["-p", "2222", "-o", "StrictHostKeyChecking=no", "-o"]);
         assert_eq!(tail, ["-o", "LogLevel=ERROR"]);
-        // Not recomputed: on Windows it follows XDG_CONFIG_HOME, which telemetry tests mutate.
         #[cfg(unix)]
         assert_eq!(known_hosts, "UserKnownHostsFile=/dev/null");
+        // By shape: on Windows it follows XDG_CONFIG_HOME, which telemetry tests mutate.
         #[cfg(not(unix))]
         assert!(
             known_hosts.starts_with("UserKnownHostsFile=")

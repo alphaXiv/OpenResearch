@@ -1,5 +1,5 @@
-//! Locating the `bash` that runs orx's generated scripts.
-//! On Windows PATH holds only Git's `cmd` dir and the WSL launcher, so bash is found via `git`.
+//! The `bash` that runs orx's generated scripts. On Windows PATH's is usually the WSL
+//! launcher, which cannot see the run dir, so this one is found via `git`.
 
 #[cfg(windows)]
 use std::path::{Path, PathBuf};

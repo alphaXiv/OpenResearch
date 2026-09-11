@@ -1232,33 +1232,31 @@ fn tool_part(
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
     if repo.exists() {
         validate_worktree(repo)?;
+    } else if bare.join("HEAD").is_file() {
+        // A kept origin carries the experiment this install was seeded with.
+        validate_bare_origin(bare)?;
+        super::git::restore_local_repository(repo, bare, "main")?;
+        validate_worktree(repo)?;
     } else {
         let parent = repo
             .parent()
             .ok_or_else(|| anyhow!("demo repository has no parent directory"))?;
         std::fs::create_dir_all(parent)?;
-        if bare.join("HEAD").is_file() {
-            // A kept origin carries the experiment this install was seeded with.
-            validate_bare_origin(bare)?;
-            super::git::restore_local_repository(repo, bare, "main")?;
-            validate_worktree(repo)?;
-        } else {
-            let tmp = parent.join(format!(".nanochat-demo-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&tmp)?;
-            let result = build_worktree(&tmp)
-                .and_then(|_| validate_worktree(&tmp))
-                .and_then(|_| match std::fs::rename(&tmp, repo) {
-                    Ok(()) => Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        validate_worktree(repo)
-                    }
-                    Err(error) => Err(anyhow!("could not install demo repository: {error}")),
-                });
-            if result.is_err() {
-                let _ = std::fs::remove_dir_all(&tmp);
-            }
-            result?;
+        let tmp = parent.join(format!(".nanochat-demo-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp)?;
+        let result = build_worktree(&tmp)
+            .and_then(|_| validate_worktree(&tmp))
+            .and_then(|_| match std::fs::rename(&tmp, repo) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_worktree(repo)
+                }
+                Err(error) => Err(anyhow!("could not install demo repository: {error}")),
+            });
+        if result.is_err() {
+            let _ = std::fs::remove_dir_all(&tmp);
         }
+        result?;
     }
     ensure_follow_up_branches(repo)?;
     ensure_local_origin(repo, bare)?;
@@ -1682,6 +1680,21 @@ mod tests {
             install_repository(&repo, &bare).unwrap(),
             PREVIOUS_EXPERIMENT_SHA
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A foreign kept origin is named as the problem, before any clone is restored from it.
+    #[test]
+    fn a_foreign_kept_origin_is_rejected_before_restoring() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        let bare = root.join("origin.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare", "-q"]).unwrap();
+
+        let error = install_repository(&repo, &bare).unwrap_err().to_string();
+        assert!(error.contains("reserved demo origin"), "{error}");
+        assert!(!repo.exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

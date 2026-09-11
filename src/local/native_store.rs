@@ -438,8 +438,8 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
     }
 }
 
-/// `mklink /J` is the only junction maker short of reparse-point FFI; quoting holds
-/// because a Windows path cannot contain `"`.
+/// `mklink /J` is the only junction maker short of reparse-point FFI. Both paths are quoted,
+/// and a Windows path cannot contain the `"` that would end its quoting.
 #[cfg(windows)]
 fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;

@@ -28,10 +28,12 @@ use crate::error::{anyhow, Result};
 /// processes (unlike the `-u` flag).
 pub const PYTHONUNBUFFERED: &str = "PYTHONUNBUFFERED";
 
-/// CPython prints in the console codepage (cp1252 on Windows), so other characters crash a run.
+/// Redirected CPython output uses Windows' ANSI codepage (often cp1252), so other
+/// characters crash a run.
 pub const PYTHONIOENCODING: &str = "PYTHONIOENCODING";
 
-/// Default CPython's streaming and encoding unless the caller set them; kubernetes open-codes this.
+/// Default CPython's streaming and encoding unless the caller set them; kubernetes
+/// open-codes it because its env is a JSON array.
 pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, String> {
     let mut env = env.clone();
     env.entry(PYTHONUNBUFFERED.to_string())

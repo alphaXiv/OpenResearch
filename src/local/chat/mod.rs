@@ -7678,8 +7678,8 @@ const PATH_GUARD: &str =
      export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
      fi\n";
 
-/// Directory holding the running `orx`; None if relative or containing the PATH separator,
-/// neither of which can be a PATH entry.
+/// Directory holding the running `orx`; None if relative (PATH would resolve it against the
+/// agent's cwd) or if it contains the PATH separator.
 fn orx_bin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
