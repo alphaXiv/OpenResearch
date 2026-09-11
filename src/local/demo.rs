@@ -63,6 +63,9 @@ const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
 const EXPERIMENT_SHA: &str = "dae919e9b6f6edd3bdb14a514dd1e451781682f8";
+// Installs seeded before `runs/runcpu.sh` learned Windows keep that tree, since
+// every session worktree they have was cut from it.
+const PREVIOUS_EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
@@ -209,14 +212,34 @@ pub(crate) fn turn_context(project_id: &str) -> Option<&'static str> {
     (project_id == PROJECT_ID).then_some(TURN_CONTEXT)
 }
 
-pub(crate) fn session_start_ref(owner: &str, repo: &str, session_id: &str) -> Option<&'static str> {
+pub(crate) fn session_start_ref(
+    checkout: &Path,
+    owner: &str,
+    repo: &str,
+    session_id: &str,
+) -> Option<&'static str> {
     (owner == OWNER
         && repo == REPO
         && matches!(
             session_id,
             SESSION_ID | FIGURE_SESSION_ID | LITERATURE_SESSION_ID
         ))
-    .then_some(EXPERIMENT_SHA)
+    .then(|| installed_experiment_sha(checkout))
+}
+
+/// The experiment commit this install was seeded with — the one its demo branch
+/// descends from. Asking whether the object merely exists would also find one
+/// left dangling, which no session was ever cut from.
+fn installed_experiment_sha(repo: &Path) -> &'static str {
+    let branch = format!("refs/heads/{BRANCH}");
+    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA]
+        .into_iter()
+        .find(|sha| git(repo, &["merge-base", "--is-ancestor", sha, &branch]).is_ok())
+        .unwrap_or(EXPERIMENT_SHA)
+}
+
+fn is_experiment_sha(sha: &str) -> bool {
+    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA].contains(&sha)
 }
 
 /// Repoint the embedded demo's local origin after the data directory moves.
@@ -593,7 +616,7 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
         || runs[0].id != RUN_ID
         || runs[0].status != "done"
         || runs[0].exit_code != Some(0)
-        || runs[0].commit_sha.as_deref() != Some(EXPERIMENT_SHA)
+        || runs[0].commit_sha.as_deref() != Some(installed_experiment_sha(repo))
         || sessions.len() != 3
         || sessions[0].id != SESSION_ID
         || sessions[1].id != FIGURE_SESSION_ID
@@ -1352,7 +1375,7 @@ fn validate_bare_origin(bare: &Path) -> Result<()> {
     let head = git(bare, &["symbolic-ref", "HEAD"]);
     if !bare.join("HEAD").is_file()
         || !matches!(baseline.as_deref(), Ok(value) if value == BASELINE_SHA)
-        || !matches!(experiment.as_deref(), Ok(value) if value == EXPERIMENT_SHA)
+        || !matches!(experiment.as_deref(), Ok(value) if is_experiment_sha(value))
         || !matches!(is_bare.as_deref(), Ok("true"))
         || !matches!(head.as_deref(), Ok("refs/heads/main"))
     {
@@ -1370,11 +1393,16 @@ fn validate_worktree(repo: &Path) -> Result<()> {
     let clean = git(repo, &["status", "--porcelain"]);
     let ancestry = git(
         repo,
-        &["merge-base", "--is-ancestor", BASELINE_SHA, EXPERIMENT_SHA],
+        &[
+            "merge-base",
+            "--is-ancestor",
+            BASELINE_SHA,
+            installed_experiment_sha(repo),
+        ],
     );
     if !repo.join(".git").is_dir()
         || !matches!(baseline.as_deref(), Ok(value) if value == BASELINE_SHA)
-        || !matches!(experiment.as_deref(), Ok(value) if value == EXPERIMENT_SHA)
+        || !matches!(experiment.as_deref(), Ok(value) if is_experiment_sha(value))
         || !matches!(clean.as_deref(), Ok(""))
         || ancestry.is_err()
     {
@@ -1596,12 +1624,60 @@ mod tests {
 
     #[test]
     fn every_demo_session_recovers_from_the_experiment_commit() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        install_repository(&repo, &root.join("origin.git")).unwrap();
         for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
             assert_eq!(
-                session_start_ref(OWNER, REPO, session_id),
+                session_start_ref(&repo, OWNER, REPO, session_id),
                 Some(EXPERIMENT_SHA)
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An upgrade must not strand a demo seeded before `runcpu.sh` learned
+    /// Windows: its sessions were cut from that commit, and every agent turn
+    /// resolves the worktree from it again.
+    #[test]
+    fn an_install_seeded_at_the_previous_experiment_keeps_working() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        build_worktree(&repo).unwrap();
+        git(&repo, &["checkout", "-q", BRANCH]).unwrap();
+        git(&repo, &["reset", "-q", "--soft", "HEAD~1"]).unwrap();
+        std::fs::write(
+            repo.join("runs/runcpu.sh"),
+            include_str!("demo_fixtures/runcpu-before-windows.sh"),
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["update-index", "--chmod=+x", "runs/runcpu.sh"]).unwrap();
+        commit(&repo, "Make the CPU pipeline portable and memory-safe").unwrap();
+        git(&repo, &["checkout", "-q", "main"]).unwrap();
+        assert_eq!(
+            git(&repo, &["rev-parse", BRANCH]).unwrap(),
+            PREVIOUS_EXPERIMENT_SHA
+        );
+
+        validate_worktree(&repo).unwrap();
+        for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+            assert_eq!(
+                session_start_ref(&repo, OWNER, REPO, session_id),
+                Some(PREVIOUS_EXPERIMENT_SHA)
+            );
+            let worktree = root.join("worktrees").join(session_id);
+            crate::local::git::ensure_session_worktree_in(
+                &repo, &worktree, OWNER, REPO, "main", session_id,
+            )
+            .unwrap();
+            assert_eq!(
+                git(&worktree, &["rev-parse", "HEAD"]).unwrap(),
+                PREVIOUS_EXPERIMENT_SHA
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

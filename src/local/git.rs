@@ -1270,9 +1270,13 @@ pub fn ensure_session_worktree(
         return Err(anyhow!("{} is not a Git repository", repo_path.display()));
     }
     let dir = existing_session_worktree_path(project, session_id);
-    let start_ref =
-        super::demo::session_start_ref(&project.github_owner, &project.github_repo, session_id)
-            .unwrap_or(&project.baseline_branch);
+    let start_ref = super::demo::session_start_ref(
+        repo_path,
+        &project.github_owner,
+        &project.github_repo,
+        session_id,
+    )
+    .unwrap_or(&project.baseline_branch);
     git(Some(repo_path), &["rev-parse", "--verify", start_ref])?;
     ensure_worktree_from(repo_path, dir, start_ref)
 }
@@ -1285,8 +1289,8 @@ pub(crate) fn ensure_session_worktree_in(
     baseline_branch: &str,
     session_id: &str,
 ) -> Result<PathBuf> {
-    let start_ref =
-        super::demo::session_start_ref(owner, repo_name, session_id).unwrap_or(baseline_branch);
+    let start_ref = super::demo::session_start_ref(repo, owner, repo_name, session_id)
+        .unwrap_or(baseline_branch);
     ensure_worktree_from(repo, dir.to_path_buf(), start_ref)
 }
 
