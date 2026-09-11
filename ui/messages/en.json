@@ -1142,9 +1142,5 @@
   "local_models_disconnect": "Disconnect {name}",
   "local_models_config_restricted": "Saved, but OpenCode did not list this model. Check installed agents again. If your OpenCode config restricts enabled providers, allow this connection before using it.",
   "local_models_custom_endpoint": "Custom Endpoint",
-  "local_models_compatible_api": "(OpenAI compatible)",
-  "chat_claude_usage_resets": "Resets {reset}",
-  "chat_claude_usage_limit": "Claude Code usage limit reached",
-  "chat_claude_usage_limit_help": "Choose another model below, or manage your Claude usage before trying again.",
-  "chat_view_claude_usage": "View Claude usage"
+  "local_models_compatible_api": "(OpenAI compatible)"
 }

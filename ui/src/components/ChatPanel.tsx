@@ -177,7 +177,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, Input, MenuItem, showAlert, Spinner, Tooltip } from "./ui";
+import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
 import { useDialogFocus } from "./useDialogFocus";
 import { PaperTitle } from "./PaperTitle";
 
@@ -2256,24 +2256,10 @@ function TurnStatusRow({
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
   if (usageLimited) {
-    const reset = part.state?.error?.match(/· resets (.+)$/i)?.[1];
     return (
-      <div className="turn-usage-limit flex gap-3 py-3 text-text" role="status">
-        <TriangleAlert size={18} className="shrink-0 mt-0.5 text-subtext" />
-        <div className="min-w-0 flex-1">
-          <div className="text-base font-medium">{m.chat_claude_usage_limit()}</div>
-          <p className="mt-1 text-sm">{m.chat_claude_usage_limit_help()}</p>
-          {reset && <p className="mt-1 text-sm text-subtext">{m.chat_claude_usage_resets({ reset })}</p>}
-          <div className="flex flex-wrap items-center gap-3 mt-3">
-            <a href="https://claude.ai/settings/usage" target="_blank" rel="noreferrer" className="text-sm underline underline-offset-4">{m.chat_view_claude_usage()}</a>
-            {action && turnId && onRecover && (
-              <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover(turnId, action)}>
-                {recovering ? m.chat_starting() : m.app_retry()}
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
+      <p className="turn-usage-limit text-base text-text whitespace-pre-wrap wrap-anywhere" role="status">
+        {part.state?.error?.replace(/^claude: /, "")}
+      </p>
     );
   }
   if ((action !== "retry" && action !== "continue") || !turnId) return null;
@@ -2874,16 +2860,12 @@ function ForkControls({
         </>
       )}
       <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
-        <Tooltip content={sentAt.toLocaleString(getLocale())}>
-          <time dateTime={sentAt.toISOString()} className="text-xs text-subtext tabular-nums me-2">
-            {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
-          </time>
-        </Tooltip>
-        <Tooltip content={m.md_copy()}>
-          <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
-            <Copy size={13} />
-          </IconButton>
-        </Tooltip>
+        <time dateTime={sentAt.toISOString()} className="text-xs text-subtext tabular-nums me-2">
+          {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
+        </time>
+        <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
+          <Copy size={13} />
+        </IconButton>
       </div>
       <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
