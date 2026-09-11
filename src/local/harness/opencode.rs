@@ -584,50 +584,30 @@ async fn opencode_child(
 }
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
-///
-/// stdout lands in a temp file rather than a pipe. `opencode debug config
-/// --pure` writes its whole document in one unchecked `write(2)`, which stops
-/// at the 64 KiB pipe capacity while the child still exits 0 — so a piped read
-/// turns any config large enough into silently truncated JSON (issue #307). A
-/// regular file accepts the entire write, and the same command run without a
-/// pipe emits the complete document.
+/// File redirection avoids the truncated piped config output reported in #307.
 async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        // A child that outlives the timeout below must not keep writing to the
-        // temp file we are about to remove.
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
     cmd.env("NO_COLOR", "1");
     let path = std::env::temp_dir().join(format!("orx-opencode-stdout-{}", uuid::Uuid::new_v4()));
-    // `create_new` so a pre-planted path in a shared temp dir can't redirect
-    // the child's output; the uuid makes the EEXIST case unreachable.
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .ok()?;
-    cmd.stdout(std::process::Stdio::from(file));
-    // `Command::output()` would force stdout back to a pipe, so spawn directly.
-    let completion = async {
-        let child = cmd.spawn().ok()?;
-        child.wait_with_output().await.ok()
-    };
-    let out = match tokio::time::timeout(Duration::from_secs(20), completion).await {
-        Ok(Some(out)) => out,
-        _ => {
-            std::fs::remove_file(&path).ok();
-            return None;
-        }
-    };
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
+    let status = tokio::time::timeout(Duration::from_secs(20), cmd.status()).await;
     let stdout = std::fs::read(&path).ok();
     std::fs::remove_file(&path).ok();
     let stdout = stdout?;
-    out.status
-        .success()
+    matches!(status, Ok(Ok(status)) if status.success())
         .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 
@@ -2233,7 +2213,8 @@ opencode/glm-5
     fn sh_script(name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("orx-opencode-capture-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("orx-opencode-capture-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, body).unwrap();
@@ -2241,31 +2222,26 @@ opencode/glm-5
         path
     }
 
-    /// Regression (issue #307): `opencode debug config --pure` writes its whole
-    /// document in one unchecked `write(2)`, which stops at the 64 KiB pipe
-    /// capacity while the child still exits 0. A piped read therefore truncates
-    /// any config that large, silently, because the truncated text still looks
-    /// like a successful run. `run_models` must hand the child a file instead.
+    /// Capture uses a private regular file because resolved config can contain API keys.
     #[cfg(unix)]
     #[tokio::test]
-    async fn child_stdout_is_a_file_not_a_pipe() {
+    async fn child_stdout_is_a_private_file() {
         let script = sh_script(
             "stdout-kind",
-            "#!/bin/sh\nif [ -p /dev/stdout ]; then echo pipe; else echo file; fi\n",
+            "#!/bin/sh\n[ -f /dev/stdout ] && ls -lL /dev/stdout\n",
         );
 
-        assert_eq!(
-            run_models(&script, &[]).await.as_deref().map(str::trim),
-            Some("file")
+        let out = run_models(&script, &[]).await.expect("child output");
+        // macOS reports the write-only descriptor mode through /dev/stdout.
+        assert!(
+            out.starts_with("-rw-------") || out.starts_with("--w-------"),
+            "stdout permissions: {out}"
         );
 
         std::fs::remove_dir_all(script.parent().unwrap()).ok();
     }
 
-    /// Everything the child writes must reach the caller, however large the
-    /// output is: reading the redirect target has to wait for exit and take the
-    /// whole file. 70 KB is past the 64 KiB buffer that cut the piped form of
-    /// this call short.
+    /// Read the whole capture file after the child exits, including output over 64 KiB.
     #[cfg(unix)]
     #[tokio::test]
     async fn output_past_the_pipe_capacity_arrives_whole() {
