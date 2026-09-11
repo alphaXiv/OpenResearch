@@ -39,6 +39,7 @@ import {
   FlaskConical,
   FolderOpen,
   Globe,
+  Gauge,
   HelpCircle,
   Lightbulb,
   MessageSquareQuote,
@@ -2257,9 +2258,16 @@ function TurnStatusRow({
   const turnId = input?.turnId;
   if (usageLimited) {
     return (
-      <p className="turn-usage-limit text-base text-text whitespace-pre-wrap wrap-anywhere" role="status">
-        {part.state?.error?.replace(/^claude: /, "")}
-      </p>
+      <details className="turn-usage-limit group/limit text-base text-subtext">
+        <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+          <Gauge size={18} className="shrink-0 text-accent-red" aria-hidden="true" />
+          <span>{m.chat_session_limit_reached()}</span>
+          <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+        </summary>
+        <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
+          {part.state?.error?.replace(/^claude: /, "")}
+        </pre>
+      </details>
     );
   }
   if ((action !== "retry" && action !== "continue") || !turnId) return null;
