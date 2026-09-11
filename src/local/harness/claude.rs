@@ -1143,6 +1143,7 @@ struct TurnState {
     /// Claude's typed headless auth failure. Its synthetic assistant text is
     /// suppressed and the resident child is quarantined by the caller.
     auth_failed: bool,
+    usage_limited: bool,
     /// Any real output or tool activity makes transparent resubmission unsafe.
     had_activity: bool,
     /// The last non-empty assistant text block — the plan, if the model wrote
@@ -1429,6 +1430,26 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 state.turn_errored = true;
                 return false;
             }
+            if subagent_parent(event).is_none()
+                && event.get("error").and_then(Value::as_str) == Some("rate_limit")
+            {
+                let detail = event
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|block| block.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "Claude Code usage limit reached".into());
+                state.usage_limited = true;
+                state.turn_errored = true;
+                ctx.mark_terminal_failure("claude_usage_limit", detail);
+                return false;
+            }
             let mid = event
                 .pointer("/message/id")
                 .and_then(Value::as_str)
@@ -1643,7 +1664,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .unwrap_or(subtype != "success");
             if is_error {
                 state.turn_errored = true;
-                if !state.auth_failed {
+                if !state.auth_failed && !state.usage_limited {
                     let detail = event
                         .get("result")
                         .and_then(Value::as_str)
@@ -2119,7 +2140,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             },
         ));
     }
-    if state.turn_errored {
+    if state.turn_errored && !state.usage_limited {
         let message = ctx
             .assistant
             .parts
@@ -2866,6 +2887,33 @@ mod tests {
             .expect("sub bash nested with namespaced id");
         assert_eq!(bash.state.as_ref().unwrap().status, "completed");
         assert_eq!(bash.state.as_ref().unwrap().output.as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn usage_limit_is_terminal_without_duplicate_text_or_tool_errors() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        ctx.upsert_part(WirePart::text("real-answer", "Earlier useful output"));
+        let message = "You've reached your Fable limit. Switch models at claude.ai/settings/usage";
+        assert!(!apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type": "assistant", "error": "rate_limit",
+                "message": {"id": "quota", "model": "<synthetic>", "content": [{"type":"text", "text":message}]}
+            })
+        ));
+        assert!(apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type":"result", "subtype":"success", "is_error":true, "result":message
+            })
+        ));
+        assert!(state.usage_limited && state.turn_errored);
+        assert!(!state.had_activity);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].id, "real-answer");
     }
 
     #[test]

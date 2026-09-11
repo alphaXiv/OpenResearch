@@ -1142,5 +1142,9 @@
   "templates_agent_alternative": "یا از عامل خود بخواهید یک قالب LaTeX برایتان اضافه کند.",
   "skills_remove_imported": "حذف از OpenResearch",
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
-  "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند."
+  "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
+  "chat_claude_usage_resets": "بازنشانی: {reset}",
+  "chat_claude_usage_limit": "به سقف مصرف Claude Code رسیده‌اید",
+  "chat_claude_usage_limit_help": "مدل دیگری را در پایین انتخاب کنید، یا پیش از تلاش دوباره مصرف Claude خود را مدیریت کنید.",
+  "chat_view_claude_usage": "مشاهدهٔ مصرف Claude"
 }

@@ -85,3 +85,12 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
     ? { work: [], answer: parts }
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
 }
+
+export function isClaudeUsageLimitPart(part: ChatPart): boolean {
+  if (part.state?.input?.errorKind === "claude_usage_limit") return true;
+  const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
+  // Older Claude transcripts stored the synthetic quota notice as text and errors.
+  return Boolean(text && ((/^(?:claude: )?you(?:'ve| have) reached your .+ limit\./i.test(text.trim())
+    && text.includes("claude.ai/settings/usage"))
+    || /^(?:claude: )?you(?:'ve| have) hit your session limit · resets /i.test(text.trim())));
+}

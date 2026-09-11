@@ -1142,5 +1142,9 @@
   "templates_agent_alternative": "或者，请你的智能体为你添加 LaTeX 模板。",
   "skills_remove_imported": "从 OpenResearch 移除",
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
-  "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。"
+  "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
+  "chat_claude_usage_resets": "重置时间：{reset}",
+  "chat_claude_usage_limit": "已达到 Claude Code 使用限额",
+  "chat_claude_usage_limit_help": "请在下方选择其他模型，或管理 Claude 用量后重试。",
+  "chat_view_claude_usage": "查看 Claude 用量"
 }

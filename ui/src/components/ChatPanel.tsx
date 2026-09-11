@@ -111,6 +111,7 @@ import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
+  isClaudeUsageLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
@@ -2220,8 +2221,10 @@ function TurnStatusRow({
   busy,
   recovering,
   onRecover,
+  usageLimited = false,
 }: {
   part: ChatPart;
+  usageLimited?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2251,6 +2254,27 @@ function TurnStatusRow({
   }
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
+  if (usageLimited) {
+    const reset = part.state?.error?.match(/· resets (.+)$/i)?.[1];
+    return (
+      <div className="turn-usage-limit flex gap-3 py-3 text-text" role="status">
+        <TriangleAlert size={18} className="shrink-0 mt-0.5 text-subtext" />
+        <div className="min-w-0 flex-1">
+          <div className="text-base font-medium">{m.chat_claude_usage_limit()}</div>
+          <p className="mt-1 text-sm">{m.chat_claude_usage_limit_help()}</p>
+          {reset && <p className="mt-1 text-sm text-subtext">{m.chat_claude_usage_resets({ reset })}</p>}
+          <div className="flex flex-wrap items-center gap-3 mt-3">
+            <a href="https://claude.ai/settings/usage" target="_blank" rel="noreferrer" className="text-sm underline underline-offset-4">{m.chat_view_claude_usage()}</a>
+            {action && turnId && onRecover && (
+              <Button type="button" size="small" disabled={busy || recovering} onClick={() => onRecover(turnId, action)}>
+                {recovering ? m.chat_starting() : m.app_retry()}
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
   if ((action !== "retry" && action !== "continue") || !turnId) return null;
   const label = action === "retry" ? m.app_retry() : m.chat_continue();
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
@@ -3019,10 +3043,9 @@ const Message = memo(function Message({
       </div>
     );
   }
-  const turnStatus = message.parts.find(isTurnStatusPart);
-  const regularParts = turnStatus
-    ? message.parts.filter((part) => part !== turnStatus)
-    : message.parts;
+  const usageLimit = message.parts.find((part) => part.type === "tool" && isClaudeUsageLimitPart(part));
+  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
+  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isClaudeUsageLimitPart(part)));
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       <AssistantTurn message={message} parts={regularParts} options={{
@@ -3042,6 +3065,7 @@ const Message = memo(function Message({
       {turnStatus && (
         <TurnStatusRow
           part={turnStatus}
+          usageLimited={Boolean(usageLimit)}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}

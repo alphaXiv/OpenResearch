@@ -85,3 +85,20 @@ test("reasoning-only work never creates an empty disclosure", async () => {
   const parts = [{ id: "thought", type: "reasoning", text: "Thinking" }, { id: "answer", type: "text", text: "Done", phase: "final_answer" }];
   assert.deepEqual(splitTurnParts(parts, false), { work: [], answer: parts });
 });
+
+test("Claude quota notices recognize typed errors and legacy duplicates without hiding real output", async () => {
+  const { isClaudeUsageLimitPart } = await import("../src/chatRendering.ts");
+  const text = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
+  const sessionLimit = "You've hit your session limit · resets 3:10pm (America/Los_Angeles)";
+  const duplicates = [
+    { type: "text", text },
+    { type: "text", text: sessionLimit },
+    { type: "tool", tool: "error", state: { error: `claude: ${sessionLimit}` } },
+    { type: "tool", tool: "error", state: { error: `claude: ${text}` } },
+    { type: "tool", tool: "error", state: { input: { errorKind: "claude_usage_limit" } } },
+  ];
+  assert.ok(duplicates.every(isClaudeUsageLimitPart));
+  assert.equal(isClaudeUsageLimitPart({ type: "text", text: "Earlier useful output" }), false);
+  assert.equal(isClaudeUsageLimitPart({ type: "tool", tool: "bash", state: { error: text } }), false);
+  assert.equal(isClaudeUsageLimitPart({ type: "tool", tool: "error", state: { error: "File not found" } }), false);
+});
