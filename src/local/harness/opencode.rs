@@ -584,20 +584,31 @@ async fn opencode_child(
 }
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
+/// File redirection avoids the truncated piped config output reported in #307.
 async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
     crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
     cmd.env("NO_COLOR", "1");
-    let fut = cmd.output();
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
-        return None;
-    };
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let path = std::env::temp_dir().join(format!("orx-opencode-stdout-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
+    let status = tokio::time::timeout(Duration::from_secs(20), cmd.status()).await;
+    let stdout = std::fs::read(&path).ok();
+    std::fs::remove_file(&path).ok();
+    let stdout = stdout?;
+    matches!(status, Ok(Ok(status)) if status.success())
+        .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// The bare `provider/model` id lines of plain `opencode models` output.
@@ -2195,5 +2206,58 @@ opencode/glm-5
         let task = &ctx.assistant.parts[0];
         assert_eq!(task.state.as_ref().unwrap().status, "completed");
         assert_eq!(task.children.len(), 1, "children survive the final merge");
+    }
+
+    /// A `#!/bin/sh` stand-in for the opencode CLI, as in `detect.rs`.
+    #[cfg(unix)]
+    fn sh_script(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("orx-opencode-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Capture uses a private regular file because resolved config can contain API keys.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_stdout_is_a_private_file() {
+        let script = sh_script(
+            "stdout-kind",
+            "#!/bin/sh\n[ -f /dev/stdout ] && ls -lL /dev/stdout\n",
+        );
+
+        let out = run_models(&script, &[]).await.expect("child output");
+        // macOS reports the write-only descriptor mode through /dev/stdout.
+        assert!(
+            out.starts_with("-rw-------") || out.starts_with("--w-------"),
+            "stdout permissions: {out}"
+        );
+
+        std::fs::remove_dir_all(script.parent().unwrap()).ok();
+    }
+
+    /// Read the whole capture file after the child exits, including output over 64 KiB.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_past_the_pipe_capacity_arrives_whole() {
+        let script = sh_script(
+            "big-output",
+            "#!/bin/sh\nawk 'BEGIN { for (i = 0; i < 7000; i++) printf \"%010d\", i }'\n",
+        );
+
+        let out = run_models(&script, &[]).await.expect("child output");
+        assert_eq!(out.len(), 70_000);
+        assert!(
+            out.ends_with("0000006999"),
+            "tail: {}",
+            &out[out.len() - 20..]
+        );
+
+        std::fs::remove_dir_all(script.parent().unwrap()).ok();
     }
 }
