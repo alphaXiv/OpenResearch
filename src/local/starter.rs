@@ -603,7 +603,7 @@ mod tests {
         assert!(brief.contains("## requirements.txt\ntorch>=2.0"));
         assert!(brief.contains("## train.py\nimport torch"));
         assert!(brief.contains("## Files (4)\nREADME.md\nrequirements.txt\ntrain.py\nsrc/model.py"));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -614,7 +614,7 @@ mod tests {
         let brief = brief(&project);
         assert!(brief.contains("(the project folder is empty)"));
         assert!(!brief.contains("Run command"));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -634,7 +634,7 @@ mod tests {
         let mut files = walk(&root);
         files.sort();
         assert_eq!(files, vec!["a/b/c/deep.py", "main.py"]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -702,7 +702,7 @@ mod tests {
             &["paper.pdf".to_string()],
         );
         assert_eq!(created, ahead);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

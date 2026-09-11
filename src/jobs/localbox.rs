@@ -43,10 +43,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     let dir = run_dir(&spec.run_id);
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
-    // Default the job's Python to unbuffered so its prints land in `log` (which
-    // we tail) live instead of block-buffering behind the redirect (see
-    // jobs::default_unbuffered).
-    let env = super::default_unbuffered(&spec.env);
+    let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
         .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
@@ -56,7 +53,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     // `( … )` ends the subshell, not run.sh, so exit_code is always written.
     let run_sh = format!(
         "#!/usr/bin/env bash\n{exports}\ncd {dir} || exit 97\n(\n{script}\n) > log 2>&1\necho $? > exit_code\n",
-        dir = sh_quote(&dir.to_string_lossy()),
+        dir = sh_quote(&crate::local::bash::bash_path(&dir)),
         script = spec.script,
     );
     let run_sh_path = dir.join("run.sh");
@@ -70,7 +67,12 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         let _ = std::fs::set_permissions(&run_sh_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let mut cmd = std::process::Command::new("bash");
+    let mut cmd = std::process::Command::new(crate::local::bash::program());
+    if let Some(path) =
+        crate::local::bash::path_with_toolchain(crate::local::shell_env::search_path())
+    {
+        cmd.env("PATH", path);
+    }
     cmd.arg("run.sh")
         .envs(&spec.secret_env)
         .current_dir(&dir)
@@ -93,6 +95,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
 /// Is the recorded process still alive? `ps` rather than `kill -0`: a zombie
 /// (dead but not yet reaped by a still-living spawner) answers `kill -0` yet
 /// is not running. No libc dependency; works on macOS and Linux.
+#[cfg(not(windows))]
 fn pid_alive(pid: &str) -> bool {
     match std::process::Command::new("ps")
         .args(["-o", "stat=", "-p", pid])
@@ -105,6 +108,29 @@ fn pid_alive(pid: &str) -> bool {
             !stat.is_empty() && !stat.starts_with('Z')
         }
         _ => false,
+    }
+}
+
+/// Windows has no `ps`. A zero-timeout wait, not the exit code, where a real 259 reads as live.
+#[cfg(windows)]
+fn pid_alive(pid: &str) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    let Ok(pid) = pid.trim().parse::<u32>() else {
+        return false;
+    };
+    // SAFETY: plain syscalls; the handle is closed on every path out.
+    unsafe {
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let waited = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        waited == WAIT_TIMEOUT
     }
 }
 
@@ -189,12 +215,41 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
     Ok(seen)
 }
 
-/// Cancel = TERM the process group (pid == pgid under `process_group(0)`);
-/// fall back to the pid alone if the group kill is refused.
+/// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
     let pid = pid.trim().to_string();
+    #[cfg(windows)]
+    {
+        terminate_tree(&pid)
+    }
+    #[cfg(not(windows))]
+    {
+        terminate_group(&pid)
+    }
+}
+
+/// `/T` also kills the python the launcher started, as TERMing the group does on unix.
+#[cfg(windows)]
+fn terminate_tree(pid: &str) -> Result<()> {
+    // `/T` fails if any descendant already exited, so success is read from the leader's liveness.
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", pid, "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    for _ in 0..50 {
+        if !pid_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Err(anyhow!("Could not terminate local process tree {pid}"))
+}
+
+#[cfg(not(windows))]
+fn terminate_group(pid: &str) -> Result<()> {
     let group = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{pid}")])
         .stdout(std::process::Stdio::null())
@@ -204,7 +259,7 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
         .unwrap_or(false);
     if !group {
         let process = std::process::Command::new("kill")
-            .args(["-TERM", &pid])
+            .args(["-TERM", pid])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()

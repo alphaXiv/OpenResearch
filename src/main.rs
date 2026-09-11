@@ -25,6 +25,7 @@ mod jobs;
 #[allow(dead_code)]
 mod local;
 mod output;
+mod paths;
 mod plane;
 mod remote;
 mod store;
@@ -785,6 +786,8 @@ pub struct PaperArgs {
 // worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(windows)]
+    install_panic_reporter();
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
     // server, browser) instead of parsing CLI args. Also require an empty argv so
     // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
@@ -800,7 +803,11 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+    // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
+    if cli.command.is_none() && owns_its_console() {
+        cli.command = Cli::parse_from(["orx", "up"]).command;
+    }
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
         use clap::CommandFactory;
@@ -879,8 +886,61 @@ async fn main() {
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
+        show_error_dialog(&err.to_string());
         std::process::exit(1);
     }
+}
+
+/// Explorer gives a double-clicked exe a console of its own, which closes when it exits.
+#[cfg(windows)]
+fn owns_its_console() -> bool {
+    use windows_sys::Win32::System::Console::GetConsoleProcessList;
+
+    let mut attached = [0u32; 2];
+    // SAFETY: writes at most `attached.len()` process ids into `attached`.
+    let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
+    count == 1
+}
+
+#[cfg(not(windows))]
+fn owns_its_console() -> bool {
+    false
+}
+
+/// A double-clicked exe's console closes with it, so repeat the error in a dialog.
+#[cfg(windows)]
+fn show_error_dialog(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    if !owns_its_console() {
+        return;
+    }
+    let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (body, title) = (wide(message), wide("OpenResearch stopped"));
+    // SAFETY: both strings are NUL-terminated and outlive the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        )
+    };
+}
+
+#[cfg(not(windows))]
+fn show_error_dialog(_message: &str) {}
+
+/// Main thread only: a worker's panic has a running dashboard to report through.
+#[cfg(windows)]
+fn install_panic_reporter() {
+    let inner = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        inner(info);
+        if std::thread::current().name() == Some("main") {
+            show_error_dialog(&format!("{info}"));
+        }
+    }));
 }
 
 fn should_capture_command(command: &Command) -> bool {
@@ -1000,6 +1060,16 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+
+    /// A double-clicked orx.exe reaches `up` through this parse; an argv clap
+    /// rejected would panic there instead of opening the dashboard.
+    #[test]
+    fn a_double_click_parses_as_a_local_up() {
+        assert!(matches!(
+            Cli::parse_from(["orx", "up"]).command,
+            Some(Command::Up(args)) if args.remote.is_none()
+        ));
+    }
 
     #[test]
     fn internal_commands_do_not_emit_command_telemetry() {

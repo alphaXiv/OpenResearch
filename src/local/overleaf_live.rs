@@ -2271,7 +2271,7 @@ mod tests {
             let temp = crate::local::git::TemporaryDirectory::new("orx-live").unwrap();
             let dir = temp.path().join("paper");
             std::fs::create_dir_all(&dir).unwrap();
-            let dir = std::fs::canonicalize(&dir).unwrap();
+            let dir = crate::paths::canonicalize(&dir).unwrap();
             let config = Config {
                 project: Project {
                     id: "p".to_string(),

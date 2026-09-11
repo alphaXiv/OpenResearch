@@ -56,10 +56,17 @@ sha1 = "0.10"
 # roots for the same musl reasons as reqwest above; already in the tree via axum.
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
+# File identity for Windows' hard-link fallback (native_store.rs); already in the tree via walkdir.
+same-file = "1.0"
+
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
 # transitively; taken as a direct dep only on unix, where we call it.
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Win32 calls std lacks: run liveness, console ownership, the error dialog. Already in the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS `.app` mode (src/commands/app.rs): an NSApplication + delegate run loop

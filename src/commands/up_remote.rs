@@ -6,12 +6,12 @@
 //! forward itself: it starts `orx up` on the remote, tunnels the port to this
 //! machine, waits for the server to come up, and opens the browser.
 //!
-//! Transport is the `ssh` binary with the same ControlMaster/BatchMode options
+//! Transport is the `ssh` binary with the same multiplexing/BatchMode options
 //! the SSH job backend uses (`crate::jobs::ssh`); auth is the user's own
 //! `~/.ssh/config` + agent/keys — orx never reads a key.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -1771,37 +1771,40 @@ fn parse_remote_install_paths(output: &str) -> Option<RemoteInstallPaths> {
     })
 }
 
-fn storage_root(path: &str, filename: &str, label: &str) -> Result<PathBuf> {
-    let path = Path::new(path);
-    if !path.is_absolute()
-        || path.components().any(|part| {
-            matches!(
-                part,
-                std::path::Component::CurDir | std::path::Component::ParentDir
-            )
-        })
-    {
+/// The parent directory of a path on the *remote* machine, checked as a string: the remote
+/// is POSIX, and Windows `Path` rules would reject it or rejoin it with backslashes.
+fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
+    // Only `..` is refused; an interior `.` (which a probe can report) was always allowed.
+    if !path.starts_with('/') || path.split('/').any(|part| part == "..") {
         return Err(anyhow!("{label} must be an absolute path without . or .."));
     }
-    if path.file_name().and_then(|name| name.to_str()) != Some(filename) {
+    let (parent, last) = path
+        .rsplit_once('/')
+        .expect("a leading slash guarantees one");
+    if last != filename {
         return Err(anyhow!("{label} must end in /{filename}"));
     }
-    path.parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("{label} has no parent directory"))
+    Ok(posix_parent(parent))
 }
 
-fn validated_roots(paths: &RemoteInstallPaths) -> Result<(PathBuf, PathBuf, PathBuf)> {
+/// An empty remainder from `rsplit_once` is the root itself.
+fn posix_parent(parent: &str) -> String {
+    if parent.is_empty() {
+        "/".to_string()
+    } else {
+        parent.to_string()
+    }
+}
+
+fn validated_roots(paths: &RemoteInstallPaths) -> Result<(String, String, String)> {
     let bin = storage_root(&paths.binary, "orx", "OpenResearch binary")?;
-    if bin.file_name().and_then(|name| name.to_str()) != Some("bin") {
+    let (cargo, last) = bin
+        .rsplit_once('/')
+        .ok_or_else(|| anyhow!("OpenResearch binary has no install directory"))?;
+    if last != "bin" {
         return Err(anyhow!("OpenResearch binary must end in /bin/orx"));
     }
-    let cargo = bin
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .ok_or_else(|| anyhow!("OpenResearch binary has no install directory"))?;
+    let cargo = posix_parent(cargo);
     let data = storage_root(&paths.database, "orx.db", "Database")?;
     let cache = storage_root(&paths.cache, "repos", "Repository cache")?;
     Ok((cargo, data, cache))
@@ -1861,11 +1864,8 @@ pub(crate) async fn save_remote_install_paths(
         .as_object_mut()
         .ok_or_else(|| anyhow!("OpenResearch settings on '{host}' are invalid."))?;
     object.insert("orxBinaryPath".into(), paths.binary.clone().into());
-    object.insert("dataDir".into(), data.to_string_lossy().into_owned().into());
-    object.insert(
-        "cacheDir".into(),
-        cache.to_string_lossy().into_owned().into(),
-    );
+    object.insert("dataDir".into(), data.clone().into());
+    object.insert("cacheDir".into(), cache.clone().into());
     write_remote_json(target, host, &paths.settings, &settings).await
 }
 
@@ -1973,7 +1973,7 @@ pub(crate) async fn install_remote_orx(
     paths: &RemoteInstallPaths,
 ) -> Result<RemoteOrx> {
     let (cargo, _, _) = validated_roots(paths)?;
-    let cargo = crate::jobs::ssh::sh_quote(&cargo.to_string_lossy());
+    let cargo = crate::jobs::ssh::sh_quote(&cargo);
     let version = env!("CARGO_PKG_VERSION");
     let installer = remote_installer(version);
     let command = remote_login_orx_cmd(&format!("export CARGO_HOME={cargo}; {installer}"));
@@ -2093,8 +2093,8 @@ fn remote_host_cmd(path: &str, paths: &RemoteInstallPaths, operation: &str) -> R
     let (_, data, cache) = validated_roots(paths)?;
     Ok(remote_orx_cmd(&format!(
         "export ORX_DATA_DIR={} ORX_CACHE_DIR={}; exec {} remote-host {operation}",
-        crate::jobs::ssh::sh_quote(&data.to_string_lossy()),
-        crate::jobs::ssh::sh_quote(&cache.to_string_lossy()),
+        crate::jobs::ssh::sh_quote(&data),
+        crate::jobs::ssh::sh_quote(&cache),
         crate::jobs::ssh::sh_quote(path),
     )))
 }
@@ -2236,7 +2236,8 @@ pub(crate) fn forward_spec(local_port: u16, remote_port: u16) -> String {
 }
 
 /// Build `ssh <opts> -L <forward> -- <dest> <remote_cmd>` over the settings
-/// ControlMaster. The session launcher replaces stdin with its credential pipe.
+/// ControlMaster, where the platform has one. The session launcher replaces
+/// stdin with its credential pipe.
 pub(crate) fn ssh_forward_command(
     target: &SshTarget,
     forward: &str,
@@ -2566,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_reuses_control_master_and_exits_on_forward_failure() {
+    fn tunnel_uses_the_platform_control_master_and_exits_on_forward_failure() {
         let opts = crate::jobs::ssh::forward_args(
             &SshTarget::alias("mybox"),
             "127.0.0.1:7:localhost:7",
@@ -2576,7 +2577,8 @@ mod tests {
         let joined = opts.join(" ");
         assert!(joined.contains("-o ExitOnForwardFailure=yes"));
         assert!(joined.contains("-o BatchMode=yes"));
-        assert!(joined.contains("-o ControlMaster=auto"));
+        let master = if cfg!(unix) { "auto" } else { "no" };
+        assert!(joined.contains(&format!("-o ControlMaster={master}")));
         assert!(opts.contains(&"-T".to_string()));
     }
 
@@ -2593,6 +2595,15 @@ mod tests {
         // dest then the remote command follow the separator, in that order.
         assert_eq!(args[sep + 1], "mybox");
         assert_eq!(args[sep + 2], "orx up");
+    }
+
+    #[test]
+    fn remote_storage_roots_allow_dot_but_not_dot_dot() {
+        assert_eq!(
+            storage_root("/home/u/./orx/orx.db", "orx.db", "Database").unwrap(),
+            "/home/u/./orx"
+        );
+        assert!(storage_root("/home/u/../orx/orx.db", "orx.db", "Database").is_err());
     }
 
     #[test]

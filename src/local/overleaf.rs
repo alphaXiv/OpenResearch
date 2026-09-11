@@ -236,7 +236,7 @@ pub fn collect(tex: &Path) -> Result<Payload> {
     let dir = tex
         .parent()
         .ok_or_else(|| anyhow!("the paper has no parent directory"))?;
-    let root = std::fs::canonicalize(dir)?;
+    let root = crate::paths::canonicalize(dir)?;
     let main = tex
         .file_name()
         .ok_or_else(|| anyhow!("the paper has no file name"))?
@@ -309,7 +309,7 @@ fn resolve(root: &Path, reference: &str) -> Option<(String, PathBuf)> {
     if trimmed.split('/').any(|part| part.starts_with('.')) {
         return None;
     }
-    let path = std::fs::canonicalize(root.join(trimmed)).ok()?;
+    let path = crate::paths::canonicalize(root.join(trimmed)).ok()?;
     if !path.is_file() || !path.starts_with(root) {
         return None;
     }
@@ -824,7 +824,7 @@ fn plan(
                 // `confined_path` is lexical; this is the same canonicalized
                 // boundary `collect` applies, so a symlinked folder cannot make
                 // a "keep this copy" send something from outside the paper.
-                match std::fs::canonicalize(&local_path) {
+                match crate::paths::canonicalize(&local_path) {
                     Ok(real) if real.starts_with(&payload.dir) => {
                         plan.forced.insert(rel.clone(), real);
                     }
@@ -1127,7 +1127,7 @@ pub(crate) fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> 
                 None => break,
             }
         }
-        if !std::fs::canonicalize(existing)?.starts_with(dir) {
+        if !crate::paths::canonicalize(existing)?.starts_with(dir) {
             return Err(anyhow!(
                 "{} resolves outside the paper's folder",
                 parent.display()
@@ -1892,8 +1892,15 @@ mod tests {
 
     #[test]
     fn the_upload_page_posts_every_file_as_a_data_url() {
+        // `"` is reserved in a Windows filename; `&` is not, and still has to be
+        // escaped to stay inside the attribute.
+        #[cfg(windows)]
+        let (risky, escaped) = ("pa&per.tex", "pa&amp;per.tex");
+        #[cfg(not(windows))]
+        let (risky, escaped) = ("pa\"per.tex", "pa&quot;per.tex");
+
         let temporary = TemporaryDirectory::new("orx-overleaf-test").unwrap();
-        let tex = temporary.path().join("pa\"per.tex");
+        let tex = temporary.path().join(risky);
         std::fs::write(&tex, b"% !TeX program = lualatex\nhi").unwrap();
         let payload = collect(&tex).unwrap();
 
@@ -1901,8 +1908,8 @@ mod tests {
         assert!(html.contains("action=\"https://www.overleaf.com/docs\""));
         assert!(html.contains("data:text/plain;base64,"));
         assert!(html.contains("name=\"engine\" value=\"lualatex\""));
-        // A quote in a file name must not break out of the attribute.
-        assert!(html.contains("pa&quot;per.tex"));
-        assert!(!html.contains("value=\"pa\"per.tex\""));
+        // The raw character must not break out of the attribute.
+        assert!(html.contains(escaped));
+        assert!(!html.contains(&format!("value=\"{risky}\"")));
     }
 }

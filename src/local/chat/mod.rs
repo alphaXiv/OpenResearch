@@ -1329,8 +1329,19 @@ fn kill_shell_group(pid: Option<u32>) {
     }
 }
 
+/// Windows has no group to signal, and the caller's second wait is untimed, so
+/// without this a timed-out command hangs the turn until the child exits.
 #[cfg(not(unix))]
-fn kill_shell_group(_pid: Option<u32>) {}
+fn kill_shell_group(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
 
 /// Drain one stream on its own task from the moment the child starts, so a
 /// chatty command never blocks on a full pipe while we wait for it.
@@ -1354,6 +1365,12 @@ async fn drained((mut handle, kept): (tokio::task::JoinHandle<()>, ShellStream))
     String::from_utf8_lossy(&kept).into_owned()
 }
 
+/// Appended to a failed bash spawn; empty where bash is expected to exist.
+#[cfg(windows)]
+const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
+#[cfg(not(windows))]
+const BASH_HINT: &str = "";
+
 impl ChatHost {
     /// Run a composer `!` command in `cwd` and record the exchange on the
     /// session's branch, where the next turn picks it up as context.
@@ -1363,7 +1380,7 @@ impl ChatHost {
         command: String,
         cwd: PathBuf,
     ) -> Result<WireMessage> {
-        let mut spawn = tokio::process::Command::new("bash");
+        let mut spawn = tokio::process::Command::new(crate::local::bash::program());
         spawn
             .arg("-c")
             .arg(&command)
@@ -1375,11 +1392,20 @@ impl ChatHost {
         #[cfg(unix)]
         spawn.process_group(0);
         prepare_env(&mut spawn);
+        if let Some(path) = crate::local::bash::path_with_toolchain(
+            child_path().or_else(crate::local::shell_env::search_path),
+        ) {
+            spawn.env("PATH", path);
+        }
         let mut exit_code = None;
-        let mut signal = None;
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut signal: Option<i64> = None;
         let mut timed_out = false;
         let (mut output, mut error) = match spawn.spawn() {
-            Err(error) => (String::new(), format!("could not start bash: {error}")),
+            Err(error) => (
+                String::new(),
+                format!("could not start bash: {error}{BASH_HINT}"),
+            ),
             Ok(mut child) => {
                 let pid = child.id();
                 let stdout = drain_shell_stream(child.stdout.take());
@@ -7576,17 +7602,23 @@ pub async fn watch_runs(
     }
 }
 
+/// The PATH a child gets: this orx first, so an agent shelling out to `orx`
+/// reaches the running one.
+fn child_path() -> Option<std::ffi::OsString> {
+    let mut path = orx_bin_dir()?.into_os_string();
+    if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
+        path.push(crate::local::shell_env::PATH_LIST_SEPARATOR);
+        path.push(existing);
+    }
+    Some(path)
+}
+
 /// Env prep shared by the CLI adapters: this orx first on PATH (agents shell
 /// out to `orx`), the shell environment app mode imported, and the
 /// dashboard-managed env vars, real env winning. Only the starting order —
 /// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
-    if let Some(dir) = orx_bin_dir() {
-        let mut path = dir.into_os_string();
-        if let Some(existing) = crate::local::shell_env::search_path().filter(|p| !p.is_empty()) {
-            path.push(":");
-            path.push(existing);
-        }
+    if let Some(path) = child_path() {
         cmd.env("PATH", path);
     }
     // So an agent's `orx exp run` resolves the same store the dashboard is
@@ -7646,16 +7678,20 @@ const PATH_GUARD: &str =
      export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
      fi\n";
 
-/// Directory holding the running `orx`. A relative or colon-bearing directory
-/// is dropped rather than fronted: neither can be spelled in a `PATH` entry,
-/// and an empty one would mean the agent's cwd.
+/// Directory holding the running `orx`; None if relative (PATH would resolve it against the
+/// agent's cwd) or if it contains the PATH separator.
 fn orx_bin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
     // the un-canonicalized path still names the right directory.
-    let exe = exe.canonicalize().unwrap_or(exe);
+    let exe = crate::paths::canonicalize(&exe).unwrap_or(exe);
     exe.parent()
-        .filter(|dir| dir.is_absolute() && !dir.to_string_lossy().contains(':'))
+        .filter(|dir| {
+            dir.is_absolute()
+                && !dir
+                    .to_string_lossy()
+                    .contains(crate::local::shell_env::PATH_LIST_SEPARATOR)
+        })
         .map(std::path::Path::to_path_buf)
 }
 
@@ -7753,6 +7789,11 @@ pub fn set_chat_session_env(
             cmd.env_remove(UP_AUTH_TOKEN_ENV);
         }
     }
+    // PATH_GUARD joins on `:`, which a drive letter splits; on Windows only prepare_env's
+    // fronting applies.
+    #[cfg(windows)]
+    cmd.env_remove(BIN_DIR_ENV);
+    #[cfg(not(windows))]
     match orx_bin_dir() {
         Some(dir) => {
             cmd.env(BIN_DIR_ENV, dir);
@@ -7944,6 +7985,8 @@ mod cap_tests {
         assert!(!safe_session_name("...").is_empty());
     }
 
+    // BASH_ENV hooks over POSIX paths; Git Bash sees a different filesystem root.
+    #[cfg(unix)]
     #[test]
     fn shell_hooks_tolerate_nounset_and_preserve_spaced_bash_env() {
         let root = std::env::temp_dir().join(format!("orx-shell-hook-{}", uuid::Uuid::new_v4()));
@@ -7980,6 +8023,7 @@ mod cap_tests {
         assert!(zshenv_hook(std::path::Path::new("/tmp")).contains("${ZSH_EXECUTION_STRING-}"));
     }
 
+    #[cfg(unix)]
     fn write_orx_stub(dir: &std::path::Path, marker: &str) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
@@ -7990,6 +8034,7 @@ mod cap_tests {
 
     /// A stale `orx` on a directory a user startup file prepends, ahead of the
     /// one `prepare_env` fronted.
+    #[cfg(unix)]
     fn path_guard_fixture(root: &std::path::Path) -> (PathBuf, String, String) {
         let ours = root.join("ours");
         let decoy = root.join("decoy");
@@ -8007,6 +8052,7 @@ mod cap_tests {
     /// The hooks branch on the chat target vars, which a `cargo test` run from
     /// inside a chat session would otherwise inherit; interactive zsh wants a
     /// `TERM` it can name.
+    #[cfg(unix)]
     fn shell_output(mut cmd: std::process::Command) -> String {
         let out = cmd
             .env_remove(CHAT_TARGET_FILE_ENV)
@@ -8022,6 +8068,7 @@ mod cap_tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_guard_refronts_orx_after_a_bash_hook_prepends_its_own_bin() {
         let root = std::env::temp_dir().join(format!("orx-path-guard-{}", uuid::Uuid::new_v4()));
@@ -8055,6 +8102,7 @@ mod cap_tests {
         assert_eq!(unguarded, "decoy", "the user hook's prepend never ran");
     }
 
+    #[cfg(unix)]
     #[test]
     fn path_guard_refronts_orx_after_a_zsh_startup_file_prepends_its_own_bin() {
         if !std::process::Command::new("zsh")
@@ -9067,7 +9115,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             1
         );
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9097,7 +9145,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         );
         assert!(!host.is_busy("parent").await);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9272,7 +9320,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             1
         );
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -9496,7 +9544,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             .unwrap();
 
         assert!(!host.is_busy("owner").await);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9521,7 +9569,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
         assert!(!host.is_busy("owner").await);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9548,7 +9596,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
         let store = Store::open_at(dir.clone()).unwrap();
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -9776,7 +9824,7 @@ mod steering_tests {
         // The chip shows what the user typed, and the queue path re-expands it.
         assert_eq!(queued[0]["text"], "/plan the migration");
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -9906,6 +9954,6 @@ mod steering_tests {
         assert!(tx.send(steer("too late")).is_err());
         assert_eq!(host.queued_items("owner")[0]["text"], "still here");
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

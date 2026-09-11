@@ -137,6 +137,15 @@ pub fn existing_session_worktree_path(
     }
 }
 
+/// Session worktrees spend ~100 of Windows' 260 path characters before the repo's own.
+fn long_paths() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["-c", "core.longpaths=true"]
+    } else {
+        &[]
+    }
+}
+
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
@@ -147,9 +156,10 @@ fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     }
     cmd.env("GIT_TERMINAL_PROMPT", "0");
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
-        cmd.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes");
+        cmd.env("GIT_SSH_COMMAND", git_ssh_command("ssh -oBatchMode=yes"));
     }
     let out = cmd
+        .args(long_paths())
         .args(args)
         .output()
         .map_err(|e| anyhow!("Could not run git: {}", e))?;
@@ -197,7 +207,7 @@ pub fn repository_state(path: &Path) -> RepositoryState {
 /// Whether `path` is the root of its own work tree, rather than a folder that
 /// merely sits inside an enclosing checkout.
 pub fn is_repository_root(path: &Path) -> bool {
-    match (repository_root(path), std::fs::canonicalize(path)) {
+    match (repository_root(path), crate::paths::canonicalize(path)) {
         (Ok(root), Ok(path)) => root == path,
         _ => false,
     }
@@ -209,7 +219,7 @@ pub fn is_repository_root(path: &Path) -> bool {
 pub fn own_repository_state(path: &Path) -> RepositoryState {
     let state = repository_state(path);
     if matches!(
-        (repository_root(path), std::fs::canonicalize(path)),
+        (repository_root(path), crate::paths::canonicalize(path)),
         (Ok(root), Ok(path)) if root != path
     ) {
         return RepositoryState::NotRepository;
@@ -219,7 +229,7 @@ pub fn own_repository_state(path: &Path) -> RepositoryState {
 
 pub fn repository_root(path: &Path) -> Result<PathBuf> {
     let root = git(Some(path), &["rev-parse", "--show-toplevel"])?;
-    std::fs::canonicalize(root).map_err(Into::into)
+    crate::paths::canonicalize(root).map_err(Into::into)
 }
 
 pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
@@ -230,7 +240,7 @@ pub fn common_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(value)
     };
-    std::fs::canonicalize(resolved).map_err(Into::into)
+    crate::paths::canonicalize(resolved).map_err(Into::into)
 }
 
 pub(crate) struct TemporaryDirectory(PathBuf);
@@ -260,7 +270,7 @@ fn repository_git_dir(path: &Path) -> Result<PathBuf> {
     } else {
         path.join(value)
     };
-    std::fs::canonicalize(resolved).map_err(Into::into)
+    crate::paths::canonicalize(resolved).map_err(Into::into)
 }
 
 fn git_context_bytes(
@@ -771,7 +781,7 @@ fn initialize(path: &Path, state: RepositoryState) -> Result<()> {
     let root = if state == RepositoryState::Unborn {
         repository_root(path)?
     } else {
-        std::fs::canonicalize(path)?
+        crate::paths::canonicalize(path)?
     };
     let snapshot = prepare_initial_snapshot(&root)?;
 
@@ -858,6 +868,7 @@ pub fn clone_public(url: &str, path: &Path, shallow: bool) -> Result<()> {
         .env("GIT_ASKPASS", "")
         .env("SSH_ASKPASS", "")
         .env("SSH_ASKPASS_REQUIRE", "never")
+        .args(long_paths())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", &empty_config)
         .env_remove("GIT_CONFIG_COUNT")
@@ -1190,6 +1201,10 @@ pub(crate) fn restore_local_repository(
     let origin_arg = origin.to_string_lossy().into_owned();
     let result: Result<()> = (|| {
         git(None, &["init", "--quiet", &tmp_arg])?;
+        // Git for Windows' system config turns autocrlf on; later reads ignore that config,
+        // so a CRLF checkout would look permanently dirty and the demo would reject it.
+        git(Some(&tmp), &["config", "core.autocrlf", "false"])?;
+        git(Some(&tmp), &["config", "core.eol", "lf"])?;
         git(Some(&tmp), &["remote", "add", "origin", &origin_arg])?;
         git(
             Some(&tmp),
@@ -1246,9 +1261,13 @@ pub fn ensure_session_worktree(
         return Err(anyhow!("{} is not a Git repository", repo_path.display()));
     }
     let dir = existing_session_worktree_path(project, session_id);
-    let start_ref =
-        super::demo::session_start_ref(&project.github_owner, &project.github_repo, session_id)
-            .unwrap_or(&project.baseline_branch);
+    let start_ref = super::demo::session_start_ref(
+        repo_path,
+        &project.github_owner,
+        &project.github_repo,
+        session_id,
+    )
+    .unwrap_or(&project.baseline_branch);
     git(Some(repo_path), &["rev-parse", "--verify", start_ref])?;
     ensure_worktree_from(repo_path, dir, start_ref)
 }
@@ -1261,8 +1280,8 @@ pub(crate) fn ensure_session_worktree_in(
     baseline_branch: &str,
     session_id: &str,
 ) -> Result<PathBuf> {
-    let start_ref =
-        super::demo::session_start_ref(owner, repo_name, session_id).unwrap_or(baseline_branch);
+    let start_ref = super::demo::session_start_ref(repo, owner, repo_name, session_id)
+        .unwrap_or(baseline_branch);
     ensure_worktree_from(repo, dir.to_path_buf(), start_ref)
 }
 
@@ -1478,7 +1497,41 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
     Ok(true)
 }
 
+#[cfg(unix)]
+fn git_ssh_command(base: &str) -> String {
+    base.to_string()
+}
+
+/// Multiplexing off: a ControlPath from the user's ssh_config would fail the connection
+/// (see `jobs::ssh::multiplexing_opts`).
+#[cfg(not(unix))]
+fn git_ssh_command(base: &str) -> String {
+    format!("{base} -oControlMaster=no -oControlPath=none")
+}
+
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
+
+/// Only for `diff --no-index`; anywhere git reads the path, use [`empty_config_file`].
+#[cfg(not(windows))]
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
+#[cfg(windows)]
+pub(crate) const NULL_DEVICE: &str = "NUL";
+
+/// Not `NUL`: Windows git fails "unable to access 'NUL'" instead of reading it as empty.
+pub(crate) fn empty_config_file() -> PathBuf {
+    static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let path = crate::config::config_dir().join("empty.gitconfig");
+        let _ = std::fs::create_dir_all(crate::config::config_dir());
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path);
+        path
+    })
+    .clone()
+}
 
 fn redact_remote_urls(text: &str) -> String {
     text.split_whitespace()
@@ -1504,7 +1557,10 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
         command.env("PATH", paths);
     }
     if std::env::var_os("GIT_SSH_COMMAND").is_none() && std::env::var_os("GIT_SSH").is_none() {
-        command.env("GIT_SSH_COMMAND", "ssh -oBatchMode=yes -oConnectTimeout=15");
+        command.env(
+            "GIT_SSH_COMMAND",
+            git_ssh_command("ssh -oBatchMode=yes -oConnectTimeout=15"),
+        );
     }
     command
         .env("GH_PROMPT_DISABLED", "1")
@@ -1514,7 +1570,8 @@ fn authenticated_git_command(repo_path: &Path) -> Command {
         .env("GIT_CONFIG_KEY_1", "credential.helper")
         .env("GIT_CONFIG_VALUE_1", GITHUB_CREDENTIAL_HELPER)
         .env("GIT_CONFIG_KEY_2", "core.hooksPath")
-        .env("GIT_CONFIG_VALUE_2", "/dev/null");
+        .env("GIT_CONFIG_VALUE_2", empty_config_file())
+        .args(long_paths());
     #[cfg(unix)]
     command.process_group(0);
     command
@@ -1914,7 +1971,7 @@ pub fn working_tree_diff_against(repo: &Path, base: Option<&str>) -> Result<Diff
         }
         if let Ok(chunk) = git_bytes(
             repo,
-            &["--no-pager", "diff", "--no-index", "--", "/dev/null", f],
+            &["--no-pager", "diff", "--no-index", "--", NULL_DEVICE, f],
             &[1],
         ) {
             bytes.extend_from_slice(&chunk);
@@ -2310,7 +2367,7 @@ mod tests {
             own_repository_state(&nested),
             RepositoryState::NotRepository
         );
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(unix)]
@@ -2335,7 +2392,7 @@ mod tests {
             snapshot.included_bytes,
             target.as_os_str().to_string_lossy().len() as u64
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[cfg(target_os = "linux")]
@@ -2357,7 +2414,7 @@ mod tests {
         let snapshot = initial_snapshot(&root).unwrap();
 
         assert_eq!(snapshot.excluded_paths, vec![raw_name]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// A throwaway git repo under the temp dir with one seed commit on `main`.
@@ -2402,7 +2459,7 @@ mod tests {
             .unwrap();
         assert_eq!(actual, bytes);
         assert!(!truncated);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn statuses(files: &[ChangedFile]) -> Vec<(String, ChangedStatus)> {

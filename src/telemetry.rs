@@ -1707,9 +1707,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Read one whole HTTP request off `stream`: on Windows, closing with unread data
+    /// resets the connection and the client never sees the reply.
+    async fn drain_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                if bytes.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        bytes
+    }
+
     #[tokio::test]
     async fn sender_posts_the_first_party_endpoint() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let _g = EnvGuard::new(OPT_VARS);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1718,31 +1750,7 @@ mod tests {
         let event_id = uuid::Uuid::new_v4();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).await.unwrap();
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length: ")
-                                .map(str::to_owned)
-                        })
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap();
-                    if bytes.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-            }
+            let bytes = drain_request(&mut stream).await;
             stream
                 .write_all(
                     b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1785,6 +1793,7 @@ mod tests {
                 "202 Accepted",
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
+                drain_request(&mut stream).await;
                 let response =
                     format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 stream.write_all(response.as_bytes()).await.unwrap();
@@ -1819,6 +1828,7 @@ mod tests {
         );
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            drain_request(&mut stream).await;
             stream
                 .write_all(
                     b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",

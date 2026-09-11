@@ -214,7 +214,7 @@ impl HarnessInfo {
 /// symlink. Spawning the resolved path keeps helpers real siblings. Best-effort:
 /// a path that can't be resolved is returned unchanged.
 pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or(path)
+    crate::paths::canonicalize(&path).unwrap_or(path)
 }
 
 /// What `<bin> --version` said about an install found on PATH.
@@ -368,7 +368,10 @@ mod tests {
         let link = bin.join("codex");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        assert_eq!(resolve_symlinks(link), real.canonicalize().unwrap());
+        assert_eq!(
+            resolve_symlinks(link),
+            crate::paths::canonicalize(&real).unwrap()
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

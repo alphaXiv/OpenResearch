@@ -36,7 +36,7 @@ pub(crate) fn is_bundle_exe_launch(exe: &std::path::Path, argv0: Option<&std::ff
 /// process was *launched as*, symlink and all, so it is canonicalized first.
 #[cfg(target_os = "macos")]
 pub fn launched_as_app_bundle() -> bool {
-    let Ok(exe) = std::env::current_exe().and_then(|exe| exe.canonicalize()) else {
+    let Ok(exe) = std::env::current_exe().and_then(crate::paths::canonicalize) else {
         return false;
     };
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())

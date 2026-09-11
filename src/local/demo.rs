@@ -36,12 +36,31 @@ const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
 // Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
-const PROBE_SETUP: &str = "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" && (command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh) && ([ -d .venv ] || uv venv) && uv sync --extra cpu && source .venv/bin/activate && python -m nanochat.dataset -n 8";
+// Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
+fn probe_setup() -> String {
+    let install_uv = if cfg!(windows) {
+        "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
+    } else {
+        "curl -LsSf https://astral.sh/uv/install.sh | sh"
+    };
+    format!(
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+         && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }} \
+         && ([ -d .venv ] || uv venv) \
+         && uv sync --extra cpu \
+         && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
+         && python -m nanochat.dataset -n 8"
+    )
+}
 // --warmdown-ratio=0 keeps the LR schedule identical to the baseline's first 200 steps.
 const PROBE_TRAIN: &str = "python -m scripts.base_train --depth=6 --head-dim=64 --window-pattern=L --max-seq-len=512 --device-batch-size=32 --total-batch-size=16384 --eval-every=50 --eval-tokens=524288 --core-metric-every=-1 --sample-every=-1 --num-iterations=200 --warmdown-ratio=0";
 const PROBE_TOK_TRAIN: &str = "python -m scripts.tok_train --max-chars=2000000000";
 const BASELINE_SHA: &str = "96098ad3f3708748f693c28194520ae13afb9c69";
-const EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
+const EXPERIMENT_SHA: &str = "dae919e9b6f6edd3bdb14a514dd1e451781682f8";
+// Installs seeded before `runs/runcpu.sh` learned Windows keep that tree, since
+// every session worktree they have was cut from it.
+const PREVIOUS_EXPERIMENT_SHA: &str = "b302007b336e47028e321b0d920f030445c4db67";
 
 const TURN_CONTEXT: &str = r#"<openresearch-demo-evidence>
 This is a recorded OpenResearch demo run. The project's Artifacts/evidence directory contains real checkpoint metadata, the trained tokenizer, structured training and evaluation metrics, the final inference transcript, and run-manifest.json. To reduce the bundled demo project's download size, the multi-gigabyte model checkpoints, optimizer states, datasets, and environment are intentionally not included; the manifest records their original paths, sizes, hashes, and omission status. Do not search for or claim access to omitted files. Before proposing work that requires model weights, explain that the weights must be regenerated or downloaded. When the user asks you to choose an autonomous follow-up, prefer an analysis supported by the bundled evidence unless they explicitly ask to regenerate or download the weights.
@@ -178,7 +197,9 @@ pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
         return None;
     }
     Store::open().ok()?.get_local_project(PROJECT_ID).ok()??;
-    let origin = crate::store::data_dir().join("demo-repos/nanochat.git");
+    let origin = crate::store::data_dir()
+        .join("demo-repos")
+        .join("nanochat.git");
     origin.exists().then_some(origin)
 }
 
@@ -186,14 +207,32 @@ pub(crate) fn turn_context(project_id: &str) -> Option<&'static str> {
     (project_id == PROJECT_ID).then_some(TURN_CONTEXT)
 }
 
-pub(crate) fn session_start_ref(owner: &str, repo: &str, session_id: &str) -> Option<&'static str> {
+pub(crate) fn session_start_ref(
+    checkout: &Path,
+    owner: &str,
+    repo: &str,
+    session_id: &str,
+) -> Option<&'static str> {
     (owner == OWNER
         && repo == REPO
         && matches!(
             session_id,
             SESSION_ID | FIGURE_SESSION_ID | LITERATURE_SESSION_ID
         ))
-    .then_some(EXPERIMENT_SHA)
+    .then(|| installed_experiment_sha(checkout))
+}
+
+/// The experiment commit the demo branch descends from, not merely one whose object exists.
+fn installed_experiment_sha(repo: &Path) -> &'static str {
+    let branch = format!("refs/heads/{BRANCH}");
+    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA]
+        .into_iter()
+        .find(|sha| git(repo, &["merge-base", "--is-ancestor", sha, &branch]).is_ok())
+        .unwrap_or(EXPERIMENT_SHA)
+}
+
+fn is_experiment_sha(sha: &str) -> bool {
+    [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA].contains(&sha)
 }
 
 /// Repoint the embedded demo's local origin after the data directory moves.
@@ -214,7 +253,7 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     if !repo.join(".git").is_dir() {
         return Ok(());
     }
-    let bare = data_root.join("demo-repos/nanochat.git");
+    let bare = data_root.join("demo-repos").join("nanochat.git");
     if !matches!(
         git(&bare, &["rev-parse", "--is-bare-repository"]).as_deref(),
         Ok("true")
@@ -306,7 +345,8 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04"
+                "{} && {PROBE_TOK_TRAIN} && {PROBE_TRAIN} --matrix-lr=0.04",
+                probe_setup()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 8, 0),
@@ -325,7 +365,8 @@ fn seed_at(
                     .into(),
             ),
             run_command: format!(
-                "{PROBE_SETUP} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}"
+                "{} && {PROBE_TOK_TRAIN} --vocab-size=8192 && {PROBE_TRAIN}",
+                probe_setup()
             ),
             agent_status: "idle".into(),
             created_at: ago(seeded_at, 6, 0),
@@ -568,7 +609,7 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
         || runs[0].id != RUN_ID
         || runs[0].status != "done"
         || runs[0].exit_code != Some(0)
-        || runs[0].commit_sha.as_deref() != Some(EXPERIMENT_SHA)
+        || runs[0].commit_sha.as_deref() != Some(installed_experiment_sha(repo))
         || sessions.len() != 3
         || sessions[0].id != SESSION_ID
         || sessions[1].id != FIGURE_SESSION_ID
@@ -1191,6 +1232,11 @@ fn tool_part(
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
     if repo.exists() {
         validate_worktree(repo)?;
+    } else if bare.join("HEAD").is_file() {
+        // A kept origin carries the experiment this install was seeded with.
+        validate_bare_origin(bare)?;
+        super::git::restore_local_repository(repo, bare, "main")?;
+        validate_worktree(repo)?;
     } else {
         let parent = repo
             .parent()
@@ -1239,13 +1285,20 @@ fn build_worktree(root: &Path) -> Result<()> {
     git(root, &["-c", "init.defaultObjectFormat=sha1", "init"])?;
     git(root, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     git(root, &["config", "core.autocrlf", "false"])?;
+    // NTFS reports every file as 0644; the index, not the filesystem, owns the exec bit.
+    #[cfg(windows)]
+    git(root, &["config", "core.filemode", "false"])?;
+    #[cfg(not(windows))]
     git(root, &["config", "core.filemode", "true"])?;
     git(root, &["add", "-A"])?;
+    // Without the exec bit in the index, commit ids drift off BASELINE_SHA/EXPERIMENT_SHA.
+    git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
     commit(root, "Import nanochat demo baseline")?;
     git(root, &["checkout", "-b", BRANCH])?;
     write_assets::<ExperimentAssets>(root)?;
     set_executable(root.join("runs/runcpu.sh"))?;
     git(root, &["add", "-A"])?;
+    git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
     commit(root, "Make the CPU pipeline portable and memory-safe")?;
     git(root, &["checkout", "main"])?;
     Ok(())
@@ -1316,7 +1369,7 @@ fn validate_bare_origin(bare: &Path) -> Result<()> {
     let head = git(bare, &["symbolic-ref", "HEAD"]);
     if !bare.join("HEAD").is_file()
         || !matches!(baseline.as_deref(), Ok(value) if value == BASELINE_SHA)
-        || !matches!(experiment.as_deref(), Ok(value) if value == EXPERIMENT_SHA)
+        || !matches!(experiment.as_deref(), Ok(value) if is_experiment_sha(value))
         || !matches!(is_bare.as_deref(), Ok("true"))
         || !matches!(head.as_deref(), Ok("refs/heads/main"))
     {
@@ -1334,11 +1387,16 @@ fn validate_worktree(repo: &Path) -> Result<()> {
     let clean = git(repo, &["status", "--porcelain"]);
     let ancestry = git(
         repo,
-        &["merge-base", "--is-ancestor", BASELINE_SHA, EXPERIMENT_SHA],
+        &[
+            "merge-base",
+            "--is-ancestor",
+            BASELINE_SHA,
+            installed_experiment_sha(repo),
+        ],
     );
     if !repo.join(".git").is_dir()
         || !matches!(baseline.as_deref(), Ok(value) if value == BASELINE_SHA)
-        || !matches!(experiment.as_deref(), Ok(value) if value == EXPERIMENT_SHA)
+        || !matches!(experiment.as_deref(), Ok(value) if is_experiment_sha(value))
         || !matches!(clean.as_deref(), Ok(""))
         || ancestry.is_err()
     {
@@ -1364,6 +1422,10 @@ fn write_assets<T: RustEmbed>(root: &Path) -> Result<()> {
 }
 
 fn commit(repo: &Path, message: &str) -> Result<()> {
+    let hooks = format!(
+        "core.hooksPath={}",
+        crate::local::git::empty_config_file().display()
+    );
     git(
         repo,
         &[
@@ -1374,7 +1436,7 @@ fn commit(repo: &Path, message: &str) -> Result<()> {
             "-c",
             "commit.gpgsign=false",
             "-c",
-            "core.hooksPath=/dev/null",
+            hooks.as_str(),
             "commit",
             "-m",
             message,
@@ -1400,20 +1462,27 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     ] {
         command.env_remove(name);
     }
+    let empty_file = crate::local::git::empty_config_file();
+    let empty = empty_file.display();
+    let (attributes, excludes, hooks) = (
+        format!("core.attributesFile={empty}"),
+        format!("core.excludesFile={empty}"),
+        format!("core.hooksPath={empty}"),
+    );
     let out = command
         .current_dir(dir)
         .args([
             "-c",
-            "core.attributesFile=/dev/null",
+            attributes.as_str(),
             "-c",
-            "core.excludesFile=/dev/null",
+            excludes.as_str(),
             "-c",
-            "core.hooksPath=/dev/null",
+            hooks.as_str(),
         ])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", &empty_file)
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "OpenResearch Demo")
         .env("GIT_AUTHOR_EMAIL", "demo@openresearch.sh")
@@ -1434,6 +1503,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn set_executable(path: PathBuf) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = path;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1547,12 +1618,84 @@ mod tests {
 
     #[test]
     fn every_demo_session_recovers_from_the_experiment_commit() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        install_repository(&repo, &root.join("origin.git")).unwrap();
         for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
             assert_eq!(
-                session_start_ref(OWNER, REPO, session_id),
+                session_start_ref(&repo, OWNER, REPO, session_id),
                 Some(EXPERIMENT_SHA)
             );
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Sessions seeded before `runcpu.sh` learned Windows must still resolve their start commit.
+    #[test]
+    fn an_install_seeded_at_the_previous_experiment_keeps_working() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        build_worktree(&repo).unwrap();
+        git(&repo, &["checkout", "-q", BRANCH]).unwrap();
+        git(&repo, &["reset", "-q", "--soft", "HEAD~1"]).unwrap();
+        std::fs::write(
+            repo.join("runs/runcpu.sh"),
+            include_str!("demo_fixtures/runcpu-before-windows.sh"),
+        )
+        .unwrap();
+        git(&repo, &["add", "-A"]).unwrap();
+        git(&repo, &["update-index", "--chmod=+x", "runs/runcpu.sh"]).unwrap();
+        commit(&repo, "Make the CPU pipeline portable and memory-safe").unwrap();
+        git(&repo, &["checkout", "-q", "main"]).unwrap();
+        assert_eq!(
+            git(&repo, &["rev-parse", BRANCH]).unwrap(),
+            PREVIOUS_EXPERIMENT_SHA
+        );
+
+        validate_worktree(&repo).unwrap();
+        for session_id in [SESSION_ID, FIGURE_SESSION_ID, LITERATURE_SESSION_ID] {
+            assert_eq!(
+                session_start_ref(&repo, OWNER, REPO, session_id),
+                Some(PREVIOUS_EXPERIMENT_SHA)
+            );
+            let worktree = root.join("worktrees").join(session_id);
+            crate::local::git::ensure_session_worktree_in(
+                &repo, &worktree, OWNER, REPO, "main", session_id,
+            )
+            .unwrap();
+            assert_eq!(
+                git(&worktree, &["rev-parse", "HEAD"]).unwrap(),
+                PREVIOUS_EXPERIMENT_SHA
+            );
+        }
+
+        // Cache wiped, origin kept: onboarding restores the old tree, not a sibling.
+        let bare = root.join("origin.git");
+        ensure_follow_up_branches(&repo).unwrap();
+        ensure_local_origin(&repo, &bare).unwrap();
+        std::fs::remove_dir_all(root.join("worktrees")).unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert_eq!(
+            install_repository(&repo, &bare).unwrap(),
+            PREVIOUS_EXPERIMENT_SHA
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A foreign kept origin is named as the problem, before any clone is restored from it.
+    #[test]
+    fn a_foreign_kept_origin_is_rejected_before_restoring() {
+        let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
+        let repo = root.join("repo");
+        let bare = root.join("origin.git");
+        std::fs::create_dir_all(&bare).unwrap();
+        git(&bare, &["init", "--bare", "-q"]).unwrap();
+
+        let error = install_repository(&repo, &bare).unwrap_err().to_string();
+        assert!(error.contains("reserved demo origin"), "{error}");
+        assert!(!repo.exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1601,7 +1744,7 @@ mod tests {
             );
             assert_eq!(
                 git(
-                    &data.join("demo-repos/nanochat.git"),
+                    &data.join("demo-repos").join("nanochat.git"),
                     &[
                         "rev-parse",
                         &format!("refs/heads/{}", follow_up.branch_name)
@@ -1693,7 +1836,7 @@ mod tests {
             .parts_json
             .contains(data.to_string_lossy().as_ref()));
         assert!(repo.join(".git").is_dir());
-        let bare = data.join("demo-repos/nanochat.git");
+        let bare = data.join("demo-repos").join("nanochat.git");
         assert!(bare.join("HEAD").is_file());
         assert_eq!(
             git(&bare, &["symbolic-ref", "HEAD"]).unwrap(),
@@ -1753,7 +1896,7 @@ mod tests {
         assert!(!log.contains("/Users/"));
         assert!(!log.contains("Traceback"));
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1807,7 +1950,18 @@ mod tests {
             .join("cpu-apple-silicon-pipeline-results.md")
             .is_file());
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// The setup runs under Git Bash on Windows, where uv lays the venv out as
+    /// `Scripts/`, and the whole thing is one `&&` chain on a single line.
+    #[test]
+    fn probe_setup_runs_on_either_venv_layout() {
+        let setup = probe_setup();
+        assert!(setup.contains(". .venv/bin/activate"), "{setup}");
+        assert!(setup.contains(". .venv/Scripts/activate"), "{setup}");
+        assert!(!setup.contains('\n'), "{setup}");
+        assert!(!setup.contains("  "), "double space: {setup}");
     }
 
     #[test]
@@ -1822,7 +1976,7 @@ mod tests {
             git(&first, &["rev-parse", "refs/heads/main"]).unwrap(),
             git(&second, &["rev-parse", "refs/heads/main"]).unwrap()
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1851,9 +2005,12 @@ mod tests {
 
         assert_eq!(
             git(&repo, &["remote", "get-url", "origin"]).unwrap(),
-            moved.join("demo-repos/nanochat.git").to_string_lossy()
+            moved
+                .join("demo-repos")
+                .join("nanochat.git")
+                .to_string_lossy()
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1875,12 +2032,12 @@ mod tests {
             },
         )
         .unwrap();
-        std::fs::remove_dir_all(&worktrees).unwrap();
-        std::fs::remove_dir_all(&repo).unwrap();
+        std::fs::remove_dir_all(&worktrees).expect("clear the worktrees");
+        std::fs::remove_dir_all(&repo).expect("clear the cached clone");
 
         crate::local::git::restore_local_repository(
             &repo,
-            &data.join("demo-repos/nanochat.git"),
+            &data.join("demo-repos").join("nanochat.git"),
             "main",
         )
         .unwrap();
@@ -1905,7 +2062,7 @@ mod tests {
             );
         }
         drop(store);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1923,6 +2080,6 @@ mod tests {
             "user data"
         );
         assert!(!repo.join(".git").exists());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

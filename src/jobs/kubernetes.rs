@@ -557,6 +557,9 @@ fn prepare_docs(
         if !env.iter().any(|e| e["name"] == super::PYTHONUNBUFFERED) {
             env.push(json!({ "name": super::PYTHONUNBUFFERED, "value": "1" }));
         }
+        if !env.iter().any(|e| e["name"] == super::PYTHONIOENCODING) {
+            env.push(json!({ "name": super::PYTHONIOENCODING, "value": "utf-8" }));
+        }
         c["env"] = json!(env);
         let env_from = c["envFrom"]
             .as_array_mut()
@@ -964,8 +967,8 @@ mod tests {
         let (docs, _) = prepare(j).unwrap();
         let c = &docs[0]["spec"]["template"]["spec"]["containers"][0];
         let env = c["env"].as_array().unwrap();
-        // FOO + rewritten ORX_SCRIPT + the injected PYTHONUNBUFFERED default.
-        assert_eq!(env.len(), 3);
+        // FOO + rewritten ORX_SCRIPT + the two injected CPython defaults.
+        assert_eq!(env.len(), 4);
         assert!(env.iter().any(|e| e["name"] == "FOO"));
         assert!(env
             .iter()
@@ -974,15 +977,17 @@ mod tests {
     }
 
     #[test]
-    fn python_unbuffered_defaulted_and_author_value_wins() {
-        // Default: injected when the author didn't set it.
+    fn python_env_defaulted_and_author_value_wins() {
+        // Default: injected when the author didn't set them.
         let (docs, _) = prepare(job("train")).unwrap();
         let c = &docs[0]["spec"]["template"]["spec"]["containers"][0];
-        assert!(c["env"]
-            .as_array()
-            .unwrap()
+        let env = c["env"].as_array().unwrap();
+        assert!(env
             .iter()
             .any(|e| e["name"] == "PYTHONUNBUFFERED" && e["value"] == "1"));
+        assert!(env
+            .iter()
+            .any(|e| e["name"] == "PYTHONIOENCODING" && e["value"] == "utf-8"));
 
         // Override: an explicit author value is preserved, not duplicated.
         let mut j = job("train");

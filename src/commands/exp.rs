@@ -245,7 +245,7 @@ mod tests {
         assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -309,6 +309,6 @@ mod tests {
         assert!(!completed_while_locked);
         assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

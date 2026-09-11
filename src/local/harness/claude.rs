@@ -435,10 +435,12 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
 pub(crate) fn find_claude() -> Option<PathBuf> {
     find_on_path("claude").or_else(|| {
         let home = dirs::home_dir()?;
-        [".claude/local/claude", ".local/bin/claude"]
-            .iter()
-            .map(|rel| home.join(rel))
-            .find(|c| c.is_file())
+        [
+            home.join(".claude").join("local"),
+            home.join(".local").join("bin"),
+        ]
+        .into_iter()
+        .find_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
     })
 }
 
@@ -2130,7 +2132,7 @@ mod tests {
                 0o600
             );
         }
-        std::fs::remove_dir_all(repo).unwrap();
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     /// Plugins live in the version cache or a marketplace checkout, and a

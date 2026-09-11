@@ -28,14 +28,18 @@ use crate::error::{anyhow, Result};
 /// processes (unlike the `-u` flag).
 pub const PYTHONUNBUFFERED: &str = "PYTHONUNBUFFERED";
 
-/// Default `PYTHONUNBUFFERED=1` into a job's environment map unless the caller
-/// already set it (an explicit value always wins). Shared by every backend that
-/// carries env as a `HashMap`; kubernetes open-codes the equivalent because its
-/// env is a JSON `[{name, value}]` array, not a map.
-pub fn default_unbuffered(env: &HashMap<String, String>) -> HashMap<String, String> {
+/// Redirected CPython output uses Windows' ANSI codepage (often cp1252), so other
+/// characters crash a run.
+pub const PYTHONIOENCODING: &str = "PYTHONIOENCODING";
+
+/// Default CPython's streaming and encoding unless the caller set them; kubernetes
+/// open-codes it because its env is a JSON array.
+pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, String> {
     let mut env = env.clone();
     env.entry(PYTHONUNBUFFERED.to_string())
         .or_insert_with(|| "1".to_string());
+    env.entry(PYTHONIOENCODING.to_string())
+        .or_insert_with(|| "utf-8".to_string());
     env
 }
 
@@ -336,14 +340,22 @@ mod tests {
     }
 
     #[test]
-    fn default_unbuffered_injects_when_absent_and_lets_author_win() {
-        // Injected when the caller didn't set it.
-        let got = default_unbuffered(&HashMap::new());
+    fn default_python_env_injects_when_absent_and_lets_author_win() {
+        // Injected when the caller didn't set them.
+        let got = default_python_env(&HashMap::new());
         assert_eq!(got.get(PYTHONUNBUFFERED).map(String::as_str), Some("1"));
+        assert_eq!(got.get(PYTHONIOENCODING).map(String::as_str), Some("utf-8"));
 
-        // An explicit value is preserved — even a falsy one — never overwritten.
-        let author = HashMap::from([(PYTHONUNBUFFERED.to_string(), "0".to_string())]);
-        let got = default_unbuffered(&author);
+        // Explicit values are preserved — even falsy ones — never overwritten.
+        let author = HashMap::from([
+            (PYTHONUNBUFFERED.to_string(), "0".to_string()),
+            (PYTHONIOENCODING.to_string(), "cp1252".to_string()),
+        ]);
+        let got = default_python_env(&author);
         assert_eq!(got.get(PYTHONUNBUFFERED).map(String::as_str), Some("0"));
+        assert_eq!(
+            got.get(PYTHONIOENCODING).map(String::as_str),
+            Some("cp1252")
+        );
     }
 }

@@ -1185,6 +1185,7 @@ dependencies = [
  "reqwest",
  "rusqlite",
  "rust-embed",
+ "same-file",
  "semver",
  "serde",
  "serde_json",
@@ -1196,6 +1197,7 @@ dependencies = [
  "toml",
  "urlencoding",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

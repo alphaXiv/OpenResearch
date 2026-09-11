@@ -1,16 +1,25 @@
 //! Persistent SSH remote host and its private same-user control channel.
 
+// Windows compiles out the Unix-socket half; what only it reaches stays ungated, since the
+// half returns intact once the channel has a Windows transport.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
-use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+#[cfg(unix)]
+use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 
@@ -250,6 +259,22 @@ impl ControlServer {
     }
 }
 
+/// No Unix sockets on Windows: refuse `--remote-host` rather than start a host nothing can reach.
+#[cfg(not(unix))]
+pub(crate) async fn start_control_server(
+    _descriptor: HostDescriptor,
+    _auth: RemoteAuth,
+    _chat: Arc<ChatHost>,
+    _stopping: Arc<AtomicBool>,
+    _stop: watch::Sender<bool>,
+) -> Result<ControlServer> {
+    Err(anyhow!(
+        "Running as a persistent remote host needs a Unix domain socket for its control \
+         channel, which Windows does not provide."
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) async fn start_control_server(
     descriptor: HostDescriptor,
     auth: RemoteAuth,
@@ -312,6 +337,7 @@ pub(crate) async fn start_control_server(
     })
 }
 
+#[cfg(unix)]
 async fn handle_control(
     stream: UnixStream,
     descriptor: HostDescriptor,
@@ -441,6 +467,7 @@ async fn handle_control(
     Ok(())
 }
 
+#[cfg(unix)]
 async fn stop_preview(chat: &ChatHost, auth: &RemoteAuth) -> StopPreview {
     StopPreview {
         active_turn_count: chat.busy_sessions().await.len(),
@@ -453,6 +480,16 @@ async fn stop_preview(chat: &ChatHost, auth: &RemoteAuth) -> StopPreview {
     }
 }
 
+/// The whole `orx remote-host` surface talks over the control socket.
+#[cfg(not(unix))]
+pub(crate) async fn run(_args: RemoteHostArgs) -> Result<()> {
+    Err(anyhow!(
+        "`orx remote-host` needs a Unix domain socket for its control channel, which Windows \
+         does not provide."
+    ))
+}
+
+#[cfg(unix)]
 pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
     match args.command {
         RemoteHostCommand::Ensure { expected_instance } => ensure(expected_instance).await,
@@ -462,6 +499,7 @@ pub(crate) async fn run(args: RemoteHostArgs) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 async fn ensure(expected_instance: Option<String>) -> Result<()> {
     let data_dir = canonical_data_dir()?;
     match live_descriptor(&data_dir).await {
@@ -516,6 +554,7 @@ async fn ensure(expected_instance: Option<String>) -> Result<()> {
     print_descriptor(&started)
 }
 
+#[cfg(unix)]
 async fn print_status() -> Result<()> {
     let data_dir = canonical_data_dir()?;
     let response = control_exchange(&data_dir, &ControlRequest::Status).await?;
@@ -526,6 +565,7 @@ async fn print_status() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn attach(expected_instance: &str) -> Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     let token = tokio::time::timeout(Duration::from_secs(10), read_bounded_line(&mut input))
@@ -568,6 +608,7 @@ async fn attach(expected_instance: &str) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 async fn stop() -> Result<()> {
     let mut input = BufReader::new(tokio::io::stdin());
     let request: StopRequest = serde_json::from_str(&read_bounded_line(&mut input).await?)?;
@@ -584,12 +625,14 @@ async fn stop() -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 enum LiveHost {
     Running(HostDescriptor),
     Stopping(HostDescriptor),
     Missing,
 }
 
+#[cfg(unix)]
 async fn live_descriptor(data_dir: &Path) -> LiveHost {
     let Ok(response) = control_exchange(data_dir, &ControlRequest::Status).await else {
         return LiveHost::Missing;
@@ -604,6 +647,7 @@ async fn live_descriptor(data_dir: &Path) -> LiveHost {
     }
 }
 
+#[cfg(unix)]
 fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
     let path = shared_path(data_dir, "lock")?;
     let lock = open_lock(&path)?;
@@ -615,6 +659,7 @@ fn server_lock_is_held(data_dir: &Path) -> Result<bool> {
     result
 }
 
+#[cfg(unix)]
 async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
     tokio::time::timeout(START_TIMEOUT, async {
         loop {
@@ -628,6 +673,7 @@ async fn wait_for_server_lock_free(data_dir: &Path) -> Result<()> {
     .map_err(|_| anyhow!("Timed out waiting for the previous OpenResearch host to stop."))?
 }
 
+#[cfg(unix)]
 async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<ControlResponse> {
     tokio::time::timeout(CONTROL_TIMEOUT, async {
         let mut stream = UnixStream::connect(control_socket_path(data_dir)?).await?;
@@ -640,6 +686,7 @@ async fn control_exchange(data_dir: &Path, request: &ControlRequest) -> Result<C
     .map_err(|_| anyhow!("Timed out contacting the persistent OpenResearch host."))?
 }
 
+#[cfg(unix)]
 async fn write_request(stream: &mut UnixStream, request: &ControlRequest) -> Result<()> {
     stream
         .write_all(serde_json::to_string(request)?.as_bytes())
@@ -649,6 +696,7 @@ async fn write_request(stream: &mut UnixStream, request: &ControlRequest) -> Res
     Ok(())
 }
 
+#[cfg(unix)]
 async fn write_response(stream: &mut UnixStream, response: &ControlResponse) -> Result<()> {
     stream
         .write_all(serde_json::to_string(response)?.as_bytes())
@@ -695,6 +743,7 @@ fn print_descriptor(descriptor: &HostDescriptor) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)> {
     let executable = std::env::current_exe()?;
     let args = ["up", "--no-browser", "--remote-host", "--port", "0"];
@@ -732,6 +781,7 @@ fn spawn_detached_host(data_dir: &Path) -> Result<(std::process::Child, PathBuf)
     Ok((child, log_path))
 }
 
+#[cfg(unix)]
 fn open_runtime_log(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create(true).append(true);
@@ -745,6 +795,7 @@ fn open_runtime_log(path: &Path) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(unix)]
 fn ensure_server_lock_free(data_dir: &Path) -> Result<()> {
     let path = shared_path(data_dir, "lock")?;
     let mut lock = open_lock(&path)?;
@@ -784,18 +835,25 @@ fn open_lock(path: &Path) -> Result<fd_lock::RwLock<File>> {
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata_uid(&metadata) != effective_uid() {
+    if !metadata.is_file() {
         return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
     }
-    set_mode(path, 0o600)?;
+    // Windows has no uid or mode to check, so a lock under an ORX_DATA_DIR the
+    // user shares with someone else is guarded by its ACL alone.
+    #[cfg(unix)]
+    {
+        if metadata_uid(&metadata) != effective_uid() {
+            return Err(anyhow!("Unsafe OpenResearch dashboard lock."));
+        }
+        set_mode(path, 0o600)?;
+    }
     Ok(fd_lock::RwLock::new(file))
 }
 
 pub(crate) fn canonical_data_dir() -> Result<PathBuf> {
     let data_dir = crate::store::data_dir();
     std::fs::create_dir_all(&data_dir)?;
-    data_dir
-        .canonicalize()
+    crate::paths::canonicalize(&data_dir)
         .map_err(|error| anyhow!("Could not resolve {}: {error}", data_dir.display()))
 }
 
@@ -811,14 +869,17 @@ pub(crate) fn hostname() -> String {
         .unwrap_or_else(|| "remote host".into())
 }
 
+#[cfg(unix)]
 fn descriptor_path(data_dir: &Path) -> Result<PathBuf> {
     shared_path(data_dir, "json")
 }
 
+#[cfg(unix)]
 fn control_socket_path(data_dir: &Path) -> Result<PathBuf> {
     runtime_path(data_dir, "sock")
 }
 
+#[cfg(unix)]
 fn runtime_path(data_dir: &Path, extension: &str) -> Result<PathBuf> {
     let root = PathBuf::from(format!("/tmp/orx-{}", effective_uid()));
     ensure_private_dir(&root)?;
@@ -871,7 +932,7 @@ fn directory_writable(_path: &Path) -> bool {
 }
 
 fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
-    if let Ok(path) = path.canonicalize() {
+    if let Ok(path) = crate::paths::canonicalize(path) {
         return Ok(path);
     }
     let mut current = path;
@@ -886,13 +947,14 @@ fn normalize_lock_key(path: &Path) -> Result<PathBuf> {
             .parent()
             .ok_or_else(|| anyhow!("OpenResearch data directory must have a parent."))?;
     }
-    let mut normalized = current.canonicalize()?;
+    let mut normalized = crate::paths::canonicalize(current)?;
     for component in missing.into_iter().rev() {
         normalized.push(component);
     }
     Ok(normalized)
 }
 
+#[cfg(unix)]
 fn ensure_private_dir(path: &Path) -> Result<()> {
     if path.exists() {
         let metadata = std::fs::symlink_metadata(path)?;
@@ -912,6 +974,7 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     set_mode(path, 0o700)
 }
 
+#[cfg(unix)]
 fn write_descriptor(path: &Path, descriptor: &HostDescriptor) -> Result<()> {
     crate::local::git::atomic_write_with_mode(
         path,
@@ -964,10 +1027,12 @@ mod tests {
         assert!(auth.matches_callback(&digest("callback")));
     }
 
+    // Asserts the /tmp/orx-<uid> runtime layout, which is unix's alone.
+    #[cfg(unix)]
     #[test]
     fn server_lock_is_shared_but_control_socket_is_node_local() {
         let data_dir = std::env::temp_dir().join(format!("orx-lock-test-{}", uuid::Uuid::new_v4()));
-        let parent = data_dir.parent().unwrap().canonicalize().unwrap();
+        let parent = crate::paths::canonicalize(data_dir.parent().unwrap()).unwrap();
         assert_eq!(
             shared_path(&data_dir, "lock").unwrap().parent(),
             Some(parent.as_path())

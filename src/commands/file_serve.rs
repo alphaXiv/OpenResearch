@@ -333,7 +333,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("secret.env"), b"TOKEN=1").unwrap();
         std::os::unix::fs::symlink("secret.env", dir.join("logo.png")).unwrap();
-        let resolved = std::fs::canonicalize(dir.join("logo.png")).unwrap();
+        let resolved = crate::paths::canonicalize(dir.join("logo.png")).unwrap();
 
         let response = disk_response(
             &resolved.to_string_lossy(),
@@ -352,7 +352,7 @@ mod tests {
         assert_eq!(response.headers()["x-openresearch-presentation"], "text");
         // The name asked for is what it would have been typed as.
         assert_eq!(files::content_type_for_path("logo.png"), "image/png");
-        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -469,7 +469,7 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("sandbox;"));
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -514,6 +514,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes 7-9/10");
         assert_eq!(body(response).await, b"hij");
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

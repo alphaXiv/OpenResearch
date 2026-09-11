@@ -8,6 +8,7 @@
 //! project registered in the local store.
 
 pub mod agent_skills;
+pub mod bash;
 pub mod browser_cookies;
 pub mod chat;
 pub mod claude;

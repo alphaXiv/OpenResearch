@@ -80,7 +80,7 @@ pub fn is_safe_rel_path(p: &str) -> bool {
 /// True when `path` resolves (following symlinks) to a location inside
 /// `canonical_base`. Anything that fails to resolve is treated as outside.
 fn resolves_inside(canonical_base: &Path, path: &Path) -> bool {
-    path.canonicalize()
+    crate::paths::canonicalize(path)
         .map(|c| c.starts_with(canonical_base))
         .unwrap_or(false)
 }
@@ -116,12 +116,10 @@ fn resolve_contained(base: &Path, rel_path: &str) -> Result<PathBuf> {
     if !is_safe_rel_path(rel_path) {
         return Err(anyhow!("invalid file path: {rel_path}"));
     }
-    let canonical_base = base
-        .canonicalize()
+    let canonical_base = crate::paths::canonicalize(base)
         .map_err(|e| anyhow!("Could not resolve {}: {}", base.display(), e))?;
     let path = canonical_base.join(rel_path);
-    let canonical = path
-        .canonicalize()
+    let canonical = crate::paths::canonicalize(&path)
         .map_err(|e| anyhow!("Could not read {}: {}", path.display(), e))?;
     if !canonical.starts_with(&canonical_base) {
         return Err(anyhow!("path escapes the artifacts directory: {rel_path}"));
@@ -392,8 +390,7 @@ fn collect_tree(
 /// Scan the artifacts dir (creating it if missing) into a plain file tree.
 pub fn list(project: &LocalProject) -> Result<ArtifactsListing> {
     let dir = ensure_dir(project)?;
-    let canonical = dir
-        .canonicalize()
+    let canonical = crate::paths::canonicalize(&dir)
         .map_err(|e| anyhow!("Could not resolve {}: {}", dir.display(), e))?;
     let mut seen = 0;
     let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut seen);
@@ -421,8 +418,7 @@ pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
     let base = files_dir(project);
     let parent = match rel_path.rsplit_once('/') {
         Some((parent_rel, _)) => resolve_contained(&base, parent_rel)?,
-        None => base
-            .canonicalize()
+        None => crate::paths::canonicalize(&base)
             .map_err(|e| anyhow!("Could not resolve {}: {}", base.display(), e))?,
     };
     let name = rel_path.rsplit('/').next().unwrap_or(rel_path);
@@ -441,7 +437,7 @@ pub fn delete_entry(project: &LocalProject, rel_path: &str) -> Result<()> {
 /// A missing dir hashes to a stable value, so first creation is a change.
 pub fn fingerprint(project: &LocalProject) -> u64 {
     let mut hasher = DefaultHasher::new();
-    if let Ok(canonical) = files_dir(project).canonicalize() {
+    if let Ok(canonical) = crate::paths::canonicalize(files_dir(project)) {
         hash_dir(&canonical, &canonical, &mut hasher, &mut 0);
     }
     hasher.finish()
@@ -500,7 +496,7 @@ mod tests {
         for bad in ["../x", "/etc/passwd", "a/../b", "a/./b", "", "a\\b"] {
             assert!(resolve_contained(&base, bad).is_err(), "accepted {bad:?}");
         }
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -508,7 +504,7 @@ mod tests {
         let (root, base, outside) = scratch();
         symlink(outside.join("secret.txt"), base.join("link.txt")).unwrap();
         assert!(resolve_contained(&base, "link.txt").is_err());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -516,7 +512,7 @@ mod tests {
         let (root, base, outside) = scratch();
         symlink(&outside, base.join("sub")).unwrap();
         assert!(resolve_contained(&base, "sub/secret.txt").is_err());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -526,7 +522,7 @@ mod tests {
         symlink("real.txt", base.join("alias.txt")).unwrap();
         let resolved = resolve_contained(&base, "alias.txt").unwrap();
         assert_eq!(std::fs::read_to_string(resolved).unwrap(), "data");
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -535,7 +531,7 @@ mod tests {
         std::fs::create_dir(base.join("exp")).unwrap();
         std::fs::write(base.join("exp/report.md"), "# T").unwrap();
         assert!(resolve_contained(&base, "exp/report.md").is_ok());
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -545,12 +541,12 @@ mod tests {
         symlink("real.txt", base.join("alias.txt")).unwrap();
         symlink(outside.join("secret.txt"), base.join("leak.txt")).unwrap();
         symlink(&outside, base.join("leakdir")).unwrap();
-        let canonical = base.canonicalize().unwrap();
+        let canonical = crate::paths::canonicalize(&base).unwrap();
         let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
         let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["alias.txt", "real.txt"]);
         assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -560,12 +556,12 @@ mod tests {
             std::fs::create_dir(base.join(name)).unwrap();
         }
         std::fs::write(base.join("summary.md"), "# Summary").unwrap();
-        let canonical = base.canonicalize().unwrap();
+        let canonical = crate::paths::canonicalize(&base).unwrap();
         let (entries, truncated) = collect_tree(&canonical, &canonical, "", &mut 0);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         assert_eq!(names, ["baseline", "notes", "project", "summary.md"]);
         assert!(!truncated);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -574,7 +570,7 @@ mod tests {
         std::fs::create_dir(base.join("exp")).unwrap();
         std::fs::write(base.join("exp/analysis.md"), "# Analysis").unwrap();
         std::fs::write(base.join("exp/report.md"), "# Report").unwrap();
-        let canonical = base.canonicalize().unwrap();
+        let canonical = crate::paths::canonicalize(&base).unwrap();
         let (entries, _) = collect_tree(&canonical, &canonical, "", &mut 0);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "exp");
@@ -584,7 +580,7 @@ mod tests {
             .map(|entry| entry.name.as_str())
             .collect();
         assert_eq!(names, ["analysis.md", "report.md"]);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -282,7 +282,7 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     }
     if let Some(receipt) = load_receipt()? {
         let prefix = PathBuf::from(&receipt.install_prefix);
-        let prefix = prefix.canonicalize().unwrap_or(prefix);
+        let prefix = crate::paths::canonicalize(&prefix).unwrap_or(prefix);
         return Ok(InstallChannel::Installer { receipt, prefix });
     }
     if exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin")) {
@@ -296,8 +296,7 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
 /// because the bundle's `orx` symlink must resolve to the real executable
 /// before its `Contents/MacOS` parent can be recognized.
 fn current_exe() -> Result<PathBuf> {
-    std::env::current_exe()?
-        .canonicalize()
+    crate::paths::canonicalize(std::env::current_exe()?)
         .map_err(|e| anyhow!("Could not resolve the running executable: {}", e))
 }
 
@@ -751,6 +750,7 @@ pub fn relaunch(_port: u16) -> std::io::Error {
 
 /// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
 /// new file at `<path>`, which is what to exec.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn relaunch_target(exe: PathBuf) -> PathBuf {
     exe.to_str()
         .and_then(|exe| exe.strip_suffix(" (deleted)"))
@@ -760,6 +760,7 @@ fn relaunch_target(exe: PathBuf) -> PathBuf {
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
 /// restart reloads itself, so a second tab would only be clutter.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = args.collect();
     if !args.iter().any(|arg| arg == "--no-browser") {

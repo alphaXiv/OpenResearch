@@ -4,8 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Run the suite against a branch before it has a PR — the Windows job below
+  # is the only Windows machine most changes will meet.
+  workflow_dispatch:
   workflow_call:
     inputs:
+      # Unused, but part of cargo-dist's calling convention: release.yml's
+      # generated `custom-ci` job always passes it.
       plan:
         required: true
         type: string
@@ -86,6 +91,44 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+  # Only what differs by platform: the checks above are platform-independent,
+  # and ui/dist is committed, so no Node here.
+  windows:
+    name: windows build, test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked
+
+      # A debug orx.exe is slow enough to colour a tester's impression of the
+      # dashboard, so the artifact is the build they would actually be given.
+      - name: Build release
+        if: ${{ !inputs.plan }}
+        run: cargo build --release --locked
+
+      - name: Upload orx.exe
+        if: ${{ !inputs.plan }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: orx-windows-x86_64
+          path: target/release/orx.exe
+          if-no-files-found: error
 
   # Guards the version-bump release flow (release-on-bump.yml): the version in
   # Cargo.toml may only move forward, may not reuse an already-released tag,

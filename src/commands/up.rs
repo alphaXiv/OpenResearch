@@ -62,9 +62,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
             DashboardLockMode::Shared
         },
     )?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        // A second double-click should reach the running dashboard, not fail on its port.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::AddrInUse
+                && crate::owns_its_console()
+                && dashboard_is_serving(port).await =>
+        {
+            let url = format!("http://127.0.0.1:{port}");
+            eprintln!("orx up: already running — opening {url}");
+            if !args.no_browser {
+                browser::open_browser(&url);
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
+    };
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
     {
@@ -174,6 +188,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
         eprint!("{}", session.instructions(actual_port));
     } else {
         eprintln!("orx up: dashboard on {url}");
+        if let Some(warning) = crate::local::bash::missing_toolchain() {
+            eprintln!("orx up: warning: {warning}");
+        }
         if !args.no_browser {
             browser::open_browser(&url);
         }
@@ -827,6 +844,22 @@ impl From<&StoredRun> for ApiRun {
 }
 
 // --- basic routes ---------------------------------------------------------
+
+/// Whether a dashboard this build can talk to, not some other server, holds `port`.
+async fn dashboard_is_serving(port: u16) -> bool {
+    let Ok(response) = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{port}/api/health"))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response.json::<Value>().await.is_ok_and(|body| {
+        body.get("dashboardProtocol").and_then(Value::as_u64)
+            == Some(u64::from(crate::commands::up_remote::DASHBOARD_PROTOCOL))
+    })
+}
 
 async fn health(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
@@ -2449,7 +2482,7 @@ fn resolve_checkout_root(
                 .filter(|sess| sess.project_id == project.id)
                 .ok_or_else(|| not_found("chat session"))?;
             let dir = local::git::existing_session_worktree_path(project, &session.id);
-            match std::fs::canonicalize(&dir) {
+            match crate::paths::canonicalize(&dir) {
                 Ok(p) => Some(p),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                 Err(e) => return Err(ApiError::from(anyhow!("session worktree unavailable: {e}"))),
@@ -2460,7 +2493,7 @@ fn resolve_checkout_root(
     match worktree {
         Some(r) => Ok((r, "worktree")),
         None => Ok((
-            std::fs::canonicalize(&project.repo_path)
+            crate::paths::canonicalize(&project.repo_path)
                 .map_err(|e| ApiError::from(anyhow!("repo clone unavailable: {e}")))?,
             "clone",
         )),
@@ -2738,7 +2771,7 @@ async fn project_file(
         }
         let (root, root_kind) = resolve_checkout_root(&store, &project, q.session_id.as_deref())?;
         // Canonicalize so symlinks can't escape the checkout.
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Json(ProjectFileResponse::missing(
@@ -2876,6 +2909,17 @@ fn duplicate_file_name(name: &str, number: usize) -> String {
     }
 }
 
+/// API paths are `/`-separated; a Windows `PathBuf` would send backslashes back.
+#[cfg(windows)]
+fn api_rel_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+#[cfg(not(windows))]
+fn api_rel_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 fn manage_local_file(
     root: &std::path::Path,
     rel: &str,
@@ -2887,10 +2931,10 @@ fn manage_local_file(
     if protect_git_dir && touches_git_dir(&rel_path) {
         return Err(bad_request("cannot manage files under .git"));
     }
-    let root = std::fs::canonicalize(root)
+    let root = crate::paths::canonicalize(root)
         .map_err(|e| ApiError::from(anyhow!("file root unavailable: {e}")))?;
     let source = root.join(&rel_path);
-    let resolved = std::fs::canonicalize(&source).map_err(|e| match e.kind() {
+    let resolved = crate::paths::canonicalize(&source).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => not_found("file"),
         _ => ApiError::from(anyhow!("file unavailable: {e}")),
     })?;
@@ -2905,7 +2949,7 @@ fn manage_local_file(
     }
 
     let parent = source.parent().ok_or_else(|| bad_request("invalid path"))?;
-    let parent = std::fs::canonicalize(parent)
+    let parent = crate::paths::canonicalize(parent)
         .map_err(|e| ApiError::from(anyhow!("parent directory unavailable: {e}")))?;
     if !parent.starts_with(&root) {
         return Err(bad_request("path escapes file root"));
@@ -2958,7 +3002,7 @@ fn manage_local_file(
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(bad_request("a file with that name already exists"));
         }
-        Ok(_) => match std::fs::canonicalize(&destination) {
+        Ok(_) => match crate::paths::canonicalize(&destination) {
             Ok(path) if path == resolved => {}
             Ok(_) | Err(_) => return Err(bad_request("a file with that name already exists")),
         },
@@ -2974,7 +3018,7 @@ fn manage_local_file(
         }
         FileAction::Delete => unreachable!(),
     }
-    Ok(destination_rel.to_string_lossy().into_owned())
+    Ok(api_rel_path(&destination_rel))
 }
 
 async fn manage_project_file(
@@ -3038,7 +3082,7 @@ async fn write_project_file(
         }
         // Canonicalize the existing target so a symlinked path can't escape the
         // checkout; a missing file means the editor's copy is stale.
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if req.expected_version.is_some() {
@@ -3124,7 +3168,7 @@ async fn open_project_file(
             .get_local_project(&id)?
             .ok_or_else(|| not_found("project"))?;
         let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        let full = match std::fs::canonicalize(root.join(&rel_path)) {
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
             Err(e) => return Err(ApiError::from(anyhow!("open failed: {e}"))),
@@ -3607,7 +3651,7 @@ fn resolve_project_tex(
             "this session's worktree is no longer available — reload the file",
         ));
     }
-    let full = match std::fs::canonicalize(root.join(&rel_path)) {
+    let full = match crate::paths::canonicalize(root.join(&rel_path)) {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
         Err(e) => return Err(ApiError::from(anyhow!("could not read the file: {e}"))),
@@ -3646,12 +3690,11 @@ async fn compile_project_latex(
         }
         let result = local::latex::compile(&full)?;
         let pdf_path = match result.pdf.as_deref() {
-            Some(pdf) => Some(
-                pdf.strip_prefix(&root)
-                    .map_err(|_| anyhow!("compiled PDF landed outside the checkout"))?
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            ),
+            Some(pdf) => {
+                Some(api_rel_path(pdf.strip_prefix(&root).map_err(|_| {
+                    anyhow!("compiled PDF landed outside the checkout")
+                })?))
+            }
             None => None,
         };
         Ok(Json(json!({
@@ -3710,7 +3753,7 @@ async fn project_raw_file(
         }
 
         let (root, _) = resolve_checkout_root(&store, &project, q.session_id.as_deref())?;
-        let full = std::fs::canonicalize(root.join(rel_path)).map_err(|e| {
+        let full = crate::paths::canonicalize(root.join(rel_path)).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 not_found("file")
             } else {
@@ -3808,7 +3851,7 @@ async fn absolute_file(
         use std::io::Read as _;
         let (display, abs) = validated_absolute_file_path(&q.path)?;
         let presentation = local::files::presentation_for_path(&display);
-        let full = match std::fs::canonicalize(&abs) {
+        let full = match crate::paths::canonicalize(&abs) {
             Ok(p) => p,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Json(ProjectFileResponse::missing(
@@ -3880,7 +3923,7 @@ async fn absolute_raw_file(
     let (type_path, file) = tokio::task::spawn_blocking(
         move || -> std::result::Result<(String, std::fs::File), ApiError> {
             let (_, abs) = validated_absolute_file_path(&q.path)?;
-            let full = std::fs::canonicalize(&abs).map_err(|e| {
+            let full = crate::paths::canonicalize(&abs).map_err(|e| {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     not_found("file")
                 } else {
@@ -6938,7 +6981,7 @@ async fn run_shell_command(
         // The worktree the harness will create on its first turn, so a command
         // run before any message acts on the same checkout the agent sees.
         match local::git::ensure_session_worktree(&project, &session.id) {
-            Ok(dir) => Ok(std::fs::canonicalize(&dir).unwrap_or(dir)),
+            Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
             Err(error) => {
                 eprintln!("orx up: session worktree unavailable, using the clone: {error}");
                 resolve_checkout_root(&store, &project, Some(&session_id)).map(|(root, _)| root)
@@ -7195,7 +7238,7 @@ async fn chat_attachment(
         if !metadata.is_file() {
             return Err(not_found("attachment"));
         }
-        let resolved = std::fs::canonicalize(&path).map_err(|_| not_found("attachment"))?;
+        let resolved = crate::paths::canonicalize(&path).map_err(|_| not_found("attachment"))?;
         Ok((resolved.to_string_lossy().into_owned(), file))
     })
     .await
@@ -7898,7 +7941,7 @@ mod tests {
 
         assert_eq!(body["gitState"], "unborn");
         assert_eq!(body["initialized"], true);
-        std::fs::remove_dir_all(path).unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]
@@ -8219,7 +8262,7 @@ mod tests {
                 manage_local_file(&root, "git-link/config", FileAction::Delete, None, true,)
                     .is_err()
             );
-            std::fs::remove_dir_all(outside).unwrap();
+            let _ = std::fs::remove_dir_all(outside);
         }
         let case_renamed = manage_local_file(
             &root,
@@ -8235,7 +8278,7 @@ mod tests {
         assert!(std::fs::read_dir(root.join("reports"))
             .unwrap()
             .any(|entry| entry.unwrap().file_name() == "SUMMARY.md"));
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     // ApiError has no Debug, so `.unwrap()` on the Err path won't compile; drop
@@ -8246,12 +8289,14 @@ mod tests {
 
     #[test]
     fn absolute_file_paths_require_an_absolute_path() {
+        #[cfg(windows)]
+        let absolute = r"C:\Windows\System32\drivers\etc\hosts";
+        #[cfg(not(windows))]
+        let absolute = "/etc/hosts";
+
         assert_eq!(
-            abs_path("  /etc/hosts  "),
-            Ok((
-                "/etc/hosts".to_string(),
-                std::path::PathBuf::from("/etc/hosts")
-            )),
+            abs_path(&format!("  {absolute}  ")),
+            Ok((absolute.to_string(), std::path::PathBuf::from(absolute))),
         );
         for path in ["", "   ", "relative/path", "../secret", &"/x".repeat(3000)] {
             assert!(abs_path(path).is_err(), "accepted {path:?}");

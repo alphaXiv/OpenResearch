@@ -1262,7 +1262,7 @@ mod tests {
 
         // Once the collision is resolved the retired tree goes entirely, junk at
         // either level included — otherwise this walk runs on every call forever.
-        fs::remove_dir_all(root.join("projects/p1/dup")).unwrap();
+        fs::remove_dir_all(root.join("projects/p1/dup")).expect("retire the duplicate");
         migrate_project_scoped(&root);
         assert!(!root.join("projects").exists());
         let _ = fs::remove_dir_all(&root);
@@ -1352,6 +1352,7 @@ mod tests {
         let _ = fs::remove_dir_all(&wt);
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unchanged_skill_is_not_recopied_into_the_session() {
         use std::os::unix::fs::MetadataExt;
@@ -1405,7 +1406,7 @@ mod tests {
 
         // So does an edit to SKILL.md of exactly the same length — the tally
         // can't see that one, so `dest` is rebuilt first to isolate it.
-        fs::remove_dir_all(&dest).unwrap();
+        fs::remove_dir_all(&dest).expect("rebuild dest to isolate the edit");
         copy_dir_all(&src, &dest).unwrap();
         assert!(dest_matches_source(&src, fingerprint(&src), &dest));
         fs::write(src.join("SKILL.md"), skill_md("samf")).unwrap();
