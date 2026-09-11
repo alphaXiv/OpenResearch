@@ -44,6 +44,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+  cursor: "Cursor",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.

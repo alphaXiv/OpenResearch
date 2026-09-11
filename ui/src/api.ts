@@ -1452,7 +1452,7 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-export type HarnessId = "claude-code" | "codex" | "opencode";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor";
 
 export interface HarnessModel {
   id: string;
@@ -1820,7 +1820,7 @@ export interface ChatSession {
   model: string | null;
   serviceTier: string | null;
   permissionMode: string | null;
-  /** Independent Plan axis for Codex/OpenCode. */
+  /** Independent Plan axis for Codex/OpenCode/Cursor. */
   planMode: boolean;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
@@ -1875,7 +1875,7 @@ export const renameChatSession = (sessionId: string, title: string) =>
     (r) => r.session,
   );
 
-/** Enter/leave the session-specific Plan axis used by Codex/OpenCode. */
+/** Enter/leave the session-specific Plan axis used by Codex/OpenCode/Cursor. */
 export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
     (r) => r.session,

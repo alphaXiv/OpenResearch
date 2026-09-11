@@ -5,8 +5,9 @@
 **The local-first workspace for research agents and autoresearch.**
 
 <p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="18" /> Claude Code,
-<img src=".github/readme-assets/codex.svg" alt="" width="18" /> Codex, or
-<img src=".github/readme-assets/opencode.svg" alt="" width="18" /> OpenCode into research agents that can review
+<img src=".github/readme-assets/codex.svg" alt="" width="18" /> Codex,
+<img src=".github/readme-assets/opencode.svg" alt="" width="18" /> OpenCode, or
+Cursor into research agents that can review
 literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 [Download the desktop app](https://openresearch.sh/download) ·
@@ -46,7 +47,7 @@ updates and use managed OpenResearch compute.
 | **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
 | **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
 | **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
-| **Your choice of agent** | Use Claude Code, Codex, or OpenCode, with the harness and model selected per session. |
+| **Your choice of agent** | Use Claude Code, Codex, OpenCode, or Cursor, with the harness and model selected per session. |
 | **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
 | **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
 

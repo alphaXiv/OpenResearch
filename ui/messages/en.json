@@ -230,7 +230,7 @@
   "onboarding_choose_one_or_more": "Choose one or more.",
   "onboarding_consolidate_your_research": "Consolidate your research",
   "onboarding_continue": "Continue",
-  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode…",
+  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods.",
   "onboarding_everything_stays_local": "Everything stays local",
   "onboarding_get_started": "Get started",

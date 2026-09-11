@@ -1,5 +1,5 @@
-//! Unified chat layer for `orx up` — one session/message model over three
-//! harness adapters (Claude Code, Codex, OpenCode), each a local child
+//! Unified chat layer for `orx up` — one session/message model over four
+//! harness adapters (Claude Code, Codex, OpenCode, Cursor), each a local child
 //! process using the user's own login. orx's SQLite is the system of record
 //! for transcripts; each harness keeps its native session for context/resume.
 //!
@@ -6313,7 +6313,7 @@ pub struct TurnCtx {
     /// Effective permission mode for this turn (session value; harness applies
     /// its own default when `None`).
     pub permission_mode: Option<crate::local::harness::PermissionMode>,
-    /// Independent Plan state for Codex/OpenCode.
+    /// Independent Plan state for Codex/OpenCode/Cursor.
     pub plan_mode: bool,
     /// Codex must attach one native `default` collaboration-mode mask after
     /// Plan is left, even if ORX restarted before the next turn.

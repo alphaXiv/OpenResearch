@@ -11,15 +11,15 @@
 //!   normalizing its native event stream into wire parts. Detection-only or
 //!   install-only harnesses leave this at its default (unsupported).
 //! * **skill install** (`skill_target` / `skill_shim`) — drop the `orx` skill
-//!   shim so the agent auto-discovers the CLI. Cursor offers only this.
+//!   shim so the agent auto-discovers the CLI.
 //!
-//! Adding a fourth harness is one new file with one `impl Harness` and one line
+//! Adding a harness is one new file with one `impl Harness` and one line
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
 pub(crate) mod claude;
 pub(crate) mod codex;
-mod cursor;
+pub(crate) mod cursor;
 mod detect;
 pub(crate) mod opencode;
 mod options;
@@ -295,7 +295,7 @@ pub trait Harness: Send + Sync {
     /// `None` = failed; the caller keeps the first-line placeholder.
     ///
     /// Default: the shared title one-shot, sanitized; a harness without
-    /// `one_shot` (Cursor) gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
+    /// `one_shot` gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.
@@ -401,10 +401,10 @@ pub trait Harness: Send + Sync {
 
     /// The worktree-relative dir this harness discovers native `SKILL.md` skill
     /// dirs under, for a **local `orx up` session** — `.claude/skills`,
-    /// `.opencode/skills`, `.agents/skills`. The modular `orx` skills are
+    /// `.opencode/skills`, `.agents/skills`, `.cursor/skills`. The modular `orx` skills are
     /// written there (fresh every turn, beside the playbook) so the session's
     /// own agent auto-loads them. `None` for a harness with no local chat
-    /// session that can host per-session skills (Cursor).
+    /// session that can host per-session skills.
     fn session_skills_dir(&self) -> Option<&'static str> {
         None
     }
@@ -786,6 +786,23 @@ mod tests {
         assert_eq!(opencode.default_permission_mode, Some("default"));
         assert_eq!(opencode.plan_activation, Some(PlanActivation::Command));
         assert!(opencode.reasoning_levels.is_empty());
+
+        let cursor = options_for("cursor");
+        assert_eq!(
+            permission_contract(&cursor),
+            [
+                ("ask", "Ask", "Propose changes without applying them"),
+                ("auto", "Auto", "Allow commands unless explicitly denied"),
+                (
+                    "full-access",
+                    "Full access",
+                    "Allow commands and disable the sandbox"
+                ),
+            ]
+        );
+        assert_eq!(cursor.default_permission_mode, Some("auto"));
+        assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
+        assert_eq!(reasoning_ids(&cursor), ["default", "low", "medium", "high"]);
     }
 
     /// Every advertised permission-mode id must round-trip through

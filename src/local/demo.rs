@@ -1525,6 +1525,7 @@ mod tests {
             ("claude-code", ["Read", "Edit", "Bash"]),
             ("codex", ["bash", "edit", "bash"]),
             ("opencode", ["read", "bash", "todowrite"]),
+            ("cursor", ["bash", "edit", "bash"]),
         ] {
             let parts = assistant_parts(harness);
             let encoded = serde_json::to_string(&parts).unwrap();
@@ -1592,7 +1593,7 @@ mod tests {
 
     #[test]
     fn supplementary_transcripts_use_portable_native_parts() {
-        for harness in ["claude-code", "codex", "opencode"] {
+        for harness in ["claude-code", "codex", "opencode", "cursor"] {
             for parts in [
                 figure_assistant_parts(harness),
                 literature_assistant_parts(harness),

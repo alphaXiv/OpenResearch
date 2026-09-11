@@ -230,7 +230,7 @@
   "onboarding_choose_one_or_more": "请选择一项或多项。",
   "onboarding_consolidate_your_research": "集中管理研究",
   "onboarding_continue": "继续",
-  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode…",
+  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode、Cursor…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "例如：我研究用于 LLM 后训练的样本高效强化学习，重点关注无需奖励模型的方法。",
   "onboarding_everything_stays_local": "一切都保留在本地",
   "onboarding_get_started": "开始使用",
