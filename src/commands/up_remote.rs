@@ -2611,6 +2611,7 @@ mod tests {
         let target = SshTarget {
             dest: "mybox".into(),
             extra_opts: vec!["-p".into(), "2222".into()],
+            ..SshTarget::alias("mybox")
         };
         let args =
             crate::jobs::ssh::forward_args(&target, "127.0.0.1:7:localhost:7", "orx up").unwrap();

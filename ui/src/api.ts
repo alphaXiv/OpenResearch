@@ -1089,6 +1089,53 @@ export interface SlurmPreflight {
   error: string | null;
 }
 
+// --- settings: sge (Sun Grid Engine) -----------------------------------------
+
+export interface SgeSettings {
+  /** Default login node (an ~/.ssh/config alias); null = must pass --host. */
+  host: string | null;
+  /** Absolute shared scratch/work directory outside $HOME; null = the default. */
+  workDir: string | null;
+  /** Grid Engine project (`qsub -P`); null = the cluster decides. */
+  sccProject: string | null;
+  /** Parallel environment (`qsub -pe <pe> <slots>`); null = the default. */
+  pe: string | null;
+  /** Slots (cores) requested for the parallel environment; null = the default. */
+  slots: number | null;
+  timeLimit: string | null;
+  /** GPUs requested (`-l gpus=`); null = the default. */
+  gpus: number | null;
+  /** GPU model filter (`-l gpu_type=`), e.g. L40S; null = any. */
+  gpuType: string | null;
+  /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
+  hosts: SshHost[];
+}
+
+export const getSgeSettings = (signal?: AbortSignal) => get<SgeSettings>("/api/settings/sge", signal);
+
+/** Empty string clears a field back to the cluster default. */
+export const saveSgeSettings = (body: {
+  host?: string;
+  workDir?: string;
+  sccProject?: string;
+  pe?: string;
+  slots?: string;
+  timeLimit?: string;
+  gpus?: string;
+  gpuType?: string;
+}) => post<SgeSettings>("/api/settings/sge", body);
+
+export interface SgePreflight {
+  reachable: boolean;
+  sgeFound: boolean;
+  toolsFound: boolean;
+  /** The login node answered, but the session needs a Duo/2FA approval first. */
+  authBlocked: boolean;
+  masterRunning: boolean;
+  projects: string[];
+  error: string | null;
+}
+
 // --- settings: ray ------------------------------------------------------------
 
 export interface RaySettings {
@@ -1127,6 +1174,7 @@ export type ComputeTargetId =
   | "k8s"
   | "ssh"
   | "slurm"
+  | "sge"
   | "ray"
   | "openresearch";
 

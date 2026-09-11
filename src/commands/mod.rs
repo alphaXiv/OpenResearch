@@ -40,6 +40,7 @@ pub mod remote_host;
 pub mod runs;
 pub mod serve;
 pub mod skill;
+pub mod ssh;
 pub mod ssh_key;
 pub mod supervise;
 pub mod telemetry;

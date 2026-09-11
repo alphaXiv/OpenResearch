@@ -279,6 +279,7 @@ impl LocalPlane {
                 Some("k8s") => crate::local::k8s::launch_local_k8s(&args).await,
                 Some("ssh") => crate::local::ssh::launch_local_ssh(&args).await,
                 Some("slurm") => crate::local::slurm::launch_local_slurm(&args).await,
+                Some("sge") => crate::local::sge::launch_local_sge(&args).await,
                 Some("ray") => crate::local::ray::launch_local_ray(&args).await,
                 Some("openresearch") => {
                     crate::local::openresearch::launch_local_openresearch(&args).await
@@ -287,7 +288,8 @@ impl LocalPlane {
                 Some(other) => Err(anyhow!(
                     "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                      modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
-                     slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                     slurm (your Slurm cluster), sge (your Sun Grid Engine cluster), \
+                     ray (a Ray Jobs cluster), \
                      openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                      local (this machine).",
                     other
@@ -302,6 +304,7 @@ impl LocalPlane {
                      default .orx/k8s.yaml, or --manifest <path>), \
                      `--backend ssh --host <alias>` (an ~/.ssh/config alias), \
                      `--backend slurm [--host <alias>] [--flavor h100:2]` (your Slurm cluster), \
+                     `--backend sge [--host <alias>] [--flavor A100:2]` (your Grid Engine cluster), \
                      `--backend ray [--flavor gpu:1]` (a Ray Jobs cluster), \
                      `--backend openresearch --flavor <shape>` (an ephemeral OpenResearch box, \
                      e.g. --flavor h100_sxm or cpu5c; needs `orx login`), \

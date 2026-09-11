@@ -16,6 +16,7 @@ use crate::jobs::localbox;
 use crate::jobs::modal;
 use crate::jobs::openresearch;
 use crate::jobs::ray;
+use crate::jobs::sge;
 use crate::jobs::slurm;
 use crate::jobs::ssh;
 use crate::jobs::{is_terminal_stage, stage_to_run_status, BackendDescriptor};
@@ -86,6 +87,9 @@ pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     }
     if descriptor.kind == "slurm_job" {
         return run_slurm(store, stored, descriptor, run_id).await;
+    }
+    if descriptor.kind == "sge_job" {
+        return run_sge(store, stored, descriptor, run_id).await;
     }
     if descriptor.kind == "ray_job" {
         return run_ray(store, stored, descriptor, run_id).await;
@@ -687,15 +691,23 @@ async fn tail_logs_ssh(
         let mut sink = |line: &str| {
             let _ = writeln!(log_file, "{line}");
         };
+        let mut backoff = Duration::from_secs(2);
         match ssh::stream_logs(&target, &dir, seen, LOG_IDLE, &mut sink).await {
             Ok(s) => seen = s,
+            // Transport is down (a second factor lapsed, or the master died).
+            // The main loop owns the user-facing notice; stay quiet, back off,
+            // and above all do NOT reset `seen` — the remote log is intact on
+            // the shared filesystem and replays from this cursor on recovery.
+            Err(err) if err.downcast_ref::<ssh::MasterRequired>().is_some() => {
+                backoff = Duration::from_secs(30);
+            }
             Err(err) => eprintln!("supervise {run_id}: log stream error (will retry): {err}"),
         }
         let _ = log_file.flush();
         if *done.borrow() {
             return;
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(backoff).await;
     }
 }
 
@@ -1132,6 +1144,291 @@ async fn cancel_slurm(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut 
     match slurm::cancel_job(host, job_id).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: scancel failed (will retry): {err}"),
+    }
+}
+
+// --- sge ----------------------------------------------------------------------
+//
+// The slurm loop with three differences that matter:
+//   * the run dir is an ABSOLUTE path on a project filesystem (SCC home dirs
+//     are quota'd), carried on the descriptor so a later workDir settings edit
+//     cannot strand this supervisor away from its log and exit_code;
+//   * `qacct` costs ~11s, so accounting is a detached escalation harvested a
+//     few polls later rather than an inline fallback — the loop never blocks;
+//   * transport health is tracked SEPARATELY from job state, because SCC's
+//     sshd needs a second factor that batch-mode ssh cannot answer. A lost
+//     session says nothing about the job, so it must never fail the run.
+
+/// Escalate to the 11-second `qacct` probe at these consecutive-GONE counts
+/// (~20s, ~60s, ~180s). The first rung is late enough to absorb an exit_code
+/// write still in flight over NFS, which is the common benign GONE.
+const ACCT_ESCALATION_POLLS: &[u32] = &[4, 12, 36];
+
+/// Transport health, tracked apart from the job's own state.
+enum Transport {
+    Up,
+    Stalled {
+        probes: u32,
+        grace_expired: bool,
+        announced: bool,
+    },
+}
+
+/// Back off while stalled so we neither spin nor hammer the cluster's PAM
+/// stack once we know the grace is genuinely gone.
+fn stall_backoff(probes: u32, grace_expired: bool) -> Duration {
+    match (probes, grace_expired) {
+        (0..=1, _) => Duration::from_secs(10),
+        (2, _) => Duration::from_secs(30),
+        (_, false) => Duration::from_secs(60),
+        (_, true) => Duration::from_secs(300),
+    }
+}
+
+fn stalled_markdown(host: &str, job_id: &str) -> String {
+    format!(
+        "**Paused — waiting to reconnect to `{host}`.**\n\n\
+         Your job is still running on the cluster. orx lost its authenticated SSH session \
+         (laptop sleep, VPN, or a network change), and it cannot approve a Duo prompt on its \
+         own.\n\nTo resume, run:\n\n    {orx} ssh connect {host}\n\n\
+         or open Settings → Compute → Sun Grid Engine and press **Connect** on `{host}`.\n\n\
+         Status and logs pick up automatically within a minute. Nothing is lost — job \
+         `{job_id}`'s output is buffered on the cluster and replayed when the session \
+         returns.",
+        orx = crate::invocation::orx()
+    )
+}
+
+async fn run_sge(
+    store: Store,
+    stored: crate::store::StoredRun,
+    descriptor: BackendDescriptor,
+    run_id: String,
+) -> Result<()> {
+    let (host, job_id) = descriptor.sge_ref()?;
+    let host = host.to_string();
+    let job_id = job_id.to_string();
+    // Pinned at submit; fall back to deriving it only for a descriptor written
+    // before that field existed.
+    let dir = match descriptor.run_dir.clone() {
+        Some(dir) => dir,
+        None => {
+            let settings = sge::load_settings()?.unwrap_or_default();
+            sge::run_dir(&settings.resolved_work_dir()?, &run_id)
+        }
+    };
+
+    eprintln!("supervise {run_id}: watching sge job {job_id} on {host}");
+
+    let path = log_path(&run_id);
+    let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+    let mut log_task = tokio::spawn(tail_logs_ssh(
+        sge::login(&host),
+        dir.clone(),
+        path.clone(),
+        run_id.clone(),
+        done_rx,
+    ));
+
+    let mut last_status = stored.status.clone();
+    let mut cancel_sent = false;
+    let mut cancel_forced = false;
+    let mut cancel_polls = 0u32;
+    let mut gone_polls = 0u32;
+    let mut blocked_polls = 0u32;
+    let mut transport = Transport::Up;
+    let mut acct: Option<tokio::task::JoinHandle<Result<Option<sge::AcctRecord>>>> = None;
+    // A supervisor restarted after a reboot has no master; try to get one back
+    // before the first poll so the common case never shows a banner at all.
+    let _ = ssh::ensure_master_headless(&sge::login(&host)).await;
+
+    let finish =
+        |log_task: &mut tokio::task::JoinHandle<()>,
+         acct: &mut Option<tokio::task::JoinHandle<Result<Option<sge::AcctRecord>>>>| {
+            if let Some(handle) = acct.take() {
+                handle.abort();
+            }
+            let _ = done_tx.send(true);
+            log_task.abort();
+        };
+
+    loop {
+        let probe = sge::inspect_job(&host, &dir, &job_id).await;
+
+        // --- transport fault: never a verdict about the job ---
+        let is_transport_fault = matches!(&probe, Err(e)
+            if e.downcast_ref::<ssh::MasterRequired>().is_some()
+                || ssh::is_second_factor_failure(&e.to_string()));
+        if is_transport_fault {
+            let (probes, grace_expired, announced) = match transport {
+                Transport::Up => (0, false, false),
+                Transport::Stalled {
+                    probes,
+                    grace_expired,
+                    announced,
+                } => (probes, grace_expired, announced),
+            };
+            // `gone_polls` is deliberately NOT touched: a transport outage is
+            // not evidence about the job, and resetting would forgive a real
+            // GONE we were already counting.
+            let recovered = ssh::ensure_master_headless(&sge::login(&host))
+                .await
+                .unwrap_or(false);
+            if recovered {
+                if announced {
+                    eprintln!("supervise {run_id}: reconnected to {host}");
+                    let _ = store.set_result_markdown(&run_id, "");
+                }
+                transport = Transport::Up;
+                // Poll again immediately — we may have missed a terminal state.
+                continue;
+            }
+            let probes = probes + 1;
+            // The probe reached keyboard-interactive and was refused, so the
+            // grace really is gone (as opposed to a flaky network).
+            let grace_expired = grace_expired || probes >= 2;
+            let mut announced = announced;
+            if !announced && (grace_expired || probes >= 6) {
+                if let Err(err) =
+                    store.set_result_markdown(&run_id, &stalled_markdown(&host, &job_id))
+                {
+                    eprintln!("supervise {run_id}: could not record the stall notice: {err}");
+                }
+                eprintln!("supervise {run_id}: transport stalled — needs `ssh connect {host}`");
+                announced = true;
+            }
+            transport = Transport::Stalled {
+                probes,
+                grace_expired,
+                announced,
+            };
+            tokio::time::sleep(stall_backoff(probes, grace_expired)).await;
+            continue;
+        }
+
+        let mut job = match probe {
+            Ok(j) => j,
+            Err(err) => {
+                eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+        };
+        if matches!(
+            transport,
+            Transport::Stalled {
+                announced: true,
+                ..
+            }
+        ) {
+            eprintln!("supervise {run_id}: reconnected to {host}");
+            let _ = store.set_result_markdown(&run_id, "");
+        }
+        transport = Transport::Up;
+
+        // --- Eqw: parked forever unless a human runs `qmod -cj` ---
+        if job.stage == "BLOCKED" {
+            blocked_polls += 1;
+            if blocked_polls < 2 {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                continue;
+            }
+            let reason = sge::blocked_reason(&host, &job_id)
+                .await
+                .unwrap_or_else(|| "no reason reported by qstat -j".to_string());
+            // Don't leave it cluttering the queue now that we've read the cause.
+            let _ = sge::cancel_job(&host, &job_id).await;
+            job = sge::JobState {
+                stage: "ERROR".to_string(),
+                message: Some(format!("Grid Engine rejected the job (Eqw): {reason}")),
+            };
+        } else {
+            blocked_polls = 0;
+        }
+
+        // --- GONE: left the queue with no exit code; escalate to accounting ---
+        if job.stage == "GONE" {
+            gone_polls += 1;
+            if acct.is_none() && ACCT_ESCALATION_POLLS.contains(&gone_polls) {
+                let (h, j) = (host.clone(), job_id.clone());
+                acct = Some(tokio::spawn(
+                    async move { sge::probe_accounting(&h, &j).await },
+                ));
+            }
+            // Harvest without ever awaiting it inside the loop's cadence.
+            if acct.as_ref().is_some_and(|h| h.is_finished()) {
+                if let Some(handle) = acct.take() {
+                    if let Ok(Ok(Some(rec))) = handle.await {
+                        job = sge::map_acct_record(&rec);
+                    }
+                }
+            }
+            if job.stage == "GONE" {
+                if gone_polls >= 60 {
+                    job = sge::JobState {
+                        stage: "ERROR".to_string(),
+                        message: Some(
+                            "job left the queue without an exit code (killed or node lost?)"
+                                .to_string(),
+                        ),
+                    };
+                } else {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+        } else {
+            gone_polls = 0;
+        }
+
+        let stage = job.stage.as_str();
+        let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
+
+        if is_terminal_stage(stage) {
+            store.update_status(&run_id, &status, Some(now_ms()), None)?;
+            if status == "failed" {
+                if let Some(msg) = &job.message {
+                    if let Err(err) =
+                        store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
+                    {
+                        eprintln!("supervise {run_id}: could not record failure reason: {err}");
+                    }
+                }
+            }
+            finish(&mut log_task, &mut acct);
+            eprintln!("supervise {run_id}: finished ({status})");
+            return Ok(());
+        }
+
+        if status != last_status {
+            store.update_status(&run_id, &status, None, None)?;
+            eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
+            last_status = status.clone();
+        }
+        if local_cancel_requested(&store, &run_id) {
+            if !cancel_sent {
+                cancel_sge(&host, &job_id, &run_id, &mut cancel_sent).await;
+            } else {
+                // SGE can strand a job in dr/dt when the exec node is
+                // unreachable — something scancel never needs.
+                cancel_polls += 1;
+                if cancel_polls >= 12 && !cancel_forced {
+                    eprintln!("supervise {run_id}: still queued after cancel — qdel -f {job_id}");
+                    let _ = sge::force_cancel_job(&host, &job_id).await;
+                    cancel_forced = true;
+                }
+            }
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+async fn cancel_sge(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut bool) {
+    eprintln!("supervise {run_id}: cancel requested — qdel {job_id}");
+    match sge::cancel_job(host, job_id).await {
+        Ok(()) => *cancel_sent = true,
+        Err(err) => eprintln!("supervise {run_id}: qdel failed (will retry): {err}"),
     }
 }
 

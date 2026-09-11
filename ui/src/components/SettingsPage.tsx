@@ -15,6 +15,7 @@ import {
   getSshMasterStatusQuery,
   getSshHostsQuery,
   getSlurmSettingsQuery,
+  getSgeSettingsQuery,
   getRaySettingsQuery,
   getOpenResearchSettingsQuery,
   getLocalMachineQuery,
@@ -69,6 +70,7 @@ import {
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
+  saveSgeSettings,
   setEnvVar,
   validateDataDir,
   moveDataDir,
@@ -96,6 +98,8 @@ import {
   type RayPreflight,
   type RaySettings,
   type Run,
+  type SgePreflight,
+  type SgeSettings,
   type SlurmPreflight,
   type SlurmSettings,
   type SshPreflight,
@@ -1086,6 +1090,332 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
   );
 }
 
+// --- compute (sge / Sun Grid Engine) -----------------------------------------
+
+/** GPU models the scheduler accepts for `-l gpu_type=`. */
+const SGE_GPU_TYPES = ["A100", "A40", "H200", "K40m", "L40S", "P100", "RTXP6000", "V100"];
+
+/** First failing check wins, like SlurmTestBadge. */
+function SgeTestBadge({ test, connecting, masterRunning }: { test: SgePreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
+  if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
+  if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
+  if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
+  if (test.authBlocked) return <Badge className="rounded-sm" variant="warning">{m.settings_page_needs_duo()}</Badge>;
+  if (!test.sgeFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_no_sge_cli()}</Badge>;
+  if (!test.toolsFound) return <Badge className="rounded-sm" variant="error">{m.settings_page_missing_bash_tar()}</Badge>;
+  if (!test.masterRunning || masterRunning === false) return <Badge className="rounded-sm" variant="warning">{m.settings_disconnected()}</Badge>;
+  return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
+}
+
+function SgeSection({ remote = false }: { remote?: boolean }) {
+  const saveSgeSettingsMutation = useMutation({ mutationFn: saveSgeSettings });
+
+  const settingsOptions = getSgeSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<SgeSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
+  const [host, setHost] = useState("");
+  const [workDir, setWorkDir] = useState("");
+  const [sccProject, setSccProject] = useState("");
+  const [pe, setPe] = useState("");
+  const [slots, setSlots] = useState("");
+  const [timeLimit, setTimeLimit] = useState("");
+  const [gpus, setGpus] = useState("");
+  const [gpuType, setGpuType] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [test, setTest] = useState<SgePreflight | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectionFailed, setConnectionFailed] = useState(false);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const readyHost = !remote && host && test?.reachable && test.sgeFound && test.toolsFound ? [host] : [];
+  const [masterRunning, markMasterRunning] = useSshMasterStatuses(readyHost);
+
+  function connect() {
+    setConnectionFailed(false);
+    setConnectionAttempt((attempt) => attempt + 1);
+    setConnecting(true);
+  }
+
+  const apply = (s: SgeSettings) => {
+    setSettings(s);
+    setHost(s.host ?? "");
+    setWorkDir(s.workDir ?? "");
+    setSccProject(s.sccProject ?? "");
+    setPe(s.pe ?? "");
+    setSlots(s.slots === null || s.slots === undefined ? "" : String(s.slots));
+    setTimeLimit(s.timeLimit ?? "");
+    setGpus(s.gpus === null || s.gpus === undefined ? "" : String(s.gpus));
+    setGpuType(s.gpuType ?? "");
+  };
+
+  const previousSettings = useRef<SgeSettings | null>(null);
+  useEffect(() => {
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (
+      host === (previous.host ?? "")
+      && workDir.trim() === (previous.workDir ?? "")
+      && sccProject.trim() === (previous.sccProject ?? "")
+      && pe.trim() === (previous.pe ?? "")
+      && slots.trim() === (previous.slots === null || previous.slots === undefined ? "" : String(previous.slots))
+      && timeLimit.trim() === (previous.timeLimit ?? "")
+      && gpus.trim() === (previous.gpus === null || previous.gpus === undefined ? "" : String(previous.gpus))
+      && gpuType.trim() === (previous.gpuType ?? "")
+    ))) {
+      setHost(settings.host ?? "");
+      setWorkDir(settings.workDir ?? "");
+      setSccProject(settings.sccProject ?? "");
+      setPe(settings.pe ?? "");
+      setSlots(settings.slots === null || settings.slots === undefined ? "" : String(settings.slots));
+      setTimeLimit(settings.timeLimit ?? "");
+      setGpus(settings.gpus === null || settings.gpus === undefined ? "" : String(settings.gpus));
+      setGpuType(settings.gpuType ?? "");
+    }
+  }, [settings, host, workDir, sccProject, pe, slots, timeLimit, gpus, gpuType]);
+
+  const unchanged =
+    settings !== null &&
+    host === (settings.host ?? "") &&
+    workDir.trim() === (settings.workDir ?? "") &&
+    sccProject.trim() === (settings.sccProject ?? "") &&
+    pe.trim() === (settings.pe ?? "") &&
+    slots.trim() === (settings.slots === null || settings.slots === undefined ? "" : String(settings.slots)) &&
+    timeLimit.trim() === (settings.timeLimit ?? "") &&
+    gpus.trim() === (settings.gpus === null || settings.gpus === undefined ? "" : String(settings.gpus)) &&
+    gpuType.trim() === (settings.gpuType ?? "");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      apply(
+        await saveSgeSettingsMutation.mutateAsync({
+          host,
+          workDir: workDir.trim(),
+          sccProject: sccProject.trim(),
+          pe: pe.trim(),
+          slots: slots.trim(),
+          timeLimit: timeLimit.trim(),
+          gpus: gpus.trim(),
+          gpuType: gpuType.trim(),
+        }),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      {loadError ? (
+        <div className="error">{loadError}</div>
+      ) : !settings ? (
+        <LoadingRow>
+          <Spinner /> {m.settings_page_loading_sge_settings()}
+        </LoadingRow>
+      ) : (
+        <>
+          {!connecting && test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
+          <form className={FORM_CLASS_NAME} onSubmit={submit}>
+            <div className="max-w-xl">
+              <label>
+                {m.settings_page_login_node()}
+                <OptionPicker
+                  choices={[
+                    { id: "", label: m.settings_page_not_set_pass_host_per_launch() },
+                    ...(host && !settings.hosts.some((item) => item.host === host)
+                      ? [{ id: host, label: `${host} (not in ~/.ssh/config)` }]
+                      : []),
+                    ...settings.hosts.map((item) => ({ id: item.host, label: item.host })),
+                  ]}
+                  value={host}
+                  variant="field"
+                  dropDown
+                  disabled={saving || connecting}
+                  onSelect={(id) => {
+                    setHost(id);
+                    setTest(null); // a badge earned by cluster A must not vouch for cluster B
+                    setConnecting(false);
+                    setConnectionFailed(false);
+                  }}
+                />
+              </label>
+            </div>
+            <div className="actions">
+              {!remote && (
+                <Button
+                  type="button"
+                  onClick={() => {
+                    if (connecting && !connectionFailed) {
+                      setConnectionFailed(false);
+                      setConnecting(false);
+                    } else {
+                      connect();
+                    }
+                  }}
+                  disabled={!host}
+                  title={host ? undefined : m.settings_pick_login_node()}
+                >
+                  {connecting
+                    ? connectionFailed
+                      ? m.app_retry()
+                      : m.settings_page_cancel()
+                    : test
+                      ? m.settings_reconnect()
+                      : m.settings_connect()}
+                </Button>
+              )}
+              <span role="status">
+                <SgeTestBadge
+                  test={test}
+                  connecting={connecting && !connectionFailed}
+                  masterRunning={masterRunning[host]}
+                />
+              </span>
+            </div>
+            <div className="mt-5 border-t border-border pt-5">
+              <label className="block max-w-xl">
+                {m.settings_page_work_dir()}
+                <Input
+                  type="text"
+                  dir="ltr"
+                  value={workDir}
+                  onChange={(e) => setWorkDir(e.target.value)}
+                  placeholder="/projectnb/<project>/workspaces/<user>"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+              <div className="row2 mt-3">
+                <label>
+                  {m.settings_page_scc_project()}
+                  <Input
+                    type="text"
+                    list="sge-projects"
+                    value={sccProject}
+                    onChange={(e) => setSccProject(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <datalist id="sge-projects">
+                    {test?.projects.map((p) => <option key={p} value={p} />)}
+                  </datalist>
+                </label>
+                <label>
+                  {m.settings_page_parallel_environment()}
+                  <Input
+                    type="text"
+                    value={pe}
+                    onChange={(e) => setPe(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+              <div className="row2 mt-3">
+                <label>
+                  {m.settings_page_cores()}
+                  <Input
+                    type="text"
+                    inputMode="numeric"
+                    value={slots}
+                    onChange={(e) => setSlots(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  {m.settings_page_time_limit()}
+                  <Input
+                    type="text"
+                    value={timeLimit}
+                    onChange={(e) => setTimeLimit(e.target.value)}
+                    placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+              <div className="row2 mt-3">
+                <label>
+                  {m.settings_page_gpus()}
+                  <Input
+                    type="text"
+                    inputMode="numeric"
+                    value={gpus}
+                    onChange={(e) => setGpus(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+                <label>
+                  {m.settings_page_gpu_type()}
+                  <Input
+                    type="text"
+                    list="sge-gpu-types"
+                    value={gpuType}
+                    onChange={(e) => setGpuType(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <datalist id="sge-gpu-types">
+                    {SGE_GPU_TYPES.map((type) => <option key={type} value={type} />)}
+                  </datalist>
+                </label>
+              </div>
+            </div>
+            {error && <div className="error">{error}</div>}
+            <div className="actions">
+              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
+                {saving ? m.common_saving() : m.common_save()}
+              </Button>
+            </div>
+          </form>
+          {!remote && connecting && (
+            <SshConnectTerminal
+              key={connectionAttempt}
+              host={host}
+              backend="sge"
+              onComplete={(complete) => {
+                if (complete.backend !== "sge") return;
+                setTest(complete.result);
+                markMasterRunning(host);
+                setConnectionFailed(false);
+                setConnecting(false);
+              }}
+              onError={(error) => {
+                setConnectionFailed(true);
+                setTest({
+                  reachable: false,
+                  sgeFound: false,
+                  toolsFound: false,
+                  authBlocked: false,
+                  masterRunning: false,
+                  projects: [],
+                  error,
+                });
+              }}
+            />
+          )}
+        </>
+      )}
+    </>
+  );
+}
+
 function RaySection() {
   const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
 
@@ -1345,6 +1675,7 @@ const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   modal: m.compute_description_modal,
   k8s: m.compute_description_k8s,
   slurm: m.compute_description_slurm,
+  sge: m.compute_description_sge,
   ray: m.compute_description_ray,
   openresearch: m.compute_description_openresearch,
 };
@@ -1358,12 +1689,13 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   k8s: "k8s_job",
   ssh: "ssh_job",
   slurm: "slurm_job",
+  sge: "sge_job",
   ray: "ray_job",
   openresearch: "openresearch_job",
 };
 
 /** Backends whose launches take --flavor; mirrors the server's validation. */
-const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
+const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "sge", "ray", "openresearch"];
 /** Of those, the ones where a launch *requires* a flavor. */
 const FLAVOR_REQUIRED: ComputeTargetId[] = ["hf", "modal", "openresearch"];
 
@@ -1371,6 +1703,7 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   hf: ["cpu-basic", "t4-small", "a10g-small", "a10g-large", "a100-large", "h100", "h200"],
   modal: ["cpu", "t4", "l4", "a10g", "a100", "a100-80gb", "l40s", "h100", "h100:2"],
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
+  sge: ["L40S:1", "A100:1", "A100:2", "V100:2", "cpu"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
 };
@@ -1692,6 +2025,7 @@ function BackendDetailPage({
       <div className="mt-6 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
         {target.id === "ssh" && <SshSection remote={remote} />}
         {target.id === "slurm" && <SlurmSection remote={remote} />}
+        {target.id === "sge" && <SgeSection remote={remote} />}
         {target.id === "openresearch" && <OpenResearchSection remote={remote} />}
       </div>
     </>

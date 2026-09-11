@@ -610,6 +610,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/slurm/preflight", post(slurm_preflight))
         .route(
+            "/api/settings/sge",
+            get(sge_settings).post(set_sge_settings),
+        )
+        .route("/api/settings/sge/preflight", post(sge_preflight))
+        .route(
             "/api/settings/ray",
             get(ray_settings).post(set_ray_settings),
         )
@@ -5363,6 +5368,7 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
 pub(crate) enum SshConnectBackend {
     Ssh,
     Slurm,
+    Sge,
 }
 
 #[derive(Deserialize)]
@@ -5618,6 +5624,10 @@ async fn ssh_connect_socket(
         SshConnectBackend::Slurm => {
             let result = crate::jobs::slurm::preflight(&host).await;
             ("slurm", slurm_preflight_value(&result), None)
+        }
+        SshConnectBackend::Sge => {
+            let result = crate::jobs::sge::preflight(&host).await;
+            ("sge", sge_preflight_value(&result), None)
         }
     };
     if socket
@@ -6128,6 +6138,136 @@ fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
     })
 }
 
+// --- sge ----------------------------------------------------------------------
+
+use crate::jobs::sge;
+
+/// One payload powers the whole settings card: stored cluster defaults plus the
+/// ssh hosts to pick a login node from. Every value is the RESOLVED default
+/// rather than the raw `Option`, so the card shows what a launch will actually
+/// do instead of a row of blanks.
+fn sge_settings_json() -> Value {
+    let settings = sge::load_settings().ok().flatten().unwrap_or_default();
+    json!({
+        "host": settings.host,
+        "workDir": settings.work_dir.clone().unwrap_or_else(|| sge::DEFAULT_WORK_DIR.to_string()),
+        "sccProject": settings.scc_project_or_default(),
+        "pe": settings.pe_or_default(),
+        "slots": settings.slots_or_default(),
+        "timeLimit": settings.time_limit_or_default(),
+        "gpus": settings.gpus_or_default(),
+        "gpuType": settings.gpu_type_or_default(),
+        "hosts": list_ssh_hosts(),
+    })
+}
+
+async fn sge_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(sge_settings_json())))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSgeSettingsReq {
+    /// `None` leaves the field alone; `Some("")` clears it back to the default.
+    host: Option<String>,
+    work_dir: Option<String>,
+    scc_project: Option<String>,
+    pe: Option<String>,
+    slots: Option<u32>,
+    time_limit: Option<String>,
+    gpus: Option<u32>,
+    gpu_type: Option<String>,
+}
+
+async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let mut settings = sge::load_settings()?.unwrap_or_default();
+        let norm = |v: String| Some(v.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(h) = req.host {
+            settings.host = norm(h);
+        }
+        if let Some(w) = req.work_dir {
+            // Reject a path that would fail every later launch — or, worse,
+            // silently land the run in a quota'd home directory.
+            let w = norm(w);
+            if let Some(w) = &w {
+                sge::validate_work_dir(w).map_err(bad_request)?;
+            }
+            settings.work_dir = w;
+        }
+        if let Some(p) = req.scc_project {
+            settings.scc_project = norm(p);
+        }
+        if let Some(p) = req.pe {
+            settings.pe = norm(p);
+        }
+        if let Some(s) = req.slots {
+            if s == 0 || s > 64 {
+                return Err(bad_request("slots must be between 1 and 64"));
+            }
+            settings.slots = Some(s);
+        }
+        if let Some(t) = req.time_limit {
+            let t = norm(t);
+            if let Some(t) = &t {
+                crate::jobs::huggingface::parse_timeout(t).map_err(bad_request)?;
+            }
+            settings.time_limit = t;
+        }
+        if let Some(g) = req.gpus {
+            settings.gpus = Some(g);
+        }
+        if let Some(t) = req.gpu_type {
+            let t = norm(t);
+            if let Some(t) = &t {
+                // The complex uses the `==` relop, so an unknown or miscased
+                // value is unschedulable rather than merely wrong.
+                if sge::canonical_gpu_type(t).is_none() {
+                    return Err(bad_request(format!(
+                        "Unknown gpu_type {t:?}. Valid types: {}.",
+                        sge::SCC_GPU_TYPES.join(", ")
+                    )));
+                }
+            }
+            settings.gpu_type = t.and_then(|t| sge::canonical_gpu_type(&t).map(str::to_string));
+        }
+        sge::save_settings(&settings)?;
+        Ok(Json(sge_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SgePreflightReq {
+    host: String,
+}
+
+/// Live check for one login node: reachable, Grid Engine CLI + snapshot tools,
+/// the ControlMaster prerequisite, and the user's valid `-P` projects.
+async fn sge_preflight(Json(req): Json<SgePreflightReq>) -> ApiResult {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+    let p = sge::preflight(&host).await;
+    Ok(Json(sge_preflight_value(&p)))
+}
+
+fn sge_preflight_value(p: &sge::SgePreflight) -> Value {
+    json!({
+        "reachable": p.reachable,
+        "sgeFound": p.sge_found,
+        "toolsFound": p.tools_found,
+        "authBlocked": p.auth_blocked,
+        "masterRunning": p.master_running,
+        "projects": p.projects,
+        "error": p.error,
+    })
+}
+
 // --- ray --------------------------------------------------------------------
 
 use crate::jobs::ray;
@@ -6288,6 +6428,8 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
     let slurm_host = slurm_settings.as_ref().and_then(|s| s.host.clone());
+    let sge_settings = crate::jobs::sge::load_settings().ok().flatten();
+    let sge_host = sge_settings.as_ref().and_then(|s| s.host.clone());
     let (ray_resolved, ray_source) = crate::jobs::ray::resolve_address_with_source();
     let ray_configured = !matches!(ray_source, crate::jobs::ray::AddressSource::Default);
     let ray_source_label = match ray_source {
@@ -6374,6 +6516,20 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
                     Some(partition) => format!("Login node {h} / partition {partition}"),
                     None => format!("Login node {h}"),
                 },
+            ),
+        },
+        {
+            "id": "sge",
+            "configured": sge_host.is_some(),
+            "summary": sge_host.as_ref().map_or_else(
+                || "No login node configured".to_string(),
+                |h| format!(
+                    "Login node {h} / project {}",
+                    sge_settings
+                        .as_ref()
+                        .map(|s| s.scc_project_or_default())
+                        .unwrap_or_else(|| crate::jobs::sge::DEFAULT_SCC_PROJECT.to_string())
+                ),
             ),
         },
         {
