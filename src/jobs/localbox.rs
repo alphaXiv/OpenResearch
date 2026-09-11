@@ -43,9 +43,7 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     let dir = run_dir(&spec.run_id);
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
-    // Default the job's Python to unbuffered so its prints land in `log` (which
-    // we tail) live instead of block-buffering behind the redirect (see
-    // jobs::default_python_env).
+    // Default the job's Python env (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
@@ -54,10 +52,9 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         .join("\n");
     // Same subshell shape as the ssh backend: an `exit`/`set -e` failure inside
     // `( … )` ends the subshell, not run.sh, so exit_code is always written.
-    let cd_target = crate::local::bash::bash_path(&dir);
     let run_sh = format!(
         "#!/usr/bin/env bash\n{exports}\ncd {dir} || exit 97\n(\n{script}\n) > log 2>&1\necho $? > exit_code\n",
-        dir = sh_quote(&cd_target),
+        dir = sh_quote(&crate::local::bash::bash_path(&dir)),
         script = spec.script,
     );
     let run_sh_path = dir.join("run.sh");

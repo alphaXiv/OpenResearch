@@ -132,9 +132,7 @@ impl SshTarget {
     }
 }
 
-/// Where a host key may be written and forgotten. Windows' OpenSSH has no
-/// `/dev/null` and would take the name literally, creating a `\dev\null` on
-/// whichever drive is current, so give it a scratch file of orx's own.
+/// Windows' OpenSSH has no `/dev/null`, and would create a `\dev\null` on the current drive.
 #[cfg(unix)]
 fn discarded_known_hosts() -> PathBuf {
     PathBuf::from("/dev/null")
@@ -422,9 +420,7 @@ pub struct SshJobSpec {
 /// the remote run dir (relative to `$HOME`) — the reattach handle.
 pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
     let dir = format!(".orx/runs/{}", spec.run_id);
-    // Default the remote job's Python to unbuffered so its prints land in `log`
-    // (which we tail) live instead of block-buffering behind the redirect
-    // (see jobs::default_python_env).
+    // Default the job's Python env (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
@@ -632,6 +628,10 @@ mod tests {
                 "LogLevel=ERROR",
             ]
         );
+        #[cfg(unix)]
+        assert_eq!(discarded_known_hosts(), PathBuf::from("/dev/null"));
+        #[cfg(not(unix))]
+        assert!(discarded_known_hosts().starts_with(crate::config::config_dir()));
     }
 
     #[cfg(unix)]

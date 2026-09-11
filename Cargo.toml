@@ -56,9 +56,7 @@ sha1 = "0.10"
 # roots for the same musl reasons as reqwest above; already in the tree via axum.
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
-# Windows links a file into the isolated agent home with a hard link when it
-# refuses a symlink, and only file identity tells one apart from a stale copy.
-# Already in the tree transitively (walkdir).
+# File identity for Windows' hard-link fallback (native_store.rs); already in the tree via walkdir.
 same-file = "1.0"
 
 [target.'cfg(unix)'.dependencies]
@@ -67,8 +65,7 @@ same-file = "1.0"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-# Liveness of a detached local run (jobs/localbox.rs) — Windows has no `ps`.
-# Already in the tree transitively, same as libc above.
+# Win32 calls std lacks: run liveness, console ownership, the error dialog. Already in the tree.
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

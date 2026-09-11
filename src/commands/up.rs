@@ -64,12 +64,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
         Ok(listener) => listener,
-        // Clicking orx a second time must reach the dashboard already serving,
-        // not die on the port that dashboard is holding.
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            if !dashboard_is_serving(port).await {
-                return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error));
-            }
+        // A second double-click should reach the running dashboard, not fail on its port.
+        Err(error)
+            if error.kind() == std::io::ErrorKind::AddrInUse
+                && crate::owns_its_console()
+                && dashboard_is_serving(port).await =>
+        {
             let url = format!("http://127.0.0.1:{port}");
             eprintln!("orx up: already running — opening {url}");
             if !args.no_browser {
@@ -845,8 +845,7 @@ impl From<&StoredRun> for ApiRun {
 
 // --- basic routes ---------------------------------------------------------
 
-/// Whether an OpenResearch dashboard, rather than some unrelated server, is what
-/// holds `port`. `dashboardProtocol` is the field no other service would answer.
+/// Whether a dashboard this build can talk to, not some other server, holds `port`.
 async fn dashboard_is_serving(port: u16) -> bool {
     let Ok(response) = reqwest::Client::new()
         .get(format!("http://127.0.0.1:{port}/api/health"))
@@ -856,10 +855,10 @@ async fn dashboard_is_serving(port: u16) -> bool {
     else {
         return false;
     };
-    response
-        .json::<Value>()
-        .await
-        .is_ok_and(|body| body.get("dashboardProtocol").is_some())
+    response.json::<Value>().await.is_ok_and(|body| {
+        body.get("dashboardProtocol").and_then(Value::as_u64)
+            == Some(u64::from(crate::commands::up_remote::DASHBOARD_PROTOCOL))
+    })
 }
 
 async fn health(State(state): State<AppState>) -> Json<Value> {

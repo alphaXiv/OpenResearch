@@ -28,10 +28,7 @@ use crate::error::{anyhow, Result};
 /// processes (unlike the `-u` flag).
 pub const PYTHONUNBUFFERED: &str = "PYTHONUNBUFFERED";
 
-/// CPython encodes stdout in the console's codepage, which is cp1252 on a
-/// default Windows install — so a script that prints anything outside Latin-1
-/// dies with `UnicodeEncodeError` partway through a run. Set everywhere, not
-/// just on Windows: a Linux container with `LANG=C` has the same ASCII default.
+/// CPython prints in cp1252 on Windows (ASCII under `LANG=C`), so non-Latin-1 output crashes.
 pub const PYTHONIOENCODING: &str = "PYTHONIOENCODING";
 
 /// Default CPython's streaming and encoding into a job's environment map unless

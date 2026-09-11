@@ -305,9 +305,8 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
             remove_link(destination)?;
         }
         Ok(metadata) if metadata.is_file() && source_metadata.is_file() && marker.is_file() => {
-            // Windows' hard-link fallback *is* the source, so there is nothing
-            // to adopt back and nothing in conflict.
-            if same_file::is_same_file(destination, source)? {
+            // Windows' hard-link fallback is the source itself: nothing to adopt.
+            if same_file::is_same_file(destination, source).unwrap_or(false) {
                 write_marker(&marker, source)?;
                 return Ok(());
             }
@@ -416,11 +415,8 @@ pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> std::io::Result
     }
 }
 
-/// Windows hands out symlinks only to an elevated process or one running under
-/// Developer Mode; everyone else gets `ERROR_PRIVILEGE_NOT_HELD`. Fall back to
-/// the links that need no privilege: a junction for a directory, which reads
-/// back through `symlink_metadata`/`read_link` exactly like a symlink, and a
-/// hard link for a file, which does not — `reconcile_link` recognizes those.
+/// Without Developer Mode, Windows refuses symlinks; a junction reads back like one,
+/// a hard link does not (see `reconcile_link`).
 #[cfg(windows)]
 pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
     let directory = source.is_dir();
@@ -442,9 +438,7 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
     }
 }
 
-/// `mklink /J` is the only junction maker short of raw reparse-point FFI. Both
-/// paths are quoted because a home directory name may hold a `cmd`
-/// metacharacter, and a Windows path can never hold the quote itself.
+/// `mklink /J` is the only junction maker short of reparse-point FFI.
 #[cfg(windows)]
 fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
@@ -472,9 +466,7 @@ fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     )))
 }
 
-/// Windows links a file into the isolated home with a hard link when it refuses
-/// a symlink; the reconcile must not read that as a severed one. Runs
-/// everywhere, since hard links are not a Windows idea.
+/// Outside the unix-only `tests`: hard links exist everywhere.
 #[cfg(test)]
 mod hard_link_tests {
     use super::*;
@@ -508,6 +500,11 @@ mod hard_link_tests {
                 .file_name()
                 .to_string_lossy()
                 .contains(".orx-conflict-")));
+
+        // A launch with nothing edited must not adopt the link back as a copy.
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+        assert!(same_file::is_same_file(&destination, &source).unwrap());
+        assert!(!legacy.join(".config.toml.orx-backup").exists());
         std::fs::remove_dir_all(root).ok();
     }
 }

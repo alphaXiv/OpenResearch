@@ -18,23 +18,23 @@ pub fn program() -> std::ffi::OsString {
 /// Git for Windows would be fails the spawn instead, pointing at the fix.
 #[cfg(windows)]
 pub fn program() -> std::ffi::OsString {
-    git_bash()
-        .or_else(|| {
-            crate::local::shell_env::find_on_path("bash").filter(|bash| !is_wsl_launcher(bash))
-        })
+    usable_bash()
         .map(std::ffi::OsString::from)
         .unwrap_or_else(|| r"C:\Program Files\Git\bin\bash.exe".into())
 }
 
-/// Told at startup, not when the first run dies: Git for Windows supplies the
-/// only usable `bash` and coreutils on this platform, so without it experiments
-/// and the demo fail at their first command.
+/// Git for Windows' bash, else any on PATH that is not the WSL launcher.
+#[cfg(windows)]
+fn usable_bash() -> Option<PathBuf> {
+    git_bash().or_else(|| {
+        crate::local::shell_env::find_on_path("bash").filter(|bash| !is_wsl_launcher(bash))
+    })
+}
+
+/// Warn at startup rather than fail at the first run's first command.
 #[cfg(windows)]
 pub fn missing_toolchain() -> Option<&'static str> {
-    let found = git_bash().is_some()
-        || crate::local::shell_env::find_on_path("bash")
-            .is_some_and(|bash| !is_wsl_launcher(&bash));
-    (!found).then_some(
+    usable_bash().is_none().then_some(
         "Git for Windows not found — orx needs the bash it ships to run experiments. \
          Install it from https://git-scm.com/download/win, then restart orx.",
     )
@@ -62,14 +62,8 @@ fn git_bash() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// `base` with the shell's own toolchain in front, or None where the shell
-/// already has one.
-///
-/// Git for Windows keeps coreutils in `usr\bin` and puts only `cmd` on the
-/// Windows PATH, so a bash spawned from a Windows process has no `mkdir` and
-/// the generated scripts die on their first command. Scoped to the bash we
-/// spawn: fronting these for every child would shadow Windows' own `find` and
-/// `sort` with the MSYS ones.
+/// `base` behind Git for Windows' coreutils, which its installer leaves off PATH.
+/// Only for the bash we spawn, so MSYS `find`/`sort` never shadow Windows' own.
 #[cfg(windows)]
 pub fn path_with_toolchain(base: Option<std::ffi::OsString>) -> Option<std::ffi::OsString> {
     let root = git_root()?;
@@ -95,11 +89,7 @@ pub fn path_with_toolchain(_base: Option<std::ffi::OsString>) -> Option<std::ffi
     None
 }
 
-/// A local path as the shell reads it. `/c/Users/…` on Windows, unchanged
-/// elsewhere.
-///
-/// Forward slashes alone would not do: GNU tar reads the drive colon as a
-/// `host:path` remote spec and tries to resolve `C:` as a hostname.
+/// `/c/…`, not `C:/…`: GNU tar reads a drive colon as `host:path`.
 #[cfg(windows)]
 pub fn bash_path(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");

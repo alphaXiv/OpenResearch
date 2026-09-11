@@ -7602,10 +7602,6 @@ pub async fn watch_runs(
     }
 }
 
-/// Env prep shared by the CLI adapters: this orx first on PATH (agents shell
-/// out to `orx`), the shell environment app mode imported, and the
-/// dashboard-managed env vars, real env winning. Only the starting order —
-/// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
 /// The PATH a child gets: this orx first, so an agent shelling out to `orx`
 /// reaches the running one.
 fn child_path() -> Option<std::ffi::OsString> {
@@ -7617,6 +7613,10 @@ fn child_path() -> Option<std::ffi::OsString> {
     Some(path)
 }
 
+/// Env prep shared by the CLI adapters: this orx first on PATH (agents shell
+/// out to `orx`), the shell environment app mode imported, and the
+/// dashboard-managed env vars, real env winning. Only the starting order —
+/// [`PATH_GUARD`] is what holds it once the child's shell reads a user profile.
 pub fn prepare_env(cmd: &mut tokio::process::Command) {
     if let Some(path) = child_path() {
         cmd.env("PATH", path);

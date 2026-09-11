@@ -137,25 +137,18 @@ pub fn existing_session_worktree_path(
     }
 }
 
+/// Session worktrees spend ~100 of Windows' 260 path characters before the repo's own.
+fn long_paths() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &["-c", "core.longpaths=true"]
+    } else {
+        &[]
+    }
+}
+
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
-/// Config carried by every git invocation that writes a working tree.
-///
-/// Windows refuses paths over 260 characters unless git is told to use the
-/// wide API, and a session worktree spends about a hundred of them on
-/// `worktrees/<project>/chat_<session>` before the repository's own paths
-/// begin — so a deep tree fails to check out partway through.
-#[cfg(windows)]
-fn long_paths() -> &'static [&'static str] {
-    &["-c", "core.longpaths=true"]
-}
-
-#[cfg(not(windows))]
-fn long_paths() -> &'static [&'static str] {
-    &[]
-}
-
 fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
@@ -1521,29 +1514,18 @@ fn git_ssh_command(base: &str) -> String {
 
 const GITHUB_CREDENTIAL_HELPER: &str = "!gh auth git-credential";
 
-/// The null device as `diff --no-index` spells it, which is the only place git
-/// takes one — it recognizes `NUL` there before touching the path. Anywhere a
-/// path is *read*, use [`empty_config_file`] instead.
+/// Only for `diff --no-index`; anywhere git reads the path, use [`empty_config_file`].
 #[cfg(not(windows))]
 pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]
 pub(crate) const NULL_DEVICE: &str = "NUL";
 
-/// An empty file to point `GIT_CONFIG_GLOBAL` and the `core.*File` settings at.
-///
-/// Not the null device: Windows cannot `access()` `NUL` by name, and git fatals
-/// with "unable to access 'NUL': Invalid argument" rather than reading it empty.
-/// A real file behaves the same on every platform — and pointing `hooksPath` at
-/// one disables hooks, since git finds no hook inside it.
+/// Not `NUL`: Windows git fails "unable to access 'NUL'" instead of reading it as empty.
 pub(crate) fn empty_config_file() -> PathBuf {
     static PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     PATH.get_or_init(|| {
         let path = crate::config::config_dir().join("empty.gitconfig");
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        // Left alone if it is already there; a failure leaves a path that does
-        // not exist, which git skips the way it skips an absent global config.
+        let _ = std::fs::create_dir_all(crate::config::config_dir());
         let _ = std::fs::OpenOptions::new()
             .write(true)
             .create(true)

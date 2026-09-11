@@ -21,21 +21,22 @@ npm install -g @anthropic-ai/claude-code
 
 Open a new terminal afterwards so `PATH` is picked up.
 
-Nothing else is needed for experiments — `uv` installs itself on first run and
-brings its own Python.
+The nanochat demo installs `uv`, and with it Python, on its first run.
 
 ## Install
 
 From [Releases](https://github.com/alphaXiv/OpenResearch/releases), download
-`orx-x86_64-pc-windows-msvc.zip`, extract it, and double-click `orx.exe`. It
-starts the dashboard at `http://127.0.0.1:4791` and opens your browser. Leave
-the console window open — closing it stops the server.
+`openresearch-cli-x86_64-pc-windows-msvc.zip`, extract it, and double-click
+`orx.exe`. It starts the dashboard at `http://127.0.0.1:4791` and opens your
+browser. Leave the console window open — closing it stops the server. If orx
+cannot start, a dialog says why.
 
-If you would rather have `orx` on your `PATH` as a command, run the PowerShell
-installer attached to the same release instead.
+To have `orx` on your `PATH` as a command instead, run the PowerShell installer,
+which installs to `%USERPROFILE%\.cargo\bin`:
 
-> If the console window appears and vanishes, orx failed to start. Run
-> `orx.exe` from an open terminal to see why.
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.ps1 | iex"
+```
 
 ### The SmartScreen warning
 
@@ -62,7 +63,7 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 | | |
 |---|---|
 | `orx up --remote-host` | Refused. The control channel is a Unix domain socket. |
-| Self-update | Not implemented; reinstall to upgrade. |
+| Self-update | `orx update` does not work on Windows; re-run the installer to upgrade. |
 | SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page reports a host as "Disconnected" even when it works. Use a key held by an agent, or one without a passphrase. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |

@@ -36,11 +36,7 @@ const LR_PROBE_BRANCH: &str = "orx/matrix-lr-2x-probe";
 const VOCAB_PROBE_EXPERIMENT_ID: &str = "demo_nanochat_vocab_probe_v1";
 const VOCAB_PROBE_BRANCH: &str = "orx/vocab-8192-probe";
 // Same environment and data setup as runs/runcpu.sh, then a 200-step base-training probe.
-//
-// Runs under Git Bash on Windows, where two things differ: uv has no shell
-// installer, and it lays the venv out as `Scripts/` rather than `bin/`. Both
-// forms of the activation are tried, since either platform may have either
-// layout depending on how the venv was made.
+// Git Bash: uv has no shell installer there, and venvs may use `Scripts/` not `bin/`.
 fn probe_setup() -> String {
     let install_uv = if cfg!(windows) {
         "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://astral.sh/uv/install.ps1 | iex\""
@@ -48,10 +44,9 @@ fn probe_setup() -> String {
         "curl -LsSf https://astral.sh/uv/install.sh | sh"
     };
     format!(
-        "export PATH=\"$HOME/.local/bin:$PATH\" \
-         && export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
+        "export NANOCHAT_BASE_DIR=\"$PWD/.cache/nanochat\" UV_CACHE_DIR=\"$PWD/.cache/uv\" \
          && mkdir -p \"$NANOCHAT_BASE_DIR\" \"$UV_CACHE_DIR\" \
-         && (command -v uv >/dev/null || {install_uv}) \
+         && {{ command -v uv >/dev/null || {{ {install_uv} && export PATH=\"$HOME/.local/bin:$PATH\"; }}; }} \
          && ([ -d .venv ] || uv venv) \
          && uv sync --extra cpu \
          && {{ . .venv/bin/activate 2>/dev/null || . .venv/Scripts/activate; }} \
@@ -227,9 +222,7 @@ pub(crate) fn session_start_ref(
     .then(|| installed_experiment_sha(checkout))
 }
 
-/// The experiment commit this install was seeded with — the one its demo branch
-/// descends from. Asking whether the object merely exists would also find one
-/// left dangling, which no session was ever cut from.
+/// The experiment commit the demo branch descends from, not merely one whose object exists.
 fn installed_experiment_sha(repo: &Path) -> &'static str {
     let branch = format!("refs/heads/{BRANCH}");
     [EXPERIMENT_SHA, PREVIOUS_EXPERIMENT_SHA]
@@ -1239,6 +1232,14 @@ fn tool_part(
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
     if repo.exists() {
         validate_worktree(repo)?;
+    } else if bare.join("HEAD").is_file() {
+        // A kept origin carries the experiment this install was seeded with.
+        let parent = repo
+            .parent()
+            .ok_or_else(|| anyhow!("demo repository has no parent directory"))?;
+        std::fs::create_dir_all(parent)?;
+        super::git::restore_local_repository(repo, bare, "main")?;
+        validate_worktree(repo)?;
     } else {
         let parent = repo
             .parent()
@@ -1468,8 +1469,8 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
     ] {
         command.env_remove(name);
     }
-    let empty = crate::local::git::empty_config_file();
-    let empty = empty.display();
+    let empty_file = crate::local::git::empty_config_file();
+    let empty = empty_file.display();
     let (attributes, excludes, hooks) = (
         format!("core.attributesFile={empty}"),
         format!("core.excludesFile={empty}"),
@@ -1488,7 +1489,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", crate::local::git::empty_config_file())
+        .env("GIT_CONFIG_GLOBAL", &empty_file)
         .env("GIT_ATTR_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "OpenResearch Demo")
         .env("GIT_AUTHOR_EMAIL", "demo@openresearch.sh")
@@ -1636,9 +1637,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-    /// An upgrade must not strand a demo seeded before `runcpu.sh` learned
-    /// Windows: its sessions were cut from that commit, and every agent turn
-    /// resolves the worktree from it again.
+    /// Sessions seeded before `runcpu.sh` learned Windows must still resolve their start commit.
     #[test]
     fn an_install_seeded_at_the_previous_experiment_keeps_working() {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
@@ -1677,6 +1676,17 @@ mod tests {
                 PREVIOUS_EXPERIMENT_SHA
             );
         }
+
+        // Cache wiped, origin kept: onboarding restores the old tree, not a sibling.
+        let bare = root.join("origin.git");
+        ensure_follow_up_branches(&repo).unwrap();
+        ensure_local_origin(&repo, &bare).unwrap();
+        std::fs::remove_dir_all(root.join("worktrees")).unwrap();
+        std::fs::remove_dir_all(&repo).unwrap();
+        assert_eq!(
+            install_repository(&repo, &bare).unwrap(),
+            PREVIOUS_EXPERIMENT_SHA
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -119,9 +119,11 @@ jobs:
       # A debug orx.exe is slow enough to colour a tester's impression of the
       # dashboard, so the artifact is the build they would actually be given.
       - name: Build release
+        if: ${{ !inputs.plan }}
         run: cargo build --release --locked
 
       - name: Upload orx.exe
+        if: ${{ !inputs.plan }}
         uses: actions/upload-artifact@v4
         with:
           name: orx-windows-x86_64

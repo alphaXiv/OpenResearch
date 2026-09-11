@@ -89,12 +89,7 @@ async fn submit_controller_run(
     }
     // run.sh executes the user's own script, so it needs the shell's PATH — a
     // run launched from the macOS app would otherwise have no python/uv/conda.
-    //
-    // Never on Windows. This is exported *inside* run.sh, where bash splits
-    // PATH on `:`, so a Windows value collapses at the first drive colon and
-    // nothing resolves — not even `mkdir`. Git Bash converts the PATH it
-    // inherits into POSIX form for itself, so the launcher sets the process
-    // PATH and the script leaves it alone.
+    // Not on Windows: bash splits PATH on `:`, so a `C:` value collapses there.
     #[cfg(not(windows))]
     if let Some(path) = crate::local::shell_env::search_path() {
         env.insert("PATH".to_string(), path.to_string_lossy().into_owned());

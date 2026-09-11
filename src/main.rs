@@ -786,6 +786,7 @@ pub struct PaperArgs {
 // worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
+    #[cfg(windows)]
     install_panic_reporter();
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
     // server, browser) instead of parsing CLI args. Also require an empty argv so
@@ -802,21 +803,16 @@ async fn main() {
         return;
     }
 
-    let cli = Cli::parse();
-    let command = match cli.command {
-        Some(command) => command,
-        // Double-clicked from Explorer, where a usage dump goes to a console
-        // that closes with the process and reads as nothing happening. Start the
-        // dashboard, as the macOS .app does for the same gesture.
-        None if owns_its_console() => Cli::parse_from(["orx", "up"])
-            .command
-            .expect("`orx up` names a subcommand"),
+    let mut cli = Cli::parse();
+    // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
+    if cli.command.is_none() && owns_its_console() {
+        cli = Cli::parse_from(["orx", "up"]);
+    }
+    let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
-        None => {
-            use clap::CommandFactory;
-            Cli::command().print_help().ok();
-            return;
-        }
+        use clap::CommandFactory;
+        Cli::command().print_help().ok();
+        return;
     };
     // Outdated-version warning (skipped for the commands that manage updates
     // themselves). `start` prints the cached warning to stderr *now*,
@@ -890,28 +886,20 @@ async fn main() {
     if let Err(err) = result {
         // Match the TS: print only the message, exit 1.
         eprintln!("{}", err);
-        report_to_a_reader_with_no_console(&err.to_string());
+        show_error_dialog(&err.to_string());
         std::process::exit(1);
     }
 }
 
-/// A double-clicked `orx.exe` owns the console Explorer opened for it, so the
-/// window — and the error just printed into it — is gone the instant this
-/// process exits, leaving the user with a flash and no idea why. Say it in a
-/// dialog, which outlives the console and needs no one to be reading stdin.
-///
-/// Launched from a terminal the shell is attached too, so the printed message
-/// survives on its own and a dialog would only be in the way.
-/// Whether this process is the only one on its console — which is what Explorer
-/// hands a double-clicked exe, and means the window dies with us. A shell that
-/// launched us is attached to the same console, so anything typed there is not.
+/// Explorer gives a double-clicked exe a console of its own, which closes when it exits.
 #[cfg(windows)]
 fn owns_its_console() -> bool {
     use windows_sys::Win32::System::Console::GetConsoleProcessList;
 
     let mut attached = [0u32; 2];
     // SAFETY: writes at most `attached.len()` process ids into `attached`.
-    unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) == 1 }
+    let count = unsafe { GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) };
+    count == 1
 }
 
 #[cfg(not(windows))]
@@ -919,15 +907,16 @@ fn owns_its_console() -> bool {
     false
 }
 
+/// That console closes with the process, so repeat the error where it survives.
 #[cfg(windows)]
-fn report_to_a_reader_with_no_console(message: &str) {
+fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
     if !owns_its_console() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
-    let (body, title) = (wide(message), wide("OpenResearch could not start"));
+    let (body, title) = (wide(message), wide("OpenResearch stopped"));
     // SAFETY: both strings are NUL-terminated and outlive the call.
     unsafe {
         MessageBoxW(
@@ -940,18 +929,16 @@ fn report_to_a_reader_with_no_console(message: &str) {
 }
 
 #[cfg(not(windows))]
-fn report_to_a_reader_with_no_console(_message: &str) {}
+fn show_error_dialog(_message: &str) {}
 
-/// The other way this process dies with something to say. Without it a panic
-/// during startup is the same unexplained flash as a returned error was.
-/// Restricted to the main thread: a worker's panic has a running dashboard to
-/// report through, and must not stop on a dialog nobody asked for.
+/// Main thread only: a worker's panic has a running dashboard to report through.
+#[cfg(windows)]
 fn install_panic_reporter() {
     let inner = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         inner(info);
         if std::thread::current().name() == Some("main") {
-            report_to_a_reader_with_no_console(&format!("{info}"));
+            show_error_dialog(&format!("{info}"));
         }
     }));
 }
