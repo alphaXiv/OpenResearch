@@ -1,8 +1,5 @@
 //! Locating the `bash` that runs orx's generated scripts.
-//!
-//! Windows has no usable one on PATH: Git for Windows exposes only its `cmd`
-//! directory, and the `bash.exe` in System32 is the WSL launcher, which cannot
-//! see the run directory it would be handed. Found through `git` instead.
+//! On Windows PATH holds only Git's `cmd` dir and the WSL launcher, so bash is found via `git`.
 
 #[cfg(windows)]
 use std::path::{Path, PathBuf};
@@ -13,9 +10,7 @@ pub fn program() -> std::ffi::OsString {
     "bash".into()
 }
 
-/// Never the bare name as a last resort: Windows resolves that through its own
-/// PATH search, straight back to the WSL launcher rejected below. Naming where
-/// Git for Windows would be fails the spawn instead, pointing at the fix.
+/// Falls back to Git's default path, not bare `bash`, which Windows resolves to the WSL launcher.
 #[cfg(windows)]
 pub fn program() -> std::ffi::OsString {
     usable_bash()

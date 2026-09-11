@@ -1232,34 +1232,33 @@ fn tool_part(
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
     if repo.exists() {
         validate_worktree(repo)?;
-    } else if bare.join("HEAD").is_file() {
-        // A kept origin carries the experiment this install was seeded with.
-        let parent = repo
-            .parent()
-            .ok_or_else(|| anyhow!("demo repository has no parent directory"))?;
-        std::fs::create_dir_all(parent)?;
-        super::git::restore_local_repository(repo, bare, "main")?;
-        validate_worktree(repo)?;
     } else {
         let parent = repo
             .parent()
             .ok_or_else(|| anyhow!("demo repository has no parent directory"))?;
         std::fs::create_dir_all(parent)?;
-        let tmp = parent.join(format!(".nanochat-demo-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&tmp)?;
-        let result = build_worktree(&tmp)
-            .and_then(|_| validate_worktree(&tmp))
-            .and_then(|_| match std::fs::rename(&tmp, repo) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    validate_worktree(repo)
-                }
-                Err(error) => Err(anyhow!("could not install demo repository: {error}")),
-            });
-        if result.is_err() {
-            let _ = std::fs::remove_dir_all(&tmp);
+        if bare.join("HEAD").is_file() {
+            // A kept origin carries the experiment this install was seeded with.
+            validate_bare_origin(bare)?;
+            super::git::restore_local_repository(repo, bare, "main")?;
+            validate_worktree(repo)?;
+        } else {
+            let tmp = parent.join(format!(".nanochat-demo-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp)?;
+            let result = build_worktree(&tmp)
+                .and_then(|_| validate_worktree(&tmp))
+                .and_then(|_| match std::fs::rename(&tmp, repo) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        validate_worktree(repo)
+                    }
+                    Err(error) => Err(anyhow!("could not install demo repository: {error}")),
+                });
+            if result.is_err() {
+                let _ = std::fs::remove_dir_all(&tmp);
+            }
+            result?;
         }
-        result?;
     }
     ensure_follow_up_branches(repo)?;
     ensure_local_origin(repo, bare)?;
@@ -1288,17 +1287,13 @@ fn build_worktree(root: &Path) -> Result<()> {
     git(root, &["-c", "init.defaultObjectFormat=sha1", "init"])?;
     git(root, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
     git(root, &["config", "core.autocrlf", "false"])?;
-    // NTFS reports every file as 0644, so trusting the filesystem would make the
-    // exec bit set below read as a permanent local modification and block the
-    // checkout back to main. The index is the authority instead.
+    // NTFS reports every file as 0644; the index, not the filesystem, owns the exec bit.
     #[cfg(windows)]
     git(root, &["config", "core.filemode", "false"])?;
     #[cfg(not(windows))]
     git(root, &["config", "core.filemode", "true"])?;
     git(root, &["add", "-A"])?;
-    // NTFS has no executable bit, so on Windows the mode reaches the tree only
-    // through the index — and without it the commit ids drift off the hardcoded
-    // BASELINE_SHA/EXPERIMENT_SHA the demo validates itself against.
+    // Without the exec bit in the index, commit ids drift off BASELINE_SHA/EXPERIMENT_SHA.
     git(root, &["update-index", "--chmod=+x", "runs/runcpu.sh"])?;
     commit(root, "Import nanochat demo baseline")?;
     git(root, &["checkout", "-b", BRANCH])?;

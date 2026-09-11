@@ -438,7 +438,8 @@ pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Resu
     }
 }
 
-/// `mklink /J` is the only junction maker short of reparse-point FFI.
+/// `mklink /J` is the only junction maker short of reparse-point FFI; quoting holds
+/// because a Windows path cannot contain `"`.
 #[cfg(windows)]
 fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
     use std::os::windows::process::CommandExt;
@@ -505,6 +506,10 @@ mod hard_link_tests {
         prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
         assert!(same_file::is_same_file(&destination, &source).unwrap());
         assert!(!legacy.join(".config.toml.orx-backup").exists());
+        assert!(!std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         std::fs::remove_dir_all(root).ok();
     }
 }

@@ -806,7 +806,7 @@ async fn main() {
     let mut cli = Cli::parse();
     // Double-clicked from Explorer: start the dashboard, as the macOS .app does.
     if cli.command.is_none() && owns_its_console() {
-        cli = Cli::parse_from(["orx", "up"]);
+        cli.command = Cli::parse_from(["orx", "up"]).command;
     }
     let Some(command) = cli.command else {
         // Bare `orx`: print the command overview to stdout and exit 0.
@@ -907,7 +907,7 @@ fn owns_its_console() -> bool {
     false
 }
 
-/// That console closes with the process, so repeat the error where it survives.
+/// A double-clicked exe's console closes with it, so repeat the error in a dialog.
 #[cfg(windows)]
 fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};

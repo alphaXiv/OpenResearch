@@ -1201,10 +1201,8 @@ pub(crate) fn restore_local_repository(
     let origin_arg = origin.to_string_lossy().into_owned();
     let result: Result<()> = (|| {
         git(None, &["init", "--quiet", &tmp_arg])?;
-        // Git for Windows' system config turns autocrlf on, which would check
-        // out CRLF against LF blobs. Every later read of this clone disables
-        // system and global config, so it would then read as permanently dirty
-        // and the demo would reject the cache it had just restored.
+        // Git for Windows' system config turns autocrlf on; later reads ignore that config,
+        // so a CRLF checkout would look permanently dirty and the demo would reject it.
         git(Some(&tmp), &["config", "core.autocrlf", "false"])?;
         git(Some(&tmp), &["config", "core.eol", "lf"])?;
         git(Some(&tmp), &["remote", "add", "origin", &origin_arg])?;
@@ -1499,14 +1497,13 @@ pub fn prepare_shallow_repository_for_publication(repo_path: &Path) -> Result<bo
     Ok(true)
 }
 
-/// git's own ssh invocation, with multiplexing turned off where the platform
-/// cannot do it — a ControlPath from the user's ssh_config would otherwise fail
-/// the connection (see `jobs::ssh::multiplexing_opts`).
 #[cfg(unix)]
 fn git_ssh_command(base: &str) -> String {
     base.to_string()
 }
 
+/// Multiplexing off: a ControlPath from the user's ssh_config would fail the connection
+/// (see `jobs::ssh::multiplexing_opts`).
 #[cfg(not(unix))]
 fn git_ssh_command(base: &str) -> String {
     format!("{base} -oControlMaster=no -oControlPath=none")

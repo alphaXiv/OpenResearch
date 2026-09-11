@@ -7678,9 +7678,8 @@ const PATH_GUARD: &str =
      export PATH=\"$ORX_BIN_DIR${PATH:+:$PATH}\"\n\
      fi\n";
 
-/// Directory holding the running `orx`. A relative directory, or one carrying
-/// the platform's own `PATH` separator, is dropped rather than fronted: neither
-/// can be spelled in a `PATH` entry, and an empty one would mean the agent's cwd.
+/// Directory holding the running `orx`; None if relative or containing the PATH separator,
+/// neither of which can be a PATH entry.
 fn orx_bin_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     // A rebuild under a live `orx up` leaves current_exe unresolvable on Linux;
@@ -7790,9 +7789,8 @@ pub fn set_chat_session_env(
             cmd.env_remove(UP_AUTH_TOKEN_ENV);
         }
     }
-    // PATH_GUARD reads this into a `:`-joined PATH, which a drive letter splits
-    // in two. prepare_env still fronts the directory on Windows, but nothing
-    // re-fronts it once the user's own startup files have run.
+    // PATH_GUARD joins on `:`, which a drive letter splits; on Windows only prepare_env's
+    // fronting applies.
     #[cfg(windows)]
     cmd.env_remove(BIN_DIR_ENV);
     #[cfg(not(windows))]

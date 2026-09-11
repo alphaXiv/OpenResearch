@@ -3,10 +3,9 @@
 //! No scheduler: the target is a plain server you can `ssh` into. Everything
 //! shells out to the `ssh` binary (like the k8s backend shells out to
 //! `kubectl`), so auth is your `~/.ssh/config` + agent/keys — orx never reads a
-//! key. On unix connections are multiplexed (ControlMaster) so the many
-//! status/log polls reuse one TCP session instead of a handshake apiece.
-//! Win32-OpenSSH cannot, so on Windows every call authenticates for itself —
-//! which needs a key in the agent, or one without a passphrase.
+//! key. Connections are multiplexed (ControlMaster) so the many status/log
+//! polls reuse one TCP session instead of a handshake apiece.
+//! Win32-OpenSSH cannot multiplex, so on Windows each call authenticates for itself.
 //!
 //! The handle is a remote run directory `~/.orx/runs/<run_id>/` holding:
 //!   run.sh      the launcher (exported env + snapshot-and-run payload)
@@ -132,12 +131,12 @@ impl SshTarget {
     }
 }
 
-/// Windows' OpenSSH has no `/dev/null`, and would create a `\dev\null` on the current drive.
 #[cfg(unix)]
 fn discarded_known_hosts() -> PathBuf {
     PathBuf::from("/dev/null")
 }
 
+/// Windows' OpenSSH has no `/dev/null`, and would create a `\dev\null` on the current drive.
 #[cfg(not(unix))]
 fn discarded_known_hosts() -> std::path::PathBuf {
     crate::config::config_dir().join("ephemeral-known-hosts")
@@ -154,10 +153,7 @@ fn control_path(target: &SshTarget) -> PathBuf {
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
-/// Shared ssh options: connection setup permits prompts; background work never
-/// does. On unix both modes share one control socket, kept for ten idle
-/// minutes, so a single interactive login covers later status, log and job
-/// commands.
+/// Shared ssh options: setup may prompt, background work never does; on unix both share one socket.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
@@ -182,10 +178,8 @@ fn multiplexing_opts(target: &SshTarget) -> Vec<String> {
     ]
 }
 
-/// Win32-OpenSSH has no multiplexing (PowerShell/Win32-OpenSSH#1328), and on
-/// the builds reported there a ControlPath inherited from the user's own
-/// ssh_config fails the connection with "getsockname failed: Not a socket".
-/// Only setting them explicitly overrides that config; omitting them does not.
+/// Win32-OpenSSH cannot multiplex, and a ControlPath inherited from ssh_config fails the
+/// connection ("getsockname failed: Not a socket"); only explicit opts override it.
 #[cfg(not(unix))]
 fn multiplexing_opts(_target: &SshTarget) -> Vec<String> {
     vec![
@@ -420,7 +414,6 @@ pub struct SshJobSpec {
 /// the remote run dir (relative to `$HOME`) — the reattach handle.
 pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
     let dir = format!(".orx/runs/{}", spec.run_id);
-    // Default the job's Python env (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
@@ -615,23 +608,17 @@ mod tests {
         // EXACT vector so the openresearch backend (which relies on this shape,
         // incl. LogLevel=ERROR and ordering) can't silently drift.
         let t = SshTarget::host_port("root@h".into(), 2222, HostKeyPolicy::Ephemeral);
-        assert_eq!(
-            t.extra_opts,
-            vec![
-                "-p",
-                "2222",
-                "-o",
-                "StrictHostKeyChecking=no",
-                "-o",
-                &format!("UserKnownHostsFile={}", discarded_known_hosts().display()),
-                "-o",
-                "LogLevel=ERROR",
-            ]
-        );
+        let (head, known_hosts, tail) = (&t.extra_opts[..5], &t.extra_opts[5], &t.extra_opts[6..]);
+        assert_eq!(head, ["-p", "2222", "-o", "StrictHostKeyChecking=no", "-o"]);
+        assert_eq!(tail, ["-o", "LogLevel=ERROR"]);
+        // Not recomputed: on Windows it follows XDG_CONFIG_HOME, which telemetry tests mutate.
         #[cfg(unix)]
-        assert_eq!(discarded_known_hosts(), PathBuf::from("/dev/null"));
+        assert_eq!(known_hosts, "UserKnownHostsFile=/dev/null");
         #[cfg(not(unix))]
-        assert!(discarded_known_hosts().starts_with(crate::config::config_dir()));
+        assert!(
+            known_hosts.starts_with("UserKnownHostsFile=")
+                && known_hosts.ends_with("ephemeral-known-hosts")
+        );
     }
 
     #[cfg(unix)]

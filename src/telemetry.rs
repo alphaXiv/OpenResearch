@@ -1707,12 +1707,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Read one whole HTTP request off `stream`.
-    ///
-    /// Load-bearing, not a convenience: closing a socket that still holds
-    /// unread data aborts the connection on Windows rather than closing it
-    /// gracefully, and the client sees a reset instead of the reply it was
-    /// already sent.
+    /// Read one whole HTTP request off `stream`: on Windows, closing with unread data
+    /// resets the connection and the client never sees the reply.
     async fn drain_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
         use tokio::io::AsyncReadExt as _;
 

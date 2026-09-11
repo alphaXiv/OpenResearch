@@ -63,9 +63,7 @@ pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
 }
 
-/// Where `binary` lives inside `dir`, if anywhere. The installer drop locations
-/// the harnesses fall back to are written as bare names, which name no file at
-/// all on Windows.
+/// Where `binary` lives inside `dir`, trying the PATHEXT spellings a bare name lacks on Windows.
 pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
     candidate_names(binary)
         .into_iter()
@@ -95,9 +93,7 @@ fn candidate_names(binary: &str) -> Vec<String> {
     vec![binary.to_string()]
 }
 
-/// A Windows executable carries an extension from PATHEXT and an npm-installed
-/// CLI ships a `.cmd` shim, so the bare name every harness looks for — `claude`,
-/// `codex`, `opencode` — matches nothing and the picker reports them all absent.
+/// Windows executables carry a PATHEXT extension and npm CLIs ship `.cmd` shims, so try those.
 #[cfg(windows)]
 fn candidate_names(binary: &str) -> Vec<String> {
     // Already extended (`bash.exe`): taken as written, the way cmd.exe does.

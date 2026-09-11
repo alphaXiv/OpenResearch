@@ -2909,9 +2909,7 @@ fn duplicate_file_name(name: &str, number: usize) -> String {
     }
 }
 
-/// Relative paths cross the API `/`-separated, the way the dashboard sends them
-/// in. A Windows `PathBuf` renders with backslashes, and the next request would
-/// carry those straight back.
+/// API paths are `/`-separated; a Windows `PathBuf` would send backslashes back.
 #[cfg(windows)]
 fn api_rel_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")

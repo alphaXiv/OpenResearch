@@ -43,7 +43,6 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
     let dir = run_dir(&spec.run_id);
     std::fs::create_dir_all(&dir)
         .map_err(|e| anyhow!("Could not create {}: {}", dir.display(), e))?;
-    // Default the job's Python env (see jobs::default_python_env).
     let env = super::default_python_env(&spec.env);
     let exports: String = env
         .iter()
@@ -112,10 +111,7 @@ fn pid_alive(pid: &str) -> bool {
     }
 }
 
-/// Windows has no `ps`, and every run would otherwise read as dead the moment
-/// it was submitted. A zero-timeout wait rather than `GetExitCodeProcess`: a
-/// process that genuinely exits with 259 is indistinguishable from a live one
-/// through the exit code.
+/// Windows has no `ps`. Waits rather than reading the exit code, where a real 259 reads as live.
 #[cfg(windows)]
 fn pid_alive(pid: &str) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
@@ -219,9 +215,7 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
     Ok(seen)
 }
 
-/// Cancel = TERM the process group (pid == pgid under `process_group(0)`),
-/// falling back to the pid alone if the group kill is refused; Windows has no
-/// group, so the tree is walked instead.
+/// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
@@ -236,14 +230,10 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
     }
 }
 
-/// Windows has no process group to signal, so the tree is walked instead:
-/// `/T` takes the children a cancelled run leaves behind — the python the
-/// launcher started — which is the whole point of TERMing the group on unix.
+/// `/T` also kills the python the launcher started, as TERMing the group does on unix.
 #[cfg(windows)]
 fn terminate_tree(pid: &str) -> Result<()> {
-    // `/T` reports a non-zero status when any descendant has already exited on
-    // its own, which says nothing about the run. Whether the leader is still
-    // alive does, so that is what the outcome is read from.
+    // `/T` fails if any descendant already exited, so success is read from the leader's liveness.
     let _ = std::process::Command::new("taskkill")
         .args(["/PID", pid, "/T", "/F"])
         .stdout(std::process::Stdio::null())

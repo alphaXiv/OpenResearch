@@ -1,14 +1,5 @@
-//! Canonicalization that stays usable outside this process.
-//!
-//! Windows `canonicalize` answers with a verbatim `\\?\C:\…` path, which
-//! `CreateProcessW` rejects as a working directory — so a session whose
-//! checkout root came straight from it cannot run git at all. Codex receives
-//! canonicalized paths as sandbox roots and the dashboard shows them to the
-//! user, both of which want the plain spelling too.
-//!
-//! Every canonicalization in the crate goes through here, because containment
-//! checks compare a canonicalized child against a canonicalized root and a mix
-//! of the two spellings denies paths that are genuinely inside.
+//! Canonicalization minus Windows' `\\?\` prefix, which `CreateProcessW` rejects as a cwd.
+//! Every canonicalization goes through here so containment checks compare one spelling.
 
 #[cfg(windows)]
 use std::path::{Component, Prefix};
@@ -24,9 +15,7 @@ fn plain(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Matched on the parsed prefix rather than the string: a name that is not
-/// valid UTF-8 has no `to_str`, and skipping it there would leave that one path
-/// verbatim while the root it is checked against is not.
+/// Matched on the parsed prefix: a non-UTF-8 path has no `to_str` and would stay verbatim.
 #[cfg(windows)]
 fn plain(path: PathBuf) -> PathBuf {
     let mut components = path.components();

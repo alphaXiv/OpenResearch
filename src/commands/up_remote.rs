@@ -1771,12 +1771,8 @@ fn parse_remote_install_paths(output: &str) -> Option<RemoteInstallPaths> {
     })
 }
 
-/// The parent directory of a path on the *remote* machine.
-///
-/// Checked as a string, not a `Path`: the remote is POSIX whatever this client
-/// runs on, so `is_absolute` under Windows rules would reject every legitimate
-/// remote path — and the `PathBuf` it returned would then reach a Linux shell
-/// separated by backslashes.
+/// The parent directory of a path on the *remote* machine, checked as a string: the remote
+/// is POSIX, and Windows `Path` rules would reject it or rejoin it with backslashes.
 fn storage_root(path: &str, filename: &str, label: &str) -> Result<String> {
     if !path.starts_with('/') || path.split('/').any(|part| part == "." || part == "..") {
         return Err(anyhow!("{label} must be an absolute path without . or .."));

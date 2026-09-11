@@ -1,9 +1,7 @@
 //! Persistent SSH remote host and its private same-user control channel.
 
-// The control channel is a Unix domain socket, so Windows compiles that half of
-// the module out. Its entry points are gated; the constants, request types and
-// imports only they reach are left in place rather than gated one by one, since
-// the half returns intact once the channel has a Windows transport.
+// Windows compiles out the Unix-socket half; what only it reaches stays ungated, since the
+// half returns intact once the channel has a Windows transport.
 #![cfg_attr(not(unix), allow(dead_code, unused_imports))]
 
 use std::collections::HashSet;
@@ -261,9 +259,7 @@ impl ControlServer {
     }
 }
 
-/// Attaching to a persistent host talks over a Unix domain socket, so on
-/// Windows `orx up` serves locally and `--remote-host` is refused rather than
-/// starting a host nothing can attach to.
+/// No Unix sockets on Windows: refuse `--remote-host` rather than start a host nothing can reach.
 #[cfg(not(unix))]
 pub(crate) async fn start_control_server(
     _descriptor: HostDescriptor,
