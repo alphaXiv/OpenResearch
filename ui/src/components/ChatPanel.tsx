@@ -3076,14 +3076,18 @@ function AssistantTurn({ message, parts, options }: {
       <div className="turn-work mb-4">
         <button
           type="button"
-          className="flex w-full items-center gap-2 border-b border-border pb-3 text-start text-sm text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
         >
           <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
-          <ChevronRight size={14} className={`shrink-0 transition-transform duration-120 ease-standard ${expanded ? "rotate-90" : ""}`} />
+          <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
         </button>
-        {expanded && <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>}
+        <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
+          <div className="tool-group-disclosure-inner">
+            <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>
+          </div>
+        </div>
       </div>
       <div className="turn-answer">{renderParts(answer, options)}</div>
     </>
