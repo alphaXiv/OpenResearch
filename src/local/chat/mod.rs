@@ -652,6 +652,7 @@ pub fn find_part_mut<'a>(parts: &'a mut [WirePart], id: &str) -> Option<&'a mut 
 pub fn upsert_preserving_children(parts: &mut Vec<WirePart>, mut part: WirePart) {
     match parts.iter_mut().find(|p| p.id == part.id) {
         Some(existing) => {
+            part.phase = part.phase.or(existing.phase);
             if part.children.is_empty() {
                 part.children = std::mem::take(&mut existing.children);
             }
@@ -822,6 +823,13 @@ pub struct WirePrompt {
     pub annotations: Vec<TextAnnotation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WirePart {
@@ -830,6 +838,8 @@ pub struct WirePart {
     pub kind: String, // text | reasoning | tool | prompt | steer
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<MessagePhase>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -855,6 +865,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }
     }
@@ -913,6 +924,7 @@ impl WirePart {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }
     }
@@ -926,6 +938,7 @@ impl WirePart {
             tool: None,
             state: None,
             prompt: Some(prompt),
+            phase: None,
             children: Vec::new(),
         }
     }
@@ -1072,6 +1085,7 @@ pub struct WireMessage {
     pub role: String,
     pub parts: Vec<WirePart>,
     pub created_at: i64,
+    pub completed_at: Option<i64>,
     /// Position on the transcript tree. None is a branch root; siblings sharing
     /// a parent are the forks of one turn.
     #[serde(default)]
@@ -1119,6 +1133,7 @@ pub(crate) fn stored_to_wire(m: &StoredChatMessage) -> WireMessage {
         role: m.role.clone(),
         parts: serde_json::from_str(&m.parts_json).unwrap_or_default(),
         created_at: m.created_at,
+        completed_at: m.completed_at,
         parent_id: m.parent_id.clone(),
     };
     cap_tool_parts(&mut message.parts);
@@ -1479,6 +1494,7 @@ impl ChatHost {
             role: "user".into(),
             parts: vec![part],
             created_at: now_ms(),
+            completed_at: None,
             parent_id: None,
         };
         message.parent_id = store.upsert_chat_message_on_branch(&StoredChatMessage {
@@ -1487,6 +1503,7 @@ impl ChatHost {
             role: "user".into(),
             parts_json: serde_json::to_string(&message.parts)?,
             created_at: message.created_at,
+            completed_at: message.completed_at,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -1522,6 +1539,7 @@ mod shell_command_tests {
             role: "user".into(),
             parts: vec![part],
             created_at: 1,
+            completed_at: None,
             parent_id: parent.map(str::to_string),
         }
     }
@@ -1532,6 +1550,7 @@ mod shell_command_tests {
             role: role.into(),
             parts: vec![WirePart::text("p0", "hi")],
             created_at: 1,
+            completed_at: None,
             parent_id: parent.map(str::to_string),
         }
     }
@@ -1543,6 +1562,7 @@ mod shell_command_tests {
             role: message.role.clone(),
             parts_json: serde_json::to_string(&message.parts).unwrap(),
             created_at: message.created_at,
+            completed_at: message.completed_at,
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
@@ -2945,6 +2965,7 @@ impl ChatHost {
             role: "assistant".into(),
             parts: vec![WirePart::prompt(prompt_id.clone(), prompt)],
             created_at: now_ms(),
+            completed_at: None,
             parent_id: None,
         };
         msg.parent_id = Store::open()?.upsert_chat_message_on_branch(&StoredChatMessage {
@@ -2953,6 +2974,7 @@ impl ChatHost {
             role: "assistant".into(),
             parts_json: serde_json::to_string(&msg.parts)?,
             created_at: msg.created_at,
+            completed_at: msg.completed_at,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -4062,8 +4084,11 @@ impl ChatHost {
                         role: "assistant".into(),
                         parts: Vec::new(),
                         created_at: turn.created_at,
+                        completed_at: None,
                         parent_id: None,
                     });
+                assistant.completed_at = None;
+                assistant.created_at = now_ms();
                 assistant.parts.retain(|part| {
                     !(matches!(part.id.as_str(), "turn-retry" | "turn-recovery")
                         || part.tool.as_deref() == Some("error")
@@ -4081,7 +4106,7 @@ impl ChatHost {
                 {
                     *reserved = Some(turn_id.to_string());
                 }
-                if !store.reset_chat_turn_for_retry(turn_id)? {
+                if !store.reset_chat_turn_for_retry(turn_id, assistant.created_at)? {
                     return Err(anyhow!("this recovery action is no longer available"));
                 }
                 let plan_state = settings.plan_mode.map(|plan_mode| {
@@ -4107,6 +4132,7 @@ impl ChatHost {
                             role: assistant.role.clone(),
                             parts_json: assistant_parts,
                             created_at: assistant.created_at,
+                            completed_at: assistant.completed_at,
                             parent_id: assistant.parent_id.clone(),
                             base_native_session_id: None,
                             result_native_session_id: None,
@@ -4218,6 +4244,7 @@ impl ChatHost {
                         role: failed_assistant.role.clone(),
                         parts_json: serde_json::to_string(&failed_assistant.parts)?,
                         created_at: failed_assistant.created_at,
+                        completed_at: failed_assistant.completed_at,
                         parent_id: failed_assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
@@ -4910,6 +4937,7 @@ impl ChatHost {
                 role: "user".into(),
                 parts,
                 created_at: now_ms(),
+                completed_at: None,
                 parent_id: session.active_leaf_id.clone(),
             })
         };
@@ -4959,6 +4987,7 @@ impl ChatHost {
                     role: message.role.clone(),
                     parts_json: serde_json::to_string(&message.parts)?,
                     created_at: message.created_at,
+                    completed_at: message.completed_at,
                     parent_id: message.parent_id.clone(),
                     base_native_session_id: session.native_session_id.clone(),
                     result_native_session_id: None,
@@ -5050,6 +5079,7 @@ impl ChatHost {
                 role: "assistant".into(),
                 parts: Vec::new(),
                 created_at: now_ms(),
+                completed_at: None,
                 parent_id: None,
             },
         );
@@ -5181,6 +5211,7 @@ impl ChatHost {
             } else {
                 false
             };
+            ctx.assistant.completed_at = Some(now_ms());
             let _ = ctx.flush();
             if let Some(path) = ctx.target_event_path.as_ref() {
                 let _ = std::fs::remove_file(path);
@@ -5322,6 +5353,7 @@ impl ChatHost {
                 let _ = store.interrupt_chat_turn(&active.turn_id);
                 if let Ok(Some(stored)) = store.get_chat_message(&active.message_id) {
                     let mut assistant = stored_to_wire(&stored);
+                    assistant.completed_at = Some(now_ms());
                     assistant.parts.retain(|part| part.id != "turn-retry");
                     let _ = store.upsert_chat_message(&StoredChatMessage {
                         id: assistant.id.clone(),
@@ -5329,6 +5361,7 @@ impl ChatHost {
                         role: assistant.role.clone(),
                         parts_json: serde_json::to_string(&assistant.parts).unwrap_or_default(),
                         created_at: assistant.created_at,
+                        completed_at: assistant.completed_at,
                         parent_id: assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
@@ -5421,6 +5454,7 @@ impl ChatHost {
                 None,
             )],
             created_at,
+            completed_at: None,
             parent_id: None,
         };
         // Marker persistence is best-effort: the abort already happened, and an
@@ -5436,6 +5470,7 @@ impl ChatHost {
                     role: "assistant".into(),
                     parts_json: json,
                     created_at: msg.created_at,
+                    completed_at: msg.completed_at,
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
@@ -6067,6 +6102,7 @@ fn mark_prompt_resolved(
                 role: msg.role.clone(),
                 parts,
                 created_at: msg.created_at,
+                completed_at: msg.completed_at,
                 parent_id: msg.parent_id.clone(),
             }));
         }
@@ -6113,6 +6149,7 @@ fn resolve_stale_prompts(
                 role: msg.role,
                 parts,
                 created_at: msg.created_at,
+                completed_at: msg.completed_at,
                 parent_id: msg.parent_id,
             });
         }
@@ -6548,6 +6585,7 @@ impl TurnCtx {
                         role: self.assistant.role.clone(),
                         parts_json,
                         created_at: self.assistant.created_at,
+                        completed_at: self.assistant.completed_at,
                         parent_id: self.assistant.parent_id.clone(),
                         base_native_session_id: None,
                         result_native_session_id: None,
@@ -6642,6 +6680,7 @@ impl TurnCtx {
                 role: "assistant".into(),
                 parts: Vec::new(),
                 created_at: 0,
+                completed_at: None,
                 parent_id: None,
             },
             context_usage: None,
@@ -6816,6 +6855,18 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
+    pub fn mark_final_text(&mut self, matches: impl Fn(&WirePart) -> bool) {
+        for part in &mut self.assistant.parts {
+            if part.kind == "text" {
+                part.phase = Some(if matches(part) {
+                    MessagePhase::FinalAnswer
+                } else {
+                    MessagePhase::Commentary
+                });
+            }
+        }
+    }
+
     pub fn append_part_text(&mut self, part_id: &str, delta: &str) {
         self.clear_retry_status();
         if let Some(part) = self.assistant.parts.iter_mut().find(|p| p.id == part_id) {
@@ -6911,6 +6962,7 @@ impl TurnCtx {
                 role: wire_assistant.role.clone(),
                 parts_json: serde_json::to_string(&wire_assistant.parts)?,
                 created_at: wire_assistant.created_at,
+                completed_at: wire_assistant.completed_at,
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: self.native_session_id.clone(),
@@ -7125,6 +7177,7 @@ fn materialize_unfinished_turns(
                 role: "assistant".into(),
                 parts: Vec::new(),
                 created_at: turn.created_at,
+                completed_at: None,
                 parent_id: turn.user_message_id.clone(),
             });
         message.parts.retain(|part| part.id != "turn-retry");
@@ -7148,6 +7201,7 @@ fn materialize_unfinished_turns(
             role: message.role.clone(),
             parts_json: serde_json::to_string(&message.parts)?,
             created_at: message.created_at,
+            completed_at: message.completed_at,
             parent_id: message.parent_id.clone(),
             base_native_session_id: None,
             result_native_session_id: None,
@@ -8234,6 +8288,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         };
         // A spawn part whose sub-agent transcript (a child) has huge output.
@@ -8285,6 +8340,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }];
 
@@ -8393,6 +8449,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }];
 
@@ -8427,6 +8484,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         };
         let mut parts = vec![make_part("one"), make_part("two")];
@@ -8464,6 +8522,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         };
         let mut parts = vec![make_part("one", "/one"), make_part("two", "/two")];
@@ -8501,6 +8560,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }];
 
@@ -8529,6 +8589,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }];
         let replacement = WirePart {
@@ -8544,6 +8605,7 @@ mod cap_tests {
                 title: None,
             }),
             prompt: None,
+            phase: None,
             children: Vec::new(),
         };
 
@@ -8662,6 +8724,7 @@ mod bridge_tests {
             tool: Some("Task".into()),
             state: None,
             prompt: None,
+            phase: None,
             children: vec![WirePart::prompt(
                 "permission",
                 WirePrompt {
@@ -9043,6 +9106,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             parts_json: serde_json::to_string(&[WirePart::text(format!("{id}-part"), text)])
                 .unwrap(),
             created_at: 1,
+            completed_at: None,
             parent_id: parent.map(str::to_string),
             base_native_session_id: None,
             result_native_session_id: None,
@@ -9231,6 +9295,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
                 role: "assistant".into(),
                 parts_json: serde_json::to_string(&parts).unwrap(),
                 created_at: 1,
+                completed_at: None,
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
@@ -9262,6 +9327,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
                 role: "assistant".into(),
                 parts_json: "[]".into(),
                 created_at: 2,
+                completed_at: None,
                 parent_id: Some("a1".into()),
                 base_native_session_id: None,
                 result_native_session_id: None,
@@ -9385,6 +9451,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
                 role: "assistant".into(),
                 parts_json: serde_json::to_string(&[WirePart::text("p", "Rank 8 wins.")]).unwrap(),
                 created_at: 1,
+                completed_at: None,
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
@@ -9617,6 +9684,7 @@ mod transcript_tree_tests {
             role: role.into(),
             parts_json: "[]".into(),
             created_at: 0,
+            completed_at: None,
             parent_id: parent.map(Into::into),
             base_native_session_id: None,
             result_native_session_id: None,

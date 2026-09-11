@@ -65,3 +65,23 @@ export function unreadAfterBusyChange(
   if (visibleSessionId) next.delete(visibleSessionId);
   return next;
 }
+
+export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
+  // Keep unanswered prompts in the visible conversation.
+  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
+    return { work: [], answer: parts };
+  }
+  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer");
+  if (finalIndex < 0 && !streaming && !parts.some((part) => part.phase)) {
+    // Older transcripts have no phase: only the trailing text can be the answer.
+    for (let index = parts.length - 1; index >= 0; index--) {
+      const part = parts[index];
+      if (part.type === "reasoning") continue;
+      if (part.type !== "text") break;
+      if (part.text) finalIndex = index;
+    }
+  }
+  return finalIndex < 0 || (!streaming && !parts.slice(finalIndex).some((part) => partIsVisible(part))) || !parts.slice(0, finalIndex).some((part) => partIsVisible(part))
+    ? { work: [], answer: parts }
+    : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
+}

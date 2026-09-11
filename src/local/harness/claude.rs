@@ -1244,6 +1244,7 @@ fn apply_subagent_blocks(
                             title: None,
                         }),
                         prompt: None,
+                        phase: None,
                         children: Vec::new(),
                     },
                 );
@@ -1288,8 +1289,19 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                             Some(p) => {
                                 state.sub_stream_mid.insert(p.to_string(), mid.to_string());
                             }
-                            None => state.stream_mid = Some(mid.to_string()),
+                            None => {
+                                ctx.mark_final_text(|_| false);
+                                state.stream_mid = Some(mid.to_string());
+                            }
                         }
+                    }
+                }
+                Some("message_delta") if parent.is_none() => {
+                    if inner.pointer("/delta/stop_reason").and_then(Value::as_str)
+                        == Some("end_turn")
+                        && state.pending_tasks.is_empty()
+                    {
+                        mark_stream_final(ctx, state);
                     }
                 }
                 Some("content_block_delta") => {
@@ -1524,6 +1536,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                     title: None,
                                 }),
                                 prompt: None,
+                                phase: None,
                                 children: Vec::new(),
                             });
                         }
@@ -1647,11 +1660,21 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             if !state.pending_tasks.is_empty() {
                 return false;
             }
+            if !is_error {
+                mark_stream_final(ctx, state);
+            }
             return true;
         }
         _ => {}
     }
     false
+}
+
+fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
+    if let Some(mid) = state.stream_mid.as_deref() {
+        let prefix = format!("{mid}-");
+        ctx.mark_final_text(|part| part.id.starts_with(&prefix));
+    }
 }
 
 /// Sum the four token buckets of a Claude `usage` object into the context-window
@@ -2467,6 +2490,33 @@ mod tests {
             }
         }
         state
+    }
+
+    #[test]
+    fn final_phase_waits_for_native_end_turn() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        ctx.upsert_part(WirePart::text("progress-0", "Reading"));
+        for event in [
+            serde_json::json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"answer"}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done"}}}),
+        ] {
+            apply_event(&mut ctx, &mut state, &event);
+        }
+        assert_eq!(ctx.assistant.parts[1].phase, None);
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}),
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[1].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
     }
 
     #[test]

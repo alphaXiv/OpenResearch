@@ -90,6 +90,7 @@ import {
   respondChat,
   selectChatBranch,
   runShellCommand,
+  fmtDuration,
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
@@ -109,6 +110,7 @@ import {
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
+  splitTurnParts,
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
@@ -3023,7 +3025,7 @@ const Message = memo(function Message({
     : message.parts;
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
-      {renderParts(regularParts, {
+      <AssistantTurn message={message} parts={regularParts} options={{
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3036,7 +3038,7 @@ const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      })}
+      }} />
       {turnStatus && (
         <TurnStatusRow
           part={turnStatus}
@@ -3048,6 +3050,45 @@ const Message = memo(function Message({
     </div>
   );
 });
+
+function AssistantTurn({ message, parts, options }: {
+  message: ChatMessage;
+  parts: ChatPart[];
+  options: Parameters<typeof renderParts>[1];
+}) {
+  const streaming = options.predictTextTail ?? false;
+  const { work, answer } = splitTurnParts(parts, streaming);
+  const [expanded, setExpanded] = useState(false);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!streaming || message.completedAt != null || work.length === 0) return;
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [streaming, message.completedAt, work.length]);
+  if (work.length === 0) return <>{renderParts(answer, options)}</>;
+  const end = message.completedAt ?? (streaming ? Date.now() : null);
+  const elapsed = end === null ? null : end - message.createdAt;
+  const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
+    ? fmtDuration(elapsed)
+    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  return (
+    <>
+      <div className="turn-work mb-4">
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 border-b border-border pb-3 text-start text-sm text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          <ChevronRight size={14} className={`shrink-0 transition-transform duration-120 ease-standard ${expanded ? "rotate-90" : ""}`} />
+        </button>
+        {expanded && <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>}
+      </div>
+      <div className="turn-answer">{renderParts(answer, options)}</div>
+    </>
+  );
+}
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
   const part = message.parts.length === 1 ? message.parts[0] : undefined;
