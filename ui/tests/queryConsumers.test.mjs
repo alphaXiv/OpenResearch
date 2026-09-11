@@ -121,7 +121,7 @@ for (const [card, family, field, upload] of [
     const { QueryObserver } = await import("@tanstack/react-query");
     const { queryModules } = await import("./queryModules.mjs");
     let fail = false, calls = 0;
-    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return [{ name: "cached" }]; } }, { nativeClient: true });
+    const { client, load } = queryModules({ [family]: async () => { calls++; if (fail) throw new Error("offline"); return family === "listUserSkills" ? { skills: [{ name: "cached" }], importing: false } : [{ name: "cached" }]; } }, { nativeClient: true });
     const options = load("settings")[`${family}Query`]();
     await client.fetchQuery(options);
     const observer = new QueryObserver(client, options);
@@ -133,7 +133,7 @@ for (const [card, family, field, upload] of [
     const prefix = statements.slice(0, statements.findIndex(ts.isReturnStatement)).map((node) => node.getText(file)).join("\n");
     const render = () => evaluate(`${prefix}\nreturn { rows: ${field}, loadError, refresh: ${card === "SkillsCard" ? "refresh" : "() => templatesQuery.refetch()"} };`, {
       useQuery: () => observer.getCurrentResult(), useMutation: () => ({}),
-      useState: (value) => [value, () => {}], useCallback: (fn) => fn, useRef: (current) => ({ current }),
+      useLayoutEffect: () => {}, useState: (value) => [value, () => {}], useCallback: (fn) => fn, useRef: (current) => ({ current }),
       [`${family}Query`]: () => options, [upload]: () => {},
     });
     assert.equal(render().rows[0].name, "cached");

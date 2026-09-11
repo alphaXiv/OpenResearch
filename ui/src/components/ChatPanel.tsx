@@ -137,7 +137,7 @@ import { Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
-import { ComposerSkillChips, MessageWithChips } from "./SkillChips";
+import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
 import { SshConfigDialog } from "./SshConfigDialog";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStatus } from "./RemoteStatus";
@@ -2980,7 +2980,7 @@ const Message = memo(function Message({
         {annotations.length > 0 && (
           <AnnotationsPopover annotations={annotations} variant="sent" />
         )}
-        <div dir="auto" className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:me-0.5 [&_.skill-chip]:align-baseline">
+        <div dir="auto" className="msg-user max-w-full bg-surface rounded-[16px] py-2.5 px-[15px] text-base whitespace-pre-wrap wrap-anywhere [&_.skill-chip]:align-baseline">
           <MessageWithChips text={text} isCommand={isCommand} />
           {images.length > 0 && (
             <div className="msg-images flex flex-wrap gap-1.5 mt-2 [&_img]:max-w-55 [&_img]:max-h-40 [&_img]:border [&_img]:border-border-variant [&_img]:rounded-xs [&_img]:block">
@@ -4302,7 +4302,7 @@ export function ChatPanel({
   // Slash-skills: menu state is derived from the draft — open while the token
   // under the caret is an unfinished `/command` (no whitespace yet) with
   // matches, wherever in the message it was typed.
-  const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery());
+
   const [skillIdx, setSkillIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
   const [composerCursor, setComposerCursor] = useState(0);
@@ -4318,7 +4318,8 @@ export function ChatPanel({
     }
     // The command replaces the `/query` token in place, so the chip lands where
     // it was typed and the rest of the message stays untouched.
-    const next = insertSlashCommand(draft, slashContext, skill.name, 2);
+    const marginSpaces = skillMarginSpaces(skill.name, composerRef.current);
+    const next = insertSlashCommand(draft, slashContext, skill.name, marginSpaces);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
@@ -4330,12 +4331,15 @@ export function ChatPanel({
   /** Backspace just behind a chip deletes the whole command, the way the chip
    * it paints reads — a single object, not eight characters. */
   function deleteCommandBehindCaret(textarea: HTMLTextAreaElement): boolean {
+    if (typingCommand) return false;
     const cursor = textarea.selectionStart;
     if (composingRef.current || cursor !== textarea.selectionEnd) return false;
-    const context = slashCommandContext(draft, cursor);
-    if (!context || context.end !== cursor) return false;
+    const tokenEnd = draft.slice(0, cursor).replace(/[ \t]+$/, "").length;
+    const context = slashCommandContext(draft, tokenEnd);
+    if (!context || context.end !== tokenEnd) return false;
     if (!knownCommand(context.query)) return false;
-    const next = removeSlashCommand(draft, context);
+    if (cursor > tokenEnd && cursor - tokenEnd !== skillMarginSpaces(context.query, textarea)) return false;
+    const next = removeSlashCommand(draft, { ...context, end: cursor });
     setDraft(next.text);
     setComposerCursor(next.cursor);
     window.requestAnimationFrame(() =>
@@ -4415,6 +4419,7 @@ export function ChatPanel({
     : savedSelection
       ? { ...savedSelection, ...sessionOverride }
       : null;
+  const { data: skills = EMPTY_SKILLS } = useQuery(getSkillsQuery(rawSelection?.harness));
   const activeHarness = rawSelection
     ? harnesses.find((h) => h.id === rawSelection.harness)
     : undefined;
@@ -4429,16 +4434,19 @@ export function ChatPanel({
   const bashMode = shellCommand !== null;
   const slashContext = slashCommandContext(draft, composerCursor);
   const slashToken = slashContext?.query ?? null;
-  // Commands now live in the draft as text, so the menu also has to stay shut
-  // when the caret merely lands in or behind a name the user already finished —
-  // unless a longer command still extends it.
   const completions =
-    slashToken === null ? [] : commands.filter((command) => command.name.startsWith(slashToken));
+    slashToken === null
+      ? []
+      : commands.filter(
+          (command) =>
+            command.name.startsWith(slashToken) ||
+            (command.plugin && `${command.plugin}:${command.name}`.toLowerCase().startsWith(slashToken)),
+        );
   const typingCommand =
     !bashMode &&
     slashToken !== null &&
     slashContext?.end === composerCursor &&
-    completions.some((command) => command.name !== slashToken);
+    completions.length > 0;
   const skillMatches =
     typingCommand && !skillMenuDismissed ? completions : [];
   const skillMenuOpen = skillMatches.length > 0;
@@ -6223,22 +6231,6 @@ export function ChatPanel({
                     activatePlanCommand(v, completedCommand);
                     return;
                   }
-                  const completedSkill = completedCommand
-                    ? commands.find(
-                      (command) =>
-                        command.source !== "command" &&
-                        command.name === completedCommand.query,
-                    )
-                    : undefined;
-                  if (completedSkill && completedCommand) {
-                    const next = insertSlashCommand(v, completedCommand, completedSkill.name, 2);
-                    setDraft(next.text);
-                    window.requestAnimationFrame(() => {
-                      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
-                      setComposerCursor(next.cursor);
-                    });
-                    return;
-                  }
                   setDraft(v);
                   setSkillMenuDismissed(false);
                 }}
@@ -6291,6 +6283,7 @@ export function ChatPanel({
               * measures it. */}
               <ComposerSkillChips
                 text={draft}
+                editingTokenEnd={slashContext?.end}
                 isCommand={knownCommand}
                 skills={commands}
                 projectId={projectId}

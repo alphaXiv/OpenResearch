@@ -10,6 +10,17 @@ import {
   splitCommandTokens,
 } from "../src/planCommand.ts";
 
+test("a selected skill can be removed with its trailing composer spaces", () => {
+  const selected = insertSlashCommand("/deb", { start: 0, end: 4, query: "deb" }, "debate", 2);
+  const tokenEnd = selected.text.trimEnd().length;
+  const context = slashCommandContext(selected.text, tokenEnd);
+  assert.ok(context);
+  assert.deepEqual(removeSlashCommand(selected.text, { ...context, end: selected.cursor }), {
+    text: "",
+    cursor: 0,
+  });
+});
+
 test("Plan is the first command for every plan-capable harness", () => {
   const skills = [{ name: "review", description: "Review", source: "user" }];
   assert.deepEqual(commandsForHarness(skills, "command").map((item) => item.name), [
@@ -129,8 +140,8 @@ test("picking a command replaces the token in place", () => {
 test("skill insertion can reserve its full hover margin", () => {
   const text = "look at /wr now";
   assert.deepEqual(insertSlashCommand(text, slashCommandContext(text, 11), "write", 2), {
-    text: "look at  /write  now",
-    cursor: 17,
+    text: "look at /write  now",
+    cursor: 16,
   });
   const indented = "\t/wr now";
   assert.deepEqual(insertSlashCommand(indented, slashCommandContext(indented, 4), "write", 2), {

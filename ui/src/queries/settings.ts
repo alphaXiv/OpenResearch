@@ -141,27 +141,32 @@ export const getHarnessesQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
-export const getSkillsQuery = () => queryOptions({
-  queryKey: workspaceKey("getSkills"),
-  queryFn: ({ signal }) => api.getSkills(signal),
+export const getSkillsQuery = (harness?: string) => queryOptions({
+  queryKey: workspaceKey("getSkills", harness ?? null),
+  queryFn: ({ signal }) => api.getSkills(signal, harness),
+  select: (data) => data.skills,
+  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
   staleTime: 300_000,
 });
 
-export const getSkillContentQuery = (name: string, projectId?: string) => queryOptions({
-  queryKey: workspaceKey("getSkillContent", name, projectId ?? null),
-  queryFn: ({ signal }) => api.getSkillContent(name, projectId, signal),
+export const getSkillContentQuery = (name: string, projectId?: string, harness?: string | null) => queryOptions({
+  queryKey: workspaceKey("getSkillContent", name, projectId ?? null, harness ?? null),
+  queryFn: ({ signal }) => api.getSkillContent(name, projectId, signal, harness),
   staleTime: 300_000,
 });
 
 export const listLatexTemplatesQuery = () => queryOptions({
   queryKey: workspaceKey("listLatexTemplates"),
   queryFn: ({ signal }) => api.listLatexTemplates(signal),
+  refetchInterval: 30_000,
   staleTime: 300_000,
 });
 
 export const listUserSkillsQuery = () => queryOptions({
   queryKey: workspaceKey("listUserSkills"),
   queryFn: ({ signal }) => api.listUserSkills(signal),
+  select: (data) => data.skills,
+  refetchInterval: (query) => query.state.data?.importing ? 2_000 : 30_000,
   staleTime: 300_000,
 });
 

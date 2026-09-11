@@ -803,6 +803,99 @@ impl Harness for Codex {
     fn session_skills_dir(&self) -> Option<&'static str> {
         Some(".agents/skills")
     }
+
+    fn plugin_skills_dirs(&self) -> Vec<(String, PathBuf)> {
+        type Inventory = (std::time::Instant, PathBuf, Vec<(String, PathBuf)>);
+        static CACHE: std::sync::Mutex<Option<Inventory>> = std::sync::Mutex::new(None);
+        let home = native_store::codex_home(NativeStore::Legacy);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, cached_home, dirs)) = &*cache {
+            if *cached_home == home && at.elapsed() < Duration::from_secs(60) {
+                return dirs.clone();
+            }
+        }
+        let worker_home = home.clone();
+        // Bound CLI discovery independently of the caller's Tokio runtime.
+        let dirs = std::thread::spawn(move || {
+            let bin = find_codex()?;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()?;
+            runtime.block_on(async {
+                let mut cmd = Command::new(bin);
+                cmd.args(["plugin", "list", "--json"])
+                    .env("CODEX_HOME", &worker_home)
+                    .current_dir(std::env::temp_dir())
+                    .stdin(Stdio::null())
+                    .stderr(Stdio::null())
+                    .kill_on_drop(true);
+                let output = tokio::time::timeout(Duration::from_secs(5), cmd.output())
+                    .await
+                    .ok()?
+                    .ok()?;
+                if !output.status.success() {
+                    return None;
+                }
+                let inventory = serde_json::from_slice::<Value>(&output.stdout).ok()?;
+                Some(installed_plugin_skills_dirs(&worker_home, &inventory))
+            })
+        })
+        .join()
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        *cache = Some((std::time::Instant::now(), home, dirs.clone()));
+        dirs
+    }
+}
+
+fn installed_plugin_skills_dirs(home: &Path, inventory: &Value) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let Some(plugins) = inventory.get("installed").and_then(Value::as_array) else {
+        return out;
+    };
+    for plugin in plugins {
+        if plugin.get("enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let parts: Option<Vec<_>> = ["marketplaceName", "name", "version"]
+            .iter()
+            .map(|key| plugin.get(key)?.as_str())
+            .collect();
+        let Some(parts) = parts else { continue };
+        if parts.iter().any(|part| {
+            part.is_empty() || *part == "." || *part == ".." || part.contains(['/', '\\'])
+        }) {
+            continue;
+        }
+        let root = parts
+            .iter()
+            .fold(home.join("plugins/cache"), |path, part| path.join(part));
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
+        let manifest = read_json(root.join(".codex-plugin/plugin.json"))
+            .or_else(|| read_json(root.join(".claude-plugin/plugin.json")));
+        let Some(manifest) = manifest else { continue };
+        let paths: Vec<&str> = match manifest.get("skills") {
+            Some(Value::String(path)) => vec![path],
+            Some(Value::Array(paths)) => paths.iter().filter_map(Value::as_str).collect(),
+            None => vec!["skills"],
+            _ => continue,
+        };
+        for path in paths {
+            let Ok(dir) = root.join(path).canonicalize() else {
+                continue;
+            };
+            if dir.starts_with(&root) && dir.is_dir() {
+                out.push((parts[1].to_string(), dir));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 // --- app-server path (codex ≥ 0.144) -----------------------------------------
@@ -3608,6 +3701,39 @@ mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn plugin_skills_follow_enabled_installs_and_manifest_paths() {
+        let home = std::env::temp_dir().join(format!("orx-plugin-test-{}", uuid::Uuid::new_v4()));
+        for version in ["1", "2"] {
+            let root = home.join("plugins/cache/market/research").join(version);
+            std::fs::create_dir_all(root.join(".codex-plugin")).unwrap();
+            std::fs::create_dir_all(root.join("skills")).unwrap();
+            std::fs::create_dir_all(root.join("extra-skills")).unwrap();
+            std::fs::write(
+                root.join(".codex-plugin/plugin.json"),
+                r#"{"skills":["./skills", "./extra-skills", "../../../../.."]}"#,
+            )
+            .unwrap();
+        }
+        let inventory = json!({"installed": [
+            {"marketplaceName":"market", "name":"research", "version":"1", "enabled":false},
+            {"marketplaceName":"market", "name":"research", "version":"2", "enabled":true}
+        ]});
+        let found = installed_plugin_skills_dirs(&home, &inventory);
+        let root = home
+            .join("plugins/cache/market/research/2")
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            found,
+            vec![
+                ("research".into(), root.join("extra-skills")),
+                ("research".into(), root.join("skills")),
+            ]
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
         models.iter().map(|model| model.id.as_str()).collect()

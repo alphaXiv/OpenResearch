@@ -104,6 +104,12 @@ enum Command {
     /// Print CLI usage for agents, or fetch a skill doc.
     Skill(SkillArgs),
 
+    /// Add reusable skills to the local OpenResearch library.
+    Skills(LibraryArgs),
+
+    /// Add reusable LaTeX templates to the local OpenResearch library.
+    Templates(LibraryArgs),
+
     /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
@@ -591,6 +597,18 @@ pub struct SkillArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct LibraryArgs {
+    #[command(subcommand)]
+    pub command: LibraryCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum LibraryCommand {
+    /// Save a file or ZIP across projects; replaces an existing entry of the same name.
+    Add { path: std::path::PathBuf },
+}
+
+#[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
     /// or `all`. Defaults to every agent already set up on this machine.
@@ -972,6 +990,8 @@ fn command_name(command: &Command) -> &'static str {
         Command::SshKey(_) => "ssh-key",
         Command::Exp(_) => "exp",
         Command::Skill(_) => "skill",
+        Command::Skills(_) => "skills",
+        Command::Templates(_) => "templates",
         Command::InstallSkills(_) => "install-skills",
         Command::Discover(_) => "discover",
         Command::Paper(_) => "paper",
@@ -1017,6 +1037,8 @@ async fn dispatch(command: Command) -> error::Result<()> {
         },
         Command::Exp(args) => commands::exp::run(args).await,
         Command::Skill(args) => commands::skill::run(args).await,
+        Command::Skills(args) => commands::library::skills(args),
+        Command::Templates(args) => commands::library::templates(args),
         Command::InstallSkills(args) => commands::install_skills::run(args).await,
         Command::Discover(args) => commands::discover::run(args).await,
         Command::Paper(args) => commands::paper::run(args).await,
@@ -1069,6 +1091,20 @@ mod cli_tests {
             Cli::parse_from(["orx", "up"]).command,
             Some(Command::Up(args)) if args.remote.is_none()
         ));
+    }
+
+    #[test]
+    fn library_add_commands_are_distinct_from_reading_skill_docs() {
+        for name in ["skills", "templates"] {
+            let cli = Cli::try_parse_from(["orx", name, "add", "./package.zip"]).unwrap();
+            let args = match cli.command.unwrap() {
+                Command::Skills(args) | Command::Templates(args) => args,
+                _ => panic!("expected a library command"),
+            };
+            let LibraryCommand::Add { path } = args.command;
+            assert_eq!(path, std::path::PathBuf::from("./package.zip"));
+            assert!(Cli::try_parse_from(["orx", name, "add"]).is_err());
+        }
     }
 
     #[test]

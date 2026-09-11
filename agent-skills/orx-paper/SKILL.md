@@ -15,6 +15,11 @@ write real content into it, then link it in chat using the session playbook's
 evidence-and-links contract so the user can open the rendered document. An
 outline in chat gives them nothing to render.
 
+Use a descriptive filename; saving the same filename replaces that template.
+To save a reusable template when asked, run `orx templates add ./conference-style.tex`
+or pass a ZIP containing its supporting files. This saves across projects and
+fully replaces any template with the same filename-derived name.
+
 ## Check for a template before writing a preamble
 
 The user may have uploaded their own LaTeX template — a conference class, a lab
