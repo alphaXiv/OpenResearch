@@ -1066,7 +1066,7 @@
   "remote_install_location": "OpenResearch از این مسیرها برای کاربر SSH راه‌دور شما استفاده می‌کند و به sudo نیاز ندارد.",
   "remote_install_binary": "فایل اجرایی OpenResearch",
   "remote_install_database": "پایگاه دادهٔ OpenResearch",
-  "remote_install_cache": "حافظهٔ نهان مخزن",
+  "remote_install_cache": "مسیر قدیمی مخزن",
   "remote_installing": "در حال نصب…",
   "remote_open": "باز کردن راه‌دور",
   "remote_connected_as": "اتصال به {host} با کاربر {user}",

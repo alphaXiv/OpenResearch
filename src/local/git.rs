@@ -1,6 +1,6 @@
 //! Git operations for local mode — shell out to the `git` binary (already a
 //! hard dependency of the workflow; no libgit2). Clones live at
-//! `~/.cache/openresearch/repos/<owner>/<repo>`, the same convention SKILL.md
+//! `<data>/repos/<owner>/<repo>`, the same convention SKILL.md
 //! documents for manual diffing.
 
 use std::io::{Read, Write};
@@ -47,15 +47,15 @@ impl RepositoryState {
 }
 
 pub fn clones_root() -> PathBuf {
-    cache_root().join("repos")
+    crate::store::data_dir().join("repos")
 }
 
 pub fn clone_path(owner: &str, repo: &str) -> PathBuf {
     clones_root().join(owner).join(repo)
 }
 
-fn cache_root() -> PathBuf {
-    std::env::var_os("ORX_CACHE_DIR")
+pub(crate) fn legacy_cache_root() -> PathBuf {
+    crate::local::shell_env::var("ORX_CACHE_DIR")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(crate::config::settings_cache_dir)
@@ -69,7 +69,7 @@ fn cache_root() -> PathBuf {
 
 /// Root for per-chat-session worktrees of a project repository.
 pub fn worktrees_root(project_id: &str) -> PathBuf {
-    cache_root().join("worktrees").join(project_id)
+    crate::store::data_dir().join("worktrees").join(project_id)
 }
 
 pub fn session_worktree_path(project_id: &str, session_id: &str) -> PathBuf {
@@ -77,7 +77,10 @@ pub fn session_worktree_path(project_id: &str, session_id: &str) -> PathBuf {
 }
 
 fn legacy_worktrees_root(owner: &str, repo: &str) -> PathBuf {
-    cache_root().join("worktrees").join(owner).join(repo)
+    crate::store::data_dir()
+        .join("worktrees")
+        .join(owner)
+        .join(repo)
 }
 
 fn legacy_session_worktree_path(owner: &str, repo: &str, session_id: &str) -> PathBuf {
@@ -149,7 +152,7 @@ fn long_paths() -> &'static [&'static str] {
 /// Run git with `args`, returning trimmed stdout; failures carry git's stderr.
 /// Headless: git must fail fast rather than prompt on /dev/tty (these calls
 /// run under a server, where a prompt would hang a worker forever).
-fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
+pub(super) fn git(dir: Option<&Path>, args: &[&str]) -> Result<String> {
     let mut cmd = Command::new("git");
     if let Some(dir) = dir {
         cmd.current_dir(dir);
@@ -467,7 +470,7 @@ fn file_backup(path: &Path) -> Result<FileBackup> {
     }
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+pub(super) fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
     atomic_write_with_mode(path, contents, None)
 }
 
@@ -1306,8 +1309,10 @@ fn ensure_worktree_from(repo: &Path, dir: PathBuf, start_ref: &str) -> Result<Pa
         if git(Some(&dir), &["rev-parse", "--is-inside-work-tree"]).is_ok() {
             return Ok(dir);
         }
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| anyhow!("Could not remove stale worktree {}: {}", dir.display(), e))?;
+        return Err(anyhow!(
+            "Cannot open worktree {}. Its files have been preserved; repair its Git links before retrying.",
+            dir.display()
+        ));
     }
     // A manually deleted worktree dir leaves a stale registration behind that
     // would make `worktree add` at the same path fail.

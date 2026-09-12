@@ -1806,7 +1806,7 @@ fn validated_roots(paths: &RemoteInstallPaths) -> Result<(String, String, String
     }
     let cargo = posix_parent(cargo);
     let data = storage_root(&paths.database, "orx.db", "Database")?;
-    let cache = storage_root(&paths.cache, "repos", "Repository cache")?;
+    let cache = storage_root(&paths.cache, "repos", "Legacy repository location")?;
     Ok((cargo, data, cache))
 }
 

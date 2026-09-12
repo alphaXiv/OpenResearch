@@ -237,7 +237,7 @@ fn is_experiment_sha(sha: &str) -> bool {
 
 /// Repoint the embedded demo's local origin after the data directory moves.
 pub fn repair_installed_origin(data_root: &Path) -> Result<()> {
-    repair_installed_origin_at(data_root, &super::git::clone_path(OWNER, REPO))
+    repair_installed_origin_at(data_root, &data_root.join("repos").join(OWNER).join(REPO))
 }
 
 fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
@@ -245,9 +245,9 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     let Some(project) = store.get_local_project(PROJECT_ID)? else {
         return Ok(());
     };
-    if project.repo_path != repo.to_string_lossy() {
+    if !same_path(&project.repo_path, repo) {
         return Err(anyhow!(
-            "the installed nanochat demo repository is not at its reserved cache path"
+            "the installed nanochat demo repository is not at its reserved storage path"
         ));
     }
     if !repo.join(".git").is_dir() {
@@ -272,12 +272,73 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     Ok(())
 }
 
+fn same_path(stored: &str, path: &Path) -> bool {
+    Path::new(stored) == path
+        || crate::paths::canonicalize(stored)
+            .ok()
+            .zip(crate::paths::canonicalize(path).ok())
+            .is_some_and(|(left, right)| left == right)
+}
+
 fn seed_at(
     store: &Store,
     data_root: &Path,
     repo: &Path,
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
+    if let Some(project) = store.get_local_project(PROJECT_ID)? {
+        if !same_path(&project.repo_path, repo)
+            || project.github_owner != OWNER
+            || project.github_repo != REPO
+            || !super::git::is_repository(repo)
+        {
+            return Err(anyhow!(
+                "The existing demo repository could not be located; its files have been preserved."
+            ));
+        }
+        let stored = store.get_chat_session(SESSION_ID)?;
+        return Ok(DemoCompletion {
+            project,
+            newly_created: false,
+            selection: stored
+                .map(|session| DemoSelection {
+                    harness: session.harness,
+                    model: session.model,
+                    permission_mode: session.permission_mode,
+                    reasoning_level: session.reasoning_level,
+                })
+                .unwrap_or(selection),
+        });
+    }
+    if repo.exists() {
+        if let Some(project) = store
+            .list_local_projects()?
+            .into_iter()
+            .find(|project| same_path(&project.repo_path, repo))
+        {
+            return Ok(DemoCompletion {
+                project,
+                selection,
+                newly_created: false,
+            });
+        }
+        if !super::git::is_repository_root(repo)
+            || git(repo, &["merge-base", "--is-ancestor", BASELINE_SHA, "HEAD"]).is_err()
+        {
+            return Err(anyhow!("The reserved demo path at {} contains an unrecognized repository; its files have been preserved.", repo.display()));
+        }
+        let project = super::projects::create_project(
+            store,
+            "nanochat (demo)",
+            &repo.to_string_lossy(),
+            super::projects::CreateProjectOptions::default(),
+        )?;
+        return Ok(DemoCompletion {
+            project,
+            selection,
+            newly_created: true,
+        });
+    }
     // Seeded history is dated from onboarding so the demo reads as recent work. The
     // bundled run log and commit dates stay absolute; the commits are SHA-pinned.
     let seeded_at = now_ms();
@@ -527,22 +588,17 @@ fn seed_at(
         base_native_session_id: None,
         result_native_session_id: None,
     };
-    let cache_root = repo
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .ok_or_else(|| anyhow!("demo repository is not under the reserved cache layout"))?;
-    let worktree = cache_root
+    let worktree = data_root
         .join("worktrees")
         .join(PROJECT_ID)
         .join(SESSION_ID);
     super::git::ensure_worktree_at(repo, &worktree, &commit_sha)?;
-    let figure_worktree = cache_root
+    let figure_worktree = data_root
         .join("worktrees")
         .join(PROJECT_ID)
         .join(FIGURE_SESSION_ID);
     super::git::ensure_worktree_at(repo, &figure_worktree, &commit_sha)?;
-    let literature_worktree = cache_root
+    let literature_worktree = data_root
         .join("worktrees")
         .join(PROJECT_ID)
         .join(LITERATURE_SESSION_ID);
@@ -588,7 +644,7 @@ fn validate_snapshot(store: &Store, repo: &Path, newly_created: bool) -> Result<
     let project = store
         .get_local_project(PROJECT_ID)?
         .ok_or_else(|| anyhow!("demo project seed did not persist"))?;
-    if project.repo_path != repo.to_string_lossy()
+    if !same_path(&project.repo_path, repo)
         || project.github_owner != OWNER
         || project.github_repo != REPO
         || project.baseline_branch != "main"
@@ -1720,10 +1776,20 @@ mod tests {
         let first = seed_at(&store, &data, &repo, selection.clone()).unwrap();
         let user_notes = data.join("files/nanochat/user-notes.md");
         std::fs::write(&user_notes, "# User notes\n").unwrap();
+        let user_source = repo.join("README.md");
+        std::fs::write(&user_source, "My edited demo\n").unwrap();
+        #[cfg(unix)]
+        let reuse_path = {
+            let alias = root.join("alias");
+            std::os::unix::fs::symlink(&root, &alias).unwrap();
+            alias.join("cache/repos").join(OWNER).join(REPO)
+        };
+        #[cfg(not(unix))]
+        let reuse_path = repo.clone();
         let second = seed_at(
             &store,
             &data,
-            &repo,
+            &reuse_path,
             DemoSelection {
                 harness: "claude-code".into(),
                 ..selection
@@ -1731,6 +1797,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.project.id, second.project.id);
+        assert_eq!(
+            std::fs::read_to_string(user_source).unwrap(),
+            "My edited demo\n"
+        );
         assert_eq!(second.selection.harness, "codex");
         assert_eq!(store.list_local_projects().unwrap().len(), 1);
         assert_eq!(
@@ -2025,7 +2095,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("orx-demo-test-{}", uuid::Uuid::new_v4()));
         let data = root.join("data");
         let repo = root.join("cache/repos").join(OWNER).join(REPO);
-        let worktrees = root.join("cache/worktrees").join(PROJECT_ID);
+        let worktrees = data.join("worktrees").join(PROJECT_ID);
         let store = Store::open_at(data.clone()).unwrap();
         seed_at(
             &store,
@@ -2088,5 +2158,40 @@ mod tests {
         );
         assert!(!repo.join(".git").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn database_reset_adopts_existing_demo_without_reseeding() {
+        let tmp = super::super::git::TemporaryDirectory::new("orx-demo-adopt").unwrap();
+        let data = tmp.path().join("data");
+        let repo = data.join("repos").join(OWNER).join(REPO);
+        let selection = DemoSelection {
+            harness: "codex".into(),
+            model: None,
+            permission_mode: None,
+            reasoning_level: None,
+        };
+        let original = Store::open_at(data.clone()).unwrap();
+        seed_at(&original, &data, &repo, selection.clone()).unwrap();
+        std::fs::write(repo.join("README.md"), "user changes").unwrap();
+        let artifact = data.join("files/nanochat/user-notes.md");
+        std::fs::write(&artifact, "user artifact").unwrap();
+        let fresh = Store::open_at(tmp.path().join("fresh-database")).unwrap();
+        let adopted = seed_at(&fresh, &data, &repo, selection.clone()).unwrap();
+        let repeated = seed_at(&fresh, &data, &repo, selection).unwrap();
+        assert_eq!(adopted.project.id, repeated.project.id);
+        assert!(fresh
+            .list_chat_sessions_by_project(&adopted.project.id)
+            .unwrap()
+            .is_empty());
+        assert!(fresh
+            .list_experiments_by_project(&adopted.project.id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("README.md")).unwrap(),
+            "user changes"
+        );
+        assert_eq!(std::fs::read_to_string(artifact).unwrap(), "user artifact");
     }
 }

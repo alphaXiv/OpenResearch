@@ -870,9 +870,12 @@ async fn main() {
         return;
     }
     if let Command::PublishBranch(args) = &command {
-        if let Err(err) =
+        let publish = || -> error::Result<()> {
+            let lock = store::open_lifecycle_lock()?;
+            let _guard = lock.read()?;
             local::git::push_branch(&args.repo_path, &args.branch, &args.owner, &args.repo)
-        {
+        };
+        if let Err(err) = publish() {
             eprintln!("orx publish-branch: {err}");
             std::process::exit(1);
         }
@@ -1011,9 +1014,11 @@ fn command_name(command: &Command) -> &'static str {
 }
 
 async fn dispatch(command: Command) -> error::Result<()> {
-    let lifecycle_lock = command_uses_lifecycle_lock(&command)
-        .then(store::open_lifecycle_lock)
-        .transpose()?;
+    let uses_lock = command_uses_lifecycle_lock(&command);
+    if uses_lock {
+        local::storage::prepare().await?;
+    }
+    let lifecycle_lock = uses_lock.then(store::open_lifecycle_lock).transpose()?;
     let _lifecycle_guard = lifecycle_lock
         .as_ref()
         .map(|lock| lock.read())

@@ -216,7 +216,7 @@ pub fn move_data_dir(
         });
         match std::fs::rename(&source, &target) {
             Ok(()) => {
-                finalize(&target, total, &on_progress)?;
+                finalize_rename(&source, &target, total, &on_progress)?;
                 return Ok(MoveOutcome {
                     path: target.to_string_lossy().into_owned(),
                     old_path_left: None,
@@ -253,7 +253,11 @@ pub fn move_data_dir(
         ));
     }
 
-    finalize(&target, total, &on_progress)?;
+    if let Err(error) = finalize(&source, &target, total, &on_progress) {
+        restore_references(&source, &target)
+            .map_err(|restore| anyhow!("Move failed: {error}. {restore}"))?;
+        return Err(error);
+    }
     Ok(MoveOutcome {
         path: target.to_string_lossy().into_owned(),
         // Copy path leaves the source in place — reported so it can be cleaned up.
@@ -263,14 +267,52 @@ pub fn move_data_dir(
 
 /// Persist the new path and emit the finalizing tick. After this, every
 /// subsequent `Store::open()` resolves `store::data_dir()` to `target`.
-fn finalize(target: &Path, total: u64, on_progress: &impl Fn(MoveProgress)) -> Result<()> {
+fn finalize(
+    source: &Path,
+    target: &Path,
+    total: u64,
+    on_progress: &impl Fn(MoveProgress),
+) -> Result<()> {
     on_progress(MoveProgress {
         phase: MovePhase::Finalizing,
         copied_bytes: total,
         total_bytes: total,
     });
-    crate::config::set_settings_data_dir(Some(target.to_string_lossy().into_owned()))?;
-    super::demo::repair_installed_origin(target)
+    super::storage::repair_paths(target, &[(source.to_path_buf(), target.to_path_buf())])?;
+    super::demo::repair_installed_origin(target)?;
+    crate::config::set_settings_data_dir(Some(target.to_string_lossy().into_owned()))
+}
+
+fn finalize_rename(
+    source: &Path,
+    target: &Path,
+    total: u64,
+    on_progress: &impl Fn(MoveProgress),
+) -> Result<()> {
+    if let Err(error) = finalize(source, target, total, on_progress) {
+        std::fs::rename(target, source).map_err(|restore| {
+            anyhow!(
+                "Move failed: {error}. Could not restore {}: {restore}. Data remains at {}.",
+                source.display(),
+                target.display()
+            )
+        })?;
+        restore_references(source, target)
+            .map_err(|restore| anyhow!("Move failed: {error}. {restore}"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn restore_references(source: &Path, target: &Path) -> Result<()> {
+    super::storage::repair_paths(source, &[(target.to_path_buf(), source.to_path_buf())]).map_err(
+        |error| {
+            anyhow!(
+                "Data remains at {}, but its Git links could not be restored: {error}",
+                source.display()
+            )
+        },
+    )
 }
 
 /// Recursively copy `src` into `dst` (both dirs), accumulating copied bytes into
@@ -439,5 +481,31 @@ mod tests {
             b"log line\n"
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn failed_reference_repair_restores_renamed_data() {
+        let tmp = super::super::git::TemporaryDirectory::new("orx-move-rollback").unwrap();
+        let source = crate::paths::canonicalize(tmp.path())
+            .unwrap()
+            .join("source");
+        let target = source.with_file_name("target");
+        let admin = source.join("repos/o/r/.git/worktrees/session");
+        std::fs::create_dir_all(&admin).unwrap();
+        let worktree = source.join("worktrees/id/session");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("keep"), "unpublished work").unwrap();
+        std::fs::rename(&source, &target).unwrap();
+        assert!(finalize_rename(&source, &target, 0, &|_| {}).is_err());
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read_to_string(worktree.join("keep")).unwrap(),
+            "unpublished work"
+        );
     }
 }
