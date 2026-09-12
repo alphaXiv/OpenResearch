@@ -10,7 +10,7 @@
 //!   native `SKILL.md` skill dirs *into the session worktree* — fresh on every
 //!   turn, right beside the playbook (see [`ensure_session_skills`]). The harness
 //!   picks the skills subdir (`.claude/skills`, `.opencode/skills`,
-//!   `.agents/skills`), so the session's own agent auto-discovers them and never
+//!   `.agents/skills`, `.cursor/skills`), so the session's own agent auto-discovers them and never
 //!   sees drift.
 //! * **`orx skill <name>`** resolves a bundled module (with or without the
 //!   `orx-` prefix) and prints it; `<name>/<resource>` prints one of its bundled

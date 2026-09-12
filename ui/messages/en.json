@@ -230,7 +230,7 @@
   "onboarding_choose_one_or_more": "Choose one or more.",
   "onboarding_consolidate_your_research": "Consolidate your research",
   "onboarding_continue": "Continue",
-  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode…",
+  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods.",
   "onboarding_everything_stays_local": "Everything stays local",
   "onboarding_get_started": "Get started",
@@ -892,7 +892,7 @@
   "settings_oauth_login": "OAuth (subscription login)",
   "settings_not_found_on_path": "not found on PATH",
   "settings_providers": "Providers",
-  "settings_models_available": "{count} available — {models}",
+  "settings_models_available": "{count} models available — {models}",
   "settings_none": "none",
   "settings_kubectl_default": "Use current kubectl context",
   "settings_kubectl_default_context": "Use current context ({context})",
@@ -1143,5 +1143,6 @@
   "local_models_config_restricted": "Saved, but OpenCode did not list this model. Check installed agents again. If your OpenCode config restricts enabled providers, allow this connection before using it.",
   "local_models_custom_endpoint": "Custom Endpoint",
   "local_models_compatible_api": "(OpenAI compatible)",
-  "chat_session_limit_reached": "Session limit reached"
+  "chat_session_limit_reached": "Session limit reached",
+  "chat_model_unavailable": "Model unavailable"
 }

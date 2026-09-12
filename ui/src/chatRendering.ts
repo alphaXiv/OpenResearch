@@ -86,7 +86,13 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
 }
 
+export function isModelAccessLimitPart(part: ChatPart): boolean {
+  return part.type === "tool" && part.tool === "error"
+    && /^(?:ActionRequiredError:\s*)?Named models unavailable\b/i.test(part.state?.error?.trim() ?? "");
+}
+
 export function isUsageLimitPart(part: ChatPart): boolean {
+  if (isModelAccessLimitPart(part)) return true;
   if (part.state?.input?.errorKind === "claude_usage_limit") return true;
   const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
   if (part.type === "tool" && part.tool === "error" && text

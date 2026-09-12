@@ -230,7 +230,7 @@
   "onboarding_choose_one_or_more": "یک یا چند مورد را انتخاب کنید.",
   "onboarding_consolidate_your_research": "پژوهش خود را یکپارچه کنید",
   "onboarding_continue": "ادامه",
-  "onboarding_detecting_claude_code_codex_open_code": "در حال شناسایی Claude Code، Codex و OpenCode…",
+  "onboarding_detecting_claude_code_codex_open_code": "در حال شناسایی Claude Code، Codex، OpenCode و Cursor…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "مثلاً روی یادگیری تقویتی کم‌نمونه برای پس‌آموزش LLM با تمرکز بر روش‌های بدون مدل پاداش کار می‌کنم.",
   "onboarding_everything_stays_local": "همه‌چیز محلی می‌ماند",
   "onboarding_get_started": "شروع",
@@ -1143,5 +1143,6 @@
   "skills_remove_imported": "حذف از OpenResearch",
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
   "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
-  "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید"
+  "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید",
+  "chat_model_unavailable": "مدل در دسترس نیست"
 }

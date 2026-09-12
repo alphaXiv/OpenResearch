@@ -104,6 +104,19 @@ test("Claude quota notices recognize typed errors and legacy duplicates without 
 });
 
 
+test("Cursor model restrictions use the limit disclosure without treating them as session quotas", async () => {
+  const { isUsageLimitPart, isModelAccessLimitPart } = await import("../src/chatRendering.ts");
+  const error = "Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue.";
+  for (const text of [error, `ActionRequiredError: ${error}`]) {
+    const part = { id: "turn-recovery", type: "tool", tool: "error", state: { error: text } };
+    assert.equal(isUsageLimitPart(part), true);
+    assert.equal(isModelAccessLimitPart(part), true);
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "bash", state: { error: text } }), false);
+    assert.equal(isUsageLimitPart({ type: "text", text }), false);
+  }
+  assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "Rate limit reached" } }), false);
+});
+
 test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {
   const { isUsageLimitPart } = await import("../src/chatRendering.ts");
   for (const error of [

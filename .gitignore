@@ -13,6 +13,7 @@ Claude.local.md
 # Keep local skills private.
 .claude/skills/
 .agents/skills/
+.cursor/skills/
 
 # Stray SQLite store if the binary is ever run from the repo root
 /orx.db
