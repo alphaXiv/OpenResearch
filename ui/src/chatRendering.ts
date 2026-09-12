@@ -65,3 +65,34 @@ export function unreadAfterBusyChange(
   if (visibleSessionId) next.delete(visibleSessionId);
   return next;
 }
+
+export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: ChatPart[]; answer: ChatPart[] } {
+  // Keep unanswered prompts in the visible conversation.
+  if (parts.some((part) => part.type === "prompt" && !part.prompt?.resolved)) {
+    return { work: [], answer: parts };
+  }
+  let finalIndex = parts.findIndex((part) => part.type === "text" && part.phase === "final_answer");
+  if (finalIndex < 0 && !streaming && !parts.some((part) => part.phase)) {
+    // Older transcripts have no phase: only the trailing text can be the answer.
+    for (let index = parts.length - 1; index >= 0; index--) {
+      const part = parts[index];
+      if (part.type === "reasoning") continue;
+      if (part.type !== "text") break;
+      if (part.text) finalIndex = index;
+    }
+  }
+  return finalIndex < 0 || (!streaming && !parts.slice(finalIndex).some((part) => partIsVisible(part))) || !parts.slice(0, finalIndex).some((part) => partIsVisible(part))
+    ? { work: [], answer: parts }
+    : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
+}
+
+export function isUsageLimitPart(part: ChatPart): boolean {
+  if (part.state?.input?.errorKind === "claude_usage_limit") return true;
+  const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
+  if (part.type === "tool" && part.tool === "error" && text
+    && /usageLimitExceeded|rateLimitExceeded|insufficient_quota|(?:usage|rate|session) limit|(?:exceeded|exhausted) (?:your |the |current )*quota|insufficient (?:credits|balance)|(?:credit|quota)[ _-](?:exhausted|exceeded)/i.test(text)) return true;
+  // Older Claude transcripts stored the synthetic quota notice as text and errors.
+  return Boolean(text && ((/^(?:claude: )?you(?:'ve| have) reached your .+ limit\./i.test(text.trim())
+    && text.includes("claude.ai/settings/usage"))
+    || /^(?:claude: )?you(?:'ve| have) hit your session limit · resets /i.test(text.trim())));
+}

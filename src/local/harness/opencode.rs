@@ -759,6 +759,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
             tool: None,
             state: None,
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }),
         "tool" => {
@@ -789,6 +790,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
                         .map(str::to_string),
                 }),
                 prompt: None,
+                phase: None,
                 children: Vec::new(),
             })
         }
@@ -1271,11 +1273,24 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                             ctx.upsert_part_preserving_children(wire);
                         }
                     }
+                    mark_final_tail(ctx);
                 }
                 return Ok(());
             }
         }
     }
+}
+
+fn mark_final_tail(ctx: &mut TurnCtx) {
+    let ids: HashSet<_> = ctx
+        .assistant
+        .parts
+        .iter()
+        .rev()
+        .take_while(|part| matches!(part.kind.as_str(), "text" | "reasoning"))
+        .map(|part| part.id.clone())
+        .collect();
+    ctx.mark_final_text(|part| ids.contains(&part.id));
 }
 
 fn opencode_response_error(message: &Value) -> Option<&str> {
@@ -1442,6 +1457,12 @@ fn handle_event(
             }
             if session != Some(native_id) || !owned_by_assistant {
                 return;
+            }
+            if part.get("type").and_then(Value::as_str) == Some("step-finish")
+                && part.get("reason").and_then(Value::as_str) == Some("stop")
+            {
+                mark_final_tail(ctx);
+                ctx.maybe_flush();
             }
             if let Some(wire) = to_wire_part(part) {
                 ctx.upsert_part(wire);
@@ -1681,6 +1702,41 @@ opencode/glm-5
         m.reasoning_levels
             .as_ref()
             .map(|c| c.iter().map(|c| c.id.as_str()).collect())
+    }
+
+    #[test]
+    fn native_stop_marks_only_the_final_text_tail() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text("progress", "Reading"));
+        ctx.upsert_part(WirePart::tool("tool", "read", "completed", None));
+        ctx.upsert_part(WirePart::text("answer", "Done"));
+        let mut messages = HashSet::from(["message".to_string()]);
+        handle_event(
+            &mut ctx,
+            "session",
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"finish","messageID":"message","sessionID":"session","type":"step-finish","reason":"stop"}}}),
+            &mut messages,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[2].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
+        ctx.upsert_part(WirePart::text("progress", "Reading"));
+        ctx.upsert_part(WirePart::text("answer", "Done."));
+        mark_final_tail(&mut ctx);
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[2].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
     }
 
     /// The core of issue #123 for opencode: variants are genuinely per-model,

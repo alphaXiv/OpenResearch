@@ -608,6 +608,9 @@
   "announcement_tools_failed": "{count} tool activities failed: {labels}",
   "announcement_running_tool": "Running a tool",
   "announcement_tool_completed": "Tool activity completed",
+  "chat_worked_for": "Worked for {duration}",
+  "chat_work_details": "Work details",
+  "chat_work_duration": "{minutes}m {seconds}s",
   "chat_working": "Working…",
   "chat_thinking": "Thinking",
   "chat_scroll_to_bottom": "Scroll to bottom",
@@ -1139,5 +1142,6 @@
   "local_models_disconnect": "Disconnect {name}",
   "local_models_config_restricted": "Saved, but OpenCode did not list this model. Check installed agents again. If your OpenCode config restricts enabled providers, allow this connection before using it.",
   "local_models_custom_endpoint": "Custom Endpoint",
-  "local_models_compatible_api": "(OpenAI compatible)"
+  "local_models_compatible_api": "(OpenAI compatible)",
+  "chat_session_limit_reached": "Session limit reached"
 }

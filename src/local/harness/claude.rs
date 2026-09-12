@@ -1143,6 +1143,7 @@ struct TurnState {
     /// Claude's typed headless auth failure. Its synthetic assistant text is
     /// suppressed and the resident child is quarantined by the caller.
     auth_failed: bool,
+    usage_limited: bool,
     /// Any real output or tool activity makes transparent resubmission unsafe.
     had_activity: bool,
     /// The last non-empty assistant text block — the plan, if the model wrote
@@ -1244,6 +1245,7 @@ fn apply_subagent_blocks(
                             title: None,
                         }),
                         prompt: None,
+                        phase: None,
                         children: Vec::new(),
                     },
                 );
@@ -1288,8 +1290,19 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                             Some(p) => {
                                 state.sub_stream_mid.insert(p.to_string(), mid.to_string());
                             }
-                            None => state.stream_mid = Some(mid.to_string()),
+                            None => {
+                                ctx.mark_final_text(|_| false);
+                                state.stream_mid = Some(mid.to_string());
+                            }
                         }
+                    }
+                }
+                Some("message_delta") if parent.is_none() => {
+                    if inner.pointer("/delta/stop_reason").and_then(Value::as_str)
+                        == Some("end_turn")
+                        && state.pending_tasks.is_empty()
+                    {
+                        mark_stream_final(ctx, state);
                     }
                 }
                 Some("content_block_delta") => {
@@ -1417,6 +1430,26 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 state.turn_errored = true;
                 return false;
             }
+            if subagent_parent(event).is_none()
+                && event.get("error").and_then(Value::as_str) == Some("rate_limit")
+            {
+                let detail = event
+                    .pointer("/message/content")
+                    .and_then(Value::as_array)
+                    .map(|blocks| {
+                        blocks
+                            .iter()
+                            .filter_map(|block| block.get("text").and_then(Value::as_str))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or_else(|| "Claude Code usage limit reached".into());
+                state.usage_limited = true;
+                state.turn_errored = true;
+                ctx.mark_terminal_failure("claude_usage_limit", detail);
+                return false;
+            }
             let mid = event
                 .pointer("/message/id")
                 .and_then(Value::as_str)
@@ -1524,6 +1557,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                                     title: None,
                                 }),
                                 prompt: None,
+                                phase: None,
                                 children: Vec::new(),
                             });
                         }
@@ -1630,7 +1664,7 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                 .unwrap_or(subtype != "success");
             if is_error {
                 state.turn_errored = true;
-                if !state.auth_failed {
+                if !state.auth_failed && !state.usage_limited {
                     let detail = event
                         .get("result")
                         .and_then(Value::as_str)
@@ -1647,11 +1681,21 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
             if !state.pending_tasks.is_empty() {
                 return false;
             }
+            if !is_error {
+                mark_stream_final(ctx, state);
+            }
             return true;
         }
         _ => {}
     }
     false
+}
+
+fn mark_stream_final(ctx: &mut TurnCtx, state: &TurnState) {
+    if let Some(mid) = state.stream_mid.as_deref() {
+        let prefix = format!("{mid}-");
+        ctx.mark_final_text(|part| part.id.starts_with(&prefix));
+    }
 }
 
 /// Sum the four token buckets of a Claude `usage` object into the context-window
@@ -2096,7 +2140,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             },
         ));
     }
-    if state.turn_errored {
+    if state.turn_errored && !state.usage_limited {
         let message = ctx
             .assistant
             .parts
@@ -2470,6 +2514,33 @@ mod tests {
     }
 
     #[test]
+    fn final_phase_waits_for_native_end_turn() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        ctx.upsert_part(WirePart::text("progress-0", "Reading"));
+        for event in [
+            serde_json::json!({"type":"stream_event","event":{"type":"message_start","message":{"id":"answer"}}}),
+            serde_json::json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Done"}}}),
+        ] {
+            apply_event(&mut ctx, &mut state, &event);
+        }
+        assert_eq!(ctx.assistant.parts[1].phase, None);
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({"type":"stream_event","event":{"type":"message_delta","delta":{"stop_reason":"end_turn"}}}),
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[1].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
+    }
+
+    #[test]
     fn plain_turn_folds_text_thinking_and_tool_lifecycle() {
         let transcript = [
             r#"{"type":"system","subtype":"init","session_id":"sess-abc"}"#,
@@ -2816,6 +2887,33 @@ mod tests {
             .expect("sub bash nested with namespaced id");
         assert_eq!(bash.state.as_ref().unwrap().status, "completed");
         assert_eq!(bash.state.as_ref().unwrap().output.as_deref(), Some("a.rs"));
+    }
+
+    #[test]
+    fn usage_limit_is_terminal_without_duplicate_text_or_tool_errors() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        ctx.upsert_part(WirePart::text("real-answer", "Earlier useful output"));
+        let message = "You've reached your Fable limit. Switch models at claude.ai/settings/usage";
+        assert!(!apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type": "assistant", "error": "rate_limit",
+                "message": {"id": "quota", "model": "<synthetic>", "content": [{"type":"text", "text":message}]}
+            })
+        ));
+        assert!(apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type":"result", "subtype":"success", "is_error":true, "result":message
+            })
+        ));
+        assert!(state.usage_limited && state.turn_errored);
+        assert!(!state.had_activity);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].id, "real-answer");
     }
 
     #[test]

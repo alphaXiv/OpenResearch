@@ -52,8 +52,8 @@ use super::{
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     find_part_mut, prepare_env, set_chat_session_env, upsert_preserving_children, ContextUsage,
-    DeliveryState, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage, WirePart,
-    WirePrompt, WireQuestionOption, WireToolState,
+    DeliveryState, MessagePhase, PromptAnswer, ResumeCtx, SteerMessage, TurnCtx, WireMessage,
+    WirePart, WirePrompt, WireQuestionOption, WireToolState,
 };
 use crate::local::codex::{CodexClient, JsonRpcError, ServerReqKind, TurnEvent};
 use crate::local::native_store::{self, NativeStore};
@@ -1250,6 +1250,7 @@ fn tool_part(
             title: None,
         }),
         prompt: None,
+        phase: None,
         children: Vec::new(),
     }
 }
@@ -1355,6 +1356,7 @@ fn reconcile_items(parts: &mut Vec<WirePart>, items: &[Value]) {
             if let Some(i) = renamed {
                 claimed.push(parts[i].id.clone());
                 parts[i].text = part.text;
+                parts[i].phase = part.phase.or(parts[i].phase);
                 continue;
             }
         }
@@ -1399,6 +1401,14 @@ fn part_text_is_empty(part: &WirePart) -> bool {
     part.text.as_deref().unwrap_or("").is_empty()
 }
 
+fn agent_text_part(id: String, item: &Value) -> WirePart {
+    let mut part = WirePart::text(id, item.get("text").and_then(Value::as_str).unwrap_or(""));
+    part.phase = item
+        .get("phase")
+        .and_then(|phase| MessagePhase::deserialize(phase).ok());
+    part
+}
+
 /// A ThreadItem → WirePart, **pure** (no `ctx`, no streaming merge). Returns
 /// `None` for items that render nothing (userMessage / hookPrompt). `prior` is
 /// the parts the result will land among — only `commandExecution` reads it, to
@@ -1411,10 +1421,7 @@ fn part_text_is_empty(part: &WirePart) -> bool {
 fn item_to_part(item: &Value, completed: bool, prior: &[WirePart]) -> Option<WirePart> {
     let id = item.get("id").and_then(Value::as_str).map(str::to_string)?;
     match item.get("type").and_then(Value::as_str) {
-        Some("agentMessage") => {
-            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-            Some(WirePart::text(id, text))
-        }
+        Some("agentMessage") => Some(agent_text_part(id, item)),
         Some("reasoning") => {
             let text = reasoning_text(item);
             Some(WirePart::reasoning(id, &text))
@@ -3562,6 +3569,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
                         title: None,
                     }),
                     prompt: None,
+                    phase: None,
                     children: Vec::new(),
                 });
             }
@@ -3657,8 +3665,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
         .unwrap_or_else(|| next_id("item"));
     match item.get("type").and_then(Value::as_str) {
         Some("agent_message") => {
-            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
-            ctx.upsert_part(WirePart::text(id, text));
+            ctx.upsert_part(agent_text_part(id, item));
         }
         Some("reasoning") => {
             let text = item.get("text").and_then(Value::as_str).unwrap_or("");
@@ -3689,6 +3696,7 @@ fn handle_item(ctx: &mut TurnCtx, item: &Value, next_id: &mut impl FnMut(&str) -
                     title: None,
                 }),
                 prompt: None,
+                phase: None,
                 children: Vec::new(),
             });
         }
@@ -3962,6 +3970,35 @@ requires_openai_auth = false
         assert!(!config_supports_auto_review(&serde_json::json!({
             "config": {"model_provider": 42, "openai_base_url": null}
         })));
+    }
+
+    #[test]
+    fn final_phase_survives_streaming_and_history_rename() {
+        let mut ctx = TurnCtx::test_stub();
+        apply_item(
+            &mut ctx,
+            &json!({"id":"progress","type":"agentMessage","text":"Reading","phase":"commentary"}),
+            false,
+        );
+        apply_item(
+            &mut ctx,
+            &json!({"id":"answer","type":"agentMessage","text":"","phase":"final_answer"}),
+            false,
+        );
+        ctx.append_part_text("answer", "Done");
+        assert_eq!(
+            ctx.assistant.parts[1].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
+        reconcile_items(
+            &mut ctx.assistant.parts,
+            &[json!({"id":"renamed","type":"agentMessage","text":"Done.","phase":"final_answer"})],
+        );
+        assert_eq!(ctx.assistant.parts.len(), 2);
+        assert_eq!(
+            ctx.assistant.parts[1].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
     }
 
     /// Fold a trimmed live transcript (captured from the 0.144 spike, ids
