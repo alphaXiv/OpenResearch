@@ -265,7 +265,6 @@ function RemoteSetup({
               {([
                 ["binary", m.remote_install_binary()],
                 ["database", m.remote_install_database()],
-                ["cache", m.remote_install_cache()],
               ] as const).map(([key, label]) => (
                 <label key={key} className="grid gap-1 text-sm font-medium text-subtext">
                   {label}

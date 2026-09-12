@@ -702,7 +702,7 @@ function printStatus(info) {
   console.log(`  Backend: ${listenerPids(slotPaths.backendPort).length > 0 ? 'running' : 'stopped'} on ${slotPaths.backendPort}`)
   console.log(`  UI:      ${listenerPids(slotPaths.uiPort).length > 0 ? 'running' : 'stopped'} on ${slotPaths.uiPort}`)
   console.log(`  Data:    ${slotPaths.dataDir}`)
-  console.log(`  Cache:   ${slotPaths.cacheDir}`)
+  console.log(`  Repos:   ${path.join(slotPaths.dataDir, 'repos')}`)
   console.log(`  State:   ${state ? slotPaths.statePath : 'legacy/unmanaged'}`)
 }
 

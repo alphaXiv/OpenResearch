@@ -117,8 +117,7 @@ pub(crate) struct Settings {
     /// (each mutation re-reads and patches only its own field via `mutate_settings`).
     #[serde(default)]
     pub data_dir: Option<String>,
-    /// User-chosen cache directory. Kept beside `data_dir` so remote installs
-    /// can persist both storage roots without relying on shell startup files.
+    /// Legacy repository migration source, retained for remote-install compatibility.
     #[serde(default)]
     pub cache_dir: Option<String>,
     /// Binary selected by the remote installer. The local SSH launcher uses a

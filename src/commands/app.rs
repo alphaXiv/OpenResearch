@@ -48,19 +48,28 @@ pub fn launched_as_app_bundle() -> bool {
 /// process just exits).
 #[cfg(target_os = "macos")]
 pub async fn run() {
+    if let Err(error) = crate::local::storage::prepare().await {
+        eprintln!("OpenResearch storage: {error}");
+        crate::show_error_dialog(&error.to_string());
+        return;
+    }
     // App mode returns before `dispatch`, which is where `orx up` takes this
     // same read lock. Without it `orx delete` from a CLI install sees no reader
     // and wipes the store out from under a running app.
-    let lifecycle = crate::store::open_lifecycle_lock()
-        .inspect_err(|err| eprintln!("openresearch app: could not open the lifecycle lock: {err}"))
-        .ok();
-    let _lifecycle_guard = lifecycle.as_ref().and_then(|lock| {
-        lock.read()
-            .inspect_err(|err| {
-                eprintln!("openresearch app: could not hold the lifecycle lock: {err}")
-            })
-            .ok()
-    });
+    let lifecycle = match crate::store::open_lifecycle_lock() {
+        Ok(lock) => lock,
+        Err(error) => {
+            crate::show_error_dialog(&format!("Could not open the storage lock: {error}"));
+            return;
+        }
+    };
+    let _lifecycle_guard = match lifecycle.read() {
+        Ok(guard) => guard,
+        Err(error) => {
+            crate::show_error_dialog(&format!("Could not hold the storage lock: {error}"));
+            return;
+        }
+    };
     // After an update relaunch, keep the previous port so the open dashboard
     // tab reconnects; it is reloading itself, so no new tab either. Otherwise an
     // ephemeral loopback port so the app never collides with a terminal `orx

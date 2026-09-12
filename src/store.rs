@@ -302,6 +302,18 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn relocate_project_paths(&self, paths: &[(String, String)]) -> Result<()> {
+        let tx = self.begin()?;
+        for (old, new) in paths {
+            tx.execute(
+                "UPDATE local_projects SET repo_path = ?2 WHERE repo_path = ?1",
+                params![old, new],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Open (creating dirs/schema as needed). WAL so the supervise writers and
     /// the serve readers never block each other.
     pub fn open() -> Result<Self> {

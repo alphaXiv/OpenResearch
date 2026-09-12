@@ -140,7 +140,7 @@ function escapeRegExp(s: string): string {
 // repo-relative, keeping the session id when it points into a per-session
 // worktree. Relative paths name files in the click context's checkout and
 // inherit `contextSessionId`; the regex fallbacks encode the
-// ~/.cache/openresearch/ layouts from src/local/git.rs:
+// managed storage layouts from src/local/git.rs:
 // worktrees/<project-id>/<session>/… and the legacy repos/<owner>/<repo>/….
 function parseFilePath(
   rawPath: string,

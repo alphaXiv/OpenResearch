@@ -1072,7 +1072,6 @@
   "remote_install_location": "OpenResearch will use these locations for your remote SSH user and does not require sudo.",
   "remote_install_binary": "OpenResearch binary",
   "remote_install_database": "OpenResearch Database",
-  "remote_install_cache": "Repository cache",
   "remote_installing": "Installing…",
   "remote_open": "Open remote",
   "remote_connected_as": "Connected to {host} as {user}",
