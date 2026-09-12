@@ -281,7 +281,8 @@ mod tests {
         assert!(lines[0].contains("Claude Code"));
         assert!(lines[0].contains(".claude/skills/orx/SKILL.md"));
         assert!(lines[1].contains("Cursor"));
-        assert!(lines[1].contains(".cursor/skills/orx/SKILL.md"));
+        let cursor_target = tilde(&cursor.skill_target().unwrap()).replace('\\', "/");
+        assert!(lines[1].contains(&cursor_target));
     }
 
     #[test]
