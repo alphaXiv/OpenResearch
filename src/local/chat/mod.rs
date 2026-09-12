@@ -6855,6 +6855,18 @@ impl TurnCtx {
         self.upsert_part_raw(part);
     }
 
+    pub fn mark_final_text_tail(&mut self) {
+        let ids: HashSet<_> = self
+            .assistant
+            .parts
+            .iter()
+            .rev()
+            .take_while(|part| matches!(part.kind.as_str(), "text" | "reasoning"))
+            .map(|part| part.id.clone())
+            .collect();
+        self.mark_final_text(|part| ids.contains(&part.id));
+    }
+
     pub fn mark_final_text(&mut self, matches: impl Fn(&WirePart) -> bool) {
         for part in &mut self.assistant.parts {
             if part.kind == "text" {

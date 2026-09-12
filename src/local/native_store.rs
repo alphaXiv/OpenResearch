@@ -75,9 +75,9 @@ pub fn codex_home(store: NativeStore) -> PathBuf {
 pub fn cursor_home(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/cursor"),
-        NativeStore::Legacy => {
-            user_env_path("CURSOR_CONFIG_DIR").unwrap_or_else(|| home_dir().join(".cursor"))
-        }
+        NativeStore::Legacy => user_env_path("CURSOR_CONFIG_DIR")
+            .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
+            .unwrap_or_else(|| home_dir().join(".cursor")),
     }
 }
 
@@ -141,7 +141,12 @@ pub fn cursor_session(native_id: &str) -> Result<Option<NativeSessionLocation>> 
         if store == NativeStore::Legacy && root == isolated {
             continue;
         }
-        if let Some(path) = cursor_session_path(&root, native_id)? {
+        let path = match cursor_session_path(&root, native_id) {
+            Ok(path) => path,
+            Err(_) if store == NativeStore::Legacy => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(path) = path {
             return Ok(Some(NativeSessionLocation { store, path }));
         }
     }

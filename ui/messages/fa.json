@@ -1143,5 +1143,6 @@
   "skills_remove_imported": "حذف از OpenResearch",
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
   "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
-  "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید"
+  "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید",
+  "chat_model_unavailable": "مدل در دسترس نیست"
 }

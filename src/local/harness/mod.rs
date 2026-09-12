@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(
             permission_contract(&cursor),
             [
-                ("ask", "Ask", "Propose changes without applying them"),
+                ("ask", "Ask", "Answer questions without changing files"),
                 ("auto", "Auto", "Allow commands unless explicitly denied"),
                 (
                     "full-access",
@@ -802,7 +802,7 @@ mod tests {
         );
         assert_eq!(cursor.default_permission_mode, Some("auto"));
         assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
-        assert_eq!(reasoning_ids(&cursor), ["default", "low", "medium", "high"]);
+        assert!(cursor.reasoning_levels.is_empty());
     }
 
     /// Every advertised permission-mode id must round-trip through

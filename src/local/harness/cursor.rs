@@ -47,18 +47,6 @@ const CURSOR_REINSTALL: &str = "Reinstall it from cursor.com/install";
 const AUTH_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// Fallback catalog when `agent models` cannot run. Ids match the CLI's
-/// `--model` examples and the current default Composer/Grok aliases.
-const CURSOR_MODELS: [&str; 5] = [
-    "auto",
-    "composer-2.5",
-    "grok-4.6",
-    "gpt-5",
-    "sonnet-4-thinking",
-];
-
-const CURSOR_EFFORT_LEVELS: [&str; 3] = ["low", "medium", "high"];
-
 pub struct Cursor;
 
 #[async_trait]
@@ -85,7 +73,7 @@ impl Harness for Cursor {
             let (status, about) = match bin {
                 Some(bin) => {
                     tokio::join!(
-                        cursor_status_json(bin),
+                        cursor_command_json(bin, &["status", "--format", "json"]),
                         cursor_command_json(bin, &["about", "--format", "json"])
                     )
                 }
@@ -104,17 +92,11 @@ impl Harness for Cursor {
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(CURSOR_REINSTALL));
         } else if info.installed {
-            info.agent_note = Some(
-                if api_key("CURSOR_API_KEY").is_some() {
-                    "Cursor could not verify `CURSOR_API_KEY`. Fix or unset it, then re-check this harness."
-                } else {
-                    "Sign in with `agent login`, then re-check this harness."
-                }
-                .to_string(),
-            );
+            info.agent_note =
+                Some("Sign in with `agent login`, then re-check this harness.".to_string());
         } else {
             info.agent_note = Some(
-                "Install Cursor CLI (curl https://cursor.com/install -fsS | bash), then sign in with `agent login`."
+                "Install Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then sign in with `agent login`."
                     .to_string(),
             );
         }
@@ -133,25 +115,19 @@ impl Harness for Cursor {
     }
 
     fn options(&self) -> HarnessOptions {
-        HarnessOptions::none()
-            .with_permission_choices(
-                vec![
-                    OptionChoice::described("ask", "Ask", "Propose changes without applying them"),
-                    OptionChoice::described(
-                        "auto",
-                        "Auto",
-                        "Allow commands unless explicitly denied",
-                    ),
-                    OptionChoice::described(
-                        "full-access",
-                        "Full access",
-                        "Allow commands and disable the sandbox",
-                    ),
-                ],
-                "auto",
-                PlanActivation::Command,
-            )
-            .with_reasoning_levels(&CURSOR_EFFORT_LEVELS)
+        HarnessOptions::none().with_permission_choices(
+            vec![
+                OptionChoice::described("ask", "Ask", "Answer questions without changing files"),
+                OptionChoice::described("auto", "Auto", "Allow commands unless explicitly denied"),
+                OptionChoice::described(
+                    "full-access",
+                    "Full access",
+                    "Allow commands and disable the sandbox",
+                ),
+            ],
+            "auto",
+            PlanActivation::Command,
+        )
     }
 
     async fn resume_from_prompt(
@@ -264,16 +240,13 @@ fn apply_auth(info: &mut HarnessInfo, status: Option<&Value>, about: Option<&Val
     info.plan = nonempty_str(about.unwrap_or(&Value::Null), "subscriptionTier");
 }
 
-async fn cursor_status_json(bin: &Path) -> Option<Value> {
-    cursor_command_json(bin, &["status", "--format", "json"]).await
-}
-
 async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
     let mut cmd = Command::new(bin);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
     let out = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output())
@@ -288,14 +261,15 @@ async fn cursor_model_list(bin: &Path) -> Option<Vec<ModelInfo>> {
     cmd.args(["models"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
     let out = tokio::time::timeout(MODELS_TIMEOUT, cmd.output())
         .await
         .ok()?
         .ok()?;
-    if !out.status.success() && out.stdout.is_empty() {
+    if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
@@ -304,134 +278,32 @@ async fn cursor_model_list(bin: &Path) -> Option<Vec<ModelInfo>> {
 }
 
 fn fallback_models() -> Vec<ModelInfo> {
-    CURSOR_MODELS
-        .iter()
-        .map(|id| ModelInfo::new(*id).with_reasoning(&CURSOR_EFFORT_LEVELS))
-        .collect()
+    vec![ModelInfo::new("auto").with_label(Some("Auto"), None)]
 }
 
-/// Parse `agent models` / `--list-models` stdout. Accepts a JSON array/object
-/// or a plain list (one id per line). Unknown shapes yield nothing so the
-/// caller can fall back.
+// `agent models` lists `id - display name`, followed by a usage tip.
+// It does not report effort capabilities; leave those to Cursor's model variants.
 fn parse_cursor_model_list(text: &str) -> Vec<ModelInfo> {
-    let trimmed = text.trim();
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            return parse_cursor_model_json(&value);
-        }
-    }
     text.lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.ends_with(':'))
-        .filter(|line| {
-            !line.eq_ignore_ascii_case("available models") && !line.eq_ignore_ascii_case("models")
-        })
         .filter_map(|line| {
-            let id = line
-                .trim_start_matches(['-', '*', '•'])
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_matches(['`', '"', '\'', ',', ';']);
-            cursor_model_id_ok(id).then(|| ModelInfo::new(id).with_reasoning(&CURSOR_EFFORT_LEVELS))
-        })
-        .collect()
-}
-
-fn parse_cursor_model_json(value: &Value) -> Vec<ModelInfo> {
-    let entries = value
-        .as_array()
-        .cloned()
-        .or_else(|| value.get("models").and_then(Value::as_array).cloned())
-        .unwrap_or_default();
-    entries
-        .iter()
-        .filter_map(|entry| {
-            if let Some(id) = entry.as_str() {
-                return cursor_model_id_ok(id)
-                    .then(|| ModelInfo::new(id).with_reasoning(&CURSOR_EFFORT_LEVELS));
-            }
-            let id = ["id", "modelId", "value", "name"]
-                .iter()
-                .find_map(|key| nonempty_str(entry, key))?;
-            if !cursor_model_id_ok(&id) {
+            let line = line.trim();
+            let (id, label) = line.split_once(" - ").unwrap_or((line, ""));
+            if id.is_empty()
+                || id == REASONING_DEFAULT_ID
+                || !id.chars().all(|c| {
+                    c.is_ascii_alphanumeric()
+                        || matches!(c, '-' | '_' | '.' | '[' | ']' | '=' | ',')
+                })
+            {
                 return None;
             }
-            let display =
-                nonempty_str(entry, "displayName").or_else(|| nonempty_str(entry, "display_name"));
-            let description = nonempty_str(entry, "description");
-            let efforts = cursor_model_efforts(entry);
-            Some(
-                ModelInfo::new(id)
-                    .with_label(display.as_deref(), description.as_deref())
-                    .with_reasoning(&efforts),
-            )
+            let label = [" (current, default)", " (current)", " (default)"]
+                .iter()
+                .find_map(|suffix| label.strip_suffix(suffix))
+                .unwrap_or(label);
+            Some(ModelInfo::new(id).with_label((!label.is_empty()).then_some(label), None))
         })
         .collect()
-}
-
-fn cursor_model_efforts(entry: &Value) -> Vec<&str> {
-    let params = entry
-        .get("parameters")
-        .or_else(|| entry.get("modelParameters"))
-        .and_then(Value::as_array);
-    let Some(params) = params else {
-        return CURSOR_EFFORT_LEVELS.to_vec();
-    };
-    let effort = params.iter().find(|param| {
-        param
-            .get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id == "effort")
-    });
-    let Some(effort) = effort else {
-        return CURSOR_EFFORT_LEVELS.to_vec();
-    };
-    let values = effort
-        .get("values")
-        .or_else(|| effort.get("options"))
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| {
-                    value
-                        .as_str()
-                        .or_else(|| value.get("id").and_then(Value::as_str))
-                })
-                .filter(|id| *id != REASONING_DEFAULT_ID)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if values.is_empty() {
-        CURSOR_EFFORT_LEVELS.to_vec()
-    } else {
-        values
-    }
-}
-
-fn cursor_model_id_ok(id: &str) -> bool {
-    !id.is_empty()
-        && id != REASONING_DEFAULT_ID
-        && id.len() < 80
-        && !id.contains(' ')
-        && id.chars().all(|c| {
-            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '[' | ']' | '=' | ',')
-        })
-}
-
-fn cursor_effort(level: Option<&str>) -> Option<&str> {
-    let level = level?;
-    (level != REASONING_DEFAULT_ID && !level.is_empty()).then_some(level)
-}
-
-fn cursor_model_arg(model: Option<&str>, effort: Option<&str>) -> Option<String> {
-    let model = model.filter(|model| !model.is_empty())?;
-    match effort {
-        Some(effort) if !model.contains('[') => Some(format!("{model}[effort={effort}]")),
-        _ => Some(model.to_string()),
-    }
 }
 
 fn cursor_cli_error(stderr: &str) -> Option<String> {
@@ -449,17 +321,26 @@ fn cursor_cli_error(stderr: &str) -> Option<String> {
 }
 
 fn read_log_tail(path: &Path, max: usize) -> String {
-    let Ok(data) = std::fs::read(path) else {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
         return String::new();
     };
-    let start = data.len().saturating_sub(max);
-    String::from_utf8_lossy(&data[start..]).into_owned()
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let _ = file.seek(SeekFrom::Start(len.saturating_sub(max as u64)));
+    let mut data = Vec::new();
+    let _ = file.take(max as u64).read_to_end(&mut data);
+    String::from_utf8_lossy(&data).into_owned()
 }
 
 fn cursor_exit_detail(status: std::process::ExitStatus, log: &Path) -> String {
     let tail = read_log_tail(log, 8 * 1024);
-    cursor_cli_error(&tail)
-        .unwrap_or_else(|| format!("cursor exited with {status}; see {}", log.display()))
+    cursor_cli_error(&tail).unwrap_or_else(|| {
+        format!(
+            "Cursor ended without a result ({status}); see {}",
+            log.display()
+        )
+    })
 }
 
 async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
@@ -472,12 +353,11 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
         "--mode",
         "ask",
         "--trust",
-        "--approve-mcps",
     ]);
     if let Some(model) = request.model.filter(|model| !model.is_empty()) {
         cmd.args(["--model", model]);
     } else if matches!(request.quality, OneShotQuality::Cheap) {
-        cmd.args(["--model", "composer-2.5"]);
+        cmd.args(["--model", "auto"]);
     }
     cmd.arg(&message)
         .stdin(Stdio::null())
@@ -486,10 +366,13 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
         .kill_on_drop(true)
         .current_dir(std::env::temp_dir());
     prepare_env(&mut cmd);
-    cmd.env(
-        "CURSOR_CONFIG_DIR",
-        native_store::prepare_cursor(NativeStore::Isolated).ok()?,
-    );
+    let cursor_home =
+        tokio::task::spawn_blocking(|| native_store::prepare_cursor(NativeStore::Isolated))
+            .await
+            .ok()?
+            .ok()?;
+    cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
+    cmd.env("CURSOR_DATA_DIR", &cursor_home);
     cmd.env("NO_COLOR", "1");
     let out = tokio::time::timeout(request.timeout, cmd.output())
         .await
@@ -556,15 +439,11 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         "stream-json",
         "--stream-partial-output",
         "--trust",
-        "--approve-mcps",
         "--workspace",
     ])
     .arg(&repo);
-    if let Some(model) = cursor_model_arg(
-        ctx.model.as_deref(),
-        cursor_effort(ctx.reasoning_level.as_deref()),
-    ) {
-        cmd.args(["--model", &model]);
+    if let Some(model) = ctx.model.as_deref().filter(|model| !model.is_empty()) {
+        cmd.args(["--model", model]);
     }
     if ctx.plan_mode || ctx.permission_mode == Some(PermissionMode::Plan) {
         cmd.args(["--mode", "plan"]);
@@ -584,14 +463,18 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(native_id) = &resume {
         cmd.args(["--resume", native_id]);
     }
+    let log_name = format!("cursor-{}", uuid::Uuid::new_v4());
     cmd.arg(&prompt)
         .current_dir(&repo)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(harness_log("cursor")?))
+        .stderr(Stdio::from(harness_log(&log_name)?))
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
+    if native_store == NativeStore::Isolated {
+        cmd.env("CURSOR_DATA_DIR", &cursor_home);
+    }
     cmd.env("NO_COLOR", "1");
     set_chat_session_env(&mut cmd, &ctx.session_id, "cursor", ctx.host.up_port());
 
@@ -615,6 +498,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 };
                 ctx.mark_delivery(DeliveryState::Accepted);
                 let terminal = apply_event(ctx, &mut state, &event);
+                if let Some(sid) = state.native_session_id.as_deref() {
+                    ctx.set_native_session_id(sid);
+                }
                 ctx.maybe_flush();
                 if terminal {
                     break;
@@ -625,18 +511,18 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 return Err(anyhow!("cursor stdout: {error}"));
             }
             Err(_) => {
-                let _ = child.start_kill();
-                ctx.push_error(
-                    "Cursor Agent went silent for 30 minutes and was interrupted.".to_string(),
-                );
-                break;
+                return Err(anyhow!(
+                    "Cursor Agent went silent for {} minutes and was interrupted.",
+                    TURN_WATCHDOG.as_secs() / 60
+                ));
             }
         }
     }
 
     let status = child.wait().await?;
-    if let Some(sid) = state.native_session_id.as_deref() {
-        ctx.set_native_session_id(sid);
+    let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
+    if !state.saw_result {
+        return Err(anyhow!("{}", cursor_exit_detail(status, &log_path)));
     }
     if ctx.plan_mode {
         if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id, state.turn_errored) {
@@ -652,9 +538,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             .find_map(|part| part.state.as_ref()?.error.clone())
             .unwrap_or_else(|| "Cursor reported a terminal turn error".into());
         ctx.mark_terminal_failure("cursor_terminal", message);
-    } else if !status.success() && !state.saw_result {
-        let log_path = crate::store::data_dir().join("agent-cursor.log");
-        return Err(anyhow!("{}", cursor_exit_detail(status, &log_path)));
+    } else if status.success() {
+        let _ = std::fs::remove_file(log_path);
     }
     let _ = ctx.flush();
     Ok(())
@@ -664,9 +549,10 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 struct TurnState {
     native_session_id: Option<String>,
     text_part_id: Option<String>,
+    reasoning_part_id: Option<String>,
     streamed_current: bool,
     text_seq: usize,
-    last_text: String,
+    text_len_before_delta: Option<usize>,
     turn_errored: bool,
     saw_result: bool,
 }
@@ -676,20 +562,49 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
         state.native_session_id = Some(sid.to_string());
     }
     match event.get("type").and_then(Value::as_str) {
-        Some("system") => {
-            if event.get("subtype").and_then(Value::as_str) == Some("init") {
-                if let Some(sid) = event.get("session_id").and_then(Value::as_str) {
-                    state.native_session_id = Some(sid.to_string());
+        Some("thinking") => {
+            if event.get("subtype").and_then(Value::as_str) == Some("delta") {
+                if let Some(text) = event.get("text").and_then(Value::as_str) {
+                    let id = match &state.reasoning_part_id {
+                        Some(id) => id.clone(),
+                        None => {
+                            close_text_segment(state);
+                            let id = next_text_id(state);
+                            ctx.upsert_part(WirePart::reasoning(id.clone(), ""));
+                            state.reasoning_part_id = Some(id.clone());
+                            id
+                        }
+                    };
+                    ctx.append_part_text(&id, text);
                 }
+            } else {
+                state.reasoning_part_id = None;
             }
             false
         }
         Some("assistant") => {
+            state.reasoning_part_id = None;
             apply_assistant(ctx, state, event);
             false
         }
         Some("tool_call") => {
             apply_tool_call(ctx, state, event);
+            false
+        }
+        Some("retry") => {
+            // Cursor flushes its buffered text as a delta immediately before retry.
+            if let (Some(id), Some(len)) = (&state.text_part_id, state.text_len_before_delta) {
+                if let Some(text) = ctx
+                    .assistant
+                    .parts
+                    .iter()
+                    .find(|part| &part.id == id)
+                    .and_then(|part| part.text.as_deref())
+                {
+                    ctx.upsert_part(WirePart::text(id.clone(), &text[..len]));
+                }
+            }
+            close_text_segment(state);
             false
         }
         Some("result") => {
@@ -708,6 +623,9 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     .unwrap_or("Cursor reported an error")
                     .to_string();
                 ctx.push_error(detail);
+            } else {
+                // Cursor's result concatenates progress and answers across model calls.
+                ctx.mark_final_text_tail();
             }
             true
         }
@@ -730,9 +648,6 @@ fn apply_assistant(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
         }
         return;
     }
-    if !text.trim().is_empty() {
-        state.last_text = text.clone();
-    }
     if has_ts {
         state.streamed_current = true;
         let id = match state.text_part_id.as_ref() {
@@ -746,6 +661,13 @@ fn apply_assistant(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
         if ctx.assistant.parts.iter().all(|part| part.id != id) {
             ctx.upsert_part(WirePart::text(id.clone(), ""));
         }
+        state.text_len_before_delta = ctx
+            .assistant
+            .parts
+            .iter()
+            .find(|part| part.id == id)
+            .and_then(|part| part.text.as_ref())
+            .map(String::len);
         ctx.append_part_text(&id, &text);
     } else {
         let id = state
@@ -758,6 +680,7 @@ fn apply_assistant(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
 }
 
 fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
+    state.reasoning_part_id = None;
     close_text_segment(state);
     let subtype = event.get("subtype").and_then(Value::as_str).unwrap_or("");
     let call_id = event
@@ -768,7 +691,6 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
     let (name, args, result) = tool_call_parts(event.get("tool_call").unwrap_or(&Value::Null));
     match subtype {
         "started" => {
-            let title = tool_title(args.as_ref());
             ctx.upsert_part(WirePart {
                 id: call_id,
                 kind: "tool".into(),
@@ -779,9 +701,10 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                     input: args,
                     output: None,
                     error: None,
-                    title,
+                    title: None,
                 }),
                 prompt: None,
+                phase: None,
                 children: Vec::new(),
             });
         }
@@ -800,7 +723,6 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                     }
                 }
             } else {
-                let title = tool_title(args.as_ref());
                 ctx.upsert_part(WirePart {
                     id: call_id,
                     kind: "tool".into(),
@@ -811,9 +733,10 @@ fn apply_tool_call(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
                         input: args,
                         output: ok.then_some(output.clone()),
                         error: (!ok).then_some(output),
-                        title,
+                        title: None,
                     }),
                     prompt: None,
+                    phase: None,
                     children: Vec::new(),
                 });
             }
@@ -857,7 +780,11 @@ fn tool_call_parts(tool_call: &Value) -> (String, Option<Value>, Option<Value>) 
         for (key, value) in obj {
             if let Some(stem) = key.strip_suffix("ToolCall") {
                 return (
-                    title_case(stem),
+                    if stem == "shell" {
+                        "Bash".into()
+                    } else {
+                        title_case(stem)
+                    },
                     value.get("args").cloned(),
                     value.get("result").cloned(),
                 );
@@ -865,20 +792,6 @@ fn tool_call_parts(tool_call: &Value) -> (String, Option<Value>, Option<Value>) 
         }
     }
     ("tool".into(), None, None)
-}
-
-fn tool_title(args: Option<&Value>) -> Option<String> {
-    let args = args?;
-    args.get("path")
-        .or_else(|| args.get("file_path"))
-        .or_else(|| args.get("filePath"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| {
-            args.get("command")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
 }
 
 fn tool_result_text(result: &Value) -> (bool, String) {
@@ -916,20 +829,31 @@ fn next_text_id(state: &mut TurnState) -> String {
 fn close_text_segment(state: &mut TurnState) {
     state.text_part_id = None;
     state.streamed_current = false;
+    state.text_len_before_delta = None;
 }
 
 fn plan_card(parts: &[WirePart], assistant_id: &str, errored: bool) -> Option<WirePart> {
     let last_text = parts
         .iter()
         .rev()
-        .find(|part| {
-            part.kind == "text"
-                && part
-                    .text
-                    .as_deref()
-                    .is_some_and(|text| !text.trim().is_empty())
+        .find_map(|part| {
+            if part.tool.as_deref() != Some("CreatePlan") {
+                return None;
+            }
+            let state = part.state.as_ref()?;
+            (state.status == "completed")
+                .then(|| state.input.as_ref()?.get("plan")?.as_str())
+                .flatten()
+                .filter(|plan| !plan.trim().is_empty())
         })
-        .and_then(|part| part.text.as_deref())?;
+        .or_else(|| {
+            parts.iter().rev().find_map(|part| {
+                (part.kind == "text")
+                    .then_some(part.text.as_deref())
+                    .flatten()
+                    .filter(|text| !text.trim().is_empty())
+            })
+        })?;
     if !super::should_synthesize_plan(true, false, errored, last_text) {
         return None;
     }
@@ -956,6 +880,69 @@ mod tests {
             apply_event(&mut ctx, &mut state, event);
         }
         (ctx, state)
+    }
+
+    #[test]
+    fn streamed_work_collapses_only_after_a_successful_result() {
+        use crate::local::chat::MessagePhase;
+        use serde_json::json;
+
+        let delta = |text: &str| {
+            json!({
+                "type": "assistant", "timestamp_ms": 1,
+                "message": {"content": [{"type": "text", "text": text}]}
+            })
+        };
+        let (mut ctx, mut state) = fold(&[
+            json!({"type": "thinking", "subtype": "delta", "text": "Read the file."}),
+            json!({"type": "thinking", "subtype": "completed"}),
+            delta("I'll read README.md."),
+            json!({"type": "assistant", "timestamp_ms": 1, "model_call_id": "call-1",
+                "message": {"content": [{"type": "text", "text": "I'll read README.md."}]}}),
+            json!({"type": "tool_call", "subtype": "started", "call_id": "read-1",
+                "tool_call": {"readToolCall": {"args": {"path": "README.md"}}}}),
+            json!({"type": "tool_call", "subtype": "completed", "call_id": "read-1",
+                "tool_call": {"readToolCall": {"result": {"success": {"content": "An otter."}}}}}),
+            json!({"type": "thinking", "subtype": "delta", "text": "The mascot is an otter."}),
+            json!({"type": "thinking", "subtype": "completed"}),
+            delta("The mascot is "),
+            delta("an otter."),
+            json!({"type": "assistant",
+                "message": {"content": [{"type": "text", "text": "The mascot is an otter."}]}}),
+        ]);
+        assert_eq!(ctx.assistant.parts.len(), 5);
+        assert_eq!(ctx.assistant.parts[0].kind, "reasoning");
+        assert_eq!(ctx.assistant.parts[3].kind, "reasoning");
+        assert!(ctx.assistant.parts.iter().all(|part| part.phase.is_none()));
+
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &json!({"type": "result", "subtype": "success",
+            "result": "I'll read README.md.The mascot is an otter."}),
+        );
+        let saved = serde_json::to_string(&ctx.assistant.parts).unwrap();
+        let restored: Vec<WirePart> = serde_json::from_str(&saved).unwrap();
+        assert_eq!(restored[1].phase, Some(MessagePhase::Commentary));
+        assert_eq!(restored[4].phase, Some(MessagePhase::FinalAnswer));
+        assert_eq!(restored[4].text.as_deref(), Some("The mascot is an otter."));
+    }
+
+    #[test]
+    fn failed_result_does_not_promote_partial_text_to_an_answer() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        ctx.upsert_part(WirePart::tool("read", "Read", "completed", None));
+        ctx.upsert_part(WirePart::text("partial", "Still checking"));
+        apply_event(
+            &mut ctx,
+            &mut state,
+            &serde_json::json!({
+                "type": "result", "is_error": true, "result": "Rate limit exceeded"
+            }),
+        );
+        assert!(state.turn_errored);
+        assert!(ctx.assistant.parts.iter().all(|part| part.phase.is_none()));
     }
 
     #[test]
@@ -1058,51 +1045,84 @@ mod tests {
     }
 
     #[test]
-    fn model_list_parses_json_and_plain_lines() {
-        let json = serde_json::json!({
-            "models": [
-                {"id": "auto", "displayName": "Auto"},
-                {"id": "grok-4.6", "displayName": "Grok 4.6", "parameters": [
-                    {"id": "effort", "values": ["low", "high"]}
-                ]},
-                {"id": "default"},
-            ]
-        });
-        let parsed = parse_cursor_model_json(&json);
-        assert_eq!(
-            parsed.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["auto", "grok-4.6"]
+    fn model_list_preserves_cli_labels_without_inventing_effort_controls() {
+        let models = parse_cursor_model_list(
+            "Available models\n\nauto - Auto (current, default)\ngrok-4.6 - Grok 4.6\nclaude-opus-4-8[effort=high] - Opus 4.8 High\n\nTip: use --model <id> to switch.\n",
         );
-        assert_eq!(parsed[0].display_name.as_deref(), Some("Auto"));
-        let efforts: Vec<_> = parsed[1]
-            .reasoning_levels
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(efforts, ["default", "low", "high"]);
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "auto");
+        assert_eq!(models[0].display_name.as_deref(), Some("Auto"));
+        assert_eq!(models[1].display_name.as_deref(), Some("Grok 4.6"));
+        assert_eq!(models[2].id, "claude-opus-4-8[effort=high]");
+        assert!(models.iter().all(|model| model.reasoning_levels.is_none()));
+        assert!(parse_cursor_model_list("No models available for this account.").is_empty());
+        assert_eq!(fallback_models()[0].id, "auto");
+    }
 
-        let lines = parse_cursor_model_list("Available models:\n- grok-4.6\n- composer-2.5\n");
+    #[test]
+    fn retry_flush_does_not_duplicate_streamed_text() {
+        let text = |value: &str| {
+            serde_json::json!({
+                "type": "assistant", "timestamp_ms": 1,
+                "message": {"content": [{"type": "text", "text": value}]}
+            })
+        };
+        let (ctx, _) = fold(&[
+            text("Hello"),
+            text("Hello"),
+            serde_json::json!({"type": "retry", "subtype": "started"}),
+            text(" again"),
+            serde_json::json!({"type": "assistant", "message": {
+                "content": [{"type": "text", "text": " again"}]
+            }}),
+        ]);
+        let rendered: String = ctx
+            .assistant
+            .parts
+            .iter()
+            .filter_map(|part| part.text.as_deref())
+            .collect();
+        assert_eq!(rendered, "Hello again");
+    }
+
+    #[test]
+    fn plan_card_uses_the_native_plan_instead_of_the_closing_message() {
+        let (mut ctx, _) = fold(&[serde_json::json!({
+            "type": "tool_call", "subtype": "completed", "call_id": "plan-1",
+            "tool_call": {"createPlanToolCall": {
+                "args": {"plan": "# Plan\n1. Run the baseline", "name": "Baseline"},
+                "result": {"success": {}}
+            }}
+        })]);
+        ctx.upsert_part(WirePart::text("closing", "The plan is ready."));
+        let card = plan_card(&ctx.assistant.parts, "msg", false).unwrap();
         assert_eq!(
-            lines.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            ["grok-4.6", "composer-2.5"]
+            card.prompt.unwrap().plan.as_deref(),
+            Some("# Plan\n1. Run the baseline")
         );
     }
 
     #[test]
-    fn effort_is_appended_unless_model_is_already_parameterized() {
+    fn shell_tool_uses_dashboard_command_activity() {
+        let event = serde_json::json!({
+            "type": "tool_call", "subtype": "completed", "call_id": "shell-1",
+            "tool_call": {"shellToolCall": {
+                "args": {"command": "orx exp status"},
+                "result": {"success": {"content": "No runs"}}
+            }}
+        });
+        let (ctx, _) = fold(&[event]);
+        assert_eq!(ctx.assistant.parts[0].tool.as_deref(), Some("Bash"));
         assert_eq!(
-            cursor_model_arg(Some("grok-4.6"), Some("high")).as_deref(),
-            Some("grok-4.6[effort=high]")
+            ctx.assistant.parts[0]
+                .state
+                .as_ref()
+                .unwrap()
+                .input
+                .as_ref()
+                .unwrap()["command"],
+            "orx exp status"
         );
-        assert_eq!(
-            cursor_model_arg(Some("grok-4.6[fast=true]"), Some("high")).as_deref(),
-            Some("grok-4.6[fast=true]")
-        );
-        assert_eq!(cursor_effort(Some(REASONING_DEFAULT_ID)), None);
-        assert_eq!(cursor_effort(Some("high")), Some("high"));
-        assert_eq!(cursor_model_arg(None, Some("high")), None);
     }
 
     #[test]
@@ -1115,6 +1135,14 @@ ActionRequiredError: Named models unavailable Free plans can only use Auto. Swit
                 "Named models unavailable Free plans can only use Auto. Switch to Auto or upgrade plans to continue."
             )
         );
+    }
+
+    #[test]
+    fn error_log_reads_only_the_requested_tail() {
+        let path = std::env::temp_dir().join(format!("cursor-log-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "earlier diagnostics\ncurrent error").unwrap();
+        assert_eq!(read_log_tail(&path, 13), "current error");
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

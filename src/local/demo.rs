@@ -704,7 +704,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         ));
     }
     let (read_name, read_input, edit_name, edit_input, shell_name) = match harness {
-        "claude-code" => (
+        "claude-code" | "cursor" => (
             "Read",
             json!({ "file_path": "runs/runcpu.sh", "filePath": "runs/runcpu.sh" }),
             "Edit",
@@ -859,7 +859,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
         "The CLI loaded SFT checkpoint 1499 on MPS and answered correctly: **“Paris … The capital of France is Paris.”** Its later continuation became repetitive, reflecting the tiny local model, but inference worked and the requested answer was correct. I’m preserving the complete tokenizer, base, evaluation, SFT, and chat record in the artifact now.",
     ));
     let (report_tool, report_input) = match harness {
-        "claude-code" => (
+        "claude-code" | "cursor" => (
             "Bash",
             json!({ "command": "printf '%s\\n' '# nanochat CPU / Apple-Silicon pipeline results' 'Base validation BPB: 1.165758' 'SFT validation BPB: 0.7389' 'Chat confirmation: Paris' > cpu-apple-silicon-pipeline-results.md" }),
         ),
@@ -888,7 +888,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
 
 fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     let (read_tool, shell_tool, edit_tool, read_input, edit_input) = match harness {
-        "claude-code" => (
+        "claude-code" | "cursor" => (
             "Read",
             "Bash",
             "Edit",
@@ -1004,12 +1004,12 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
 
 fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     let (read_tool, shell_tool, write_tool) = match harness {
-        "claude-code" => ("Read", "Bash", "Edit"),
+        "claude-code" | "cursor" => ("Read", "Bash", "Edit"),
         "opencode" => ("read", "bash", "bash"),
         _ => ("bash", "bash", "edit"),
     };
     let read_input = |path: &str| match harness {
-        "claude-code" => json!({ "file_path": path, "filePath": path }),
+        "claude-code" | "cursor" => json!({ "file_path": path, "filePath": path }),
         "opencode" => json!({ "filePath": path }),
         _ => json!({ "command": format!("sed -n '1,280p' {path}") }),
     };
@@ -1173,7 +1173,7 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
     ));
     let report_path = "artifacts/nanochat-bottleneck-diagnosis.md";
     let write_input = match harness {
-        "claude-code" => json!({
+        "claude-code" | "cursor" => json!({
             "file_path": report_path,
             "filePath": report_path,
             "old_string": "",
@@ -1532,7 +1532,7 @@ mod tests {
             ("claude-code", ["Read", "Edit", "Bash"]),
             ("codex", ["bash", "edit", "bash"]),
             ("opencode", ["read", "bash", "todowrite"]),
-            ("cursor", ["bash", "edit", "bash"]),
+            ("cursor", ["Read", "Edit", "Bash"]),
         ] {
             let parts = assistant_parts(harness);
             let encoded = serde_json::to_string(&parts).unwrap();
@@ -1564,7 +1564,7 @@ mod tests {
                 assert!(names.contains(&tool), "{harness} missing {tool}: {names:?}");
             }
             let allowed: &[&str] = match harness {
-                "claude-code" => &["Read", "Edit", "Bash"],
+                "claude-code" | "cursor" => &["Read", "Edit", "Bash"],
                 "opencode" => &["read", "bash", "todowrite"],
                 _ => &["bash", "edit"],
             };
@@ -1582,7 +1582,7 @@ mod tests {
                 assert_ne!(command, "apply the reviewed portability and SFT safeguards");
                 assert_ne!(command, "write the consolidated result artifact");
             }
-            if harness == "claude-code" {
+            if matches!(harness, "claude-code" | "cursor") {
                 for part in parts
                     .iter()
                     .filter(|part| matches!(part.tool.as_deref(), Some("Read") | Some("Edit")))
@@ -1610,7 +1610,7 @@ mod tests {
                 assert!(!encoded.contains("parse-nanochat-metrics"));
                 assert!(!encoded.contains("inspect-svg"));
                 assert!(!encoded.contains("validate-svg-artifacts"));
-                if harness == "claude-code" {
+                if matches!(harness, "claude-code" | "cursor") {
                     for part in parts
                         .iter()
                         .filter(|part| matches!(part.tool.as_deref(), Some("Read") | Some("Edit")))

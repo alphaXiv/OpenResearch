@@ -892,7 +892,7 @@
   "settings_oauth_login": "OAuth (subscription login)",
   "settings_not_found_on_path": "not found on PATH",
   "settings_providers": "Providers",
-  "settings_models_available": "{count} available — {models}",
+  "settings_models_available": "{count} models available — {models}",
   "settings_none": "none",
   "settings_kubectl_default": "Use current kubectl context",
   "settings_kubectl_default_context": "Use current context ({context})",
@@ -1143,5 +1143,6 @@
   "local_models_config_restricted": "Saved, but OpenCode did not list this model. Check installed agents again. If your OpenCode config restricts enabled providers, allow this connection before using it.",
   "local_models_custom_endpoint": "Custom Endpoint",
   "local_models_compatible_api": "(OpenAI compatible)",
-  "chat_session_limit_reached": "Session limit reached"
+  "chat_session_limit_reached": "Session limit reached",
+  "chat_model_unavailable": "Model unavailable"
 }

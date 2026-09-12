@@ -64,11 +64,11 @@ test("accessible full history includes every message", () => {
 test("viewport and footer resizing preserve bottom pin without moving a reader", () => {
   const effect = find(node => ts.isCallExpression(node) && node.expression.getText(file) === "useEffect" && node.getText(file).includes("observer.observe(inner)")).arguments[0];
   let resize, pinned = 0, updated = 0, disconnected = false;
-  const observed = [], el = {}, inner = {}, stickToBottom = { current: true };
+  const observed = [], el = { scrollHeight: 1000, scrollTop: 500, clientHeight: 500 }, inner = {}, stickToBottom = { current: true };
   const setup = evaluate(`return ${effect.getText(file)}`, {
     threadRef: { current: el }, threadInnerRef: { current: inner }, stickToBottom,
     scrollToEndRef: { current: () => { pinned++; } },
-    updateTranscriptBottom: target => { assert.equal(target, el); updated++; },
+    setTranscriptAtBottom: value => { assert.equal(value, el.scrollHeight - el.scrollTop - el.clientHeight < 60); updated++; },
     ResizeObserver: class {
       constructor(callback) { resize = callback; }
       observe(target) { observed.push(target); }
@@ -83,6 +83,11 @@ test("viewport and footer resizing preserve bottom pin without moving a reader",
   resize();
   assert.equal(pinned, 1);
   assert.equal(updated, 1);
+  assert.equal(stickToBottom.current, false);
+  el.scrollHeight += 400;
+  resize();
+  assert.equal(pinned, 1);
+  assert.equal(stickToBottom.current, false);
   cleanup();
   assert.equal(disconnected, true);
 });
