@@ -230,7 +230,7 @@
   "onboarding_choose_one_or_more": "请选择一项或多项。",
   "onboarding_consolidate_your_research": "集中管理研究",
   "onboarding_continue": "继续",
-  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode…",
+  "onboarding_detecting_claude_code_codex_open_code": "正在检测 Claude Code、Codex、OpenCode、Cursor…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "例如：我研究用于 LLM 后训练的样本高效强化学习，重点关注无需奖励模型的方法。",
   "onboarding_everything_stays_local": "一切都保留在本地",
   "onboarding_get_started": "开始使用",
@@ -886,7 +886,7 @@
   "settings_oauth_login": "OAuth（订阅登录）",
   "settings_not_found_on_path": "在 PATH 中未找到",
   "settings_providers": "提供商",
-  "settings_models_available": "{count} 个可用 — {models}",
+  "settings_models_available": "{count} 个模型可用 — {models}",
   "settings_none": "无",
   "settings_kubectl_default": "使用当前 kubectl 上下文",
   "settings_kubectl_default_context": "使用当前上下文（{context}）",
@@ -1066,7 +1066,6 @@
   "remote_install_location": "OpenResearch 将为你的远程 SSH 用户使用以下位置，无需 sudo。",
   "remote_install_binary": "OpenResearch 二进制文件",
   "remote_install_database": "OpenResearch 数据库",
-  "remote_install_cache": "旧仓库位置",
   "remote_installing": "正在安装…",
   "remote_open": "打开远程工作区",
   "remote_connected_as": "已以 {user} 身份连接到 {host}",
@@ -1143,5 +1142,6 @@
   "skills_remove_imported": "从 OpenResearch 移除",
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
   "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
-  "chat_session_limit_reached": "已达到会话使用限额"
+  "chat_session_limit_reached": "已达到会话使用限额",
+  "chat_model_unavailable": "模型不可用"
 }

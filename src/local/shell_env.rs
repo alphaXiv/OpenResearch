@@ -24,7 +24,7 @@ use std::sync::OnceLock;
 /// Deliberately short. These are the variables whose divergence makes the app
 /// and the CLI behave like different installs; credentials reach harness
 /// children through `chat::prepare_env` instead.
-pub const IMPORTED: [&str; 9] = [
+pub const IMPORTED: [&str; 11] = [
     "PATH",
     "ORX_DATA_DIR",
     "ORX_CACHE_DIR",
@@ -34,6 +34,8 @@ pub const IMPORTED: [&str; 9] = [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "CODEX_HOME",
+    "CURSOR_CONFIG_DIR",
+    "CURSOR_DATA_DIR",
 ];
 
 static OVERRIDE: OnceLock<HashMap<&'static str, OsString>> = OnceLock::new();

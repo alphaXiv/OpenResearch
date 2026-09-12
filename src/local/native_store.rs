@@ -72,6 +72,15 @@ pub fn codex_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn cursor_home(store: NativeStore) -> PathBuf {
+    match store {
+        NativeStore::Isolated => crate::store::data_dir().join("agents/cursor"),
+        NativeStore::Legacy => user_env_path("CURSOR_CONFIG_DIR")
+            .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
+            .unwrap_or_else(|| home_dir().join(".cursor")),
+    }
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
@@ -191,6 +200,64 @@ pub fn claude_session(native_id: &str) -> Result<Option<NativeSessionLocation>> 
 
 pub fn codex_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     session_location(codex_home, &["sessions", "archived_sessions"], native_id)
+}
+
+pub fn cursor_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
+    let isolated = cursor_home(NativeStore::Isolated);
+    for (store, root) in [
+        (NativeStore::Isolated, isolated.clone()),
+        (NativeStore::Legacy, cursor_home(NativeStore::Legacy)),
+    ] {
+        if store == NativeStore::Legacy && root == isolated {
+            continue;
+        }
+        let path = match cursor_session_path(&root, native_id) {
+            Ok(path) => path,
+            Err(_) if store == NativeStore::Legacy => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(path) = path {
+            return Ok(Some(NativeSessionLocation { store, path }));
+        }
+    }
+    Ok(None)
+}
+
+/// Cursor CLI print-mode chats live at `chats/<workspace-md5>/<uuid>/store.db`
+/// (and ACP sessions at `acp-sessions/<uuid>/`). Walk those trees only — never
+/// `projects/`, which is the IDE's transcript dump and can be huge.
+fn cursor_session_path(root: &Path, native_id: &str) -> Result<Option<PathBuf>> {
+    for tree in ["chats", "acp-sessions"] {
+        if let Some(path) = named_dir_session(&root.join(tree), native_id, 3)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn named_dir_session(root: &Path, native_id: &str, depth: usize) -> Result<Option<PathBuf>> {
+    if depth == 0 {
+        return Ok(None);
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some(native_id) {
+            return Ok(Some(path));
+        }
+        if let Some(path) = named_dir_session(&path, native_id, depth - 1)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn session_location(
@@ -315,6 +382,26 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
     }
     prepare_links(&root, &legacy, &sources)?;
     Ok(crate::paths::canonicalize(&root).unwrap_or(root))
+}
+
+pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
+    let root = cursor_home(store);
+    let legacy = cursor_home(NativeStore::Legacy);
+    if store == NativeStore::Legacy || root == legacy {
+        std::fs::create_dir_all(&root)?;
+        return Ok(root);
+    }
+    prepare_links(
+        &root,
+        &legacy,
+        &[
+            legacy.join("cli-config.json"),
+            legacy.join("skills"),
+            legacy.join("skills-cursor"),
+            legacy.join("plugins"),
+        ],
+    )?;
+    Ok(root)
 }
 
 fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
@@ -640,6 +727,15 @@ mod tests {
         assert!(tree_session_path(&root.join("sessions"), "ession-id")
             .unwrap()
             .is_none());
+        let chat_id = "e0ad13d3-d977-43a7-9994-e739975e82ec";
+        let chat = root.join("chats").join("abc123def456").join(chat_id);
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::write(chat.join("store.db"), []).unwrap();
+        assert_eq!(
+            cursor_session_path(&root, chat_id).unwrap().as_deref(),
+            Some(chat.as_path())
+        );
+        assert!(cursor_session_path(&root, "missing-id").unwrap().is_none());
         let db = root.join("opencode.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection

@@ -44,6 +44,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+  cursor: "Cursor",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -155,8 +156,8 @@ export function ModelPicker({
     return shown.map((h) => {
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
-      // opencode's long tail (openrouter etc.) stays behind the filter box.
-      else if (h.id === "opencode") models = models.slice(0, 5);
+      // Large catalogs stay behind the filter box.
+      else if (h.id === "opencode" || h.id === "cursor") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);

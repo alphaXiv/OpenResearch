@@ -114,6 +114,7 @@ import { activePath, forkPositions } from "../transcriptTree";
 import {
   splitTurnParts,
   isUsageLimitPart,
+  isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
@@ -2256,37 +2257,33 @@ function TurnStatusRow({
   }
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
-  if (usageLimited) {
-    return (
-      <details className="turn-usage-limit group/limit text-base text-subtext">
-        <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
-          <Gauge size={18} className="shrink-0 text-accent-red" aria-hidden="true" />
-          <span>{m.chat_session_limit_reached()}</span>
-          <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
-        </summary>
-        <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
-          {part.state?.error?.replace(/^claude: /, "")}
-        </pre>
-      </details>
-    );
-  }
-  if ((action !== "retry" && action !== "continue") || !turnId) return null;
-  const label = action === "retry" ? m.app_retry() : m.chat_continue();
+  const label = isModelAccessLimitPart(part)
+    ? m.chat_model_unavailable()
+    : usageLimited ? m.chat_session_limit_reached() : m.chat_turn_incomplete();
+  const Icon = usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
   return (
-    <div className="turn-recovery-row flex items-center justify-between gap-2 py-1.5 px-2.5 border border-border rounded-md bg-background">
-      <span className="min-w-0 truncate text-sm text-accent-red" title={errorMessage}>
+    <details className="turn-usage-limit group/limit text-base text-subtext">
+      <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+        <Icon size={18} className="shrink-0 text-accent-red" aria-hidden="true" />
+        <span>{label}</span>
+        <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+      </summary>
+      <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
         {errorMessage}
-      </span>
-      <Button
-        type="button"
-        size="small"
-        disabled={busy || recovering}
-        onClick={() => onRecover?.(turnId, action)}
-      >
-        {recovering ? m.chat_starting() : label}
-      </Button>
-    </div>
+      </pre>
+      {!usageLimited && onRecover && turnId && (action === "retry" || action === "continue") && (
+        <Button
+          type="button"
+          size="small"
+          className="mt-2"
+          disabled={busy || recovering}
+          onClick={() => onRecover(turnId, action)}
+        >
+          {recovering ? m.chat_starting() : action === "retry" ? m.app_retry() : m.chat_continue()}
+        </Button>
+      )}
+    </details>
   );
 }
 
@@ -2319,6 +2316,9 @@ function ToolRow({
   const hasDetail = failed && Boolean(errorMessage);
   const [detailOpen, setDetailOpen] = useState(false);
   const detailId = `tool-error-${part.id.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  if (part.tool === "error") {
+    return <TurnStatusRow part={part} busy={false} recovering={false} usageLimited={isUsageLimitPart(part)} />;
+  }
   const line = (
     <>
       {failed && <span className="sr-only">{m.chat_panel_failed()} </span>}
@@ -3121,6 +3121,7 @@ function AssistantTurn({ message, parts, options }: {
           type="button"
           className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
           aria-expanded={expanded}
+          data-work-toggle
           onClick={() => setExpanded((value) => !value)}
         >
           <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
@@ -3624,6 +3625,7 @@ const Transcript = memo(function Transcript({
   messages,
   scrollRef,
   scrollToEndRef,
+  stickToBottom,
   onPinToBottom,
   allMessages,
   canFork,
@@ -3647,6 +3649,7 @@ const Transcript = memo(function Transcript({
   messages: ChatMessage[];
   scrollRef: React.RefObject<HTMLDivElement | null>;
   scrollToEndRef: React.RefObject<(() => void) | null>;
+  stickToBottom: React.RefObject<boolean>;
   onPinToBottom: () => void;
   /** Every branch, for counting the forks of each turn. */
   allMessages: ChatMessage[];
@@ -3702,7 +3705,7 @@ const Transcript = memo(function Transcript({
     overscan: 1,
     initialRect: { width: scrollRef.current?.clientWidth ?? 0, height: scrollRef.current?.clientHeight ?? 0 },
     initialOffset: () => Math.max(0, visibleMessages.length * 400 - (scrollRef.current?.clientHeight ?? 0)),
-    anchorTo: "end",
+    anchorTo: stickToBottom.current ? "end" : "start",
     followOnAppend: true,
     scrollEndThreshold: 60,
     rangeExtractor,
@@ -3752,6 +3755,11 @@ const Transcript = memo(function Transcript({
             ref={virtualizer.measureElement}
             className="absolute left-0 w-full pb-4"
             style={{ top: item.start }}
+            onClickCapture={(event) => {
+              if (!(event.target instanceof Element) || !event.target.closest("[data-work-toggle]")) return;
+              stickToBottom.current = false;
+              virtualizer.setOptions({ ...virtualizer.options, anchorTo: "start" });
+            }}
             onPointerDownCapture={() => retainedRows.current.add(m.id)}
             onFocusCapture={() => retainedRows.current.add(m.id)}
           >
@@ -5119,12 +5127,13 @@ export function ChatPanel({
     // Virtual rows anchor their own growth; viewport and footer changes need the same pin.
     const observer = new ResizeObserver(() => {
       if (stickToBottom.current) scrollToEndRef.current?.();
-      else updateTranscriptBottom(el);
+      // Disclosure animation must not re-pin while its first frames remain near the bottom.
+      else setTranscriptAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 60);
     });
     observer.observe(el);
     observer.observe(inner);
     return () => observer.disconnect();
-  }, [threadMounted, updateTranscriptBottom]);
+  }, [threadMounted]);
 
   const scrollToTranscriptBottom = useCallback((event: ReactMouseEvent<HTMLButtonElement>) => {
     event.currentTarget.blur();
@@ -6042,6 +6051,7 @@ export function ChatPanel({
                 key={activeId}
                 scrollRef={threadRef}
                 scrollToEndRef={scrollToEndRef}
+                stickToBottom={stickToBottom}
                 onPinToBottom={pinTranscriptToBottom}
                 messages={messages}
                 allMessages={allMessages}

@@ -1,5 +1,5 @@
-//! Unified chat layer for `orx up` — one session/message model over three
-//! harness adapters (Claude Code, Codex, OpenCode), each a local child
+//! Unified chat layer for `orx up` — one session/message model over four
+//! harness adapters (Claude Code, Codex, OpenCode, Cursor), each a local child
 //! process using the user's own login. orx's SQLite is the system of record
 //! for transcripts; each harness keeps its native session for context/resume.
 //!
@@ -6350,7 +6350,7 @@ pub struct TurnCtx {
     /// Effective permission mode for this turn (session value; harness applies
     /// its own default when `None`).
     pub permission_mode: Option<crate::local::harness::PermissionMode>,
-    /// Independent Plan state for Codex/OpenCode.
+    /// Independent Plan state for Codex/OpenCode/Cursor.
     pub plan_mode: bool,
     /// Codex must attach one native `default` collaboration-mode mask after
     /// Plan is left, even if ORX restarted before the next turn.
@@ -6853,6 +6853,18 @@ impl TurnCtx {
     pub fn upsert_part_preserving_children(&mut self, part: WirePart) {
         self.clear_retry_status();
         self.upsert_part_raw(part);
+    }
+
+    pub fn mark_final_text_tail(&mut self) {
+        let ids: HashSet<_> = self
+            .assistant
+            .parts
+            .iter()
+            .rev()
+            .take_while(|part| matches!(part.kind.as_str(), "text" | "reasoning"))
+            .map(|part| part.id.clone())
+            .collect();
+        self.mark_final_text(|part| ids.contains(&part.id));
     }
 
     pub fn mark_final_text(&mut self, matches: impl Fn(&WirePart) -> bool) {

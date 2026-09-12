@@ -4271,7 +4271,7 @@ fn spawn_agent_preflight() {
         eprintln!("orx up: agents: {}", line.join(" · "));
         if !harnesses.iter().any(|h| h.agent_ready) {
             eprintln!(
-                "orx up: warning: no coding agent ready — install Claude Code, Codex or OpenCode, then connect a local model or sign in."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex, OpenCode or Cursor, then connect a local model or sign in."
             );
         }
     });

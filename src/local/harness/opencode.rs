@@ -1273,24 +1273,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                             ctx.upsert_part_preserving_children(wire);
                         }
                     }
-                    mark_final_tail(ctx);
+                    ctx.mark_final_text_tail();
                 }
                 return Ok(());
             }
         }
     }
-}
-
-fn mark_final_tail(ctx: &mut TurnCtx) {
-    let ids: HashSet<_> = ctx
-        .assistant
-        .parts
-        .iter()
-        .rev()
-        .take_while(|part| matches!(part.kind.as_str(), "text" | "reasoning"))
-        .map(|part| part.id.clone())
-        .collect();
-    ctx.mark_final_text(|part| ids.contains(&part.id));
 }
 
 fn opencode_response_error(message: &Value) -> Option<&str> {
@@ -1461,7 +1449,7 @@ fn handle_event(
             if part.get("type").and_then(Value::as_str) == Some("step-finish")
                 && part.get("reason").and_then(Value::as_str) == Some("stop")
             {
-                mark_final_tail(ctx);
+                ctx.mark_final_text_tail();
                 ctx.maybe_flush();
             }
             if let Some(wire) = to_wire_part(part) {
@@ -1728,7 +1716,7 @@ opencode/glm-5
         );
         ctx.upsert_part(WirePart::text("progress", "Reading"));
         ctx.upsert_part(WirePart::text("answer", "Done."));
-        mark_final_tail(&mut ctx);
+        ctx.mark_final_text_tail();
         assert_eq!(
             ctx.assistant.parts[0].phase,
             Some(crate::local::chat::MessagePhase::Commentary)

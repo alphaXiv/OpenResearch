@@ -26,7 +26,7 @@ use crate::store;
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
 /// so rewriting the file retargets a running server without a restart.
-const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
+pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -245,6 +245,7 @@ fn exclude_agent_files(hub: &Path) {
         ".claude/skills/",
         ".opencode/skills/",
         ".agents/skills/",
+        ".cursor/skills/",
         ".orx/latex-templates/",
     ]
     .into_iter()
@@ -272,12 +273,12 @@ fn exclude_agent_files(hub: &Path) {
 /// and write the autoresearch playbook into the worktree. Every harness
 /// adapter injects this same file (opencode via config `instructions`, Claude
 /// Code via `--append-system-prompt`, Codex via `developerInstructions` —
-/// legacy exec: first-turn context). Returns
+/// legacy exec: first-turn context; Cursor: first-turn pointer at this file). Returns
 /// `(workdir, playbook)` — the worktree the harness runs in and the playbook
 /// path inside it.
 ///
 /// `session_skills_dir` is the harness's worktree-relative native-skills dir
-/// (`.claude/skills`, `.opencode/skills`, `.agents/skills`); when `Some`, the
+/// (`.claude/skills`, `.opencode/skills`, `.agents/skills`, `.cursor/skills`); when `Some`, the
 /// modular `orx` skills are written there too, fresh alongside the playbook, so
 /// the session's own agent auto-loads them with zero drift.
 pub fn ensure_playbook(
