@@ -55,3 +55,69 @@ test("completion marks only unseen existing chats unread and opening clears the 
   assert.deepEqual([...unreadAfterBusyChange(finished, new Set(), new Set(), sessions, "background")], []);
   assert.deepEqual([...unreadAfterBusyChange(initial, new Set(["active"]), new Set(), sessions, null)], ["active"]);
 });
+
+test("work collapses at an explicit final phase while its text is still streaming", async () => {
+  const { splitTurnParts } = await import("../src/chatRendering.ts");
+  const progress = { id: "progress", type: "text", text: "Reading…", phase: "commentary" };
+  const tool = { id: "tool", type: "tool", state: { status: "completed" } };
+  const final = { id: "final", type: "text", text: "", phase: "final_answer" };
+  assert.deepEqual(splitTurnParts([progress, tool], true), { work: [], answer: [progress, tool] });
+  assert.deepEqual(splitTurnParts([progress, tool, final], true), { work: [progress, tool], answer: [final] });
+  assert.deepEqual(splitTurnParts([progress, tool, final], false), { work: [], answer: [progress, tool, final] });
+});
+
+test("legacy transcripts retain trailing answer and pending prompts remain exposed", async () => {
+  const { splitTurnParts } = await import("../src/chatRendering.ts");
+  const text = { id: "text", type: "text", text: "Progress" };
+  const tool = { id: "tool", type: "tool" };
+  const final = { id: "final", type: "text", text: "Done" };
+  const parts = [text, tool, final];
+  assert.deepEqual(splitTurnParts(parts, true), { work: [], answer: parts });
+  assert.deepEqual(splitTurnParts(parts, false), { work: [text, tool], answer: [final] });
+  const prompt = { id: "question", type: "prompt", prompt: { resolved: false } };
+  const pending = [...parts, prompt];
+  assert.deepEqual(splitTurnParts(pending, false), { work: [], answer: pending });
+  assert.deepEqual(splitTurnParts([text, tool], false), { work: [], answer: [text, tool] });
+});
+
+test("reasoning-only work never creates an empty disclosure", async () => {
+  const { splitTurnParts } = await import("../src/chatRendering.ts");
+  const parts = [{ id: "thought", type: "reasoning", text: "Thinking" }, { id: "answer", type: "text", text: "Done", phase: "final_answer" }];
+  assert.deepEqual(splitTurnParts(parts, false), { work: [], answer: parts });
+});
+
+test("Claude quota notices recognize typed errors and legacy duplicates without hiding real output", async () => {
+  const { isUsageLimitPart } = await import("../src/chatRendering.ts");
+  const text = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.";
+  const sessionLimit = "You've hit your session limit · resets 3:10pm (America/Los_Angeles)";
+  const duplicates = [
+    { type: "text", text },
+    { type: "text", text: sessionLimit },
+    { type: "tool", tool: "error", state: { error: `claude: ${sessionLimit}` } },
+    { type: "tool", tool: "error", state: { error: `claude: ${text}` } },
+    { type: "tool", tool: "error", state: { input: { errorKind: "claude_usage_limit" } } },
+  ];
+  assert.ok(duplicates.every(isUsageLimitPart));
+  assert.equal(isUsageLimitPart({ type: "text", text: "Earlier useful output" }), false);
+  assert.equal(isUsageLimitPart({ type: "tool", tool: "bash", state: { error: text } }), false);
+  assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error: "File not found" } }), false);
+});
+
+
+test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {
+  const { isUsageLimitPart } = await import("../src/chatRendering.ts");
+  for (const error of [
+    "You've hit your usage limit. Try again later.",
+    'Limit reached\n\ncodexErrorInfo: "usageLimitExceeded"',
+    "You exceeded your current quota, please check your plan and billing details.",
+    "Rate limit reached for model. Please try again later.",
+    "Insufficient credits",
+  ]) {
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error } }), true);
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "bash", state: { error } }), false);
+    assert.equal(isUsageLimitPart({ type: "text", text: error }), false);
+  }
+  for (const error of ["Invalid API key", "Context length exceeded", "Connection refused"]) {
+    assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error } }), false);
+  }
+});

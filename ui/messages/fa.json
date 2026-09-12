@@ -602,6 +602,9 @@
   "announcement_tools_failed": "{count} فعالیت ابزار ناموفق بود: {labels}",
   "announcement_running_tool": "در حال اجرای ابزار",
   "announcement_tool_completed": "فعالیت ابزار کامل شد",
+  "chat_worked_for": "به‌مدت {duration} کار کرد",
+  "chat_work_details": "جزئیات کار",
+  "chat_work_duration": "{minutes} دقیقه {seconds} ثانیه",
   "chat_working": "در حال کار…",
   "chat_thinking": "در حال فکر کردن",
   "chat_scroll_to_bottom": "رفتن به پایین گفتگو",
@@ -1139,5 +1142,6 @@
   "templates_agent_alternative": "یا از عامل خود بخواهید یک قالب LaTeX برایتان اضافه کند.",
   "skills_remove_imported": "حذف از OpenResearch",
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
-  "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند."
+  "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
+  "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید"
 }

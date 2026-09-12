@@ -534,6 +534,7 @@ impl Store {
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
+            "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1481,8 +1482,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
                                             parent_id, base_native_session_id,
-                                            result_native_session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                            result_native_session_id, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     message.id,
                     message.session_id,
@@ -1492,6 +1493,7 @@ impl Store {
                     message.parent_id,
                     message.base_native_session_id,
                     message.result_native_session_id,
+                    message.completed_at,
                 ],
             )?;
         }
@@ -2088,8 +2090,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  base_native_session_id, result_native_session_id, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     message.id,
                     message.session_id,
@@ -2099,6 +2101,7 @@ impl Store {
                     message.parent_id,
                     message.base_native_session_id,
                     message.result_native_session_id,
+                    message.completed_at,
                 ],
             )?;
             tx.execute(
@@ -2358,15 +2361,24 @@ impl Store {
         Ok(changed > 0)
     }
 
-    pub fn reset_chat_turn_for_retry(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
+    pub fn reset_chat_turn_for_retry(&self, id: &str, started_at: i64) -> Result<bool> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE chat_turns SET state = 'preparing', delivery_state = 'not_sent',
                  attempt_count = 0, next_retry_at = NULL, error_kind = NULL,
                  error_message = NULL, recovery_action = NULL, updated_at = ?2
              WHERE id = ?1 AND state = 'failed' AND recovery_action = 'retry'
                    AND recovered_by_turn_id IS NULL",
-            params![id, now_ms()],
+            params![id, started_at],
         )?;
+        if changed > 0 {
+            transaction.execute(
+                "UPDATE chat_messages SET completed_at = NULL, created_at = ?2 WHERE id =
+                 (SELECT assistant_message_id FROM chat_turns WHERE id = ?1)",
+                params![id, started_at],
+            )?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -2484,7 +2496,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                    base_native_session_id, result_native_session_id
+                    base_native_session_id, result_native_session_id, completed_at
              FROM chat_messages
              WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -2495,6 +2507,7 @@ impl Store {
                 role: row.get(2)?,
                 parts_json: row.get(3)?,
                 created_at: row.get(4)?,
+                completed_at: row.get(8)?,
                 parent_id: row.get(5)?,
                 base_native_session_id: row.get(6)?,
                 result_native_session_id: row.get(7)?,
@@ -2518,7 +2531,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                        base_native_session_id, result_native_session_id
+                        base_native_session_id, result_native_session_id, completed_at
                  FROM chat_messages WHERE id = ?1",
                 params![id],
                 |row| {
@@ -2528,6 +2541,7 @@ impl Store {
                         role: row.get(2)?,
                         parts_json: row.get(3)?,
                         created_at: row.get(4)?,
+                        completed_at: row.get(8)?,
                         parent_id: row.get(5)?,
                         base_native_session_id: row.get(6)?,
                         result_native_session_id: row.get(7)?,
@@ -2766,6 +2780,7 @@ pub struct StoredChatMessage {
     pub role: String,
     pub parts_json: String,
     pub created_at: i64,
+    pub completed_at: Option<i64>,
     /// Message this one follows on its branch. NULL only for a branch root.
     pub parent_id: Option<String>,
     /// Harness session id current *before* this turn ran. Re-sampling a turn
@@ -2785,10 +2800,11 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
         // the tree.
         "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  base_native_session_id, result_native_session_id, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  parts_json = excluded.parts_json,
+                 completed_at = COALESCE(excluded.completed_at, completed_at),
                  result_native_session_id = COALESCE(
                      excluded.result_native_session_id, result_native_session_id)",
         params![
@@ -2799,7 +2815,8 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
             m.created_at,
             m.parent_id,
             m.base_native_session_id,
-            m.result_native_session_id
+            m.result_native_session_id,
+            m.completed_at
         ],
     )?;
     Ok(())
@@ -3304,6 +3321,7 @@ mod tests {
                 role: "user".into(),
                 parts_json: "[]".into(),
                 created_at: 1,
+                completed_at: None,
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
@@ -3351,6 +3369,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 2,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3482,6 +3501,45 @@ mod tests {
     }
 
     #[test]
+    fn chat_completion_time_survives_reload_and_partial_updates() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-time-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut message = StoredChatMessage {
+            id: "answer".into(),
+            session_id: "chat_1".into(),
+            role: "assistant".into(),
+            parts_json: "[]".into(),
+            created_at: 1000,
+            completed_at: Some(165000),
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        store.upsert_chat_message(&message).unwrap();
+        message.completed_at = None;
+        store.upsert_chat_message(&message).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            store
+                .get_chat_message("answer")
+                .unwrap()
+                .unwrap()
+                .completed_at,
+            Some(165000)
+        );
+        assert_eq!(
+            store.list_chat_messages("chat_1").unwrap()[0].completed_at,
+            Some(165000)
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn migration_chains_a_legacy_transcript_into_one_branch() {
         let dir = std::env::temp_dir().join(format!("orx-store-tree-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -3499,6 +3557,7 @@ mod tests {
                     role: role.into(),
                     parts_json: "[]".into(),
                     created_at: i as i64,
+                    completed_at: None,
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
@@ -3564,6 +3623,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3572,8 +3632,32 @@ mod tests {
         assert!(store
             .fail_chat_turn("turn_1", "not_sent", "setup", "failed", Some("retry"))
             .unwrap());
-        assert!(store.reset_chat_turn_for_retry("turn_1").unwrap());
-        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 1);
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: turn.assistant_message_id.clone(),
+                role: "assistant".into(),
+                completed_at: Some(2000),
+                ..user.clone()
+            })
+            .unwrap();
+        assert!(store.reset_chat_turn_for_retry("turn_1", 3000).unwrap());
+        assert_eq!(
+            store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap()
+                .completed_at,
+            None
+        );
+        assert_eq!(
+            store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap()
+                .created_at,
+            3000
+        );
+        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 2);
         assert_eq!(
             store
                 .get_chat_turn("chat_1", "turn_1")
@@ -3606,7 +3690,7 @@ mod tests {
         let interrupted = store.get_chat_turn("chat_1", "turn_1").unwrap().unwrap();
         assert_eq!(interrupted.state, "interrupted");
         assert!(interrupted.recovery_action.is_none());
-        assert!(!store.reset_chat_turn_for_retry("turn_1").unwrap());
+        assert!(!store.reset_chat_turn_for_retry("turn_1", 3000).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3628,6 +3712,7 @@ mod tests {
             role: "assistant".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3674,6 +3759,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
@@ -3685,6 +3771,7 @@ mod tests {
             role: "assistant".into(),
             parts_json: "[]".into(),
             created_at: 2,
+            completed_at: None,
             parent_id: Some(user.id.clone()),
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
@@ -3799,6 +3886,7 @@ mod tests {
             role: role.into(),
             parts_json: parts.into(),
             created_at: 0,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -4483,6 +4571,7 @@ mod tests {
                     role: role.into(),
                     parts_json: "[]".into(),
                     created_at,
+                    completed_at: None,
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,

@@ -34,10 +34,12 @@ import {
   CircleX,
   Clock,
   CornerDownLeft,
+  Copy,
   FileText,
   FlaskConical,
   FolderOpen,
   Globe,
+  Gauge,
   HelpCircle,
   Lightbulb,
   MessageSquareQuote,
@@ -90,6 +92,7 @@ import {
   respondChat,
   selectChatBranch,
   runShellCommand,
+  fmtDuration,
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
@@ -109,6 +112,8 @@ import {
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
 import {
+  splitTurnParts,
+  isUsageLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
@@ -2218,8 +2223,10 @@ function TurnStatusRow({
   busy,
   recovering,
   onRecover,
+  usageLimited = false,
 }: {
   part: ChatPart;
+  usageLimited?: boolean;
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -2249,6 +2256,20 @@ function TurnStatusRow({
   }
   const action = parseRecoveryAction(input?.recoveryAction);
   const turnId = input?.turnId;
+  if (usageLimited) {
+    return (
+      <details className="turn-usage-limit group/limit text-base text-subtext">
+        <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
+          <Gauge size={18} className="shrink-0 text-accent-red" aria-hidden="true" />
+          <span>{m.chat_session_limit_reached()}</span>
+          <ChevronRight size={16} className="shrink-0 text-text transition-transform duration-120 ease-standard group-open/limit:rotate-90 motion-reduce:transition-none" aria-hidden="true" />
+        </summary>
+        <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
+          {part.state?.error?.replace(/^claude: /, "")}
+        </pre>
+      </details>
+    );
+  }
   if ((action !== "retry" && action !== "continue") || !turnId) return null;
   const label = action === "retry" ? m.app_retry() : m.chat_continue();
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
@@ -2784,6 +2805,8 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
+  text,
+  createdAt,
   count,
   index,
   prevId,
@@ -2793,6 +2816,8 @@ function ForkControls({
   onEdit,
   editDisabled,
 }: {
+  text: string;
+  createdAt: number;
   count: number;
   index: number;
   prevId?: string;
@@ -2803,6 +2828,16 @@ function ForkControls({
   editDisabled: boolean;
 }) {
   const many = count > 1;
+  const sentAt = new Date(createdAt);
+  const copy = async () => {
+    try {
+      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+      await navigator.clipboard.writeText(text);
+      showAlert(m.common_copied(), "success");
+    } catch (error) {
+      showAlert(error instanceof Error ? error.message : String(error), "error");
+    }
+  };
   return (
     <div
       className={`fork-controls flex items-center gap-0.5 transition-opacity duration-80 ease-standard ${
@@ -2832,6 +2867,14 @@ function ForkControls({
           </IconButton>
         </>
       )}
+      <div className="flex items-center gap-0.5 opacity-0 group-hover/turn:opacity-100 group-focus-within/turn:opacity-100 transition-opacity duration-80 ease-standard">
+        <time dateTime={sentAt.toISOString()} className="text-xs text-subtext tabular-nums me-2">
+          {sentAt.toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" })}
+        </time>
+        <IconButton size="small" aria-label={m.md_copy()} disabled={!text} onClick={copy}>
+          <Copy size={13} />
+        </IconButton>
+      </div>
       <IconButton size="small"
         title={m.chat_panel_edit_and_re_send()}
         aria-label={m.chat_panel_edit_and_re_send()}
@@ -3004,6 +3047,8 @@ const Message = memo(function Message({
         </div>
         {forkCount !== undefined && (
           <ForkControls
+            text={text}
+            createdAt={message.createdAt}
             count={forkCount}
             index={forkIndex}
             prevId={forkPrevId}
@@ -3017,13 +3062,12 @@ const Message = memo(function Message({
       </div>
     );
   }
-  const turnStatus = message.parts.find(isTurnStatusPart);
-  const regularParts = turnStatus
-    ? message.parts.filter((part) => part !== turnStatus)
-    : message.parts;
+  const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
+  const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
+  const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
-      {renderParts(regularParts, {
+      <AssistantTurn message={message} parts={regularParts} options={{
         activePermissionId,
         pendingTailToolId,
         onOpenFile,
@@ -3036,10 +3080,11 @@ const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
-      })}
+      }} />
       {turnStatus && (
         <TurnStatusRow
           part={turnStatus}
+          usageLimited={Boolean(usageLimit)}
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
@@ -3048,6 +3093,49 @@ const Message = memo(function Message({
     </div>
   );
 });
+
+function AssistantTurn({ message, parts, options }: {
+  message: ChatMessage;
+  parts: ChatPart[];
+  options: Parameters<typeof renderParts>[1];
+}) {
+  const streaming = options.predictTextTail ?? false;
+  const { work, answer } = splitTurnParts(parts, streaming);
+  const [expanded, setExpanded] = useState(false);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!streaming || message.completedAt != null || work.length === 0) return;
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [streaming, message.completedAt, work.length]);
+  if (work.length === 0) return <>{renderParts(answer, options)}</>;
+  const end = message.completedAt ?? (streaming ? Date.now() : null);
+  const elapsed = end === null ? null : end - message.createdAt;
+  const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
+    ? fmtDuration(elapsed)
+    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  return (
+    <>
+      <div className="turn-work mb-4">
+        <button
+          type="button"
+          className="flex w-full items-center gap-1.5 border-b border-border/50 pb-2 text-start text-base text-subtext cursor-pointer hover:text-text focus-visible:outline-2 focus-visible:outline-primary"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span>{duration === null ? m.chat_work_details() : m.chat_worked_for({ duration })}</span>
+          <ChevronRight size={16} className={`shrink-0 text-muted transition-transform duration-200 ease-standard motion-reduce:transition-none ${expanded ? "rotate-90" : ""}`} />
+        </button>
+        <div className={`tool-group-disclosure ${expanded ? "open" : ""}`} aria-hidden={!expanded} inert={!expanded}>
+          <div className="tool-group-disclosure-inner">
+            <div className="turn-work-content pt-4">{renderParts(work, { ...options, predictTextTail: false, pendingTailToolId: null })}</div>
+          </div>
+        </div>
+      </div>
+      <div className="turn-answer">{renderParts(answer, options)}</div>
+    </>
+  );
+}
 
 function shellExchangePart(message: ChatMessage): ChatPart | null {
   const part = message.parts.length === 1 ? message.parts[0] : undefined;

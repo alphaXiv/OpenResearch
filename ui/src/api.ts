@@ -1781,6 +1781,7 @@ export interface ChatPrompt {
 export interface ChatPart {
   id: string;
   type: string; // text | reasoning | tool | prompt | image | steer
+  phase?: "commentary" | "final_answer";
   text?: string;
   /** Original file name for an `image` (attachment) part, when known. */
   name?: string;
@@ -1797,6 +1798,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   parts: ChatPart[];
   createdAt: number;
+  completedAt?: number | null;
   parentId?: string | null;
 }
 

@@ -602,6 +602,9 @@
   "announcement_tools_failed": "{count} 个工具活动失败：{labels}",
   "announcement_running_tool": "正在运行工具",
   "announcement_tool_completed": "工具活动已完成",
+  "chat_worked_for": "已工作 {duration}",
+  "chat_work_details": "工作详情",
+  "chat_work_duration": "{minutes}分{seconds}秒",
   "chat_working": "正在工作…",
   "chat_thinking": "正在思考",
   "chat_scroll_to_bottom": "滚动到底部",
@@ -1139,5 +1142,6 @@
   "templates_agent_alternative": "或者，请你的智能体为你添加 LaTeX 模板。",
   "skills_remove_imported": "从 OpenResearch 移除",
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
-  "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。"
+  "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
+  "chat_session_limit_reached": "已达到会话使用限额"
 }
