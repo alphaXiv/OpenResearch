@@ -949,7 +949,22 @@ fn show_error_dialog(message: &str) {
     };
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn show_error_dialog(message: &str) {
+    if !commands::app::launched_as_app_bundle() || std::env::args_os().len() != 1 {
+        return;
+    }
+    let _ = std::process::Command::new("osascript")
+        .args([
+            "-e",
+            "on run argv\ndisplay alert \"OpenResearch could not start\" message (item 1 of argv) as critical\nend run",
+            "--",
+            message,
+        ])
+        .output();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn show_error_dialog(_message: &str) {}
 
 /// Main thread only: a worker's panic has a running dashboard to report through.

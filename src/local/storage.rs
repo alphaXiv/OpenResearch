@@ -21,6 +21,7 @@ pub async fn prepare() -> Result<()> {
         let mappings = mappings(&source, &target);
         let mut lock = crate::store::open_lifecycle_lock()?;
         let needed = {
+            // ponytail: O(repository metadata) for marker-free recovery; reuse startup inventory if this grows.
             let _guard = lock.read()?;
             mappings.iter().any(|(from, _)| from.exists())
                 || !references(&target, &mappings)?.is_empty()
@@ -63,6 +64,9 @@ fn normalize(path: &Path) -> Result<PathBuf> {
 }
 
 fn mapped(path: &Path, mappings: &[(PathBuf, PathBuf)]) -> PathBuf {
+    if mappings.iter().any(|(_, target)| path.starts_with(target)) {
+        return path.to_path_buf();
+    }
     let normalized = normalize(path).unwrap_or_else(|_| path.to_path_buf());
     mappings
         .iter()
@@ -236,52 +240,81 @@ fn repositories(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+fn config_may_need_repair(repo: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<bool> {
+    let config = match std::fs::read_to_string(repo.join(".git/config")) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    // Let Git interpret includes and escapes rather than duplicating its config parser.
+    if config.contains('\\') || config.to_ascii_lowercase().contains("[include") {
+        return Ok(true);
+    }
+    Ok(config
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .any(|(_, value)| {
+            let value = value.trim().trim_matches('"');
+            value.contains(['#', ';', '"'])
+                || mapped(Path::new(value), mappings) != Path::new(value)
+        }))
+}
+
 fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References> {
     let mut result = References::default();
     let native = data.join("agents/opencode/opencode.db");
-    let mut native_databases = BTreeSet::from([native.clone()]);
     let mut repos = BTreeSet::new();
     repositories(&data.join("repos"), &mut repos)?;
     repositories(&data.join("worktrees"), &mut repos)?;
     if data.join("orx.db").exists() {
-        let store = Store::open_at(data.to_path_buf())?;
-        for project in store.list_local_projects()? {
-            for session in store.list_chat_sessions_by_project(&project.id)? {
-                if session.harness != "opencode" {
-                    continue;
-                }
-                let Some(id) = session.native_session_id else {
-                    continue;
-                };
-                if !super::native_store::opencode_has_session(&native, &id)? {
-                    let legacy =
-                        super::native_store::opencode_db(super::native_store::NativeStore::Legacy);
-                    if super::native_store::opencode_has_session(&legacy, &id).unwrap_or(false) {
-                        native_databases.insert(legacy);
-                    }
-                }
-            }
-            let old = PathBuf::from(&project.repo_path);
+        let connection = rusqlite::Connection::open_with_flags(
+            data.join("orx.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let mut projects = connection.prepare("SELECT repo_path FROM local_projects")?;
+        for path in projects.query_map([], |row| row.get::<_, String>(0))? {
+            let path = path?;
+            let old = PathBuf::from(&path);
             let new = mapped(&old, mappings);
             if new != old {
                 result
                     .projects
-                    .push((project.repo_path, new.to_string_lossy().into_owned()));
+                    .push((path, new.to_string_lossy().into_owned()));
             }
             repos.insert(new);
         }
-    }
-    for database in native_databases {
-        if let Some(changes) =
-            super::native_store::opencode_relocation(&database, |path| mapped(path, mappings))?
-        {
-            result.opencode.push(changes);
+        let legacy = super::native_store::opencode_db(super::native_store::NativeStore::Legacy);
+        if legacy != native {
+            let changes =
+                super::native_store::opencode_relocation(&legacy, |path| mapped(path, mappings));
+            if !matches!(changes, Ok(None)) {
+                let mut sessions = connection.prepare(
+                    "SELECT native_session_id FROM chat_sessions WHERE harness = 'opencode' AND native_session_id IS NOT NULL",
+                )?;
+                for id in sessions.query_map([], |row| row.get::<_, String>(0))? {
+                    let id = id?;
+                    if !super::native_store::opencode_has_session(&native, &id)?
+                        && super::native_store::opencode_has_session(&legacy, &id).unwrap_or(false)
+                    {
+                        if let Some(changes) = changes? {
+                            result.opencode.push(changes);
+                        }
+                        break;
+                    }
+                }
+            }
         }
+    }
+    if let Some(changes) =
+        super::native_store::opencode_relocation(&native, |path| mapped(path, mappings))?
+    {
+        result.opencode.push(changes);
     }
     // Registrations also find moved worktrees whose project/database was deleted.
     let mut discovered = Vec::new();
     for repo in &repos {
-        if repo.join(".git").is_dir() {
+        if repo.join(".git").is_dir() && config_may_need_repair(repo, mappings)? {
             for remote in git::git(Some(repo), &["remote"])
                 .unwrap_or_default()
                 .lines()
@@ -387,6 +420,11 @@ pub(crate) fn repair_paths(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Resu
     }
     for (repo, remote, target) in refs.remotes {
         git::git(Some(&repo), &["remote", "set-url", &remote, &target])?;
+    }
+    if !references(data, mappings)?.is_empty() {
+        return Err(anyhow!(
+            "Repository paths could not be fully updated; files have been preserved."
+        ));
     }
     Ok(())
 }
@@ -596,6 +634,81 @@ mod tests {
     }
 
     #[test]
+    fn settled_references_are_read_only_and_skip_git_remote_commands() {
+        let tmp = git::TemporaryDirectory::new("orx-settled-storage").unwrap();
+        let root = normalize(tmp.path()).unwrap();
+        let source = root.join("cache");
+        let data = root.join("data");
+        let repo = source.join("repos/o/r");
+        init(&repo);
+        git::git(
+            Some(&repo),
+            &["remote", "add", "origin", "https://example.com/o/r"],
+        )
+        .unwrap();
+        let store = Store::open_at(data.clone()).unwrap();
+        super::super::projects::create_project(
+            &store,
+            "test",
+            &repo.to_string_lossy(),
+            Default::default(),
+        )
+        .unwrap();
+        checkout(&repo, &source.join("worktrees/id/session"));
+        drop(store);
+        migrate(&source, &data, false).unwrap();
+        let database = data.join("orx.db");
+        let before = std::fs::read(&database).unwrap();
+        let modified = std::fs::metadata(&database).unwrap().modified().unwrap();
+        std::fs::remove_dir(data.join("run-logs")).unwrap();
+        assert!(
+            !config_may_need_repair(&data.join("repos/o/r"), &mappings(&source, &data)).unwrap()
+        );
+        assert!(references(&data, &mappings(&source, &data))
+            .unwrap()
+            .is_empty());
+        assert!(!data.join("run-logs").exists());
+        assert_eq!(before, std::fs::read(&database).unwrap());
+        assert_eq!(
+            modified,
+            std::fs::metadata(&database).unwrap().modified().unwrap()
+        );
+    }
+
+    #[test]
+    fn config_filter_defers_quoted_paths_and_non_utf8_to_git() {
+        let tmp = git::TemporaryDirectory::new("orx-config-filter").unwrap();
+        let root = normalize(tmp.path()).unwrap();
+        let source = root.join("cache");
+        let data = root.join("data");
+        let repo = source.join("repos/o/r");
+        init(&repo);
+        let config = repo.join(".git/config");
+        let mut contents = std::fs::read(&config).unwrap();
+        let prefix = source.to_string_lossy().replace('\\', "/");
+        contents.extend_from_slice(
+            format!("\n[remote \"origin\"]\nurl = {prefix}/repos/\"o\"/r\n").as_bytes(),
+        );
+        std::fs::write(&config, contents).unwrap();
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::rename(source.join("repos"), data.join("repos")).unwrap();
+        let moved_repo = data.join("repos/o/r");
+        let paths = mappings(&source, &data);
+        assert!(config_may_need_repair(&moved_repo, &paths).unwrap());
+        repair_paths(&data, &paths).unwrap();
+        assert_eq!(
+            PathBuf::from(git::git(Some(&moved_repo), &["remote", "get-url", "origin"]).unwrap()),
+            moved_repo
+        );
+        let config = moved_repo.join(".git/config");
+        let mut contents = std::fs::read(&config).unwrap();
+        contents.extend_from_slice(b"\n# comment: \xff\n");
+        std::fs::write(config, contents).unwrap();
+        assert!(config_may_need_repair(&moved_repo, &paths).unwrap());
+        assert!(references(&data, &paths).unwrap().is_empty());
+    }
+
+    #[test]
     fn subsequent_data_move_repairs_git_and_database_paths() {
         let tmp = git::TemporaryDirectory::new("orx-data-move").unwrap();
         let root = normalize(tmp.path()).unwrap();
@@ -631,7 +744,12 @@ mod tests {
         };
         #[cfg(not(unix))]
         let old_path = source;
-        repair_paths(&target, &[(old_path, target.clone())]).unwrap();
+        let moved_repo = target.join("repos/owner/project");
+        let moved_paths = [(old_path, target.clone())];
+        assert!(config_may_need_repair(&moved_repo, &moved_paths).unwrap());
+        repair_paths(&target, &moved_paths).unwrap();
+        #[cfg(unix)]
+        assert!(!config_may_need_repair(&moved_repo, &moved_paths).unwrap());
         assert!(git::is_repository(&target.join("worktrees/id/session")));
         assert_eq!(
             git::git(
