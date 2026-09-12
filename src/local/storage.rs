@@ -207,11 +207,15 @@ struct References {
     projects: Vec<(String, String)>,
     worktrees: BTreeSet<(PathBuf, PathBuf, PathBuf)>,
     remotes: Vec<(PathBuf, String, String)>,
+    opencode: Vec<super::native_store::OpenCodeRelocation>,
 }
 
 impl References {
     fn is_empty(&self) -> bool {
-        self.projects.is_empty() && self.worktrees.is_empty() && self.remotes.is_empty()
+        self.projects.is_empty()
+            && self.worktrees.is_empty()
+            && self.remotes.is_empty()
+            && self.opencode.is_empty()
     }
 }
 
@@ -234,12 +238,29 @@ fn repositories(root: &Path, found: &mut BTreeSet<PathBuf>) -> Result<()> {
 
 fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References> {
     let mut result = References::default();
+    let native = data.join("agents/opencode/opencode.db");
+    let mut native_databases = BTreeSet::from([native.clone()]);
     let mut repos = BTreeSet::new();
     repositories(&data.join("repos"), &mut repos)?;
     repositories(&data.join("worktrees"), &mut repos)?;
     if data.join("orx.db").exists() {
         let store = Store::open_at(data.to_path_buf())?;
         for project in store.list_local_projects()? {
+            for session in store.list_chat_sessions_by_project(&project.id)? {
+                if session.harness != "opencode" {
+                    continue;
+                }
+                let Some(id) = session.native_session_id else {
+                    continue;
+                };
+                if !super::native_store::opencode_has_session(&native, &id)? {
+                    let legacy =
+                        super::native_store::opencode_db(super::native_store::NativeStore::Legacy);
+                    if super::native_store::opencode_has_session(&legacy, &id).unwrap_or(false) {
+                        native_databases.insert(legacy);
+                    }
+                }
+            }
             let old = PathBuf::from(&project.repo_path);
             let new = mapped(&old, mappings);
             if new != old {
@@ -248,6 +269,13 @@ fn references(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Result<References
                     .push((project.repo_path, new.to_string_lossy().into_owned()));
             }
             repos.insert(new);
+        }
+    }
+    for database in native_databases {
+        if let Some(changes) =
+            super::native_store::opencode_relocation(&database, |path| mapped(path, mappings))?
+        {
+            result.opencode.push(changes);
         }
     }
     // Registrations also find moved worktrees whose project/database was deleted.
@@ -354,6 +382,9 @@ pub(crate) fn repair_paths(data: &Path, mappings: &[(PathBuf, PathBuf)]) -> Resu
     if !refs.projects.is_empty() {
         Store::open_at(data.to_path_buf())?.relocate_project_paths(&refs.projects)?;
     }
+    for changes in refs.opencode {
+        changes.apply()?;
+    }
     for (repo, remote, target) in refs.remotes {
         git::git(Some(&repo), &["remote", "set-url", &remote, &target])?;
     }
@@ -449,12 +480,14 @@ mod tests {
             let moved = data.join("worktrees").join(&project.id).join("session");
             let moved_repo = data.join("repos/owner/project");
             assert_eq!(
-                store
-                    .get_local_project(&project.id)
-                    .unwrap()
-                    .unwrap()
-                    .repo_path,
-                moved_repo.to_string_lossy()
+                PathBuf::from(
+                    store
+                        .get_local_project(&project.id)
+                        .unwrap()
+                        .unwrap()
+                        .repo_path
+                ),
+                moved_repo
             );
             assert_eq!(
                 git::git(Some(&moved_repo), &["rev-parse", "HEAD"]).unwrap(),
@@ -609,13 +642,15 @@ mod tests {
             target.join("demo-repos/local.git").to_string_lossy()
         );
         assert_eq!(
-            Store::open_at(target.clone())
-                .unwrap()
-                .get_local_project(&project.id)
-                .unwrap()
-                .unwrap()
-                .repo_path,
-            target.join("repos/owner/project").to_string_lossy()
+            PathBuf::from(
+                Store::open_at(target.clone())
+                    .unwrap()
+                    .get_local_project(&project.id)
+                    .unwrap()
+                    .unwrap()
+                    .repo_path
+            ),
+            target.join("repos/owner/project")
         );
     }
 
@@ -683,6 +718,81 @@ mod tests {
             .contains("interrupted"));
         assert_eq!(std::fs::read_to_string(copied).unwrap(), "corrupt!");
         assert!(git::is_repository(&source.join("repos/o/r")));
+    }
+
+    #[test]
+    fn native_directories_repair_after_rename_without_rewriting_history() {
+        let tmp = git::TemporaryDirectory::new("orx-native-paths").unwrap();
+        let root = normalize(tmp.path()).unwrap();
+        let source = root.join("cache");
+        let data = root.join("data");
+        init(&data.join("repos/o/r"));
+        checkout(&data.join("repos/o/r"), &data.join("worktrees/id/session"));
+        let db = data.join("agents/opencode/opencode.db");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection.execute_batch("CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE project (id TEXT, worktree TEXT); CREATE TABLE message (text TEXT); INSERT INTO session VALUES ('unrelated', '/unrelated'); INSERT INTO message VALUES ('original history');").unwrap();
+        connection
+            .execute(
+                "INSERT INTO session VALUES ('native', ?1)",
+                [source.join("worktrees/id/session").to_string_lossy()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project VALUES ('native', ?1)",
+                [source.join("repos/o/r").to_string_lossy()],
+            )
+            .unwrap();
+        assert!(!references(&data, &mappings(&source, &data))
+            .unwrap()
+            .is_empty());
+        migrate(&source, &data, false).unwrap();
+        let directory: String = connection
+            .query_row(
+                "SELECT directory FROM session WHERE id = 'native'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(PathBuf::from(directory), data.join("worktrees/id/session"));
+        assert!(references(&data, &mappings(&source, &data))
+            .unwrap()
+            .is_empty());
+        drop(connection);
+
+        let target = root.join("new-data");
+        std::fs::rename(&data, &target).unwrap();
+        repair_paths(&target, &[(data, target.clone())]).unwrap();
+        let connection =
+            rusqlite::Connection::open(target.join("agents/opencode/opencode.db")).unwrap();
+        let directory: String = connection
+            .query_row(
+                "SELECT directory FROM session WHERE id = 'native'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            PathBuf::from(directory),
+            target.join("worktrees/id/session")
+        );
+        let project: String = connection
+            .query_row("SELECT worktree FROM project", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(PathBuf::from(project), target.join("repos/o/r"));
+        let history: String = connection
+            .query_row("SELECT text FROM message", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(history, "original history");
+        let unrelated: String = connection
+            .query_row(
+                "SELECT directory FROM session WHERE id = 'unrelated'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unrelated, "/unrelated");
     }
 
     #[cfg(unix)]

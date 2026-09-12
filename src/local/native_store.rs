@@ -94,7 +94,77 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
     Ok(None)
 }
 
-fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
+pub(crate) struct OpenCodeRelocation {
+    database: PathBuf,
+    sessions: Vec<(String, String)>,
+    projects: Vec<(String, String)>,
+}
+
+impl OpenCodeRelocation {
+    pub(crate) fn apply(self) -> Result<()> {
+        let mut connection = rusqlite::Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let transaction = connection.transaction()?;
+        for (table, column, paths) in [
+            ("session", "directory", self.sessions),
+            ("project", "worktree", self.projects),
+        ] {
+            for (old, new) in paths {
+                transaction.execute(
+                    &format!("UPDATE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                    rusqlite::params![old, new],
+                )?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+}
+
+pub(crate) fn opencode_relocation(
+    database: &Path,
+    relocate: impl Fn(&Path) -> PathBuf,
+) -> Result<Option<OpenCodeRelocation>> {
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut changes = OpenCodeRelocation {
+        database: database.to_path_buf(),
+        sessions: Vec::new(),
+        projects: Vec::new(),
+    };
+    for (table, column, paths) in [
+        ("session", "directory", &mut changes.sessions),
+        ("project", "worktree", &mut changes.projects),
+    ] {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        let mut query = connection.prepare(&format!("SELECT DISTINCT {column} FROM {table}"))?;
+        for path in query.query_map([], |row| row.get::<_, String>(0))? {
+            let old = path?;
+            let new = relocate(Path::new(&old));
+            if new != Path::new(&old) {
+                paths.push((old, new.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    Ok((!changes.sessions.is_empty() || !changes.projects.is_empty()).then_some(changes))
+}
+
+pub(crate) fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
     match std::fs::metadata(db) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
