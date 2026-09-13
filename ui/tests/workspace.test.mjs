@@ -111,6 +111,7 @@ test("all tab variants retain ordering, preview, history, expansion and view met
   saved.previewKey = tabs.rightTabKey(tabs.paneTab(file));
   saved.expanded = { files: ["src"], [tabs.rightTabKey(tabs.paneTab(code))]: ["src/utils"] };
   saved.scroll = { file: { top: 100, left: 8 } }; saved.sourceModes = { file: true }; saved.panelMax = true;
+  saved.treeViewport = { x: 24, y: -18, zoom: 1.4 };
   const restored = tabs.restoreWorkspace(saved, file);
   assert.deepEqual(clean(tabs.rememberWorkspace(restored, saved.scroll, saved.sourceModes)), clean(saved));
   const selected = tabs.applyPane(restored, { ...code, view: "files" });

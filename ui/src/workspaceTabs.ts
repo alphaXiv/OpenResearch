@@ -40,7 +40,8 @@ export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWork
     previewKey: state.previewTab ? rightTabKey(state.previewTab) : null,
     history: state.tabHistory.map(rightTabKey),
     expanded: Object.fromEntries([["files", [...state.filesToggled]], ...state.codeTabs.map((tab) => [rightTabKey(tab), [...tab.toggled]])]),
-    scroll, sourceModes, filesView: state.filesView, scope: state.scope, panelMax: state.panelMax };
+    scroll, sourceModes, filesView: state.filesView, scope: state.scope, panelMax: state.panelMax,
+    treeViewport: state.treeViewport };
 }
 
 export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | undefined): RightPaneSessionState {
@@ -50,6 +51,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
     state.filesToggled = new Set(saved.expanded.files ?? []);
     state.scope = saved.scope;
     state.panelMax = saved.panelMax;
+    state.treeViewport = saved.treeViewport ?? null;
   }
   const tabs = [...(saved?.tabs ?? [])];
   if (pane) {
@@ -233,6 +235,7 @@ export interface RightPaneSessionState {
   scope: "agent" | "project";
   panelOpen: boolean;
   panelMax: boolean;
+  treeViewport: { x: number; y: number; zoom: number } | null;
 }
 
 export function initialRightPaneSessionState(
@@ -258,6 +261,7 @@ export function initialRightPaneSessionState(
     scope: "project",
     panelOpen: false,
     panelMax: false,
+    treeViewport: null,
   };
   if (sessionId === DEMO_MAIN_SESSION_ID && openDemoOverview) {
     const demoOverviewTab: FileViewDef = {

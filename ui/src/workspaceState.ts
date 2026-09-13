@@ -17,6 +17,8 @@ export interface TaskWorkspace {
   filesView: "files" | "changes";
   scope: "agent" | "project";
   panelMax: boolean;
+  /** Last React Flow viewport for the experiments tree, if it was opened. */
+  treeViewport?: { x: number; y: number; zoom: number } | null;
 }
 
 export interface ProjectWorkspace {

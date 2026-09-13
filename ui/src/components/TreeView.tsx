@@ -10,6 +10,7 @@ import {
   type Edge,
   type Node,
   type NodeProps,
+  type Viewport,
 } from "@xyflow/react";
 import { Ellipsis, FolderTree, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
@@ -350,6 +351,8 @@ export function TreeView({
   onOpenCode,
   agentSessionId,
   onShowProjectScope,
+  viewport,
+  onViewportChange,
 }: {
   experiments: Experiment[];
   runs: Run[];
@@ -369,6 +372,9 @@ export function TreeView({
   agentSessionId: string | null;
   /** Leave Current task scope (clicking an elided "…" pill). */
   onShowProjectScope: () => void;
+  /** Preserve the canvas transform while the experiments pane is unmounted. */
+  viewport: Viewport | null;
+  onViewportChange: (viewport: Viewport) => void;
 }) {
   const { nodes, edges } = useMemo(() => {
     const runsByExp = new Map<string, Run[]>();
@@ -491,8 +497,10 @@ export function TreeView({
       nodesConnectable={false}
       nodesFocusable={false}
       onMoveStart={dismissTreeHoverCards}
+      onMove={(_, nextViewport) => onViewportChange(nextViewport)}
       minZoom={0.15}
-      fitView
+      defaultViewport={viewport ?? undefined}
+      fitView={viewport === null}
       fitViewOptions={{ padding: 0.25, maxZoom: 1 }}
     >
       <Background variant={BackgroundVariant.Dots} color="var(--dots-strong)" gap={28} size={1.6} />
