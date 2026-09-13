@@ -888,7 +888,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
   // recompute the graph on every render.
-  const showProjectScope = useCallback(() => setScope("project"), []);
+  const showProjectScope = useCallback(() => {
+    setScope("project");
+    setTreeViewport(null);
+  }, []);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1737,6 +1740,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }
                             onClick={() => {
                               setScope("agent");
+                              setTreeViewport(null);
                               setScopeMenuOpen(false);
                             }}
                           >
@@ -1747,6 +1751,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             aria-pressed={effectiveScope === "project"}
                             onClick={() => {
                               setScope("project");
+                              setTreeViewport(null);
                               setScopeMenuOpen(false);
                             }}
                           >
