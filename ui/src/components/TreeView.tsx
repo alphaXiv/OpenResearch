@@ -487,7 +487,7 @@ export function TreeView({
   return (
     <ReactFlow
       className="[&_.react-flow\_\_node.react-flow\_\_node-exp.selectable]:cursor-default [&_.react-flow\_\_node.react-flow\_\_node-elided.selectable]:cursor-pointer [&_.react-flow\_\_handle]:opacity-0 [&_.react-flow\_\_handle]:pointer-events-none [&_.react-flow\_\_attribution]:hidden!"
-      // fitView only runs on mount, so remount when the scope changes to re-fit.
+      // Saved viewports initialize on mount; a new scope needs its own canvas.
       key={agentSessionId ?? "project"}
       nodes={nodes}
       edges={edges}
@@ -497,7 +497,7 @@ export function TreeView({
       nodesConnectable={false}
       nodesFocusable={false}
       onMoveStart={dismissTreeHoverCards}
-      onMove={(_, nextViewport) => onViewportChange(nextViewport)}
+      onMoveEnd={(event, nextViewport) => { if (event) onViewportChange(nextViewport); }}
       minZoom={0.15}
       defaultViewport={viewport ?? undefined}
       fitView={viewport === null}

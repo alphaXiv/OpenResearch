@@ -3064,7 +3064,8 @@ mod tests {
                 "active":{"kind":"home", "view":"files"}, "previewKey":"file:paper.tex",
                 "history":["home", "file:paper.tex"], "expanded":{"files":["src"]},
                 "scroll":{"file:paper.tex":{"top":23.5,"left":2.0}}, "sourceModes":{"file:paper.tex":true},
-                "filesView":"changes", "scope":"agent", "panelMax":true
+                "filesView":"changes", "scope":"agent", "panelMax":true,
+                "treeViewport":{"x":-24.0,"y":18.0,"zoom":1.4}
             }}
         });
         let workspace: WorkspaceState = serde_json::from_value(value.clone()).unwrap();

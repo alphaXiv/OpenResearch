@@ -9,6 +9,7 @@ import {
   type SetStateAction,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -654,6 +655,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     apply: applyWorkspace, getScroll: getFileScroll,
     sourceModes: sourceModesRef.current, revision: metadataRevision,
   });
+  const previousTreeScope = useRef<{ projectId: string | undefined; taskId: string | null; scope: string } | null>(null);
+  useLayoutEffect(() => {
+    if (!workspaceReady || !experimentDataReady || destination?.kind !== "task") return;
+    const previous = previousTreeScope.current;
+    if (previous?.projectId === projectId && previous.taskId === activeSessionId && previous.scope !== effectiveScope) {
+      setTreeViewport(null);
+    }
+    previousTreeScope.current = { projectId, taskId: activeSessionId, scope: effectiveScope };
+  }, [workspaceReady, experimentDataReady, destination?.kind, projectId, activeSessionId, effectiveScope]);
   const onActiveSessionChange = useCallback((sessionId: string | null, options?: { replace?: boolean }) => {
     if (!projectId) return;
     if (sessionId) {
@@ -888,10 +898,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
   // recompute the graph on every render.
-  const showProjectScope = useCallback(() => {
-    setScope("project");
-    setTreeViewport(null);
-  }, []);
+  const showProjectScope = useCallback(() => setScope("project"), []);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1740,7 +1747,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             }
                             onClick={() => {
                               setScope("agent");
-                              setTreeViewport(null);
                               setScopeMenuOpen(false);
                             }}
                           >
@@ -1751,7 +1757,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                             aria-pressed={effectiveScope === "project"}
                             onClick={() => {
                               setScope("project");
-                              setTreeViewport(null);
                               setScopeMenuOpen(false);
                             }}
                           >

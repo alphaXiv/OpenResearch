@@ -35,6 +35,16 @@ pub struct TaskWorkspace {
     files_view: FilesView,
     scope: Scope,
     panel_max: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tree_viewport: Option<TreeViewport>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+struct TreeViewport {
+    x: f64,
+    y: f64,
+    zoom: f64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -183,6 +193,12 @@ impl WorkspaceState {
                 id.is_empty()
                     || !task.tabs.iter().all(Pane::valid)
                     || !task.active.as_ref().is_none_or(Pane::valid)
+                    || task.tree_viewport.as_ref().is_some_and(|viewport| {
+                        !viewport.x.is_finite()
+                            || !viewport.y.is_finite()
+                            || !viewport.zoom.is_finite()
+                            || viewport.zoom <= 0.0
+                    })
                     || task.scroll.values().any(|position| {
                         !position.top.is_finite()
                             || !position.left.is_finite()
@@ -283,6 +299,42 @@ fn valid_location(location: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tree_viewport_is_optional_and_validated() {
+        let mut value = json!({"version":1,"tasks":{"new":{
+            "tabs":[],"active":null,"previewKey":null,"history":[],"expanded":{},
+            "scroll":{},"sourceModes":{},"filesView":"files","scope":"project","panelMax":false
+        }}});
+        assert!(WorkspaceState::from_stored(&value.to_string()).is_some());
+        for viewport in [json!(null), json!({"x":-24.0,"y":18.0,"zoom":1.4})] {
+            value["tasks"]["new"]["treeViewport"] = viewport;
+            let state = WorkspaceState::from_stored(&value.to_string()).unwrap();
+            assert_eq!(
+                WorkspaceState::from_stored(&serde_json::to_string(&state).unwrap()),
+                Some(state)
+            );
+        }
+        for viewport in [
+            json!({"x":0,"y":0,"zoom":0}),
+            json!({"x":0,"y":0,"zoom":-1}),
+            json!({"x":null,"y":0,"zoom":1}),
+        ] {
+            value["tasks"]["new"]["treeViewport"] = viewport;
+            assert!(WorkspaceState::from_stored(&value.to_string()).is_none());
+        }
+        value["tasks"]["new"]["treeViewport"] = json!({"x":0,"y":0,"zoom":1});
+        let mut state: WorkspaceState = serde_json::from_value(value).unwrap();
+        state
+            .tasks
+            .get_mut("new")
+            .unwrap()
+            .tree_viewport
+            .as_mut()
+            .unwrap()
+            .x = f64::INFINITY;
+        assert!(state.validate().is_err());
+    }
 
     #[test]
     fn workspace_schema_and_resume_locations_are_validated() {
