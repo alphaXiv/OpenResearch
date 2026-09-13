@@ -321,6 +321,7 @@
   "settings_page_connected": "متصل",
   "settings_page_context": "زمینه",
   "settings_page_cores": "هسته‌ها",
+  "settings_page_counts_must_be_whole_numbers": "تعداد هسته‌ها و پردازنده‌های گرافیکی باید عدد صحیح باشد.",
   "settings_page_current": "فعلی",
   "settings_page_currently_off": "اکنون خاموش است:",
   "settings_page_custom_flavor": "پیکربندی سفارشی",

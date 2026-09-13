@@ -1095,6 +1095,18 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
 /** GPU models the scheduler accepts for `-l gpu_type=`. */
 const SGE_GPU_TYPES = ["A100", "A40", "H200", "K40m", "L40S", "P100", "RTXP6000", "V100"];
 
+/**
+ * Cores and GPUs go over the wire as numbers, so the text input has to be
+ * converted: blank clears the field back to the cluster default, and anything
+ * that is not a whole number is rejected rather than coerced — `Number("abc")`
+ * is NaN, which `JSON.stringify` would quietly turn into a reset.
+ */
+function parseSgeCount(value: string): number | null | "invalid" {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return /^\d+$/.test(trimmed) ? Number(trimmed) : "invalid";
+}
+
 /** First failing check wins, like SlurmTestBadge. */
 function SgeTestBadge({ test, connecting, masterRunning }: { test: SgePreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
@@ -1191,6 +1203,12 @@ function SgeSection({ remote = false }: { remote?: boolean }) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (saving) return;
+    const slotsValue = parseSgeCount(slots);
+    const gpusValue = parseSgeCount(gpus);
+    if (slotsValue === "invalid" || gpusValue === "invalid") {
+      setError(m.settings_page_counts_must_be_whole_numbers());
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
@@ -1200,9 +1218,9 @@ function SgeSection({ remote = false }: { remote?: boolean }) {
           workDir: workDir.trim(),
           sccProject: sccProject.trim(),
           pe: pe.trim(),
-          slots: slots.trim(),
+          slots: slotsValue,
           timeLimit: timeLimit.trim(),
-          gpus: gpus.trim(),
+          gpus: gpusValue,
           gpuType: gpuType.trim(),
         }),
       );

@@ -321,6 +321,7 @@
   "settings_page_connected": "Connected",
   "settings_page_context": "Context",
   "settings_page_cores": "Cores",
+  "settings_page_counts_must_be_whole_numbers": "Cores and GPUs must be whole numbers.",
   "settings_page_current": "Current",
   "settings_page_currently_off": "Currently off:",
   "settings_page_custom_flavor": "Custom flavor",

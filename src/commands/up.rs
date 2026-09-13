@@ -6175,10 +6175,30 @@ struct SetSgeSettingsReq {
     work_dir: Option<String>,
     scc_project: Option<String>,
     pe: Option<String>,
-    slots: Option<u32>,
+    /// The counts are numbers, not strings, so an absent field and an explicit
+    /// `null` have to be told apart — see [`deserialize_present`]. `None`
+    /// leaves the field alone; `Some(None)` clears it back to the default.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    slots: Option<Option<u32>>,
     time_limit: Option<String>,
-    gpus: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    gpus: Option<Option<u32>>,
     gpu_type: Option<String>,
+}
+
+/// Distinguish "field absent" from "field present and null".
+///
+/// A plain `Option<T>` collapses both to `None`, which for these settings would
+/// make "leave this alone" and "reset this to the default" indistinguishable.
+/// The custom deserializer only runs when the key is actually present, so
+/// `#[serde(default)]` supplies `None` for an absent field while an explicit
+/// `null` arrives as `Some(None)`.
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
@@ -6203,11 +6223,13 @@ async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
         if let Some(p) = req.pe {
             settings.pe = norm(p);
         }
-        if let Some(s) = req.slots {
-            if s == 0 || s > 64 {
-                return Err(bad_request("slots must be between 1 and 64"));
+        if let Some(slots) = req.slots {
+            if let Some(n) = slots {
+                if n == 0 || n > 64 {
+                    return Err(bad_request("slots must be between 1 and 64"));
+                }
             }
-            settings.slots = Some(s);
+            settings.slots = slots;
         }
         if let Some(t) = req.time_limit {
             let t = norm(t);
@@ -6216,8 +6238,15 @@ async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
             }
             settings.time_limit = t;
         }
-        if let Some(g) = req.gpus {
-            settings.gpus = Some(g);
+        if let Some(gpus) = req.gpus {
+            // 0 is meaningful — it is how a CPU-only default is expressed, so
+            // only the upper bound is checked.
+            if let Some(n) = gpus {
+                if n > 16 {
+                    return Err(bad_request("gpus must be 16 or fewer"));
+                }
+            }
+            settings.gpus = gpus;
         }
         if let Some(t) = req.gpu_type {
             let t = norm(t);
@@ -7958,6 +7987,35 @@ mod tests {
         .unwrap();
         let result = set_project_ui_state(Path("project".into()), Json(unsupported)).await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// The counts are numbers on the wire, and the request has to tell three
+    /// cases apart: absent (leave alone), null (reset to the default), and a
+    /// value. A plain `Option<u32>` collapses the first two, and a string would
+    /// not deserialize at all — which is what the dashboard used to send.
+    #[test]
+    fn sge_counts_distinguish_absent_from_null_from_a_value() {
+        let parse = |body: &str| serde_json::from_str::<SetSgeSettingsReq>(body).unwrap();
+
+        let absent = parse(r#"{"host":"scc1"}"#);
+        assert_eq!(absent.slots, None, "an absent field must leave slots alone");
+        assert_eq!(absent.gpus, None);
+
+        let cleared = parse(r#"{"slots":null,"gpus":null}"#);
+        assert_eq!(
+            cleared.slots,
+            Some(None),
+            "an explicit null must clear slots back to the default"
+        );
+        assert_eq!(cleared.gpus, Some(None));
+
+        let set = parse(r#"{"slots":16,"gpus":2}"#);
+        assert_eq!(set.slots, Some(Some(16)));
+        assert_eq!(set.gpus, Some(Some(2)));
+
+        // The regression this replaced: the dashboard sent "16" and axum
+        // rejected the whole body with a deserialization error.
+        assert!(serde_json::from_str::<SetSgeSettingsReq>(r#"{"slots":"16"}"#).is_err());
     }
 
     #[test]

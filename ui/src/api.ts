@@ -1113,15 +1113,19 @@ export interface SgeSettings {
 
 export const getSgeSettings = (signal?: AbortSignal) => get<SgeSettings>("/api/settings/sge", signal);
 
-/** Empty string clears a field back to the cluster default. */
+/**
+ * Omitting a field leaves it alone. Clearing it back to the cluster default is
+ * an empty string for the text fields and `null` for the counts — they are
+ * numbers on the wire, so `""` would fail to deserialize.
+ */
 export const saveSgeSettings = (body: {
   host?: string;
   workDir?: string;
   sccProject?: string;
   pe?: string;
-  slots?: string;
+  slots?: number | null;
   timeLimit?: string;
-  gpus?: string;
+  gpus?: number | null;
   gpuType?: string;
 }) => post<SgeSettings>("/api/settings/sge", body);
 

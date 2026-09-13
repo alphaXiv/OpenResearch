@@ -321,6 +321,7 @@
   "settings_page_connected": "已连接",
   "settings_page_context": "上下文",
   "settings_page_cores": "核心数",
+  "settings_page_counts_must_be_whole_numbers": "核心数和 GPU 数必须为整数。",
   "settings_page_current": "当前",
   "settings_page_currently_off": "当前已关闭：",
   "settings_page_custom_flavor": "自定义规格",
