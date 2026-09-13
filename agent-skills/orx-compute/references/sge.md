@@ -52,6 +52,29 @@ SCC home directories are quota'd at 10 GB. The layout is
 `<workDir>/<user>/.orx/runs/<runId>/` holding `repo/`, `job.qsub`, `log`, and
 `exit_code`.
 
+## Caches never go to `$HOME`
+
+Packages, wheels, and model or compile caches must land on the project
+filesystem. A single `pip install torch` plus one model download spends most of
+a 10 GB home quota, and a few runs wedge the account.
+
+Every generated `job.qsub` already exports the redirects, pointing at
+`<workDir>/<user>/.orx/cache`:
+
+`XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, `PYTHONUSERBASE`, `HF_HOME`,
+`TORCH_HOME`, `TRITON_CACHE_DIR`, `TORCHINDUCTOR_CACHE_DIR`, `CUDA_CACHE_PATH`,
+`MPLCONFIGDIR`, `CONDA_PKGS_DIRS`, `NUMBA_CACHE_DIR`.
+
+They are defaults, so exporting one in the run command still wins. The caches
+are shared across runs on purpose — re-downloading CUDA wheels per job would be
+slow and antisocial on a shared filesystem.
+
+When writing experiment code, do not hardcode a path under `~`. A few libraries
+ignore the variables above and need an explicit argument — OpenAI CLIP is the
+known one, where `clip.load(...)` requires `download_root=` because it hardcodes
+`~/.cache/clip`. Anything writing large files itself should use the run
+directory or `$TMPDIR` (node-local scratch, cleared when the job ends).
+
 ## The second factor is a prerequisite
 
 SCC's sshd requires `publickey,keyboard-interactive`, and ssh `BatchMode=yes`

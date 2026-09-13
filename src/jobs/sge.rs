@@ -248,6 +248,73 @@ pub fn login(host: &str) -> SshTarget {
     SshTarget::alias(host).with_second_factor(SecondFactor::Required)
 }
 
+/// Every environment variable [`cache_env`] sets, so the job script knows which
+/// directories to create. Ordered for a stable, readable `mkdir` line.
+pub const CACHE_ENV_VARS: &[&str] = &[
+    "XDG_CACHE_HOME",
+    "PIP_CACHE_DIR",
+    "UV_CACHE_DIR",
+    "PYTHONUSERBASE",
+    "HF_HOME",
+    "TORCH_HOME",
+    "TRITON_CACHE_DIR",
+    "TORCHINDUCTOR_CACHE_DIR",
+    "CUDA_CACHE_PATH",
+    "MPLCONFIGDIR",
+    "CONDA_PKGS_DIRS",
+    "NUMBA_CACHE_DIR",
+];
+
+/// Redirect every package, model and compile cache that otherwise defaults into
+/// `$HOME`.
+///
+/// This is not a tidiness measure. SCC home directories are capped at 10 GB, and
+/// a single `pip install torch` plus one model download will spend most of that;
+/// a handful of runs would wedge the account entirely. Everything here lands on
+/// the project filesystem instead.
+///
+/// The caches are deliberately SHARED across runs rather than per-run — that is
+/// the entire point of a wheel or model cache, and re-downloading CUDA wheels
+/// for every job would be both slow and antisocial on a shared filesystem. Only
+/// genuinely per-run state belongs in the run dir.
+///
+/// These are defaults: an author who exports one of these themselves wins, the
+/// same contract as [`super::default_python_env`].
+pub fn cache_env(work_dir: &str) -> HashMap<String, String> {
+    let base = work_dir.trim_end_matches('/');
+    let cache = format!("{base}/.orx/cache");
+    [
+        // Catches anything XDG-aware that we have not named explicitly.
+        ("XDG_CACHE_HOME", cache.clone()),
+        ("PIP_CACHE_DIR", format!("{cache}/pip")),
+        ("UV_CACHE_DIR", format!("{cache}/uv")),
+        // `pip install --user` writes here; without it the user site-packages
+        // tree lands in ~/.local and counts against the home quota forever.
+        ("PYTHONUSERBASE", format!("{base}/.orx/python-user")),
+        // Covers HF_HUB_CACHE and HF_DATASETS_CACHE both.
+        ("HF_HOME", format!("{cache}/huggingface")),
+        ("TORCH_HOME", format!("{cache}/torch")),
+        ("TRITON_CACHE_DIR", format!("{cache}/triton")),
+        ("TORCHINDUCTOR_CACHE_DIR", format!("{cache}/torchinductor")),
+        ("CUDA_CACHE_PATH", format!("{cache}/nv")),
+        ("MPLCONFIGDIR", format!("{cache}/matplotlib")),
+        ("CONDA_PKGS_DIRS", format!("{cache}/conda-pkgs")),
+        ("NUMBA_CACHE_DIR", format!("{cache}/numba")),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+/// Apply [`cache_env`] as defaults over an existing env map.
+pub fn default_cache_env(env: &HashMap<String, String>, work_dir: &str) -> HashMap<String, String> {
+    let mut env = env.clone();
+    for (key, value) in cache_env(work_dir) {
+        env.entry(key).or_insert(value);
+    }
+    env
+}
+
 /// The per-user leaf under the configured base. `/projectnb/...` is a shared
 /// group filesystem and run dirs are `umask 077` (job.qsub embeds HF_TOKEN and
 /// every synced env var), so without this a labmate's `test -r` on our 0600
@@ -275,8 +342,8 @@ pub async fn ensure_work_dir(host: &str, work_dir: &str) -> Result<()> {
         "base={base}; \
          case \"$base\" in /*) ;; *) echo ORX_NOT_ABSOLUTE; exit 0;; esac; \
          case \"$base\" in \"$HOME\"|\"$HOME\"/*) echo ORX_UNDER_HOME; exit 0;; esac; \
-         mkdir -p \"$base/.orx/runs\" \"$base/.orx/source\" 2>/dev/null || {{ echo ORX_MKDIR_FAILED; exit 0; }}; \
-         chmod 700 \"$base/.orx\" \"$base/.orx/runs\" \"$base/.orx/source\" 2>/dev/null || true; \
+         mkdir -p \"$base/.orx/runs\" \"$base/.orx/source\" \"$base/.orx/cache\" 2>/dev/null || {{ echo ORX_MKDIR_FAILED; exit 0; }}; \
+         chmod 700 \"$base/.orx\" \"$base/.orx/runs\" \"$base/.orx/source\" \"$base/.orx/cache\" 2>/dev/null || true; \
          {{ [ -d \"$base/.orx/runs\" ] && [ -w \"$base/.orx/runs\" ]; }} || {{ echo ORX_NOT_WRITABLE; exit 0; }}; \
          echo ORX_OK"
     );
@@ -509,12 +576,32 @@ fn render_qsub_script(spec: &SgeJobSpec) -> String {
     // but SGE under unix_behavior execs the shebang with a bare environment.
     // `env bash -l` does not work — Linux env passes "bash -l" as one argument.
     // Our own exports come after and still win over anything the profile sets.
+    let env = super::default_python_env(&spec.env);
     format!(
-        "#!/bin/bash -l\n{directives}\n{exports}\n(\ncd {dir}/repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > {dir}/exit_code\nexit \"$code\"\n",
+        "#!/bin/bash -l\n{directives}\n{exports}\n{cache_dirs}(\ncd {dir}/repo || exit 97\n{command}\n)\ncode=$?\necho \"$code\" > {dir}/exit_code\nexit \"$code\"\n",
         directives = directives.join("\n"),
-        exports = render_exports(&super::default_python_env(&spec.env)),
+        exports = render_exports(&env),
+        cache_dirs = render_cache_mkdir(&env),
         command = spec.command,
     )
+}
+
+/// Create the redirected cache directories before the payload runs.
+///
+/// Most tools would create their own, but not all do — matplotlib and CUDA both
+/// fall back to `$HOME` with only a warning if their target is missing, which is
+/// exactly the failure this redirection exists to prevent. Expanding the
+/// variables rather than the literal paths means an author override is honoured.
+fn render_cache_mkdir(env: &HashMap<String, String>) -> String {
+    let dirs: Vec<String> = CACHE_ENV_VARS
+        .iter()
+        .filter(|name| env.contains_key(**name))
+        .map(|name| format!("\"${name}\""))
+        .collect();
+    if dirs.is_empty() {
+        return String::new();
+    }
+    format!("mkdir -p {} 2>/dev/null || true\n", dirs.join(" "))
 }
 
 /// `qsub -terse` prints the bare job id. Array submissions print
@@ -940,6 +1027,86 @@ mod tests {
         let mut s = spec();
         s.pe = Some(("omp".into(), 1));
         assert!(!render_qsub_script(&s).contains("#$ -pe"));
+    }
+
+    /// SCC home directories are capped at 10 GB, so every cache that defaults
+    /// into $HOME has to land on the project filesystem instead. This is the
+    /// guard that keeps a new cache variable from being forgotten.
+    #[test]
+    fn caches_are_redirected_off_home() {
+        let work = "/projectnb/herbdl/workspaces/herb/faridkar";
+        let env = cache_env(work);
+        for name in CACHE_ENV_VARS {
+            let value = env
+                .get(*name)
+                .unwrap_or_else(|| panic!("{name} is listed but not set"));
+            assert!(
+                value.starts_with(work),
+                "{name} must live under the work dir, got {value}"
+            );
+        }
+        assert_eq!(env.len(), CACHE_ENV_VARS.len());
+        // The ones that actually consume the quota.
+        assert_eq!(
+            env.get("PIP_CACHE_DIR").map(String::as_str),
+            Some("/projectnb/herbdl/workspaces/herb/faridkar/.orx/cache/pip")
+        );
+        assert_eq!(
+            env.get("HF_HOME").map(String::as_str),
+            Some("/projectnb/herbdl/workspaces/herb/faridkar/.orx/cache/huggingface")
+        );
+        // `pip install --user` goes outside the cache root: it is an install
+        // tree, not a cache, and must survive a cache wipe.
+        assert_eq!(
+            env.get("PYTHONUSERBASE").map(String::as_str),
+            Some("/projectnb/herbdl/workspaces/herb/faridkar/.orx/python-user")
+        );
+    }
+
+    /// Caches are defaults, not impositions — the same contract as
+    /// `default_python_env`.
+    #[test]
+    fn an_author_can_override_a_cache_location() {
+        let author = HashMap::from([("HF_HOME".to_string(), "/scratch/models".to_string())]);
+        let env = default_cache_env(&author, "/projectnb/herbdl/workspaces/herb");
+        assert_eq!(
+            env.get("HF_HOME").map(String::as_str),
+            Some("/scratch/models")
+        );
+        // The others are still filled in.
+        assert!(env.contains_key("PIP_CACHE_DIR"));
+    }
+
+    /// The directories must exist before the payload runs: matplotlib and CUDA
+    /// silently fall back to $HOME when their target is missing, which is the
+    /// exact failure the redirection exists to prevent.
+    #[test]
+    fn the_script_creates_the_cache_dirs_via_their_variables() {
+        let mut s = spec();
+        s.env = cache_env("/projectnb/herbdl/workspaces/herb/faridkar");
+        let script = render_qsub_script(&s);
+        let mkdir = script
+            .lines()
+            .find(|l| l.starts_with("mkdir -p "))
+            .expect("expected a mkdir line");
+        for name in CACHE_ENV_VARS {
+            assert!(
+                mkdir.contains(&format!("\"${name}\"")),
+                "{name} not created"
+            );
+        }
+        // Expanding the variables (not the literal paths) is what makes an
+        // author override get its directory created too.
+        assert!(!mkdir.contains("/projectnb"), "{mkdir}");
+        // It has to run before the payload subshell.
+        let mkdir_at = script.find("mkdir -p ").unwrap();
+        assert!(mkdir_at < script.find("\n(\ncd ").unwrap(), "{script}");
+    }
+
+    /// A spec with no cache vars emits no mkdir at all.
+    #[test]
+    fn the_script_omits_the_mkdir_when_there_are_no_cache_vars() {
+        assert!(!render_qsub_script(&spec()).contains("mkdir"));
     }
 
     #[test]

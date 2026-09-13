@@ -112,6 +112,11 @@ pub async fn submit_local_sge_with_source(
         .await
         .map_err(|e| connect_hint(&host, e))?;
 
+    // Redirect pip/conda/HF/compile caches off $HOME, which is capped at 10 GB
+    // on SCC — one `pip install torch` plus a model download would spend most
+    // of it. Defaults only: anything the author synced themselves still wins.
+    let env = sge::default_cache_env(&env, &work_dir);
+
     let dir = ssh::stage_source_under(
         &sge::login(&host),
         Some(&work_dir),
