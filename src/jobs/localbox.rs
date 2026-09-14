@@ -216,10 +216,17 @@ pub fn stream_logs(dir: &Path, skip: u64, sink: &mut (dyn FnMut(&str) + Send)) -
 }
 
 /// TERM the process group (pid == pgid), else the pid alone; on Windows, the process tree.
+/// Idempotent (TASK 4's cancellation contract): a process already gone —
+/// whether it exited on its own, or a prior `cancel_job` call already
+/// terminated it — is not an error to cancel again; there's simply nothing
+/// left to do.
 pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = std::fs::read_to_string(dir.join("pid"))
         .map_err(|e| anyhow!("Could not read the run's pid: {}", e))?;
     let pid = pid.trim().to_string();
+    if !pid_alive(&pid) {
+        return Ok(());
+    }
     #[cfg(windows)]
     {
         terminate_tree(&pid)
@@ -402,12 +409,23 @@ mod tests {
         state
     }
 
+    /// This is `local`'s instance of the TASK 4 (Priority 3, "Standardize
+    /// Compute Backend Contracts") conformance suite — the codebase has no
+    /// generic cross-backend test harness (only `local` can run its own
+    /// launch/inspect/cancel lifecycle end-to-end without external
+    /// infrastructure: a real cluster, ssh host, or cloud credentials — see
+    /// the TASK 4 PR description), so the contract is expressed here as one
+    /// exhaustive scenario rather than a reusable framework with a single
+    /// implementer. Each block below is labeled with the contract property
+    /// from `OpenResearch_Improvement_Priorities.md` it verifies; a future
+    /// backend gaining real test infrastructure should assert the same set.
     #[test]
     fn local_job_lifecycle() {
         // The only test that touches ORX_DATA_DIR, so the global env is safe.
         let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", std::process::id()));
         std::env::set_var("ORX_DATA_DIR", &base);
 
+        // Contract: launch succeeds with a valid configuration.
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
             script: "[ -n \"$TINKER_API_KEY\" ] && echo hello-$ORX_TEST_VAR".into(),
@@ -422,12 +440,84 @@ mod tests {
         assert!(run_sh.contains("export PYTHONUNBUFFERED='1'\n"));
         assert!(!run_sh.contains("s3cr3t-value"));
 
+        // Contract: logs remain readable after completion — both a resumed
+        // read past what's already been consumed (nothing new)...
         let mut lines = Vec::new();
         let seen = stream_logs(&dir, 0, &mut |l| lines.push(l.to_string())).unwrap();
         assert_eq!(seen, 1);
         assert_eq!(lines, ["hello-42"]);
-        // Re-poll past the consumed lines: nothing new.
         assert_eq!(stream_logs(&dir, seen, &mut |_| ()).unwrap(), seen);
+        // ...and a fresh read from the start, well after the job (and its
+        // supervisor, in the real system) is long gone.
+        let mut replayed = Vec::new();
+        let replayed_seen = stream_logs(&dir, 0, &mut |l| replayed.push(l.to_string())).unwrap();
+        assert_eq!(replayed_seen, seen);
+        assert_eq!(replayed, lines, "the full log must still be replayable");
+
+        // Contract: status reaches one terminal state only. Wires this run's
+        // real, backend-produced terminal stage through the same
+        // `stage_to_run_status` + `Store::update_status` path `supervise.rs`
+        // uses, and confirms TASK 1's transition guard rejects a conflicting
+        // second terminal write end-to-end for a real backend's output —
+        // not just in `store.rs`'s own unit tests.
+        {
+            use crate::store::{RunStatus, Store};
+            let store_dir = base.join("conformance-store");
+            let store = Store::open_at(store_dir.clone()).unwrap();
+            let run = crate::store::StoredRun {
+                id: "lifecycle".into(),
+                experiment_id: "exp_1".into(),
+                project_id: "proj_1".into(),
+                status: "running".into(),
+                backend_json: "{}".into(),
+                command: String::new(),
+                created_at: 1,
+                updated_at: 1,
+                ended_at: None,
+                exit_code: None,
+                commit_sha: None,
+                result_markdown: None,
+                cancel_requested: false,
+                chat_session_id: None,
+                recovery_reason: None,
+                error_kind: None,
+                provenance_json: None,
+            };
+            store.upsert_run(&run).unwrap();
+            let terminal = crate::jobs::stage_to_run_status(&state.stage);
+            assert_eq!(terminal, RunStatus::Done);
+            assert!(store
+                .update_status("lifecycle", terminal, Some(2), Some(0))
+                .unwrap());
+            // A second, conflicting terminal write — as a duplicate poll or a
+            // racing supervisor might produce — must be rejected, not applied.
+            assert!(!store
+                .update_status("lifecycle", RunStatus::Failed, Some(3), Some(1))
+                .unwrap());
+            assert_eq!(store.get_run("lifecycle").unwrap().unwrap().status, "done");
+            let _ = std::fs::remove_dir_all(&store_dir);
+        }
+
+        // Contract: invalid configuration fails before execution. A run id
+        // that collides with an existing *file* at the target run dir path
+        // can't have its directory created — `run_job` must fail up front
+        // rather than partially launching into a broken location.
+        {
+            let blocked_dir = run_dir("blocked");
+            std::fs::create_dir_all(blocked_dir.parent().unwrap()).unwrap();
+            std::fs::write(&blocked_dir, b"not a directory").unwrap();
+            let result = run_job(&LocalJobSpec {
+                run_id: "blocked".into(),
+                script: "echo should-never-run".into(),
+                env: HashMap::new(),
+                secret_env: HashMap::new(),
+            });
+            assert!(
+                result.is_err(),
+                "launch must fail before spawning anything when the run dir can't be created"
+            );
+            let _ = std::fs::remove_file(&blocked_dir);
+        }
 
         let failed = run_job(&LocalJobSpec {
             run_id: "failing".into(),
@@ -453,6 +543,9 @@ mod tests {
         // TERM leaves either a dead pid with no exit_code, or a non-zero
         // exit_code if run.sh got to write one — ERROR either way.
         assert_eq!(state.stage, "ERROR");
+        // Contract: cancellation is idempotent. The process is long dead by
+        // now; cancelling again must still succeed, not error.
+        cancel_job(&cancelled).unwrap();
 
         std::env::remove_var("ORX_DATA_DIR");
         let _ = std::fs::remove_dir_all(&base);

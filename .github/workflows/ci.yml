@@ -65,6 +65,23 @@ jobs:
       - name: UI unit tests
         run: node --test --experimental-strip-types ui/tests/*.test.mjs
 
+      # ui/dist is committed and embedded in release builds (see AGENTS.md).
+      # Rebuild it here and fail if the committed copy doesn't match — the
+      # deterministic-build check backing the generated-file markers below:
+      # reviewers can trust the diff (or the collapsed "generated" summary)
+      # reflects a real `ui/src` change, not a stale or hand-edited artifact.
+      - name: UI build artifacts are up to date
+        working-directory: ui
+        run: |
+          set -euo pipefail
+          pnpm exec vite build
+          git add -A -- dist
+          if ! git diff --cached --quiet -- dist; then
+            echo "::error::ui/dist is out of date relative to ui/src. Run 'pnpm build' in ui/ and commit the regenerated assets (see AGENTS.md)."
+            git diff --cached --stat -- dist
+            exit 1
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

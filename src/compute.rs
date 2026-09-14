@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, Store, StoredRun};
+use crate::store::{log_path, RunStatus, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -693,6 +693,31 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Launch-time context for [`crate::store::ProvenanceManifest`] (TASK 6,
+/// Priority 4) that doesn't vary by backend: which `orx` build and machine
+/// launched the run, and what launched it (a human via the CLI, or a named
+/// agent harness/model — resolved from the launching chat session, when
+/// there is one). Every backend's own `submit` impl already reopens the
+/// store and re-fetches its experiment independently of this call, so this
+/// only needs to run once, here, before dispatch.
+fn build_provenance(
+    store: &Store,
+    args: &crate::ExpRunArgs,
+    experiment: &LocalExperiment,
+) -> crate::store::ProvenanceManifest {
+    let session = args
+        .launching_chat_session()
+        .and_then(|id| store.get_chat_session(&id).ok().flatten());
+    crate::store::ProvenanceManifest {
+        orx_version: env!("CARGO_PKG_VERSION").to_string(),
+        launcher_os: std::env::consts::OS.to_string(),
+        launcher_arch: std::env::consts::ARCH.to_string(),
+        agent_harness: session.as_ref().map(|s| s.harness.clone()),
+        agent_model: session.and_then(|s| s.model),
+        parent_experiment_id: experiment.parent_experiment_id.clone(),
+    }
+}
+
 pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
@@ -758,6 +783,13 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         result_markdown: None,
         cancel_requested: false,
         chat_session_id: args.launching_chat_session(),
+        recovery_reason: None,
+        error_kind: None,
+        // Captured once, here, on the row's first `upsert_run` (this is the
+        // `INSERT` branch — every subsequent upsert for this run id, from
+        // whichever backend actually launches it, excludes this column from
+        // its `ON CONFLICT` update). See `build_provenance`.
+        provenance_json: Some(build_provenance(&store, args, &experiment).to_json()),
     };
     reserve_run(&store, &pending, args.force)?;
     let pending_backend_json = descriptor.to_json();
@@ -783,7 +815,12 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
                 .as_ref()
                 .is_some_and(|run| run.backend_json != pending_backend_json);
             if !handle_was_persisted {
-                store.update_status(&run_id, "failed", Some(crate::store::now_ms()), None)?;
+                store.update_status(
+                    &run_id,
+                    RunStatus::Failed,
+                    Some(crate::store::now_ms()),
+                    None,
+                )?;
                 store
                     .set_result_markdown(&run_id, &format!("Compute submission failed: {error}"))?;
             }
@@ -917,5 +954,90 @@ mod tests {
         args.image = None;
         args.timeout = Some("1h".into());
         assert!(validate_run_args(&args).is_err());
+    }
+
+    fn experiment_fixture(parent_experiment_id: Option<&str>) -> LocalExperiment {
+        LocalExperiment {
+            id: "exp_1".into(),
+            project_id: "proj_1".into(),
+            parent_experiment_id: parent_experiment_id.map(str::to_string),
+            slug: "exp".into(),
+            branch_name: "orx/exp".into(),
+            title: None,
+            description: None,
+            run_command: "echo hi".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            chat_session_id: None,
+        }
+    }
+
+    /// TASK 6 (experiment provenance): a run launched from an agent chat
+    /// session resolves that session's harness/model into the manifest, and
+    /// snapshots the launching experiment's parent id.
+    #[test]
+    fn build_provenance_resolves_agent_from_the_launching_chat_session() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-compute-provenance-{}", uuid::Uuid::new_v4()));
+        let store = crate::store::Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&crate::store::StoredChatSession {
+                id: "chat_A".into(),
+                project_id: "proj_1".into(),
+                harness: "claude".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: Some("claude-sonnet-5".into()),
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                active_leaf_id: None,
+                parent_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        let mut args = tinker_args();
+        args.chat_session_id = Some("chat_A".into());
+        let experiment = experiment_fixture(Some("exp_parent"));
+
+        let manifest = build_provenance(&store, &args, &experiment);
+
+        assert_eq!(manifest.orx_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.launcher_os, std::env::consts::OS);
+        assert_eq!(manifest.launcher_arch, std::env::consts::ARCH);
+        assert_eq!(manifest.agent_harness.as_deref(), Some("claude"));
+        assert_eq!(manifest.agent_model.as_deref(), Some("claude-sonnet-5"));
+        assert_eq!(manifest.parent_experiment_id.as_deref(), Some("exp_parent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A plain CLI launch (no chat session) and a root experiment (no
+    /// parent) both correctly resolve to `None`, not a fabricated value.
+    #[test]
+    fn build_provenance_has_no_agent_fields_for_a_plain_cli_launch() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-compute-provenance-cli-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = crate::store::Store::open_at(dir.clone()).unwrap();
+        let args = tinker_args();
+        let experiment = experiment_fixture(None);
+
+        let manifest = build_provenance(&store, &args, &experiment);
+
+        assert_eq!(manifest.agent_harness, None);
+        assert_eq!(manifest.agent_model, None);
+        assert_eq!(manifest.parent_experiment_id, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

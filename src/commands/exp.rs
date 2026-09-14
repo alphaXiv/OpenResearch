@@ -8,12 +8,20 @@
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::error::{anyhow, Result};
 use crate::plane::{resolve_experiment, resolve_project};
 use crate::store::Store;
 use crate::ExpCommand;
+
+/// How many consecutive reconciliation passes may fail to (re)spawn a
+/// supervisor for the same run before giving up on it. Each pass is spaced
+/// `RUN_RECONCILE_INTERVAL` apart (`commands::up`), so this is a bound on how
+/// long orx keeps retrying a broken installation (binary missing, resource
+/// limits) rather than leaving the run stuck `Starting`/`Running` forever.
+const MAX_SUPERVISOR_SPAWN_ATTEMPTS: u32 = 5;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
     let store = Store::open()?;
@@ -164,6 +172,91 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Crash recovery: find every locally-owned run that is still `Starting`/
+/// `Running` but has no supervisor left watching it — because `orx up` (or
+/// the CLI) restarted after a crash/reboot, or because a supervisor died
+/// mid-flight without the process that spawned it noticing — and give it a
+/// fresh one. `attempts` tracks consecutive spawn failures per run *across
+/// calls* (a caller keeps one map alive for as long as it keeps calling this,
+/// e.g. once per tick of `commands::up`'s reconciliation loop); a run whose
+/// supervisor cannot be started after [`MAX_SUPERVISOR_SPAWN_ATTEMPTS`] tries
+/// is marked unrecoverable instead of being retried forever.
+///
+/// This is the one place orphan detection happens: liveness is the same
+/// `fd_lock` a running supervisor holds (`supervise::run_has_live_supervisor`),
+/// so there is nothing to go stale — a dead process or a rebooted machine
+/// releases the lock at the OS level, with no heartbeat/TTL of ours to miss.
+/// A backend actually being gone (a killed local process, a deleted k8s Job,
+/// an unreachable ssh host) is then detected the normal way, by the fresh
+/// supervisor's own `inspect_job` — reconciliation's job is only to make sure
+/// *a* supervisor is always eventually running to notice.
+pub(crate) fn reconcile_active_runs(
+    store: &Store,
+    attempts: &mut HashMap<String, u32>,
+) -> Result<()> {
+    reconcile_active_runs_with(
+        store,
+        attempts,
+        spawn_detached_supervise,
+        crate::commands::supervise::run_has_live_supervisor,
+    )
+}
+
+fn reconcile_active_runs_with(
+    store: &Store,
+    attempts: &mut HashMap<String, u32>,
+    spawn: impl Fn(&str) -> Result<()>,
+    has_live_supervisor: impl Fn(&str) -> Result<bool>,
+) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for run in store.list_active_runs()? {
+        if store.get_local_experiment(&run.experiment_id)?.is_none() {
+            continue;
+        }
+        seen.insert(run.id.clone());
+        if has_live_supervisor(&run.id)? {
+            // Healthy — being watched normally. Forget any earlier failures:
+            // a supervisor made it up eventually, and a later crash of *this*
+            // one restarts the count fresh rather than inheriting stale tries.
+            attempts.remove(&run.id);
+            continue;
+        }
+        if let Err(err) = spawn(&run.id) {
+            let count = attempts.entry(run.id.clone()).or_insert(0);
+            *count += 1;
+            eprintln!(
+                "reconcile: could not (re)spawn a supervisor for run {} (attempt {count}/{MAX_SUPERVISOR_SPAWN_ATTEMPTS}): {err}",
+                run.id
+            );
+            if *count >= MAX_SUPERVISOR_SPAWN_ATTEMPTS {
+                let reason = format!(
+                    "orx could not start a supervisor process for this run after \
+                     {count} attempts and is giving up: {err}"
+                );
+                if let Err(mark_err) = store.mark_run_unrecoverable(
+                    &run.id,
+                    crate::error::ErrorKind::Reconciliation,
+                    &reason,
+                ) {
+                    eprintln!(
+                        "reconcile: could not mark run {} unrecoverable: {mark_err}",
+                        run.id
+                    );
+                } else {
+                    attempts.remove(&run.id);
+                }
+            }
+        } else {
+            attempts.remove(&run.id);
+        }
+    }
+    // Drop counters for runs that left the active set entirely (finished,
+    // cancelled, or already marked unrecoverable above) so the map can't
+    // grow without bound across a long-lived `orx up` process.
+    attempts.retain(|run_id, _| seen.contains(run_id));
+    Ok(())
+}
+
 /// Persist cancel intent and ensure an orphaned run gets a fresh supervisor.
 pub(crate) fn request_local_run_cancel(store: &Store, run_id: &str) -> Result<()> {
     let lock_path = crate::store::log_path(run_id).with_extension("cancel.lock");
@@ -222,6 +315,9 @@ mod tests {
             result_markdown: None,
             cancel_requested: false,
             chat_session_id: None,
+            recovery_reason: None,
+            error_kind: None,
+            provenance_json: None,
         }
     }
 
@@ -309,6 +405,204 @@ mod tests {
         assert!(!completed_while_locked);
         assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
         drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // --- reconcile_active_runs_with (TASK 2: crash recovery/reconciliation) ---
+
+    fn experiment_fixture() -> crate::local::model::LocalExperiment {
+        crate::local::model::LocalExperiment {
+            id: "experiment-1".into(),
+            project_id: "project-1".into(),
+            parent_experiment_id: None,
+            slug: "exp".into(),
+            branch_name: "orx/exp".into(),
+            title: None,
+            description: None,
+            run_command: "echo hi".into(),
+            agent_status: "idle".into(),
+            created_at: 1,
+            updated_at: 1,
+            chat_session_id: None,
+        }
+    }
+
+    /// A run already being watched by a live supervisor is left alone:
+    /// reconciliation never spawns a redundant one, and never touches the
+    /// attempt counter.
+    #[test]
+    fn reconcile_skips_a_run_with_a_live_supervisor() {
+        let dir = std::env::temp_dir().join(format!("orx-reconcile-live-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_experiment(&experiment_fixture())
+            .unwrap();
+        store.upsert_run(&run_fixture()).unwrap();
+        let mut attempts = HashMap::new();
+
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| panic!("must not spawn"),
+            |_| Ok(true),
+        )
+        .unwrap();
+
+        assert!(attempts.is_empty());
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "running");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An orphaned run (no live supervisor) whose spawn succeeds is left with
+    /// no failure recorded and no attempt counter — the fresh supervisor now
+    /// owns it.
+    #[test]
+    fn reconcile_spawns_a_fresh_supervisor_for_an_orphaned_run() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-reconcile-orphan-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_experiment(&experiment_fixture())
+            .unwrap();
+        store.upsert_run(&run_fixture()).unwrap();
+        let mut attempts = HashMap::new();
+        let spawned = std::cell::Cell::new(false);
+
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| {
+                spawned.set(true);
+                Ok(())
+            },
+            |_| Ok(false),
+        )
+        .unwrap();
+
+        assert!(spawned.get());
+        assert!(attempts.is_empty());
+        assert_eq!(store.get_run("run-1").unwrap().unwrap().status, "running");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run whose experiment isn't a registered local one is out of scope
+    /// for local reconciliation entirely — no spawn attempt, no counter.
+    #[test]
+    fn reconcile_ignores_runs_without_a_registered_local_experiment() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-reconcile-foreign-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        // Deliberately no `create_local_experiment` call.
+        store.upsert_run(&run_fixture()).unwrap();
+        let mut attempts = HashMap::new();
+
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| panic!("must not spawn"),
+            |_| panic!("must not probe a supervisor for an out-of-scope run"),
+        )
+        .unwrap();
+
+        assert!(attempts.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An orphaned run whose supervisor can never be spawned (a permanently
+    /// broken installation) is retried up to `MAX_SUPERVISOR_SPAWN_ATTEMPTS`
+    /// times — left alone in between — and only then marked unrecoverable
+    /// with a `recovery_reason`, instead of being retried forever or given up
+    /// on after a single blip.
+    #[test]
+    fn reconcile_gives_up_after_repeated_spawn_failures_and_marks_the_run_unrecoverable() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-reconcile-giveup-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_experiment(&experiment_fixture())
+            .unwrap();
+        store.upsert_run(&run_fixture()).unwrap();
+        let mut attempts = HashMap::new();
+
+        for attempt in 1..MAX_SUPERVISOR_SPAWN_ATTEMPTS {
+            reconcile_active_runs_with(
+                &store,
+                &mut attempts,
+                |_| Err(anyhow!("synthetic spawn failure")),
+                |_| Ok(false),
+            )
+            .unwrap();
+            assert_eq!(attempts.get("run-1"), Some(&attempt));
+            assert_eq!(
+                store.get_run("run-1").unwrap().unwrap().status,
+                "running",
+                "must not give up before the attempt cap"
+            );
+        }
+
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| Err(anyhow!("synthetic spawn failure")),
+            |_| Ok(false),
+        )
+        .unwrap();
+
+        assert!(
+            !attempts.contains_key("run-1"),
+            "the counter is cleared once the run is marked unrecoverable"
+        );
+        let run = store.get_run("run-1").unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert!(run
+            .recovery_reason
+            .unwrap()
+            .contains("synthetic spawn failure"));
+        assert_eq!(run.error_kind.as_deref(), Some("reconciliation_failure"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run that leaves the active set (it reached a terminal state some
+    /// other way) between reconciliation passes must not leave a stale
+    /// counter behind — `attempts` must not grow without bound over the
+    /// lifetime of a long-running `orx up`.
+    #[test]
+    fn reconcile_forgets_attempt_counters_for_runs_no_longer_active() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-reconcile-forget-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_experiment(&experiment_fixture())
+            .unwrap();
+        store.upsert_run(&run_fixture()).unwrap();
+        let mut attempts = HashMap::new();
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| Err(anyhow!("synthetic spawn failure")),
+            |_| Ok(false),
+        )
+        .unwrap();
+        assert_eq!(attempts.get("run-1"), Some(&1));
+
+        // The run finishes through the normal path, independent of reconciliation.
+        assert!(store
+            .update_status("run-1", crate::store::RunStatus::Done, Some(1), Some(0))
+            .unwrap());
+        reconcile_active_runs_with(
+            &store,
+            &mut attempts,
+            |_| panic!("must not spawn"),
+            |_| panic!("must not probe a terminal run"),
+        )
+        .unwrap();
+
+        assert!(attempts.is_empty());
+
         let _ = std::fs::remove_dir_all(dir);
     }
 }
