@@ -4,13 +4,20 @@
 
 **The local-first workspace for research agents and autoresearch.**
 
-<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="18" /> Claude Code,
-<img src=".github/readme-assets/codex.svg" alt="" width="18" /> Codex,
-<img src=".github/readme-assets/opencode.svg" alt="" width="18" /> OpenCode, or
-Cursor into research agents that can review
+<p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a></p>
+
+<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="18" height="18" align="middle" /> Claude Code,
+<picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/codex-dark.svg"><img src=".github/readme-assets/codex.svg" alt="" width="18" height="18" align="middle" /></picture> Codex,
+<picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/opencode-dark.svg"><img src=".github/readme-assets/opencode.svg" alt="" width="18" height="18" align="middle" /></picture> OpenCode, or
+<picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/cursor-dark.svg"><img src=".github/readme-assets/cursor.svg" alt="" width="18" height="18" align="middle" /></picture> Cursor into research agents that can review
 literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
-[Download the desktop app](https://openresearch.sh/download) ·
+<p>
+<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="250" height="55" /></a>
+<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="250" height="55" /></a>
+<br><sub>macOS 11+ · Windows requires <a href="docs/windows.md">Git for Windows</a>.</sub>
+</p>
+
 [Documentation](https://openresearch.sh/docs) ·
 [Releases](https://github.com/alphaXiv/OpenResearch/releases)
 
