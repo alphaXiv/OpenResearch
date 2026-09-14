@@ -227,14 +227,15 @@ impl BackendDescriptor {
 
 /// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
 /// in the wild as a live state (see huggingface_hub).
-pub fn stage_to_run_status(stage: &str) -> &'static str {
+pub fn stage_to_run_status(stage: &str) -> crate::store::RunStatus {
+    use crate::store::RunStatus;
     match stage {
-        "SCHEDULING" => "starting",
-        "RUNNING" | "UPDATING" => "running",
-        "COMPLETED" => "done",
-        "ERROR" => "failed",
-        "CANCELED" | "DELETED" => "cancelled",
-        _ => "running",
+        "SCHEDULING" => RunStatus::Starting,
+        "RUNNING" | "UPDATING" => RunStatus::Running,
+        "COMPLETED" => RunStatus::Done,
+        "ERROR" => RunStatus::Failed,
+        "CANCELED" | "DELETED" => RunStatus::Cancelled,
+        _ => RunStatus::Running,
     }
 }
 
