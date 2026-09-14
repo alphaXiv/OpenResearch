@@ -22,6 +22,7 @@ import { getProjectStarterPromptsQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
+import { speechLocale, useDictation } from "../useDictation";
 import { getThemePreference } from "../theme";
 import {
   ArrowDown,
@@ -43,6 +44,7 @@ import {
   HelpCircle,
   Lightbulb,
   MessageSquareQuote,
+  Mic,
   MoreHorizontal,
   PanelLeft,
   Paperclip,
@@ -4205,6 +4207,24 @@ function RemoteHostDialog({
   );
 }
 
+/** Web Speech error codes the user can act on, as sentences they can act on.
+ * `no-restart` is ours: the recognizer kept ending the moment it started. */
+function dictationErrorText(code: string): string {
+  switch (code) {
+    case "not-allowed":
+    case "service-not-allowed":
+      return m.chat_dictation_error_not_allowed();
+    case "audio-capture":
+      return m.chat_dictation_error_audio_capture();
+    case "network":
+      return m.chat_dictation_error_network();
+    case "language-not-supported":
+      return m.chat_dictation_error_language();
+    default:
+      return m.chat_dictation_error_generic();
+  }
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -4404,6 +4424,21 @@ export function ChatPanel({
   const [composerCursor, setComposerCursor] = useState(0);
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
+
+  // Dictation writes into the composer through the same state the keyboard
+  // does, so skill chips, the slash menu and send() need no special case. It
+  // listens in the UI language, which is the one the user is typing in.
+  const dictationLang = speechLocale(useLocale());
+  const dictation = useDictation({
+    lang: dictationLang,
+    target: composerRef,
+    onChange: (value, caret) => {
+      setDraft(value);
+      setComposerCursor(caret);
+      setSkillMenuDismissed(false);
+    },
+    describeError: dictationErrorText,
+  });
 
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
@@ -5142,6 +5177,9 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
+    // The dictated text is on its way out; a live recognizer would otherwise
+    // keep writing into whatever replaces it.
+    dictation.stop();
     captureUiEvent({
       name: "first_action",
       surface: telemetrySurface,
@@ -5478,6 +5516,7 @@ export function ChatPanel({
   async function runShell() {
     const command = shellCommand;
     if (!command) return;
+    dictation.stop();
     setSettingsError(null);
     if (busy) {
       setSettingsError(m.chat_bash_busy());
@@ -6278,6 +6317,11 @@ export function ChatPanel({
                 {settingsError}
               </div>
             )}
+            {dictation.error && (
+              <div className="composer-dictation-error pt-1.5 px-3 pb-0 text-sm text-accent-red" role="alert">
+                {dictation.error}
+              </div>
+            )}
             <div className={`composer-input relative flex overflow-hidden [&_textarea]:flex-1 ${bashActive ? "[&_textarea]:font-mono [&_textarea]:text-sm" : ""}`}>
               <textarea
                 dir="auto"
@@ -6427,6 +6471,33 @@ export function ChatPanel({
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Paperclip size={16} />
+              </IconButton>
+              <IconButton
+                type="button"
+                className="composer-dictate"
+                active={dictation.listening}
+                // Kept visible but inert where the browser has no speech API,
+                // so its absence reads as a browser limit rather than a bug.
+                disabled={!dictation.supported}
+                title={
+                  !dictation.supported
+                    ? m.chat_dictation_unsupported()
+                    : dictation.listening
+                      ? m.chat_panel_stop_dictating()
+                      : m.chat_panel_dictate()
+                }
+                aria-label={dictation.listening ? m.chat_panel_stop_dictating() : m.chat_panel_dictate()}
+                aria-pressed={dictation.listening}
+                // Declining focus keeps the composer's caret where the user
+                // put it, so dictation lands mid-message when that is where
+                // they were typing.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={dictation.toggle}
+              >
+                <Mic
+                  size={16}
+                  className={dictation.listening ? "text-accent-red motion-safe:animate-pulse" : undefined}
+                />
               </IconButton>
               {planActive && (
                 <Button
