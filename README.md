@@ -16,10 +16,13 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/install-linux-centered-dark.svg"><img src=".github/readme-assets/install-linux-centered.svg" alt="Install OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
-<h3><a href="https://api.openresearch.sh/auth/login">Create an account →</a></h3>
+<p>
+<a href="https://api.openresearch.sh/auth/login"><img src=".github/readme-assets/link-create-account.svg" alt="Create an account" width="174" height="24" /></a> ·
+<a href="https://openresearch.sh/docs"><img src=".github/readme-assets/link-documentation.svg" alt="Documentation" width="132" height="24" /></a> ·
+<a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/link-releases.svg" alt="Releases" width="78" height="24" /></a>
+</p>
 
-<p><strong><a href="https://openresearch.sh/docs">Documentation</a> · <a href="https://github.com/alphaXiv/OpenResearch/releases">Releases</a></strong><br>
-<sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
+<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a></p>
 
