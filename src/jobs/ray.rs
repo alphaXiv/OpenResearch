@@ -249,12 +249,10 @@ pub struct JobSubmission {
     pub working_dir: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct JobInfo {
-    /// Shared stage vocabulary (`SCHEDULING` / `RUNNING` / `COMPLETED` / …).
-    pub stage: String,
-    pub message: Option<String>,
-}
+/// Job state in the shared stage vocabulary (`SCHEDULING` / `RUNNING` /
+/// `COMPLETED` / …) — see [`crate::jobs::JobState`], which this re-exports
+/// under Ray's existing name (TASK 4: one canonical shape across backends).
+pub use crate::jobs::JobState as JobInfo;
 
 #[derive(Debug, Deserialize)]
 struct RawJobStatus {

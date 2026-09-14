@@ -203,6 +203,20 @@ pub struct JobInfo {
     pub status: JobStatus,
 }
 
+impl JobInfo {
+    /// Adapts HF's nested `status.{stage,message}` — the one backend whose
+    /// native API response doesn't already match the shape every other
+    /// backend returns directly — to [`crate::jobs::JobState`], so callers
+    /// (`supervise.rs`) don't need an HF-specific field-access special case
+    /// (TASK 4: one canonical shape across backends).
+    pub fn state(&self) -> crate::jobs::JobState {
+        crate::jobs::JobState {
+            stage: self.status.stage.clone(),
+            message: self.status.message.clone(),
+        }
+    }
+}
+
 async fn check(res: reqwest::Response, what: &str) -> Result<reqwest::Response> {
     let status = res.status();
     if status.is_success() {

@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{anyhow, Result};
+use crate::local::is_terminal;
 use crate::store::{log_path, Store, StoredRun};
 
 pub async fn run(args: crate::ServeArgs) -> Result<()> {
@@ -273,10 +274,6 @@ async fn emit_log_delta(
         }),
     )
     .await
-}
-
-fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "failed" | "cancelled")
 }
 
 async fn write_event(stream: &mut TcpStream, event: &str, data: &serde_json::Value) -> Result<()> {

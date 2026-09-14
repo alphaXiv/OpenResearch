@@ -449,12 +449,9 @@ pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
     Ok(dir)
 }
 
-/// Job state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
-#[derive(Debug, Clone)]
-pub struct JobState {
-    pub stage: String,
-    pub message: Option<String>,
-}
+/// Job state in the shared stage vocabulary — see [`crate::jobs::JobState`],
+/// which this re-exports (TASK 4: one canonical shape across backends).
+pub use crate::jobs::JobState;
 
 pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
     // exit_code present -> finished; pid alive -> running; pid dead & no
