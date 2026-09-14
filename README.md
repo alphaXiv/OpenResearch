@@ -17,7 +17,6 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 </p>
 
 <p>
-<a href="https://api.openresearch.sh/auth/login"><img src=".github/readme-assets/action-create-account.svg" alt="Create an account" width="174" height="24" /></a><img src=".github/readme-assets/action-separator.svg" alt=" · " width="12" height="24" />
 <a href="https://openresearch.sh/docs"><img src=".github/readme-assets/action-documentation.svg" alt="Documentation" width="132" height="24" /></a><img src=".github/readme-assets/action-separator.svg" alt=" · " width="12" height="24" />
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
@@ -44,6 +43,9 @@ On Windows, use the beta download above after installing
 
 [Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
 or a custom endpoint with OpenCode.
+
+Create an account at [openresearch.sh](https://openresearch.sh) to receive email
+updates and use managed OpenResearch compute.
 
 ## Built for research agents
 
