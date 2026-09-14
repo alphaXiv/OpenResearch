@@ -597,12 +597,9 @@ fn prepare_docs(
 
 // --- job lifecycle ------------------------------------------------------------
 
-/// Job state in the shared stage vocabulary.
-#[derive(Debug, Clone)]
-pub struct JobState {
-    pub stage: String,
-    pub message: Option<String>,
-}
+/// Job state in the shared stage vocabulary — see [`crate::jobs::JobState`],
+/// which this re-exports (TASK 4: one canonical shape across backends).
+pub use crate::jobs::JobState;
 
 pub async fn inspect_job(context: Option<&str>, namespace: &str, name: &str) -> Result<JobState> {
     let raw = match kubectl(

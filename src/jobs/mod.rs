@@ -227,19 +227,84 @@ impl BackendDescriptor {
 
 /// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
 /// in the wild as a live state (see huggingface_hub).
-pub fn stage_to_run_status(stage: &str) -> &'static str {
+pub fn stage_to_run_status(stage: &str) -> crate::store::RunStatus {
+    use crate::store::RunStatus;
     match stage {
-        "SCHEDULING" => "starting",
-        "RUNNING" | "UPDATING" => "running",
-        "COMPLETED" => "done",
-        "ERROR" => "failed",
-        "CANCELED" | "DELETED" => "cancelled",
-        _ => "running",
+        "SCHEDULING" => RunStatus::Starting,
+        "RUNNING" | "UPDATING" => RunStatus::Running,
+        "COMPLETED" => RunStatus::Done,
+        "ERROR" => RunStatus::Failed,
+        "CANCELED" | "DELETED" => RunStatus::Cancelled,
+        _ => RunStatus::Running,
     }
 }
 
 pub fn is_terminal_stage(stage: &str) -> bool {
     matches!(stage, "COMPLETED" | "CANCELED" | "ERROR" | "DELETED")
+}
+
+/// Canonical shape for a backend's poll result, in the shared stage
+/// vocabulary above. `ssh`, `kubernetes`, `modal`, and `slurm` re-export this
+/// type as their own `JobState` (`ray` as `JobInfo`) rather than each
+/// defining an identical struct — one shape, so `supervise.rs`'s per-backend
+/// poll loops never need backend-specific field access. Huggingface's native
+/// API response nests this one level deeper (`JobInfo { status: JobStatus {
+/// .. } }`); see `huggingface::JobInfo::state`.
+#[derive(Debug, Clone)]
+pub struct JobState {
+    pub stage: String,
+    pub message: Option<String>,
+}
+
+/// Debounces a scheduler-reported "GONE" stage — the job vanished from the
+/// scheduler's own bookkeeping (Slurm's `squeue`/`sacct`, Ray's job list),
+/// as opposed to a definite terminal report — before believing it. This also
+/// fires during a scheduler restart or while a result is still propagating,
+/// so a momentary "GONE" must persist for a full window before being treated
+/// as a real, unrecoverable disappearance; any other observation resets it.
+/// Shared by every backend whose scheduler can report this, so the window
+/// and the reset rule can't drift between them.
+pub struct GoneDebounce {
+    threshold: u32,
+    consecutive: u32,
+}
+
+/// What [`GoneDebounce::observe`] learned from one poll's raw stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoneOutcome {
+    /// Not "GONE" — proceed normally with the raw stage (the counter reset).
+    NotGone,
+    /// "GONE", but hasn't persisted through the full debounce window yet —
+    /// keep polling as usual without treating this as terminal.
+    StillWaiting,
+    /// "GONE" has now persisted for the full window — believe it: synthesize
+    /// a terminal `ERROR` state rather than waiting any longer.
+    ConfirmedGone,
+}
+
+impl GoneDebounce {
+    /// `window` / `poll_interval` (rounded down, minimum 1) consecutive
+    /// "GONE" polls are required before [`GoneOutcome::ConfirmedGone`].
+    pub fn new(window: std::time::Duration, poll_interval: std::time::Duration) -> Self {
+        let threshold = (window.as_secs() / poll_interval.as_secs().max(1)).max(1) as u32;
+        Self {
+            threshold,
+            consecutive: 0,
+        }
+    }
+
+    pub fn observe(&mut self, stage: &str) -> GoneOutcome {
+        if stage != "GONE" {
+            self.consecutive = 0;
+            return GoneOutcome::NotGone;
+        }
+        self.consecutive += 1;
+        if self.consecutive >= self.threshold {
+            GoneOutcome::ConfirmedGone
+        } else {
+            GoneOutcome::StillWaiting
+        }
+    }
 }
 
 #[cfg(test)]
@@ -357,5 +422,46 @@ mod tests {
             got.get(PYTHONIOENCODING).map(String::as_str),
             Some("cp1252")
         );
+    }
+
+    /// TASK 4 (compute backend contracts): a lone "GONE" poll — the shape a
+    /// scheduler restart or an NFS-lagged status write produces — must not be
+    /// believed; the debounce window must fully elapse first.
+    #[test]
+    fn gone_debounce_requires_the_full_window_of_consecutive_gone_polls() {
+        let mut debounce = GoneDebounce::new(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::ConfirmedGone);
+    }
+
+    /// Any real observation in between resets the count — a job that flaps
+    /// between "GONE" and a real stage never accumulates toward the window.
+    #[test]
+    fn gone_debounce_resets_on_any_non_gone_observation() {
+        let mut debounce = GoneDebounce::new(
+            std::time::Duration::from_secs(15),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("RUNNING"), GoneOutcome::NotGone);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::StillWaiting);
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::ConfirmedGone);
+    }
+
+    /// A window shorter than one poll interval still requires at least one
+    /// "GONE" poll — never confirms on the first sight of anything.
+    #[test]
+    fn gone_debounce_threshold_is_never_zero() {
+        let mut debounce = GoneDebounce::new(
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(5),
+        );
+        assert_eq!(debounce.observe("GONE"), GoneOutcome::ConfirmedGone);
     }
 }
