@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
@@ -220,6 +220,184 @@ pub struct StoredRun {
     /// CLI-launched runs. This records attribution; wake-ups are
     /// separately and explicitly registered in `chat_run_wakeups`.
     pub chat_session_id: Option<String>,
+    /// Set only by [`Store::mark_run_unrecoverable`] when reconciliation gives
+    /// up on the run (e.g. no supervisor could be (re)started after repeated
+    /// attempts) rather than a backend reporting a normal failure. `None` for
+    /// every other outcome, including a plain `Failed` run. Free-text and
+    /// human-facing (also appended to `result_markdown`) — see
+    /// `error_kind` below for the stable, machine-readable counterpart.
+    pub recovery_reason: Option<String>,
+    /// The stable [`crate::error::ErrorKind`] code (as
+    /// [`crate::error::ErrorKind::as_str`]) for a run [`Store::mark_run_unrecoverable`]
+    /// force-failed — set together with `recovery_reason`, `None` in every
+    /// other case. This is the machine-readable half a consumer (the
+    /// dashboard, an agent parsing `orx exp status --json`) should switch
+    /// on; `recovery_reason` is the free-text half for a human to read.
+    pub error_kind: Option<String>,
+    /// [`ProvenanceManifest::to_json`], captured once at launch (TASK 6,
+    /// Priority 4) and never rewritten — see [`ProvenanceManifest`] for what
+    /// it records and why. `None` for runs launched before this existed.
+    pub provenance_json: Option<String>,
+}
+
+/// Launch-time context for reproducing, auditing, or exporting a run — TASK
+/// 6 (Priority 4, "Strengthen Experiment Provenance Metadata"). Deliberately
+/// scoped to what's cheap and reliable to capture from the launching process
+/// itself, without new subprocess probes on the launch path (`orx exp run`
+/// is latency-sensitive) or restating data a run already carries on its own
+/// columns/`BackendDescriptor`:
+///
+/// - Git commit SHA — already `StoredRun::commit_sha`.
+/// - Exact execution command — already `StoredRun::command`.
+/// - Compute backend + its configuration (flavor, image, …) — already
+///   `StoredRun::backend_json` (`BackendDescriptor`).
+/// - Start/completion timestamps — already `created_at`/`ended_at`.
+///
+/// What's new here: which `orx` build launched the run, what launched it
+/// (a human via the CLI, or a named agent harness/model), the launching
+/// machine's OS/arch (a lightweight "environment fingerprint" — no secrets,
+/// no subprocess calls), and a snapshot of the experiment's parent id (so
+/// lineage survives even if the experiment itself is later reparented or
+/// deleted). Dependency/runtime versions, hardware details beyond OS/arch,
+/// and dataset/artifact references are NOT captured — the first two would
+/// need per-backend probing this task doesn't attempt, and the codebase has
+/// no dataset/artifact registry to reference.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvenanceManifest {
+    /// The `orx` build that launched this run (`CARGO_PKG_VERSION`).
+    pub orx_version: String,
+    /// OS of the machine `orx` ran on when it launched this run — NOT
+    /// necessarily where the payload executes (a remote backend's actual
+    /// hardware is requested via `BackendDescriptor.flavor`).
+    pub launcher_os: String,
+    pub launcher_arch: String,
+    /// The coding-agent harness that launched this run (e.g. `"claude"`,
+    /// `"codex"`, `"opencode"`), when launched from an agent chat session
+    /// rather than a plain CLI invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_harness: Option<String>,
+    /// The model that harness was using at launch time, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_model: Option<String>,
+    /// The launching experiment's `parent_experiment_id` at launch time —
+    /// a snapshot, since the live experiment row could later change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_experiment_id: Option<String>,
+}
+
+impl ProvenanceManifest {
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    pub fn parse(json: &str) -> Option<Self> {
+        serde_json::from_str(json).ok()
+    }
+}
+
+/// Lifecycle of a [`StoredRun`]. `Starting` and `Running` are the only
+/// non-terminal states — every backend (local process, ssh, k8s, Slurm, Ray,
+/// Modal, HF Jobs, an OpenResearch box) settles into exactly one of `Done`,
+/// `Failed` or `Cancelled` and stays there:
+///
+/// ```text
+/// Starting
+///   ↓
+/// Running
+///   ├── Done
+///   ├── Failed
+///   └── Cancelled
+/// ```
+///
+/// A run may also jump straight from `Starting` to a terminal state (a
+/// submission that fails, or is cancelled, before the backend ever reports
+/// `Running`). What is never legal is moving *out* of a terminal state, or
+/// moving backward from `Running` to `Starting` — [`Store::update_status`] is
+/// the single place both rules are enforced, atomically, at the SQL layer, so
+/// a duplicate completion callback, or a completion racing a cancellation,
+/// can only ever be a no-op rather than corrupt the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// Submitted to the backend; not yet observed running.
+    Starting,
+    /// The backend has confirmed the job is under way.
+    Running,
+    /// Terminal: the job ran to completion with a successful exit.
+    Done,
+    /// Terminal: the job errored, or was never observed as launched.
+    Failed,
+    /// Terminal: cancellation was requested and honored.
+    Cancelled,
+}
+
+impl RunStatus {
+    /// Every state, for enumerating legal transitions generically (see
+    /// [`Store::update_status`]) instead of hand-duplicating
+    /// [`RunStatus::can_transition_to`]'s table at each call site.
+    pub const ALL: [RunStatus; 5] = [
+        Self::Starting,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses the stored/wire vocabulary. `None` for anything else — callers
+    /// that only need "is this finished" should prefer [`is_terminal_status`],
+    /// which treats an unrecognized string the same as a non-terminal one.
+    pub fn parse(status: &str) -> Option<Self> {
+        Some(match status {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+
+    /// A run in a terminal state is finished and will never change again.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+
+    /// Whether `self -> to` is a legal direct transition. Terminal states are
+    /// absorbing (nothing transitions out of them, including into the same
+    /// state — so a duplicate terminal write is rejected rather than treated
+    /// as a legal self-transition), and `Running` never regresses to
+    /// `Starting`.
+    pub fn can_transition_to(self, to: RunStatus) -> bool {
+        use RunStatus::*;
+        match self {
+            Starting => matches!(to, Starting | Running | Done | Failed | Cancelled),
+            Running => matches!(to, Running | Done | Failed | Cancelled),
+            Done | Failed | Cancelled => false,
+        }
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a stored run status string denotes a finished run. An unrecognized
+/// string is treated as non-terminal (the conservative choice: it keeps a run
+/// visible as active rather than silently dropping it from "in flight" views).
+pub fn is_terminal_status(status: &str) -> bool {
+    RunStatus::parse(status).is_some_and(RunStatus::is_terminal)
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +526,16 @@ impl Store {
                 ended_at     INTEGER,
                 exit_code    INTEGER
             );
+            -- `runs` had no index beyond its primary key: every poll of
+            -- active runs (the TASK 2 reconciliation loop included),
+            -- listing by project/experiment, and the newest-first history
+            -- view all table-scanned. These make each a lookup instead —
+            -- see the store.rs concurrency/stress tests for before/after
+            -- timing at a realistic row count.
+            CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
+            CREATE INDEX IF NOT EXISTS idx_runs_project_id ON runs(project_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_experiment_id ON runs(experiment_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_runs_created_at ON runs(created_at);
             CREATE TABLE IF NOT EXISTS local_projects (
                 id              TEXT PRIMARY KEY,
                 name            TEXT NOT NULL,
@@ -517,6 +705,9 @@ impl Store {
             "ALTER TABLE runs ADD COLUMN result_markdown TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE runs ADD COLUMN chat_session_id TEXT",
+            "ALTER TABLE runs ADD COLUMN recovery_reason TEXT",
+            "ALTER TABLE runs ADD COLUMN error_kind TEXT",
+            "ALTER TABLE runs ADD COLUMN provenance_json TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN service_tier TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
@@ -861,8 +1052,9 @@ impl Store {
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code,
                                commit_sha, result_markdown, cancel_requested,
-                               chat_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                               chat_session_id, recovery_reason, error_kind,
+                               provenance_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
              ON CONFLICT(id) DO UPDATE SET
                status = excluded.status,
                backend_json = excluded.backend_json,
@@ -871,9 +1063,14 @@ impl Store {
                exit_code = excluded.exit_code,
                commit_sha = excluded.commit_sha,
                result_markdown = excluded.result_markdown",
-            // chat_session_id is deliberately absent from the DO UPDATE SET:
-            // run ownership is immutable, so a later status upsert never
-            // rewrites (or clears) the session that launched the run.
+            // chat_session_id, recovery_reason, error_kind, and
+            // provenance_json are deliberately absent from the DO UPDATE
+            // SET: run ownership and launch-time provenance are immutable,
+            // so a later status upsert never rewrites (or clears) the
+            // session that launched the run or the manifest it launched
+            // with, and a backend re-recording its descriptor never
+            // clobbers the reason/classification `mark_run_unrecoverable`
+            // already stamped.
             params![
                 run.id,
                 run.experiment_id,
@@ -889,25 +1086,62 @@ impl Store {
                 run.result_markdown,
                 run.cancel_requested,
                 run.chat_session_id,
+                run.recovery_reason,
+                run.error_kind,
+                run.provenance_json,
             ],
         )?;
         Ok(())
     }
 
+    /// Move a run to `status`, honoring [`RunStatus::can_transition_to`].
+    /// Returns `Ok(true)` if the row was actually updated, `Ok(false)` if the
+    /// transition was illegal — most commonly because the run had already
+    /// reached a terminal state. `Ok(false)` is an expected, benign outcome
+    /// (a duplicate completion callback, a completion arriving after the run
+    /// was already marked cancelled, a stale poll racing a fresher one) and
+    /// callers are not required to treat it as an error; the row simply keeps
+    /// whatever terminal status it already settled on.
+    ///
+    /// The check-and-write happens in one statement, so this is safe to call
+    /// from multiple processes/threads racing on the same run: whichever
+    /// write lands first wins, and every later one is a no-op rather than a
+    /// corruption.
     pub fn update_status(
         &self,
         run_id: &str,
-        status: &str,
+        status: RunStatus,
         ended_at: Option<i64>,
         exit_code: Option<i64>,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<bool> {
+        // Derive the legal-source set straight from `can_transition_to`
+        // rather than hand-duplicating its table here, so the two can never
+        // drift apart. A row not yet in the table (a fresh `Starting` write
+        // racing `upsert_run`) also matches nothing and is correctly a no-op:
+        // the run is created via `upsert_run`, not `update_status`.
+        let sources: Vec<&'static str> = RunStatus::ALL
+            .into_iter()
+            .filter(|from| from.can_transition_to(status))
+            .map(RunStatus::as_str)
+            .collect();
+        if sources.is_empty() {
+            return Ok(false);
+        }
+        let source_list = sources
+            .iter()
+            .map(|s| format!("'{s}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
             "UPDATE runs SET status = ?2, updated_at = ?3, ended_at = COALESCE(?4, ended_at),
                              exit_code = COALESCE(?5, exit_code)
-             WHERE id = ?1",
-            params![run_id, status, now_ms(), ended_at, exit_code],
+             WHERE id = ?1 AND status IN ({source_list})"
+        );
+        let applied = self.conn.execute(
+            &sql,
+            params![run_id, status.as_str(), now_ms(), ended_at, exit_code],
         )?;
-        Ok(())
+        Ok(applied == 1)
     }
 
     pub fn get_run(&self, run_id: &str) -> Result<Option<StoredRun>> {
@@ -1014,16 +1248,21 @@ impl Store {
         Ok(())
     }
 
+    /// One transaction so a crash/interruption between the reclaim and the
+    /// delete can never leave the two halves of this sweep half-applied —
+    /// not a live bug today (each statement is independently safe to re-run),
+    /// but a future third step would no longer be able to assume that.
     pub fn prune_run_wakeups(&self) -> Result<()> {
         self.clear_stale_data_dir_move_lease()?;
-        self.conn.execute(
+        let tx = self.begin()?;
+        tx.execute(
             "UPDATE chat_run_wakeups
              SET state = 'pending', claim_token = NULL, claimed_at = NULL
              WHERE state = 'claimed' AND claimed_at < ?1
                AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             params![now_ms() - RUN_WAKEUP_CLAIM_TTL_MS],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM chat_run_wakeups
              WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
                AND (
@@ -1040,15 +1279,20 @@ impl Store {
                )",
             [],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn list_ready_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
+        // `r.*` (not a hand-rolled column list) so this can never again drift
+        // out of sync with `row_to_run`'s expected shape the way it silently
+        // did across TASK 2/5 (recovery_reason/error_kind were reading the
+        // wakeup's own `chat_session_id`/`state` columns instead — wrong
+        // data, not even an error, until TASK 6 finally added a column past
+        // the end and turned it into one). The wakeup's own two columns are
+        // named to avoid the `chat_session_id` collision with `r.*`.
         let mut stmt = self.conn.prepare(
-            "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
-                    r.created_at, r.updated_at, r.ended_at, r.exit_code,
-                    r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
-                    w.chat_session_id, w.state
+            "SELECT r.*, w.chat_session_id AS wakeup_chat_session_id, w.state AS wakeup_state
              FROM chat_run_wakeups w
              JOIN runs r ON r.id = w.run_id
              WHERE w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed')
@@ -1057,8 +1301,8 @@ impl Store {
         let rows = stmt.query_map([], |row| {
             Ok(RunWakeup {
                 run: row_to_run(row)?,
-                chat_session_id: row.get(14)?,
-                state: row.get(15)?,
+                chat_session_id: row.get("wakeup_chat_session_id")?,
+                state: row.get("wakeup_state")?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1144,7 +1388,8 @@ impl Store {
     pub fn prune_chat_spawns(&self) -> Result<()> {
         self.clear_stale_data_dir_move_lease()?;
         let stale = now_ms() - CHAT_SPAWN_CLAIM_TTL_MS;
-        self.conn.execute(
+        let tx = self.begin()?;
+        tx.execute(
             "UPDATE chat_spawns
              SET state = CASE state WHEN 'starting' THEN 'pending' ELSE 'running' END,
                  attempts = attempts + CASE state WHEN 'starting' THEN 1 ELSE 0 END,
@@ -1153,7 +1398,7 @@ impl Store {
                AND NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             params![stale],
         )?;
-        self.conn.execute(
+        tx.execute(
             "DELETE FROM chat_spawns
              WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)
                AND NOT EXISTS (
@@ -1161,6 +1406,7 @@ impl Store {
                )",
             [],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1244,13 +1490,16 @@ impl Store {
         Ok(())
     }
 
+    /// A single `UPDATE ... RETURNING` rather than an update-then-select: two
+    /// separate statements would let a concurrent caller's own increment land
+    /// in between, so the value read back could be *their* count, not this
+    /// call's — every caller would then believe it holds a unique attempt
+    /// number when several actually raced to the same one.
     pub fn record_chat_spawn_attempt(&self, chat_session_id: &str) -> Result<i64> {
-        self.conn.execute(
-            "UPDATE chat_spawns SET attempts = attempts + 1 WHERE session_id = ?1",
-            params![chat_session_id],
-        )?;
         Ok(self.conn.query_row(
-            "SELECT attempts FROM chat_spawns WHERE session_id = ?1",
+            "UPDATE chat_spawns SET attempts = attempts + 1
+             WHERE session_id = ?1
+             RETURNING attempts",
             params![chat_session_id],
             |row| row.get(0),
         )?)
@@ -1268,7 +1517,8 @@ impl Store {
 
     pub fn claim_chat_turn(&self, chat_session_id: &str, token: &str) -> Result<bool> {
         self.clear_stale_data_dir_move_lease()?;
-        self.conn.execute(
+        let tx = self.begin()?;
+        tx.execute(
             "DELETE FROM chat_turn_leases
              WHERE heartbeat_at < ?1
                 OR NOT EXISTS (
@@ -1277,13 +1527,14 @@ impl Store {
                 )",
             params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
         )?;
-        let claimed = self.conn.execute(
+        let claimed = tx.execute(
             "INSERT OR IGNORE INTO chat_turn_leases
                  (chat_session_id, claim_token, heartbeat_at)
              SELECT ?1, ?2, ?3
              WHERE NOT EXISTS (SELECT 1 FROM data_dir_move_lease WHERE id = 1)",
             params![chat_session_id, token, now_ms()],
         )?;
+        tx.commit()?;
         Ok(claimed == 1)
     }
 
@@ -1306,17 +1557,19 @@ impl Store {
     }
 
     pub fn claim_data_dir_move(&self, token: &str) -> Result<bool> {
-        self.conn.execute(
+        self.clear_stale_data_dir_move_lease()?;
+        let tx = self.begin()?;
+        tx.execute(
             "DELETE FROM chat_turn_leases WHERE heartbeat_at < ?1",
             params![now_ms() - CHAT_TURN_LEASE_TTL_MS],
         )?;
-        self.clear_stale_data_dir_move_lease()?;
-        let claimed = self.conn.execute(
+        let claimed = tx.execute(
             "INSERT OR IGNORE INTO data_dir_move_lease (id, claim_token, heartbeat_at)
              SELECT 1, ?1, ?2
              WHERE NOT EXISTS (SELECT 1 FROM chat_turn_leases)",
             params![token, now_ms()],
         )?;
+        tx.commit()?;
         Ok(claimed == 1)
     }
 
@@ -1383,6 +1636,38 @@ impl Store {
             params![run_id, backend_json, now_ms()],
         )?;
         Ok(())
+    }
+
+    /// Force a run to `Failed` because reconciliation, not the backend, gave
+    /// up on it (e.g. no supervisor could be started after repeated
+    /// attempts), recording `reason` (free-text, human-facing) on
+    /// `recovery_reason` and `kind` (stable, machine-readable — Priority 9)
+    /// on `error_kind`, and appending `reason` to `result_markdown` for
+    /// human visibility. Goes through [`Store::update_status`], so it
+    /// inherits the same terminal-state guard: if the run reached a real
+    /// terminal state first (it finished, or was cancelled, before
+    /// reconciliation caught up with it), this is a no-op and neither field
+    /// is ever recorded — reconciliation must never overwrite a legitimate
+    /// outcome.
+    pub fn mark_run_unrecoverable(
+        &self,
+        run_id: &str,
+        kind: crate::error::ErrorKind,
+        reason: &str,
+    ) -> Result<bool> {
+        let applied = self.update_status(run_id, RunStatus::Failed, Some(now_ms()), None)?;
+        if applied {
+            self.conn.execute(
+                "UPDATE runs SET recovery_reason = ?2, error_kind = ?3 WHERE id = ?1",
+                params![run_id, reason, kind.as_str()],
+            )?;
+            let existing = self
+                .get_run(run_id)?
+                .and_then(|r| r.result_markdown)
+                .unwrap_or_default();
+            self.set_result_markdown(run_id, &format!("{existing}\n\n> **Recovery**: {reason}"))?;
+        }
+        Ok(applied)
     }
 
     // --- local projects (orx up) ---
@@ -1590,14 +1875,12 @@ impl Store {
             "DELETE FROM chat_sessions WHERE project_id = ?1",
             params![id],
         )?;
-        self.conn
-            .execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
-        self.conn.execute(
+        tx.execute("DELETE FROM runs WHERE project_id = ?1", params![id])?;
+        tx.execute(
             "DELETE FROM local_experiments WHERE project_id = ?1",
             params![id],
         )?;
-        self.conn
-            .execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
+        tx.execute("DELETE FROM local_projects WHERE id = ?1", params![id])?;
         tx.commit()?;
         Ok(())
     }
@@ -2948,7 +3231,8 @@ fn row_to_chat_session(
 const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_json, command,
                                  created_at, updated_at, ended_at, exit_code,
                                  commit_sha, result_markdown, cancel_requested,
-                                 chat_session_id FROM runs";
+                                 chat_session_id, recovery_reason, error_kind,
+                                 provenance_json FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
                             baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
@@ -2973,6 +3257,9 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlit
         result_markdown: row.get(11)?,
         cancel_requested: row.get(12)?,
         chat_session_id: row.get(13)?,
+        recovery_reason: row.get(14)?,
+        error_kind: row.get(15)?,
+        provenance_json: row.get(16)?,
     })
 }
 
@@ -4242,7 +4529,780 @@ mod tests {
             result_markdown: None,
             cancel_requested: false,
             chat_session_id: chat_session_id.map(str::to_string),
+            recovery_reason: None,
+            error_kind: None,
+            provenance_json: None,
         }
+    }
+
+    /// Every (from, to) pair, checked against the lifecycle diagram on
+    /// [`RunStatus`] rather than the implementation, so this fails if
+    /// `can_transition_to` and the documented state machine ever drift apart.
+    #[test]
+    fn run_status_transition_table_matches_the_documented_lifecycle() {
+        use RunStatus::*;
+        let legal: &[(RunStatus, RunStatus)] = &[
+            (Starting, Starting),
+            (Starting, Running),
+            (Starting, Done),
+            (Starting, Failed),
+            (Starting, Cancelled),
+            (Running, Running),
+            (Running, Done),
+            (Running, Failed),
+            (Running, Cancelled),
+        ];
+        for from in RunStatus::ALL {
+            for to in RunStatus::ALL {
+                let expected = legal.contains(&(from, to));
+                assert_eq!(
+                    from.can_transition_to(to),
+                    expected,
+                    "{from} -> {to} should be {}",
+                    if expected { "legal" } else { "illegal" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn run_status_is_terminal_matches_the_three_absorbing_states() {
+        for status in RunStatus::ALL {
+            assert_eq!(
+                status.is_terminal(),
+                matches!(
+                    status,
+                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn run_status_as_str_round_trips_through_parse() {
+        for status in RunStatus::ALL {
+            assert_eq!(RunStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(RunStatus::parse("not-a-real-status"), None);
+        assert!(!is_terminal_status("not-a-real-status"));
+    }
+
+    /// TASK 6 (experiment provenance): the manifest round-trips through JSON
+    /// exactly, including when optional fields are absent.
+    #[test]
+    fn provenance_manifest_round_trips_through_json() {
+        let full = ProvenanceManifest {
+            orx_version: "0.2.1".into(),
+            launcher_os: "macos".into(),
+            launcher_arch: "aarch64".into(),
+            agent_harness: Some("claude".into()),
+            agent_model: Some("claude-sonnet-5".into()),
+            parent_experiment_id: Some("exp_parent".into()),
+        };
+        let parsed = ProvenanceManifest::parse(&full.to_json()).unwrap();
+        assert_eq!(parsed, full);
+        assert!(
+            !full.to_json().contains("null"),
+            "Option fields must be omitted, not serialized as null: {}",
+            full.to_json()
+        );
+
+        let minimal = ProvenanceManifest {
+            orx_version: "0.2.1".into(),
+            launcher_os: "linux".into(),
+            launcher_arch: "x86_64".into(),
+            agent_harness: None,
+            agent_model: None,
+            parent_experiment_id: None,
+        };
+        assert_eq!(
+            ProvenanceManifest::parse(&minimal.to_json()).unwrap(),
+            minimal
+        );
+
+        assert_eq!(ProvenanceManifest::parse("not json"), None);
+    }
+
+    /// Provenance is captured once at launch and must never be clobbered by
+    /// a later `upsert_run` — every backend re-upserts the same run id once
+    /// its real handle is known, and that second write must leave the
+    /// original manifest alone (the same immutability `chat_session_id`
+    /// already relies on).
+    #[test]
+    fn provenance_json_survives_a_later_upsert_run() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-provenance-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let manifest = ProvenanceManifest {
+            orx_version: "0.2.1".into(),
+            launcher_os: std::env::consts::OS.into(),
+            launcher_arch: std::env::consts::ARCH.into(),
+            agent_harness: Some("claude".into()),
+            agent_model: Some("claude-sonnet-5".into()),
+            parent_experiment_id: None,
+        };
+        let mut run = run_fixture("run_1", "starting", None);
+        run.provenance_json = Some(manifest.to_json());
+        store.upsert_run(&run).unwrap();
+
+        // A backend's own later upsert — e.g. once the real job id is known
+        // — naturally constructs its `StoredRun` with `provenance_json: None`
+        // (it never re-derives the manifest); that must not erase what the
+        // first upsert already stored.
+        let mut backend_update = run_fixture("run_1", "running", None);
+        backend_update.backend_json = r#"{"kind":"local_job","jobId":"real-handle"}"#.into();
+        backend_update.provenance_json = None;
+        store.upsert_run(&backend_update).unwrap();
+
+        let stored = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(stored.status, "running");
+        assert_eq!(
+            stored.backend_json,
+            r#"{"kind":"local_job","jobId":"real-handle"}"#
+        );
+        assert_eq!(
+            ProvenanceManifest::parse(&stored.provenance_json.unwrap()).unwrap(),
+            manifest,
+            "provenance must survive the backend's follow-up upsert"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario from the state-machine design doc: "duplicate completion
+    /// callbacks". The second write must be silently rejected rather than
+    /// erroring or re-stamping `ended_at`/`exit_code`.
+    #[test]
+    fn duplicate_terminal_writes_are_idempotent_no_ops() {
+        let dir = std::env::temp_dir().join(format!("orx-store-dup-term-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_1", RunStatus::Done, Some(100), Some(0))
+            .unwrap());
+        let first = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(first.status, "done");
+        assert_eq!(first.ended_at, Some(100));
+        assert_eq!(first.exit_code, Some(0));
+
+        // A second, later completion callback for the same run (e.g. a
+        // retried webhook, or a stale poll landing after a fresher one) must
+        // not be applied, and must not disturb the first write's timestamp
+        // or exit code.
+        assert!(!store
+            .update_status("run_1", RunStatus::Done, Some(200), Some(1))
+            .unwrap());
+        let second = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(second.status, "done");
+        assert_eq!(
+            second.ended_at,
+            Some(100),
+            "ended_at must not be re-stamped"
+        );
+        assert_eq!(
+            second.exit_code,
+            Some(0),
+            "exit_code must not be overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "completion arriving after cancellation" — once a run
+    /// has been recorded as cancelled, a late success/failure report from the
+    /// backend must not resurrect it.
+    #[test]
+    fn completion_after_cancellation_is_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-cancel-race-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_1", RunStatus::Cancelled, Some(100), None)
+            .unwrap());
+        assert!(!store
+            .update_status("run_1", RunStatus::Done, Some(200), Some(0))
+            .unwrap());
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.status, "cancelled");
+        assert_eq!(run.ended_at, Some(100));
+        assert_eq!(run.exit_code, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "invalid backward transitions" — a backend cannot
+    /// regress an already-`running` job back to `starting`.
+    #[test]
+    fn running_cannot_regress_to_starting() {
+        let dir = std::env::temp_dir().join(format!("orx-store-backward-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(!store
+            .update_status("run_1", RunStatus::Starting, None, None)
+            .unwrap());
+        assert_eq!(store.get_run("run_1").unwrap().unwrap().status, "running");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenarios: "cancel while preparing" and "cancel while running" —
+    /// both non-terminal states can move directly to `cancelled`.
+    #[test]
+    fn cancel_is_legal_from_either_non_terminal_state() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-cancel-both-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_starting", "starting", None))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_running", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_starting", RunStatus::Cancelled, Some(1), None)
+            .unwrap());
+        assert!(store
+            .update_status("run_running", RunStatus::Cancelled, Some(1), None)
+            .unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "retry after a partially completed run" — a run that
+    /// failed can be re-launched under a fresh run id (retries are new rows,
+    /// never a resurrection of the old one), and the old terminal row is left
+    /// untouched by anything trying to touch it afterward.
+    #[test]
+    fn retry_after_failure_is_a_new_row_not_a_resurrection() {
+        let dir = std::env::temp_dir().join(format!("orx-store-retry-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+        assert!(store
+            .update_status("run_1", RunStatus::Failed, Some(1), Some(1))
+            .unwrap());
+
+        // The retry is a distinct run id; the failed row is untouched.
+        store
+            .upsert_run(&run_fixture("run_1_retry", "starting", None))
+            .unwrap();
+        assert!(store
+            .update_status("run_1_retry", RunStatus::Running, None, None)
+            .unwrap());
+
+        assert_eq!(store.get_run("run_1").unwrap().unwrap().status, "failed");
+        assert_eq!(
+            store.get_run("run_1_retry").unwrap().unwrap().status,
+            "running"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "concurrent status updates" / "agent wake while a run
+    /// is finishing" — many independent connections (as separate supervisor
+    /// processes would be) race to finalize the same run with different
+    /// terminal outcomes. Exactly one write must win, and the row must land
+    /// on a real terminal state rather than a torn/partial one.
+    #[test]
+    fn concurrent_terminal_writes_from_separate_connections_settle_on_exactly_one_outcome() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-concurrent-{}", uuid::Uuid::new_v4()));
+        // Open once first so schema creation isn't itself racing below.
+        let setup = Store::open_at(dir.clone()).unwrap();
+        setup
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+        drop(setup);
+
+        let outcomes = [RunStatus::Done, RunStatus::Failed, RunStatus::Cancelled];
+        let handles: Vec<_> = outcomes
+            .into_iter()
+            .map(|outcome| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    // Each thread is its own connection, like independent
+                    // supervisor processes sharing one SQLite file (WAL +
+                    // busy_timeout, set in `open_at_with_move_lock`).
+                    let store = Store::open_at(dir).unwrap();
+                    store
+                        .update_status("run_1", outcome, Some(1), None)
+                        .unwrap()
+                })
+            })
+            .collect();
+        let applied: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(
+            applied.iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one racing writer should win: {applied:?}"
+        );
+        let final_status = store_reopen(&dir).get_run("run_1").unwrap().unwrap().status;
+        assert!(
+            RunStatus::parse(&final_status).is_some_and(RunStatus::is_terminal),
+            "run must settle on a real terminal state, got {final_status:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn store_reopen(dir: &std::path::Path) -> Store {
+        Store::open_at(dir.to_path_buf()).unwrap()
+    }
+
+    /// TASK 2 (crash recovery/reconciliation): `mark_run_unrecoverable` forces
+    /// a non-terminal run to `Failed`, stamping a machine-readable
+    /// `recovery_reason` distinct from a normal backend-reported failure, and
+    /// appending a human-readable note to `result_markdown`.
+    #[test]
+    fn mark_run_unrecoverable_stamps_reason_and_fails_the_run() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-unrecoverable-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(store
+            .mark_run_unrecoverable(
+                "run_1",
+                crate::error::ErrorKind::Reconciliation,
+                "no supervisor could be started"
+            )
+            .unwrap());
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.status, "failed");
+        assert_eq!(
+            run.recovery_reason.as_deref(),
+            Some("no supervisor could be started")
+        );
+        assert_eq!(run.error_kind.as_deref(), Some("reconciliation_failure"));
+        assert!(run
+            .result_markdown
+            .unwrap()
+            .contains("no supervisor could be started"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run that already reached a real terminal state (it finished, or was
+    /// cancelled, before reconciliation caught up with it) must never be
+    /// overwritten — `mark_run_unrecoverable` inherits `update_status`'s
+    /// terminal-state guard and leaves the row, including any prior
+    /// `recovery_reason`, untouched.
+    #[test]
+    fn mark_run_unrecoverable_never_overwrites_a_real_outcome() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-unrecoverable-race-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+        assert!(store
+            .update_status("run_1", RunStatus::Done, Some(1), Some(0))
+            .unwrap());
+
+        assert!(!store
+            .mark_run_unrecoverable(
+                "run_1",
+                crate::error::ErrorKind::Reconciliation,
+                "reconciliation gave up"
+            )
+            .unwrap());
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(
+            run.status, "done",
+            "a real completion must not be clobbered"
+        );
+        assert_eq!(run.recovery_reason, None);
+        assert_eq!(run.error_kind, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Calling `mark_run_unrecoverable` a second time on an already-recovered
+    /// run is a no-op (the first call's terminal write wins), matching the
+    /// idempotency `update_status` already guarantees.
+    #[test]
+    fn mark_run_unrecoverable_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "orx-store-unrecoverable-idem-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "starting", None))
+            .unwrap();
+
+        assert!(store
+            .mark_run_unrecoverable(
+                "run_1",
+                crate::error::ErrorKind::Reconciliation,
+                "first reason"
+            )
+            .unwrap());
+        assert!(!store
+            .mark_run_unrecoverable(
+                "run_1",
+                crate::error::ErrorKind::BackendUnavailable,
+                "second reason"
+            )
+            .unwrap());
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.recovery_reason.as_deref(), Some("first reason"));
+        assert_eq!(run.error_kind.as_deref(), Some("reconciliation_failure"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- TASK 3: SQLite concurrency and stress tests -----------------------
+
+    /// Many actors (as separate `orx exp run` invocations would be) creating
+    /// distinct experiments at once — real threads, each its own connection,
+    /// matching `concurrent_terminal_writes_from_separate_connections_...`
+    /// (TASK 1). WAL + busy_timeout must absorb the write contention: every
+    /// experiment lands, none is silently dropped, and no thread sees a
+    /// `SQLITE_BUSY` error surface.
+    #[test]
+    fn parallel_experiment_creation_all_land_with_no_sqlite_busy_errors() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-parallel-exp-{}", uuid::Uuid::new_v4()));
+        let setup = Store::open_at(dir.clone()).unwrap();
+        setup
+            .create_local_project(&LocalProject {
+                id: "proj_1".into(),
+                name: "proj_1".into(),
+                slug: "proj_1".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: dir.join("proj_1").to_string_lossy().into_owned(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        drop(setup);
+
+        const N: usize = 32;
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let store = Store::open_at(dir).unwrap();
+                    store.create_local_experiment(&experiment_fixture(&format!("exp_{i}"), None))
+                })
+            })
+            .collect();
+        for (i, handle) in handles.into_iter().enumerate() {
+            handle
+                .join()
+                .unwrap()
+                .unwrap_or_else(|err| panic!("experiment {i} failed to create: {err}"));
+        }
+
+        let store = store_reopen(&dir);
+        for i in 0..N {
+            assert!(
+                store
+                    .get_local_experiment(&format!("exp_{i}"))
+                    .unwrap()
+                    .is_some(),
+                "experiment {i} is missing after concurrent creation"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Retries `f` a handful of times, with backoff, on a locked/busy error —
+    /// `busy_timeout` (set on every connection) already retries *inside*
+    /// SQLite for up to 5s before ever surfacing one, so seeing it here means
+    /// that connection's own retrying wasn't enough under unusually heavy
+    /// contention (a slow/virtualized CI disk, several actors polling at
+    /// once), not that data was lost or corrupted. Any other error is
+    /// returned immediately — this exists to smooth over platform/CI timing
+    /// variance in these tests, not to mask a real bug.
+    fn retry_on_lock<T>(mut f: impl FnMut() -> crate::error::Result<T>) -> crate::error::Result<T> {
+        for attempt in 1..=5 {
+            match f() {
+                Ok(v) => return Ok(v),
+                Err(err) => {
+                    let retryable = {
+                        let msg = err.to_string();
+                        msg.contains("locked") || msg.contains("busy")
+                    };
+                    if !retryable || attempt == 5 {
+                        return Err(err);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
+                }
+            }
+        }
+        unreachable!()
+    }
+
+    /// Readers must not be permanently blocked or errored by a concurrent
+    /// writer: WAL mode's whole point is that `list_runs`/`get_run` keep
+    /// serving the last committed snapshot while a writer holds the
+    /// database. One thread updates a run at a realistic polling cadence
+    /// while several others read it at the same cadence; every reader must
+    /// eventually observe the final terminal status without ever getting
+    /// stuck.
+    #[test]
+    fn concurrent_readers_are_never_blocked_by_a_concurrent_writer() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-read-write-{}", uuid::Uuid::new_v4()));
+        let setup = Store::open_at(dir.clone()).unwrap();
+        setup
+            .upsert_run(&run_fixture("run_1", "starting", None))
+            .unwrap();
+        drop(setup);
+
+        let writer_dir = dir.clone();
+        let writer = std::thread::spawn(move || {
+            let store = Store::open_at(writer_dir).unwrap();
+            store
+                .update_status("run_1", RunStatus::Running, None, None)
+                .unwrap();
+            for _ in 0..20 {
+                // Touching an unrelated column keeps this a real repeated
+                // write without racing TASK 1's terminal-write guard. A tiny
+                // sleep models a poll loop's cadence rather than a hot spin —
+                // this test is about the read/write contention property, not
+                // about surviving an artificial denial-of-service pace.
+                store.set_result_markdown("run_1", "still running").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            store
+                .update_status("run_1", RunStatus::Done, Some(now_ms()), Some(0))
+                .unwrap();
+        });
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || -> StoredRun {
+                    let store = Store::open_at(dir).unwrap();
+                    loop {
+                        // A transient lock error gets a few retries with
+                        // backoff before this test gives up on it — real
+                        // callers get the same protection for free from
+                        // `busy_timeout` retrying inside SQLite; this loop
+                        // only covers the rare case where even that wasn't
+                        // enough.
+                        let last = retry_on_lock(|| store.get_run("run_1")).unwrap().unwrap();
+                        let _ = retry_on_lock(|| store.list_runs(10)).unwrap();
+                        if last.status == "done" {
+                            return last;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                })
+            })
+            .collect();
+
+        writer.join().unwrap();
+        for reader in readers {
+            let final_run = reader.join().unwrap();
+            assert_eq!(final_run.status, "done");
+            assert_eq!(final_run.exit_code, Some(0));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A transaction that errors out partway must leave no trace: dropping a
+    /// `Transaction` without calling `commit()` rolls it back (rusqlite's
+    /// `Drop` impl), so a write made inside it is invisible once the
+    /// transaction is gone — proving the rollback guarantee every
+    /// `self.begin()`-based method in this file depends on.
+    #[test]
+    fn an_uncommitted_transaction_rolls_back_on_drop() {
+        let dir = std::env::temp_dir().join(format!("orx-store-rollback-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "starting", None))
+            .unwrap();
+
+        {
+            let tx = store.begin().unwrap();
+            tx.execute("UPDATE runs SET status = 'running' WHERE id = 'run_1'", [])
+                .unwrap();
+            // Deliberately no `tx.commit()` — the transaction is dropped here
+            // and must roll back rather than silently persist.
+        }
+
+        assert_eq!(
+            store.get_run("run_1").unwrap().unwrap().status,
+            "starting",
+            "an uncommitted transaction's write must not survive"
+        );
+
+        // The failure-partway-through case a real multi-statement method hits:
+        // the second statement errors, so neither statement's effect should stick.
+        {
+            let tx = store.begin().unwrap();
+            tx.execute("UPDATE runs SET status = 'running' WHERE id = 'run_1'", [])
+                .unwrap();
+            let err = tx.execute("THIS IS NOT VALID SQL", []).unwrap_err();
+            drop(err);
+            // `tx` drops here (its own scope), rolling back the first
+            // statement along with the failed second one.
+        }
+        assert_eq!(
+            store.get_run("run_1").unwrap().unwrap().status,
+            "starting",
+            "a failed multi-statement transaction must not partially apply"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `record_chat_spawn_attempt` used to be a separate `UPDATE` then
+    /// `SELECT`, so a racing caller's own increment could land in between and
+    /// the value read back would be *their* count. Now it's one
+    /// `UPDATE ... RETURNING`: with `N` concurrent callers the returned
+    /// values must be exactly `{1, 2, ..., N}` — a permutation, not a
+    /// multiset with duplicates or gaps.
+    #[test]
+    fn concurrent_spawn_attempt_increments_never_collide() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-spawn-attempt-{}", uuid::Uuid::new_v4()));
+        let setup = Store::open_at(dir.clone()).unwrap();
+        setup
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        setup
+            .create_chat_spawn(&ChatSpawn {
+                session_id: "chat_A".into(),
+                parent_session_id: "chat_parent".into(),
+                prompt: "go".into(),
+                wake_parent: true,
+                attempts: 0,
+                finished_at: None,
+            })
+            .unwrap();
+        drop(setup);
+
+        const N: i64 = 16;
+        let handles: Vec<_> = (0..N)
+            .map(|_| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    let store = Store::open_at(dir).unwrap();
+                    store.record_chat_spawn_attempt("chat_A").unwrap()
+                })
+            })
+            .collect();
+        let mut results: Vec<i64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        results.sort_unstable();
+
+        assert_eq!(results, (1..=N).collect::<Vec<_>>());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No `criterion`/benchmark harness exists in this repo, so this is a
+    /// hand-rolled sanity timing test rather than a strict perf assertion —
+    /// CI hardware varies a lot (a slow/virtualized Windows runner measured
+    /// at ~2.4ms/write here, vs. sub-millisecond locally), so the bound below
+    /// is deliberately generous. It exists to catch a severe regression (an
+    /// accidental per-write fsync, a lock held far too long) rather than to
+    /// pin an exact number. High-frequency sequential status writes — the
+    /// shape every supervise poll loop produces — must stay fast.
+    #[test]
+    fn sequential_status_writes_complete_quickly() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-bench-seq-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        const WRITES: usize = 2_000;
+        let start = std::time::Instant::now();
+        for _ in 0..WRITES {
+            store.set_result_markdown("run_1", "polling...").unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "{WRITES} sequential writes took {elapsed:?} — investigate for a regression \
+             (e.g. an unintended fsync per write, or a lock held too long)"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Demonstrates the value of this task's new `runs` indexes: with a
+    /// realistically large table (this repo has no retention/pruning for
+    /// `runs`, so a long-lived project's table only grows — see the TASK 3
+    /// investigation), `list_active_runs`/`count_active_runs` — polled every
+    /// 30s by the TASK 2 reconciliation loop — must stay fast rather than
+    /// degrading into a full table scan.
+    #[test]
+    fn active_run_queries_stay_fast_against_a_large_runs_table() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-bench-scale-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        const ROWS: usize = 20_000;
+        {
+            let tx = store.begin().unwrap();
+            for i in 0..ROWS {
+                // Every 500th run is left active; the rest are finished
+                // history — a realistic long-lived-project shape.
+                let status = if i % 500 == 0 { "running" } else { "done" };
+                tx.execute(
+                    "INSERT INTO runs (id, experiment_id, project_id, status, backend_json,
+                                       command, created_at, updated_at, ended_at, exit_code,
+                                       cancel_requested)
+                     VALUES (?1, 'exp_1', 'proj_1', ?2, '{}', '', ?3, ?3, ?3, 0, 0)",
+                    params![format!("run_{i}"), status, i as i64],
+                )
+                .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let active = store.list_active_runs().unwrap();
+            assert_eq!(active.len(), ROWS.div_ceil(500));
+            let _ = store.count_active_runs().unwrap();
+        }
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "40 index-backed active-run queries over {ROWS} rows took {elapsed:?} — \
+             investigate for a missing/regressed index on runs.status"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4312,9 +5372,9 @@ mod tests {
             ["run_done", "run_failed"]
         );
 
-        store
-            .update_status("run_active", "done", Some(2), Some(0))
-            .unwrap();
+        assert!(store
+            .update_status("run_active", RunStatus::Done, Some(2), Some(0))
+            .unwrap());
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 3);
         let token = store
             .claim_run_wakeup("run_done", "chat_A")
