@@ -81,6 +81,15 @@ pub fn cursor_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn antigravity_home(store: NativeStore) -> PathBuf {
+    match store {
+        NativeStore::Isolated => crate::store::data_dir().join("agents/antigravity"),
+        NativeStore::Legacy => user_env_path("ANTIGRAVITY_HOME")
+            .or_else(|| user_env_path("GEMINI_CONFIG_DIR"))
+            .unwrap_or_else(|| home_dir().join(".gemini").join("antigravity-cli")),
+    }
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);

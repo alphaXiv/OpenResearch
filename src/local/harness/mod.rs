@@ -17,6 +17,7 @@
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
@@ -486,6 +487,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
+        Box::new(antigravity::Antigravity),
     ]
 }
 
@@ -803,6 +805,34 @@ mod tests {
         assert_eq!(cursor.default_permission_mode, Some("auto"));
         assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
         assert!(cursor.reasoning_levels.is_empty());
+
+        let antigravity = options_for("antigravity");
+        assert_eq!(
+            permission_contract(&antigravity),
+            [
+                (
+                    "ask",
+                    "Ask",
+                    "Prompt before running commands or modifying files"
+                ),
+                ("auto", "Auto", "Allow actions unless explicitly denied"),
+                (
+                    "bypass",
+                    "Bypass",
+                    "Allow commands and skip tool confirmation prompts"
+                ),
+            ]
+        );
+        assert_eq!(antigravity.default_permission_mode, Some("auto"));
+        assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
+        assert_eq!(
+            reasoning_ids(&antigravity),
+            ["default", "low", "medium", "high"]
+        );
+        assert_eq!(
+            antigravity.default_reasoning_level.as_deref(),
+            Some(REASONING_DEFAULT_ID)
+        );
     }
 
     /// Every advertised permission-mode id must round-trip through

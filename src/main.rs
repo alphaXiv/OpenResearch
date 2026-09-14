@@ -110,7 +110,7 @@ enum Command {
     /// Add reusable LaTeX templates to the local OpenResearch library.
     Templates(LibraryArgs),
 
-    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
+    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor, Antigravity).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
@@ -611,7 +611,7 @@ pub enum LibraryCommand {
 #[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
-    /// or `all`. Defaults to every agent already set up on this machine.
+    /// `antigravity`, or `all`. Defaults to every agent already set up on this machine.
     #[arg(long)]
     pub agent: Option<String>,
 

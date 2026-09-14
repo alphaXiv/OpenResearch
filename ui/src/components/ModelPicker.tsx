@@ -45,6 +45,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   cursor: "Cursor",
+  antigravity: "Google Antigravity",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.

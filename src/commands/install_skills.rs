@@ -72,7 +72,7 @@ pub async fn run(args: crate::InstallSkillsArgs) -> Result<()> {
                 .collect();
             if selected.is_empty() {
                 return Err(anyhow!(
-                    "unknown agent '{name}' (expected: claude, codex, opencode, cursor, or all)"
+                    "unknown agent '{name}' (expected: claude, codex, opencode, cursor, antigravity, or all)"
                 ));
             }
             selected
@@ -176,6 +176,7 @@ async fn write_skill_set(
 fn matches_agent(harness: &dyn Harness, name: &str) -> bool {
     match harness.id() {
         "claude-code" => name == "claude" || name == "claude-code",
+        "antigravity" => name == "antigravity" || name == "agy",
         id => id == name,
     }
 }
