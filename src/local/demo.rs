@@ -451,6 +451,7 @@ fn seed_at(
         result_markdown: Some(RESULT_MARKDOWN.into()),
         cancel_requested: false,
         chat_session_id: None,
+        recovery_reason: None,
     };
     let session = StoredChatSession {
         id: SESSION_ID.into(),
