@@ -1143,5 +1143,13 @@
   "local_models_custom_endpoint": "Custom Endpoint",
   "local_models_compatible_api": "(OpenAI compatible)",
   "chat_session_limit_reached": "Session limit reached",
-  "chat_model_unavailable": "Model unavailable"
+  "chat_model_unavailable": "Model unavailable",
+  "chat_panel_dictate": "Dictate",
+  "chat_panel_stop_dictating": "Stop dictating",
+  "chat_dictation_unsupported": "Voice input needs Chrome, Edge or Safari",
+  "chat_dictation_error_not_allowed": "Microphone access was blocked. Allow it for this page, then try again.",
+  "chat_dictation_error_audio_capture": "No microphone was found.",
+  "chat_dictation_error_network": "Speech recognition could not reach the network.",
+  "chat_dictation_error_language": "Your browser cannot transcribe this language.",
+  "chat_dictation_error_generic": "Voice input stopped unexpectedly. Try again."
 }

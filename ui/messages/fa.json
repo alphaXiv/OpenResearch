@@ -1143,5 +1143,13 @@
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
   "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
   "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید",
-  "chat_model_unavailable": "مدل در دسترس نیست"
+  "chat_model_unavailable": "مدل در دسترس نیست",
+  "chat_panel_dictate": "ورودی صوتی",
+  "chat_panel_stop_dictating": "توقف ورودی صوتی",
+  "chat_dictation_unsupported": "ورودی صوتی به کروم، اج یا سافاری نیاز دارد",
+  "chat_dictation_error_not_allowed": "دسترسی به میکروفون مسدود شد. آن را برای این صفحه اجازه دهید و دوباره تلاش کنید.",
+  "chat_dictation_error_audio_capture": "میکروفونی یافت نشد.",
+  "chat_dictation_error_network": "تشخیص گفتار نتوانست به شبکه متصل شود.",
+  "chat_dictation_error_language": "مرورگر شما نمی‌تواند این زبان را رونویسی کند.",
+  "chat_dictation_error_generic": "ورودی صوتی به‌طور غیرمنتظره متوقف شد. دوباره تلاش کنید."
 }

@@ -1143,5 +1143,13 @@
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
   "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
   "chat_session_limit_reached": "已达到会话使用限额",
-  "chat_model_unavailable": "模型不可用"
+  "chat_model_unavailable": "模型不可用",
+  "chat_panel_dictate": "语音输入",
+  "chat_panel_stop_dictating": "停止语音输入",
+  "chat_dictation_unsupported": "语音输入需要 Chrome、Edge 或 Safari",
+  "chat_dictation_error_not_allowed": "麦克风权限被拒绝。请为此页面开启后重试。",
+  "chat_dictation_error_audio_capture": "未检测到麦克风。",
+  "chat_dictation_error_network": "语音识别无法连接网络。",
+  "chat_dictation_error_language": "当前浏览器无法识别这种语言。",
+  "chat_dictation_error_generic": "语音输入意外中断，请重试。"
 }
