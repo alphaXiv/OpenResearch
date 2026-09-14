@@ -13,6 +13,7 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <p>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
+<a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/install-linux-dark.svg"><img src=".github/readme-assets/install-linux.svg" alt="Install OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
 <p><strong><a href="https://openresearch.sh/docs">Documentation</a> · <a href="https://github.com/alphaXiv/OpenResearch/releases">Releases</a></strong><br>
@@ -24,27 +25,20 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 
 ## Get started
 
-Download the local desktop app from
-[openresearch.sh/download](https://openresearch.sh/download), or install the
-CLI on macOS or Linux:
+Install the CLI on macOS or Linux, then launch OpenResearch:
 
 ```sh
 curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
+On Windows, use the beta download above after installing
+[Git for Windows](docs/windows.md).
+
 `orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
-On Windows, install from
-[Releases](https://github.com/alphaXiv/OpenResearch/releases) and read
-[the Windows notes](docs/windows.md) first — Git for Windows is required, and
-support is still in beta.
-
-To use LM Studio, oMLX, Ollama, or a custom endpoint with OpenCode, see
-[connecting local models](docs/local-models.md).
-
-Create an account at [openresearch.sh](https://openresearch.sh) to receive email
-updates and use managed OpenResearch compute.
+[Connect a local model](docs/local-models.md), or
+[create an account](https://openresearch.sh) for updates and managed compute.
 
 ## Built for research agents
 
