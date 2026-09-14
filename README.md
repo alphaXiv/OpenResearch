@@ -4,10 +4,10 @@
 
 **The local-first workspace for research agents and autoresearch.**
 
-<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="16" height="16" align="middle" /> Claude Code,
-<img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="middle" /> Codex,
-<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="middle" /> OpenCode, or
-<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="middle" /> Cursor into research agents that can review
+<p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="16" height="16" align="texttop" /> Claude Code,
+<img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="texttop" /> Codex,
+<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode, or
+<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor into research agents that can review
 literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 <p>
@@ -15,7 +15,8 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
 </p>
 
-<sub>macOS 11+ · Windows beta requires [Git for Windows](docs/windows.md) · [Documentation](https://openresearch.sh/docs) · [Releases](https://github.com/alphaXiv/OpenResearch/releases)</sub>
+<p><strong><a href="https://openresearch.sh/docs">Documentation</a> · <a href="https://github.com/alphaXiv/OpenResearch/releases">Releases</a></strong><br>
+<sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a></p>
 
