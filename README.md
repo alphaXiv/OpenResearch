@@ -16,6 +16,8 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/install-linux-centered-dark.svg"><img src=".github/readme-assets/install-linux-centered.svg" alt="Install OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
+<h3><a href="https://api.openresearch.sh/auth/login">Create an account →</a></h3>
+
 <p><strong><a href="https://openresearch.sh/docs">Documentation</a> · <a href="https://github.com/alphaXiv/OpenResearch/releases">Releases</a></strong><br>
 <sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
 
@@ -37,8 +39,8 @@ On Windows, use the beta download above after installing
 
 `orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
-[Connect a local model](docs/local-models.md), or
-[create an account](https://openresearch.sh) for updates and managed compute.
+[Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
+or a custom endpoint with OpenCode.
 
 ## Built for research agents
 
