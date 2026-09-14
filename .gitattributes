@@ -10,3 +10,10 @@
 # be treated as text and normalized.
 *.pt binary
 *.pkl binary
+
+# ui/dist is a committed build artifact (see AGENTS.md), not hand-written
+# source. Mark it generated so GitHub collapses its diffs in PR review by
+# default and excludes it from language/diff statistics — CI's "UI build
+# artifacts are up to date" check (ci.yml) is what actually vouches for its
+# contents, so a reviewer does not need to read every hashed/minified byte.
+ui/dist/** linguist-generated=true

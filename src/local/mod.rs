@@ -50,7 +50,7 @@ use crate::store::{now_ms, Store, StoredRun};
 
 /// Terminal run states — the run is finished and won't change further.
 pub fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "failed" | "cancelled")
+    crate::store::is_terminal_status(status)
 }
 
 /// The stored run, but only when it belongs to a registered local experiment.

@@ -26,6 +26,7 @@ use tokio::sync::watch;
 use crate::error::{anyhow, Result};
 use crate::local::chat::ChatHost;
 use crate::store::Store;
+use crate::token_auth::{constant_time_eq, digest};
 use crate::{RemoteHostArgs, RemoteHostCommand};
 
 pub(crate) const CONTROL_PROTOCOL: u32 = 1;
@@ -136,21 +137,6 @@ impl RemoteAuth {
     pub(crate) fn attachment_count(&self) -> usize {
         self.attachments.read().unwrap().len()
     }
-}
-
-fn digest(value: &str) -> [u8; 32] {
-    Sha256::digest(value.as_bytes()).into()
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .fold(0_u8, |difference, (left, right)| {
-                difference | (left ^ right)
-            })
-            == 0
 }
 
 pub(crate) enum DashboardLockMode {
@@ -293,6 +279,14 @@ pub(crate) async fn start_control_server(
         }
         std::fs::remove_file(&socket_path)?;
     }
+    // `set_mode` below lands after `bind`, so the socket briefly exists at
+    // the process umask. That's not a real window: `ensure_private_dir`
+    // (called via `runtime_path`, above) already requires the containing
+    // `/tmp/orx-<uid>/` to be 0700 and owner-matched before we get here, so
+    // no other user can resolve a path into it to connect during the gap —
+    // and even a same-directory race would still hit the `SO_PEERCRED`
+    // same-uid check in the accept loop below. The chmod is defense in
+    // depth, not the actual boundary.
     let listener = UnixListener::bind(&socket_path)?;
     set_mode(&socket_path, 0o600)?;
     let descriptor_path = descriptor_path(&data_dir)?;

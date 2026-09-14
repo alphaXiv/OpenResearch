@@ -98,23 +98,59 @@ pub async fn load_credentials() -> Result<Option<Credentials>> {
     }
 }
 
-/// Persists credentials as pretty JSON with a trailing newline, mode 0600.
-pub async fn save_credentials(creds: &Credentials) -> Result<()> {
-    let path = credentials_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
+/// Creates `dir` (recursively) and makes sure it isn't group/world-traversable.
+/// Idempotent and safe to call on a dir that already exists with looser
+/// permissions — it tightens those too, since `~/.config` itself is
+/// world-traversable by convention and a stale dir predating this check
+/// would otherwise stay that way forever.
+///
+/// Directory-level, not just file-level: a 0600 file inside a 0755 directory
+/// stops other users from *reading* it, but not from noticing it exists or
+/// racing its creation.
+async fn ensure_private_dir(dir: &std::path::Path) -> Result<()> {
+    fs::create_dir_all(dir).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).await?;
     }
-    let body = format!("{}\n", serde_json::to_string_pretty(creds)?);
-    fs::write(&path, body).await?;
+    Ok(())
+}
+
+/// Writes `body` to `path`, owner-only (mode 0600) from the moment the file
+/// is created — never briefly world/group-readable under the process umask,
+/// the way write-then-chmod would leave it. The trailing `set_permissions`
+/// is a second pass for the case the file already existed (`mode()` only
+/// applies when a new file is created), so a stale, looser-permissioned file
+/// from before this fix also gets tightened on the next write.
+async fn write_owner_only(path: &std::path::Path, body: &[u8]) -> Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    {
+        use tokio::io::AsyncWriteExt;
+        options.open(path).await?.write_all(body).await?;
+    }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        fs::set_permissions(&path, perms).await?;
+        fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     }
 
     Ok(())
+}
+
+/// Persists credentials as pretty JSON with a trailing newline, mode 0600.
+pub async fn save_credentials(creds: &Credentials) -> Result<()> {
+    let path = credentials_path();
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent).await?;
+    }
+    let body = format!("{}\n", serde_json::to_string_pretty(creds)?);
+    write_owner_only(&path, body.as_bytes()).await
 }
 
 /// Removes the credentials file. Succeeds even if it does not exist (`force`).
@@ -155,6 +191,41 @@ fn overleaf_credentials() -> OverleafCredentials {
         .unwrap_or_default()
 }
 
+/// Sync counterpart of `ensure_private_dir`/`write_owner_only` (this module's
+/// callers, chiefly the Overleaf credential setters, are sync — the git
+/// bridge they back predates this module's async credential path). Same
+/// atomic-mode-at-creation reasoning, blocking `std::fs` instead of `tokio::fs`.
+fn ensure_private_dir_sync(dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn write_owner_only_sync(path: &std::path::Path, body: &[u8]) -> Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600); // applies on create only
+    }
+    {
+        use std::io::Write;
+        options.open(path)?.write_all(body)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Writes owner-only, like `save_credentials` beside it. An empty file goes
 /// away rather than lingering with nothing in it.
 fn save_overleaf_credentials(credentials: &OverleafCredentials) -> Result<()> {
@@ -167,16 +238,10 @@ fn save_overleaf_credentials(credentials: &OverleafCredentials) -> Result<()> {
         };
     }
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        ensure_private_dir_sync(parent)?;
     }
     let body = serde_json::to_string_pretty(credentials)?;
-    std::fs::write(&path, format!("{body}\n"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    write_owner_only_sync(&path, format!("{body}\n").as_bytes())
 }
 
 fn non_empty(value: String) -> Option<String> {
@@ -413,21 +478,90 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
         }
     }
     let body = format!("{}\n", lines.join("\n"));
-    {
-        use std::io::Write;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600); // applies on create only
-        }
-        opts.open(&path)?.write_all(body.as_bytes())?;
+    write_owner_only_sync(&path, body.as_bytes())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Each test uses its own throwaway dir under the OS temp dir (the
+    // codebase-wide idiom for filesystem tests — see the `orx-tel-*` dirs in
+    // telemetry.rs) rather than touching `$XDG_CONFIG_HOME`/`config_dir()`,
+    // which real credential paths resolve through: mutating that env var
+    // races other modules' tests under the parallel runner (see the
+    // `ENV_LOCK` note in telemetry.rs) and, if a test ever forgot to
+    // sandbox it, would silently clobber the developer's own
+    // ~/.config/openresearch/credentials.json.
+    fn scratch_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("orx-config-{label}-{}", uuid::Uuid::new_v4()))
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+
+    fn mode(path: &std::path::Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
-    Ok(())
+
+    #[tokio::test]
+    async fn write_owner_only_creates_file_mode_0600() {
+        let dir = scratch_dir("write-owner-only");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.json");
+        write_owner_only(&path, b"{\"token\":\"x\"}\n")
+            .await
+            .unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"token\":\"x\"}\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_owner_only_tightens_a_preexisting_looser_file() {
+        let dir = scratch_dir("write-owner-only-tighten");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secret.json");
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_owner_only(&path, b"fresh").await.unwrap();
+
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fresh");
+    }
+
+    #[tokio::test]
+    async fn ensure_private_dir_creates_mode_0700() {
+        let dir = scratch_dir("ensure-private-dir").join("nested");
+        ensure_private_dir(&dir).await.unwrap();
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[tokio::test]
+    async fn ensure_private_dir_tightens_a_preexisting_looser_dir() {
+        let dir = scratch_dir("ensure-private-dir-tighten");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        ensure_private_dir(&dir).await.unwrap();
+
+        assert_eq!(mode(&dir), 0o700);
+    }
+
+    #[test]
+    fn write_owner_only_sync_creates_file_mode_0600() {
+        let dir = scratch_dir("write-owner-only-sync");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("overleaf.json");
+        write_owner_only_sync(&path, b"{}\n").unwrap();
+        assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn ensure_private_dir_sync_creates_mode_0700() {
+        let dir = scratch_dir("ensure-private-dir-sync").join("nested");
+        ensure_private_dir_sync(&dir).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+    }
 }

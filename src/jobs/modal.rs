@@ -447,12 +447,10 @@ pub async fn run_job(spec: &ModalJobSpec) -> Result<String> {
         .ok_or_else(|| anyhow!("modal submit returned no sandboxId"))
 }
 
-/// Sandbox state in the shared stage vocabulary (see `jobs::stage_to_run_status`).
-#[derive(Debug, Clone)]
-pub struct JobState {
-    pub stage: String,
-    pub message: Option<String>,
-}
+/// Sandbox state in the shared stage vocabulary — see
+/// [`crate::jobs::JobState`], which this re-exports (TASK 4: one canonical
+/// shape across backends).
+pub use crate::jobs::JobState;
 
 pub async fn inspect_job(sandbox_id: &str) -> Result<JobState> {
     let out = launcher_capture(&["status", sandbox_id], None).await?;

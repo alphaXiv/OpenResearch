@@ -14,22 +14,45 @@
 //!
 //! Hand-rolled HTTP/1.1 on a tokio TcpListener (the login.rs idiom) — no
 //! framework dependency for a single-tenant loopback daemon.
+//!
+//! Auth: loopback bind alone is not a trust boundary against *other local
+//! users* on a shared box (this daemon's own doc note above says the api
+//! reaches it by SSH-tunneling in — but any other user on that box can also
+//! just connect to 127.0.0.1:4790 directly, bypassing the tunnel entirely).
+//! `--token`/`ORX_SERVE_TOKEN` closes that gap: when set, every request
+//! (`/health` included, for the same reason `orx up --remote` gates its own
+//! health route — a liveness probe still discloses the running version) must
+//! carry a matching `Authorization: Bearer <token>`, compared as a SHA-256
+//! digest in constant time via `token_auth`. See SECURITY.md.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::error::{anyhow, Result};
+use crate::local::is_terminal;
 use crate::store::{log_path, Store, StoredRun};
+use crate::token_auth::{constant_time_eq, digest};
 
 pub async fn run(args: crate::ServeArgs) -> Result<()> {
     let port = args.port.unwrap_or(4790);
+    let token = args.token.or_else(|| {
+        crate::local::shell_env::var("ORX_SERVE_TOKEN").and_then(|v| v.into_string().ok())
+    });
+    let auth: Arc<Option<[u8; 32]>> = Arc::new(token.as_deref().map(digest));
     let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| anyhow!("Could not bind 127.0.0.1:{}: {}", port, e))?;
     eprintln!("orx serve: listening on http://127.0.0.1:{port}");
+    if auth.is_none() {
+        eprintln!(
+            "orx serve: no --token/ORX_SERVE_TOKEN set — any local user who can reach \
+             127.0.0.1:{port} can read every run's metadata and logs. Set one on shared hosts."
+        );
+    }
 
     loop {
         let (stream, _) = match listener.accept().await {
@@ -39,15 +62,16 @@ pub async fn run(args: crate::ServeArgs) -> Result<()> {
                 continue;
             }
         };
+        let auth = auth.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle(stream).await {
+            if let Err(err) = handle(stream, &auth).await {
                 eprintln!("orx serve: request failed: {err}");
             }
         });
     }
 }
 
-async fn handle(mut stream: TcpStream) -> Result<()> {
+async fn handle(mut stream: TcpStream, auth: &Option<[u8; 32]>) -> Result<()> {
     // Read the head (requests are header-only GETs; 8 KB is plenty).
     let mut buf = vec![0u8; 8192];
     let mut len = 0;
@@ -74,6 +98,18 @@ async fn handle(mut stream: TcpStream) -> Result<()> {
             b"{\"error\":\"method\"}",
         )
         .await;
+    }
+    if let Some(expected) = auth {
+        let provided = bearer_token(&head).map(digest);
+        if !provided.is_some_and(|provided| constant_time_eq(&provided, expected)) {
+            return respond(
+                &mut stream,
+                401,
+                "application/json",
+                b"{\"error\":\"unauthorized\"}",
+            )
+            .await;
+        }
     }
     let (path, query) = match target.split_once('?') {
         Some((p, q)) => (p, q),
@@ -149,6 +185,20 @@ async fn handle(mut stream: TcpStream) -> Result<()> {
     }
 }
 
+/// Extracts the bearer token from a raw HTTP head's `Authorization` header.
+/// Case-insensitive on the header name (per RFC 9110); the scheme itself
+/// (`Bearer `) is matched literally, matching every client this daemon talks
+/// to today.
+fn bearer_token(head: &str) -> Option<&str> {
+    head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("authorization") {
+            return None;
+        }
+        value.trim().strip_prefix("Bearer ")
+    })
+}
+
 fn read_log_from(run_id: &str, offset: u64) -> Vec<u8> {
     use std::io::{Read, Seek, SeekFrom};
     let Ok(mut f) = std::fs::File::open(log_path(run_id)) else {
@@ -169,6 +219,7 @@ async fn respond(
 ) -> Result<()> {
     let reason = match status {
         200 => "OK",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
         _ => "",
@@ -275,14 +326,126 @@ async fn emit_log_delta(
     .await
 }
 
-fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "failed" | "cancelled")
-}
-
 async fn write_event(stream: &mut TcpStream, event: &str, data: &serde_json::Value) -> Result<()> {
     // SSE data must be newline-free per line; JSON-encode guarantees that.
     let frame = format!("event: {event}\ndata: {data}\n\n");
     stream.write_all(frame.as_bytes()).await?;
     stream.flush().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bearer_token_extracts_value_case_insensitively() {
+        let head = "GET /health HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer secret-token\r\n\r\n";
+        assert_eq!(bearer_token(head), Some("secret-token"));
+
+        let head_lower = "GET /health HTTP/1.1\r\nauthorization: Bearer secret-token\r\n\r\n";
+        assert_eq!(bearer_token(head_lower), Some("secret-token"));
+    }
+
+    #[test]
+    fn bearer_token_absent_without_header() {
+        let head = "GET /health HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(bearer_token(head), None);
+    }
+
+    #[test]
+    fn bearer_token_ignores_non_bearer_scheme() {
+        let head = "GET /health HTTP/1.1\r\nAuthorization: Basic dXNlcjpwYXNz\r\n\r\n";
+        assert_eq!(bearer_token(head), None);
+    }
+
+    /// Starts a real `handle()` loop on a loopback socket and returns its
+    /// address — exercises the actual accept/parse/auth/respond path used by
+    /// `run()`, not a reimplementation of it. Only `/health` is used across
+    /// these tests: it needs no `Store`, so it can't collide with the
+    /// process-global data dir other tests mutate under the parallel runner.
+    async fn spawn_server(auth: Option<[u8; 32]>) -> std::net::SocketAddr {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let auth = Arc::new(auth);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                let auth = auth.clone();
+                tokio::spawn(async move {
+                    let _ = handle(stream, &auth).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// Issues one raw HTTP GET and returns (status code, body).
+    async fn get(
+        addr: std::net::SocketAddr,
+        path: &str,
+        authorization: Option<&str>,
+    ) -> (u16, String) {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let mut request = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        if let Some(value) = authorization {
+            request.push_str(&format!("Authorization: {value}\r\n"));
+        }
+        request.push_str("\r\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.shutdown().await.unwrap_or(());
+
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).await.unwrap();
+        let response = String::from_utf8_lossy(&response);
+        let status = response
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse().ok())
+            .unwrap_or(0);
+        let body = response.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn no_token_configured_allows_unauthenticated_requests() {
+        let addr = spawn_server(None).await;
+        let (status, body) = get(addr, "/health", None).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"ok\":true"));
+    }
+
+    #[tokio::test]
+    async fn token_configured_rejects_missing_authorization() {
+        let addr = spawn_server(Some(digest("s3cret"))).await;
+        let (status, _) = get(addr, "/health", None).await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn token_configured_rejects_wrong_token() {
+        let addr = spawn_server(Some(digest("s3cret"))).await;
+        let (status, _) = get(addr, "/health", Some("Bearer wrong")).await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test]
+    async fn token_configured_accepts_matching_token() {
+        let addr = spawn_server(Some(digest("s3cret"))).await;
+        let (status, body) = get(addr, "/health", Some("Bearer s3cret")).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("\"ok\":true"));
+    }
+
+    #[tokio::test]
+    async fn token_gate_applies_to_every_route_not_just_health() {
+        // /runs would touch the global Store; confirm it's rejected before
+        // that ever happens rather than exercising the Store-backed path.
+        let addr = spawn_server(Some(digest("s3cret"))).await;
+        let (status, _) = get(addr, "/runs", None).await;
+        assert_eq!(status, 401);
+    }
 }

@@ -12,7 +12,7 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 
 - Rust code lives in `src/`; the dashboard lives in `ui/src/`. Keep local-only behavior local and use the production API client only for capabilities owned by `openresearch.sh`.
 - Run local app instances through `scripts/dev-slot.mjs` so development data, ports, and processes stay isolated.
-- `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets.
+- `ui/dist` is committed and embedded in release builds. After UI changes, run `pnpm build` in `ui/` and include the regenerated assets. Prefer a separate commit for the regenerated `ui/dist` from the one changing `ui/src`, so a reviewer can read the source diff on its own and skip the generated one — CI's "UI build artifacts are up to date" check (`ci.yml`) rebuilds `ui/dist` from source and fails the PR if the committed copy doesn't match, so that commit only needs to exist, not be read byte-for-byte. `.gitattributes` marks `ui/dist/**` `linguist-generated=true` so GitHub collapses it in the PR diff by default.
 - Prefer canonical Tailwind utilities (`flex flex-col h-full min-h-0`) and project theme aliases (`bg-background`, `text-subtext`, `border-border`). Use arbitrary values only when no project utility exists, and preserve semantic marker classes when selectors or runtime behavior depend on them.
 - Before shipping, follow the checks in `.github/workflows/ci.yml`.
 

@@ -77,9 +77,13 @@ Run the workspace next to remote GPUs while using the browser on your laptop:
 orx up --remote user@host
 ```
 
-SSH config aliases and custom ports are supported. The remote service binds to
-loopback and has no application-level authentication, so other users on that
-host can reach it.
+SSH config aliases and custom ports are supported. The remote dashboard binds
+to loopback and requires a per-session bearer token minted for this
+connection, delivered to it over the SSH channel — other users on that host
+cannot reach it. `orx serve` and a bare `orx up` run directly on a box (i.e.
+outside this `--remote` flow) are unauthenticated loopback services instead;
+see [SECURITY.md](SECURITY.md) for the full trust model, including how to add
+a token to `orx serve` on a shared host.
 
 ## CLI and agent integration
 
