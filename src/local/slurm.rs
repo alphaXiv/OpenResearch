@@ -161,6 +161,8 @@ pub async fn submit_local_slurm_with_source(
             .get_run(&run_id)?
             .is_some_and(|run| run.cancel_requested),
         chat_session_id: args.launching_chat_session(),
+        recovery_reason: None,
+        error_kind: None,
     };
     store.upsert_run(&run)?;
 

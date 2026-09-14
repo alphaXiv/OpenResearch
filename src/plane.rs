@@ -176,6 +176,8 @@ mod tests {
             result_markdown: result_markdown.map(str::to_string),
             cancel_requested: false,
             chat_session_id: None,
+            recovery_reason: None,
+            error_kind: None,
         }
     }
 

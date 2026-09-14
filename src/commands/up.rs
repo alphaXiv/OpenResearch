@@ -36,6 +36,7 @@ use crate::commands::remote_host::{DashboardLock, DashboardLockMode, HostDescrip
 use crate::error::{anyhow, Result};
 use crate::local;
 use crate::local::chat::ChatHost;
+use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
 use crate::store::{
     log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
@@ -84,12 +85,16 @@ pub async fn run(args: UpArgs) -> Result<()> {
     {
         let store = Store::open()?;
         local::chat::reconcile_unfinished_turns(&store)?;
-        for run in store.list_active_runs()? {
-            if store.get_local_experiment(&run.experiment_id)?.is_some() {
-                if let Err(err) = crate::commands::exp::spawn_detached_supervise(&run.id) {
-                    eprintln!("could not recover supervisor for run {}: {err}", run.id);
-                }
-            }
+        // Crash recovery: a supervisor that died with `orx up` (or the whole
+        // machine), or was never successfully spawned before a prior crash,
+        // leaves its run `Starting`/`Running` with nobody watching it. This
+        // one-shot pass on startup is backed up by a periodic pass below —
+        // this one just gets a fresh supervisor running as early as possible
+        // rather than waiting out the first interval.
+        let mut startup_attempts = HashMap::new();
+        if let Err(err) = crate::commands::exp::reconcile_active_runs(&store, &mut startup_attempts)
+        {
+            eprintln!("orx up: could not reconcile active runs at startup: {err}");
         }
     }
 
@@ -138,6 +143,40 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 }
                 if let Err(err) = chat.reconcile_expired_turn_leases() {
                     eprintln!("orx up: could not reconcile expired chat turns: {err}");
+                }
+            }
+        });
+    }
+    {
+        let moving = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::spawn(async move {
+            // Not a TTL — `reconcile_active_runs`'s liveness check (an
+            // `fd_lock` probe) is race-free and never goes stale, so this
+            // interval only bounds how quickly a crash between two ticks
+            // (a supervisor OOM-killed, `orx up` itself restarting) gets a
+            // replacement, not correctness.
+            const RUN_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+            let mut attempts = HashMap::new();
+            loop {
+                tokio::time::sleep(RUN_RECONCILE_INTERVAL).await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let _gate = gate.lock().await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let store = match Store::open() {
+                    Ok(store) => store,
+                    Err(err) => {
+                        eprintln!("orx up: could not open the store to reconcile runs: {err}");
+                        continue;
+                    }
+                };
+                if let Err(err) = crate::commands::exp::reconcile_active_runs(&store, &mut attempts)
+                {
+                    eprintln!("orx up: could not reconcile active runs: {err}");
                 }
             }
         });
@@ -821,6 +860,18 @@ struct ApiRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
     cancel_requested: bool,
+    /// Free-text explanation when `orx` itself force-failed this run (crash
+    /// recovery giving up, a backend going unreachable) rather than the
+    /// backend reporting its own outcome. See `error_kind` for the stable,
+    /// machine-readable counterpart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_reason: Option<String>,
+    /// Stable [`crate::error::ErrorKind`] code for the same failure — the
+    /// half an agent or the dashboard should switch on. `None` unless the
+    /// stored value round-trips through a known code, so a value from a
+    /// newer `orx` version never surfaces as a silently-wrong classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_kind: Option<String>,
 }
 
 impl From<&StoredRun> for ApiRun {
@@ -839,6 +890,12 @@ impl From<&StoredRun> for ApiRun {
             ended_at: run.ended_at,
             exit_code: run.exit_code,
             cancel_requested: run.cancel_requested,
+            recovery_reason: run.recovery_reason.clone(),
+            error_kind: run
+                .error_kind
+                .as_deref()
+                .and_then(crate::error::ErrorKind::parse)
+                .map(|k| k.as_str().to_string()),
         }
     }
 }
@@ -7641,10 +7698,6 @@ fn push_log_delta(
     ));
 }
 
-fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "failed" | "cancelled")
-}
-
 fn log_size(run_id: &str) -> u64 {
     std::fs::metadata(log_path(run_id))
         .map(|m| m.len())
@@ -8061,6 +8114,8 @@ mod tests {
             result_markdown: None,
             cancel_requested: true,
             chat_session_id: None,
+            recovery_reason: None,
+            error_kind: None,
         };
 
         let value = serde_json::to_value(ApiRun::from(&run)).unwrap();
