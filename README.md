@@ -17,9 +17,9 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 </p>
 
 <p>
-<a href="https://api.openresearch.sh/auth/login"><img src=".github/readme-assets/link-create-account.svg" alt="Create an account" width="174" height="24" /></a> ·
-<a href="https://openresearch.sh/docs"><img src=".github/readme-assets/link-documentation.svg" alt="Documentation" width="132" height="24" /></a> ·
-<a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/link-releases.svg" alt="Releases" width="78" height="24" /></a>
+<a href="https://api.openresearch.sh/auth/login"><img src=".github/readme-assets/action-create-account.svg" alt="Create an account" width="174" height="24" /></a><img src=".github/readme-assets/action-separator.svg" alt=" · " width="12" height="24" />
+<a href="https://openresearch.sh/docs"><img src=".github/readme-assets/action-documentation.svg" alt="Documentation" width="132" height="24" /></a><img src=".github/readme-assets/action-separator.svg" alt=" · " width="12" height="24" />
+<a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
 <p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
