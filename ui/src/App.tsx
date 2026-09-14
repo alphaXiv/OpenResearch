@@ -1,12 +1,10 @@
 import {
-  setScopedQueryData,
   queryClient,
 } from "./queries/client";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import type { Viewport } from "@xyflow/react";
 
 import {
-  type SetStateAction,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -15,8 +13,8 @@ import {
   useState,
 } from "react";
 
-import { listChatSessionsQuery, getChatMessagesQuery } from "./queries/chat";
-import { listProjectsQuery, getUiStateQuery, listRunsQuery, listExperimentsQuery } from "./queries/projects";
+import { getChatMessagesQuery } from "./queries/chat";
+import { listRunsQuery, listExperimentsQuery } from "./queries/projects";
 import { getArtifactsQuery } from "./queries/files";
 import { useBlocker, useRouter, useRouterState } from "@tanstack/react-router";
 import {
@@ -88,16 +86,12 @@ import {
   type FirstAction,
   openProject,
   updateUiState,
-  type AgentSelection,
   type Project,
   type RuntimeInfo,
   type Run,
-  type ChatMessage,
-  type UiState,
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
-import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
-import { usePopover } from "./components/ModelPicker";
+import { ChatPanel, findPartById } from "./components/ChatPanel";
 import { SubagentTab } from "./components/SubagentTab";
 import { CodeTab, type CodeView } from "./components/CodeTab";
 import { WorktreeTab, type WorktreeView } from "./components/WorktreeTab";
@@ -116,11 +110,27 @@ import { Md } from "./components/Md";
 import { SettingsView, type SettingsTab } from "./components/SettingsPage";
 import { DemoWelcomeModal } from "./components/Tour";
 import { TreeView } from "./components/TreeView";
-import { onChatEvent, useOrxEvents } from "./events";
+import { useOrxEvents } from "./events";
 import { closeTab, openTab, type TabOpenIntent } from "./tabPreview";
 import { Button, IconButton, MenuItem, showAlert, Spinner } from "./components/ui";
 import { CodeTabBody, TabBody } from "./components/layout/TabBody";
 import { RemoteStatus } from "./components/RemoteStatus";
+import { parseFilePath, fileBranchLabel } from "./filePathResolution";
+import {
+  PANEL_MIN_WIDTH,
+  PANEL_MARGIN,
+  WORKSPACE_CARD_MIN_WIDTH,
+  FULLSCREEN_SNAP_SLOP,
+  FULLSCREEN_RESTORE_DRAG,
+  panelMaxWidth,
+  initialPanelWidth,
+} from "./panelSizing";
+import { upsertById } from "./listUpsert";
+import { useStableStringMap } from "./useStableStringMap";
+import { useAppData } from "./useAppData";
+import { useExperimentScope } from "./useExperimentScope";
+import { useSpawnTabMeta } from "./useSpawnTabMeta";
+import { usePreferredAgent } from "./usePreferredAgent";
 
 const EMPTY_STATE_CLASS_NAME = [
   "empty-state absolute inset-0 flex flex-col items-center",
@@ -130,138 +140,6 @@ const EMPTY_STATE_CLASS_NAME = [
   "[&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text",
   "[&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext",
 ].join(" ");
-
-/** Escape a string for literal use inside a RegExp. */
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Map a path an agent reported to a right-pane file tab. An artifact path under
-// the compatibility <data dir>/files/<slug>/ layout is stripped to a relative
-// path and tagged source:"artifacts". Otherwise it's a repo/worktree path stripped to
-// repo-relative, keeping the session id when it points into a per-session
-// worktree. Relative paths name files in the click context's checkout and
-// inherit `contextSessionId`; the regex fallbacks encode the
-// managed storage layouts from src/local/git.rs:
-// worktrees/<project-id>/<session>/… and the legacy repos/<owner>/<repo>/….
-function parseFilePath(
-  rawPath: string,
-  repoPath?: string,
-  contextSessionId?: string,
-  artifactsDir?: string,
-  slug?: string,
-): FileViewDef | null {
-  let path = rawPath;
-  let sessionId: string | undefined;
-  const clone = repoPath?.replace(/\/+$/, "");
-  const artifacts = artifactsDir?.replace(/\/+$/, "");
-  if (path.startsWith("artifacts/")) {
-    path = path.slice("artifacts/".length);
-    return path ? { path, source: "artifacts" } : null;
-  }
-  // A home-anchored path (`~` or `~/…`) is disk, never a repo file — the backend
-  // expands the `~`, so hand it over verbatim.
-  if (path === "~" || path.startsWith("~/")) return { path, source: "abs" };
-  // `path` relative to `base` (`""` when equal), else null. macOS symlinks
-  // `/tmp`→`/private/tmp` and `/var`→`/private/var`, so an agent-inlined path
-  // and the stored dir can differ only by that prefix — strip it on both sides.
-  const relUnder = (base: string): string | null => {
-    const strip = (p: string) => p.replace(/^\/private(?=\/(?:tmp|var)(?:\/|$))/, "");
-    const [p, b] = [strip(path), strip(base)];
-    if (p === b) return "";
-    return p.startsWith(`${b}/`) ? p.slice(b.length).replace(/^\/+/, "") : null;
-  };
-  // A relative path names a file in the click context's checkout; the absolute
-  // branches below are keyed off the (non-canonical) stored dirs.
-  const artifactRel = path.startsWith("/") && artifacts ? relUnder(artifacts) : null;
-  const cloneRel = path.startsWith("/") && clone ? relUnder(clone) : null;
-  if (!path.startsWith("/")) {
-    sessionId = contextSessionId;
-  } else if (artifactRel !== null) {
-    // Artifact — prefix match against the non-canonical dir the backend
-    // surfaced, which mirrors what the agent inlines.
-    return artifactRel ? { path: artifactRel, source: "artifacts" } : null;
-  } else if (cloneRel !== null) {
-    path = cloneRel;
-  } else {
-    // Artifact fallback for a symlink-divergent path (e.g. /tmp vs
-    // /private/tmp) where the exact prefix missed: match the …/files/<slug>/<rel>
-    // layout, requiring the slug segment when we know it. (Legacy artifacts/ is
-    // migrated to files/ in place, so it never appears in a live path.)
-    const slugPat = slug ? escapeRegExp(slug) : "[^/]+";
-    const fd = path.match(new RegExp(`/files/${slugPat}/(.+)$`));
-    const wt = fd ? null : path.match(/\/openresearch\/worktrees\/[^/]+\/([^/]+)\/(.+)$/);
-    const hub = fd || wt ? null : path.match(/\/openresearch\/repos\/[^/]+\/[^/]+\/(.+)$/);
-    if (fd) {
-      return { path: fd[1], source: "artifacts" };
-    } else if (wt) {
-      sessionId = wt[1];
-      path = wt[2];
-    } else if (hub) {
-      path = hub[1];
-    }
-  }
-  if (!path) return null;
-  // An absolute path none of the checkout/artifacts branches recognized (e.g.
-  // /Users/me/.ssh/config) reads straight off disk — the repo /file endpoint
-  // only takes repo-relative paths and would reject it.
-  if (path.startsWith("/")) return { path, source: "abs" };
-  return { path, sessionId };
-}
-
-/** The git branch a code file tab is showing, for the header pill — a cited
- * experiment's branch (or any ref view) names that branch, and a worktree/clone
- * file falls back to the baseline branch, so a code tab always says which
- * branch its contents came from. Artifacts and absolute-path files have no
- * branch. */
-function fileBranchLabel(tab: FileViewDef, baselineBranch?: string): string | undefined {
-  if (tab.source === "artifacts" || tab.source === "abs") return undefined;
-  return tab.ref ?? tab.branchLabel ?? baselineBranch;
-}
-
-type ExperimentsView = "tree" | "table";
-
-/** Floating panel sizing: keep both the panel and the chat column usable. */
-const PANEL_MIN_WIDTH = 360;
-const PANEL_MARGIN = 10;
-const WORKSPACE_CARD_MIN_WIDTH = 1448; // 1420px content plus the body’s 14px gutters.
-// Space the rest of the layout needs beside the panel: the 272px rail, the
-// chat column's minimum, and the gutters/margins between the three columns
-// (app-body padding 14×2, rail inner margin 14, end-pane inner margin 14).
-const RAIL_WIDTH = 272;
-const CHAT_MIN_SPACE = 380;
-const LAYOUT_CHROME = RAIL_WIDTH + 14 * 4;
-// Once a drag pushes the panel past its usable max by this much, it snaps to
-// fullscreen — a bit of resistance you have to overcome deliberately.
-const FULLSCREEN_SNAP_SLOP = 80;
-// Inward drag needed before snapping back to the last non-fullscreen width.
-const FULLSCREEN_RESTORE_DRAG = 48;
-
-/** The widest the floating panel can be while leaving the rail + chat usable. */
-function panelMaxWidth(): number {
-  return Math.max(PANEL_MIN_WIDTH, window.innerWidth - LAYOUT_CHROME - CHAT_MIN_SPACE);
-}
-
-function initialPanelWidth(): number {
-  const max = panelMaxWidth();
-  return Math.max(PANEL_MIN_WIDTH, Math.min(760, max, Math.round(window.innerWidth * 0.4)));
-}
-
-function upsert<T extends { id: string }>(list: T[], item: T): T[] {
-  const i = list.findIndex((x) => x.id === item.id);
-  if (i < 0) return [...list, item];
-  const next = list.slice();
-  next[i] = item;
-  return next;
-}
-
-function useStableStringMap(next: Map<string, string>): Map<string, string> {
-  const current = useRef(next);
-  const unchanged = current.current.size === next.size
-    && [...next].every(([key, value]) => current.current.get(key) === value);
-  if (!unchanged) current.current = next;
-  return current.current;
-}
 
 export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo; projectId: string; pane?: Pane }) {
   const updateUiStateMutation = useMutation({ mutationFn: updateUiState });
@@ -284,8 +162,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     return typeof tab === "object" && "path" in tab && tab.line && consumedLine !== lineVisit.current.value
       ? { ...tab, lineScrollRequest: lineVisit.current.value } : tab;
   }, [pane, consumedLine, location.href, lineJump]);
-  const sessionsQuery = useQuery(listChatSessionsQuery(projectId));
-  const sessions = useMemo(() => sessionsQuery.data?.map((session) => session.id) ?? null, [sessionsQuery.data]);
   const restoredFilesRef = useRef(new Set<string>());
   const intentionalFilesRef = useRef(new Set<string>());
   const sourceModesRef = useRef<Record<string, boolean>>({});
@@ -317,35 +193,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
 
   const locale = useLocale();
   const { status: updateStatus } = useUpdateStatus(runtime.kind === "local");
-  const projectsOptions = useMemo(() => listProjectsQuery(), [projectId]);
-  const projectsQuery = useQuery(projectsOptions);
-  const projects = projectsQuery.data ?? null;
-  const setProjects = useCallback((value: SetStateAction<Project[] | null>) => {
-    setScopedQueryData(projectsOptions.queryKey, (current) => {
-      const next = typeof value === "function" ? value(current ?? null) : value;
-      return next ?? undefined;
-    });
-  }, [projectsOptions]);
-  const uiStateOptions = useMemo(() => getUiStateQuery(), [projectId]);
-  const uiStateQuery = useQuery(uiStateOptions);
-  const uiState = uiStateQuery.data ?? null;
-  const setUiState = useCallback((value: SetStateAction<UiState | null>) => {
-    setScopedQueryData(uiStateOptions.queryKey, (current) => {
-      const next = typeof value === "function" ? value(current ?? null) : value;
-      return next ?? undefined;
-    });
-  }, [uiStateOptions]);
+  const {
+    sessionsQuery, sessions,
+    projects, setProjects,
+    uiState, setUiState,
+    startupError, loadInitialState,
+  } = useAppData(projectId, locale);
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
-  const failedStartupItems = [
-    !sessionsQuery.data && sessionsQuery.error ? m.chat_all_sessions() : null,
-    !projectsQuery.data && projectsQuery.error ? m.app_projects() : null,
-    !uiStateQuery.data && uiStateQuery.error ? m.app_settings() : null,
-  ].filter((item) => item !== null);
-  const startupError = failedStartupItems.length
-    ? m.app_startup_load_failed({ items: new Intl.ListFormat(locale).format(failedStartupItems) })
-    : null;
-  const persistedPreferredAgent = useRef<AgentSelection | null>(null);
+  const { persistedPreferredAgent, persistPreferredAgent } = usePreferredAgent(
+    setUiState,
+    useCallback((patch) => updateUiStateMutation.mutateAsync(patch), [updateUiStateMutation]),
+  );
   const experimentsQuery = useQuery(listExperimentsQuery(projectId));
   const experiments = experimentsQuery.data ?? [];
   const experimentDataReady = !experimentsQuery.isPending;
@@ -370,26 +229,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const artifactsQuery = useQuery(getArtifactsQuery(projectId));
   const artifacts = artifactsQuery.data ?? null;
 
-  const [view, setView] = useState<ExperimentsView>("table");
-  // Experiments pane scope: "agent" narrows to the open chat session's work.
-  // Falls back to "project" whenever there is no usable experiment attribution.
-  const [scope, setScope] = useState<"agent" | "project">("project");
-  const scopeTriggerRef = useRef<HTMLButtonElement>(null);
-  const { open: scopeMenuOpen, setOpen: setScopeMenuOpen, ref: scopeMenuRef } =
-    usePopover(scopeTriggerRef);
   const [demoOverviewLeading, setDemoOverviewLeading] = useState(false);
-  const allExperimentsAttributed = experiments.every((experiment) => experiment.chatSessionId);
-  const effectiveScope = activeSessionId && allExperimentsAttributed ? scope : "project";
-  const scopedExperiments = useMemo(() => {
-    if (effectiveScope !== "agent") return experiments;
-    return experiments.filter((experiment) => experiment.chatSessionId === activeSessionId);
-  }, [experiments, effectiveScope, activeSessionId]);
-  // Runs are scoped by their experiment's owner, not by which session launched them.
-  const scopedRuns = useMemo(() => {
-    if (effectiveScope !== "agent") return runs;
-    const mine = new Set(scopedExperiments.map((experiment) => experiment.id));
-    return runs.filter((r) => mine.has(r.experimentId));
-  }, [runs, scopedExperiments, effectiveScope]);
+  const {
+    view, setView,
+    scope, setScope,
+    scopeTriggerRef, scopeMenuOpen, setScopeMenuOpen, scopeMenuRef,
+    allExperimentsAttributed, effectiveScope,
+    scopedExperiments, scopedRuns,
+    showProjectScope,
+  } = useExperimentScope(experiments, runs, activeSessionId);
 
   // Right-panel tab strip: closable home and working tabs. The same experiment
   // can keep both its overview and terminal open.
@@ -751,11 +599,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     navigatePane({ kind: "home", view: "experiments" }, replace);
   }, [navigatePane, reportFirstAction]);
 
-  const loadInitialState = () => {
-    void projectsQuery.refetch();
-    void uiStateQuery.refetch();
-    void sessionsQuery.refetch();
-  };
   const preferencesLoaded = useRef(false);
   useEffect(() => {
     if (!uiState || preferencesLoaded.current) return;
@@ -771,31 +614,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   useEffect(() => {
     if (sessions && rememberedSessionRef.current && !sessions.includes(rememberedSessionRef.current)) rememberedSessionRef.current = null;
   }, [sessions]);
-
-  const preferredAgentWrite = useRef<Promise<void>>(Promise.resolve());
-  const preferredAgentSaveSeq = useRef(0);
-  const persistPreferredAgent = useCallback((selection: AgentSelection) => {
-    const saveSeq = ++preferredAgentSaveSeq.current;
-    setUiState((current) => current && { ...current, preferredAgent: selection });
-    const write = preferredAgentWrite.current
-      .then(() => updateUiStateMutation.mutateAsync({ preferredAgent: selection }))
-      .then((saved) => {
-        persistedPreferredAgent.current = saved.preferredAgent;
-        if (saveSeq === preferredAgentSaveSeq.current) {
-          setUiState((current) => current && { ...current, preferredAgent: saved.preferredAgent });
-        }
-      })
-      .catch((error: unknown) => {
-        if (saveSeq === preferredAgentSaveSeq.current) {
-          setUiState((current) =>
-            current && { ...current, preferredAgent: persistedPreferredAgent.current },
-          );
-        }
-        throw error;
-      });
-    preferredAgentWrite.current = write.catch(() => {});
-    return write;
-  }, []);
 
   // Shrinking the window can push a fixed-width panel past its usable max —
   // reclamp so it never overflows the viewport.
@@ -895,10 +713,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       else if (!runsBaselineReadyRef.current) pendingFirstRunningRunsRef.current.set(run.id, run);
     },
   });
-
-  // Stable identity: in TreeView's layout-memo deps, so an inline arrow would
-  // recompute the graph on every render.
-  const showProjectScope = useCallback(() => setScope("project"), []);
 
   // Open an experiment view as a right-panel tab (creating it if needed) and
   // focus it.
@@ -1179,76 +993,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     [forgetRightTab, rightTab, subagentTabs],
   );
 
-  // Live title + running state for open sub-agent tabs, straight off the spawn
-  // parts' message stream — so a tab is named for its task and shimmers while
-  // the agent still works (the open-time `label` is only the seed/fallback).
-  const [spawnMeta, setSpawnMeta] = useState<Record<string, { label: string; running: boolean }>>({});
-  useEffect(() => {
-    // Closed tabs drop their metadata — the map only ever holds open tabs.
-    setSpawnMeta((prev) => {
-      const open = new Set(subagentTabs.map((t) => t.spawnPartId));
-      if (Object.keys(prev).every((id) => open.has(id))) return prev;
-      return Object.fromEntries(Object.entries(prev).filter(([id]) => open.has(id)));
-    });
-    if (subagentTabs.length === 0) return;
-    let live = true;
-    // Spawn ids a live event already updated: the initial fetch can resolve
-    // AFTER newer stream frames and must not roll those tabs back (a stale
-    // `running` snapshot would shimmer forever).
-    const liveUpdated = new Set<string>();
-    const apply = (msgs: ChatMessage[], tabs: SubagentViewDef[], fromSeed: boolean) => {
-      setSpawnMeta((prev) => {
-        let next = prev;
-        for (const t of tabs) {
-          if (fromSeed && liveUpdated.has(t.spawnPartId)) continue;
-          for (const m of msgs) {
-            const part = findPartById(m.parts, t.spawnPartId);
-            if (!part) continue;
-            if (!fromSeed) liveUpdated.add(t.spawnPartId);
-            const meta = { label: spawnRowTitle(part), running: part.state?.status === "running" };
-            const cur = next[t.spawnPartId];
-            if (!cur || cur.label !== meta.label || cur.running !== meta.running) {
-              if (next === prev) next = { ...prev };
-              next[t.spawnPartId] = meta;
-            }
-            break;
-          }
-        }
-        return next;
-      });
-    };
-    // Generation token: a reconnect starts fresh seeds, and a stale in-flight
-    // response from an earlier generation must not land after them.
-    let seedGen = 0;
-    const seed = () => {
-      const gen = ++seedGen;
-      for (const sid of new Set(subagentTabs.map((t) => t.sessionId))) {
-        queryClient.fetchQuery({ ...getChatMessagesQuery(sid), staleTime: 0 })
-          .then(({ messages }) => {
-            if (live && gen === seedGen)
-              apply(messages, subagentTabs.filter((t) => t.sessionId === sid), true);
-          })
-          .catch(() => {});
-      }
-    };
-    seed();
-    const off = onChatEvent((ev) => {
-      if (ev.type === "reconnected") {
-        // Frames lost during the outage may include the terminal update —
-        // refetch, letting the fresh seed overwrite everything.
-        liveUpdated.clear();
-        seed();
-        return;
-      }
-      if (ev.type !== "message") return;
-      const tabs = subagentTabs.filter((t) => t.sessionId === ev.sessionId);
-      if (tabs.length) apply([ev.message], tabs, false);
-    });
-    return () => {
-      live = false;
-      off();
-    };
-  }, [subagentTabs]);
+  const spawnMeta = useSpawnTabMeta(subagentTabs);
 
   // One Git-backed code tab per branch. Reopening the same branch focuses it
   // at the requested subview; another branch gets its own tab.
@@ -1364,7 +1109,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   };
 
   const onProjectCreated = (project: Project, publicationError: string | null) => {
-    setProjects((cur) => (cur ? upsert(cur, project) : [project]));
+    setProjects((cur) => (cur ? upsertById(cur, project) : [project]));
     void router.navigate({ href: `/projects/${encodeURIComponent(project.id)}${publicationError ? "/settings/git" : ""}` });
     if (publicationError) {
       showAlert(publicationError, "error");
@@ -1608,7 +1353,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 tab={mainView}
                 project={activeProject}
                 onProjectUpdate={(project) => {
-                  setProjects((current) => (current ? upsert(current, project) : [project]));
+                  setProjects((current) => (current ? upsertById(current, project) : [project]));
                 }}
                 onSelectTab={selectMainView}
               />
