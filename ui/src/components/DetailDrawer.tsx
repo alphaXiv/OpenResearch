@@ -1,8 +1,9 @@
 import { m } from "../paraglide/messages.js";
-import { ChevronDown, CircleStop } from "lucide-react";
+import { ChevronDown, CircleStop, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
+  resyncRun,
   runDisplayStatus,
   timeAgo,
   type Experiment,
@@ -86,6 +87,8 @@ function TerminalView({
   onSelectRun: (id: string | null) => void;
 }) {
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resyncing, setResyncing] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -103,6 +106,13 @@ function TerminalView({
     const idx = expRuns.findIndex((r) => r.id === id);
     return idx === -1 ? expRuns.length : expRuns.length - idx;
   };
+
+  // The resync result is a transient acknowledgement, not persistent state.
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   // Close the history dropdown on outside click.
   useEffect(() => {
@@ -126,6 +136,23 @@ function TerminalView({
     }
   }
 
+  // The supervisor mirrors the backend's log into the local store. When that
+  // mirror stops advancing while the job is plainly still running, this is the
+  // escape hatch: it replaces the supervisor, which re-mirrors from the start.
+  async function resync() {
+    if (!selectedRun) return;
+    setError(null);
+    setNotice(null);
+    setResyncing(true);
+    try {
+      setNotice(await resyncRun(selectedRun.id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setResyncing(false);
+    }
+  }
+
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
       <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
@@ -137,6 +164,23 @@ function TerminalView({
           <span className="error" role="alert">
             {error}
           </span>
+        )}
+        {!error && notice && (
+          <span className="text-sm text-subtext" role="status">
+            {notice}
+          </span>
+        )}
+        {live && (
+          <Button
+            size="small"
+            variant="ghost"
+            title={m.detail_drawer_resync_hint()}
+            disabled={resyncing}
+            onClick={() => void resync()}
+          >
+            <RefreshCw size={13} className={resyncing ? "animate-spin" : undefined} />
+            {resyncing ? m.common_resyncing() : m.common_resync()}
+          </Button>
         )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>

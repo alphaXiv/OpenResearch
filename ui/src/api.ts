@@ -379,6 +379,12 @@ export const listInstances = () =>
 export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
+/** Retire the run's supervisor and start a fresh one. The manual fallback for
+ *  a supervisor that is alive but no longer advancing the local log mirror;
+ *  `message` says what actually happened, which is not always a restart. */
+export const resyncRun = (runId: string) =>
+  post<{ ok: boolean; message: string }>(`/api/runs/${runId}/resync`).then((r) => r.message);
+
 export interface LogChunk {
   dataBase64: string;
   nextOffset: number;

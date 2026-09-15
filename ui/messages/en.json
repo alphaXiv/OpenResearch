@@ -1151,5 +1151,8 @@
   "local_models_disconnect": "Disconnect {name}",
   "local_models_config_restricted": "Saved, but OpenCode did not list this model. Check installed agents again. If your OpenCode config restricts enabled providers, allow this connection before using it.",
   "local_models_custom_endpoint": "Custom Endpoint",
-  "local_models_compatible_api": "(OpenAI compatible)"
+  "local_models_compatible_api": "(OpenAI compatible)",
+  "common_resync": "Resync",
+  "common_resyncing": "Resyncing…",
+  "detail_drawer_resync_hint": "Restart the log supervisor for this run"
 }

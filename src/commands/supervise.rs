@@ -35,17 +35,191 @@ fn open_supervisor_lock(path: &std::path::Path) -> Result<fd_lock::RwLock<std::f
     Ok(fd_lock::RwLock::new(file))
 }
 
+/// The advisory lock one supervisor holds for the whole of its life. Its
+/// contents are the holder's pid, so [`resync`] can retire a wedged supervisor
+/// instead of guessing which process to signal.
+pub(crate) fn supervisor_lock_path(run_id: &str) -> std::path::PathBuf {
+    log_path(run_id).with_extension("supervisor.lock")
+}
+
+/// Stamp the lock file with our pid. Best effort — losing it only costs the
+/// forced half of [`resync`], which falls back to reporting the live holder.
+fn record_holder_pid(file: &mut std::fs::File) {
+    let _ = file.set_len(0);
+    let _ = file.rewind();
+    let _ = write!(file, "{}", std::process::id());
+    let _ = file.flush();
+}
+
+/// What a [`resync`] actually did, so the caller can say so rather than
+/// claiming a fix it may not have applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ResyncReport {
+    /// The run had already finished; supervision was not restarted.
+    pub terminal: bool,
+    /// A live supervisor was found and retired.
+    pub replaced: bool,
+    /// A fresh supervisor was spawned.
+    pub spawned: bool,
+}
+
+impl ResyncReport {
+    pub fn describe(&self, run_id: &str) -> String {
+        if self.terminal {
+            return format!("Run {run_id} has already finished — nothing to supervise.");
+        }
+        match (self.replaced, self.spawned) {
+            (true, true) => format!(
+                "Replaced the supervisor for {run_id}; the log will re-mirror from the start."
+            ),
+            (false, true) => format!("No supervisor was watching {run_id}; started one."),
+            (_, false) => format!(
+                "A supervisor is already running for {run_id} and could not be retired from here."
+            ),
+        }
+    }
+}
+
+/// How long to wait for a signalled supervisor to actually let go of its lock.
+const RESYNC_HANDOVER: Duration = Duration::from_secs(5);
+
+/// Restart supervision of `run_id` from scratch: the manual fallback for a
+/// supervisor that is alive but no longer making progress.
+///
+/// Unconditionally replacing a *healthy* supervisor is safe, and that is the
+/// point — `supervise` is restart-idempotent (its state is the local store plus
+/// the backend itself), and the ssh/slurm/sge tails re-mirror the remote log
+/// from byte zero, so a resync also repairs a local mirror that diverged rather
+/// than merely stalled. Deciding whether the old process was "really" stuck
+/// would mean re-implementing the health check that just failed us.
+pub(crate) async fn resync(run_id: &str) -> Result<ResyncReport> {
+    let store = Store::open()?;
+    let run = store
+        .get_run(run_id)?
+        .ok_or_else(|| anyhow!("Run {run_id} not found in the local store."))?;
+    if crate::local::is_terminal(&run.status) {
+        return Ok(ResyncReport {
+            terminal: true,
+            replaced: false,
+            spawned: false,
+        });
+    }
+
+    let lock_path = supervisor_lock_path(run_id);
+    let mut lock = open_supervisor_lock(&lock_path)?;
+    // Holding the lock ourselves would starve the supervisor we are about to
+    // spawn, so every branch below releases it before spawning.
+    let held = match lock.try_write() {
+        Ok(_) => false,
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(err) => return Err(err.into()),
+    };
+    if !held {
+        crate::commands::exp::spawn_detached_supervise(run_id)?;
+        return Ok(ResyncReport {
+            terminal: false,
+            replaced: false,
+            spawned: true,
+        });
+    }
+
+    let retired = retire_holder(&lock_path, run_id, &mut lock).await;
+    if !retired {
+        return Ok(ResyncReport {
+            terminal: false,
+            replaced: false,
+            spawned: false,
+        });
+    }
+    crate::commands::exp::spawn_detached_supervise(run_id)?;
+    Ok(ResyncReport {
+        terminal: false,
+        replaced: true,
+        spawned: true,
+    })
+}
+
+/// TERM the recorded holder and wait for the lock to come free. `false` means
+/// the holder could not be identified or would not let go — never that it did.
+#[cfg(unix)]
+async fn retire_holder(
+    lock_path: &std::path::Path,
+    run_id: &str,
+    lock: &mut fd_lock::RwLock<std::fs::File>,
+) -> bool {
+    let Some(pid) = std::fs::read_to_string(lock_path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+        .filter(|pid| *pid > 1)
+    else {
+        return false;
+    };
+    // A pid outlives the process that owned it, so signalling one read from a
+    // file is only safe behind an identity check: a recycled pid belongs to
+    // some unrelated program, whose argv will not name this run.
+    if !holder_is_supervisor(pid, run_id) {
+        return false;
+    }
+    // SAFETY: `kill` with a positive pid and SIGTERM has no preconditions
+    // beyond the pid being valid, which the identity check above establishes.
+    unsafe {
+        libc::kill(pid, libc::SIGTERM);
+    }
+    let deadline = tokio::time::Instant::now() + RESYNC_HANDOVER;
+    while tokio::time::Instant::now() < deadline {
+        if lock.try_write().is_ok() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
+}
+
+/// Does `pid` name a live `orx supervise` for this run?
+#[cfg(unix)]
+fn holder_is_supervisor(pid: i32, run_id: &str) -> bool {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-o", "args=", "-p", &pid.to_string()])
+        .output()
+    else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let args = String::from_utf8_lossy(&out.stdout);
+    args.contains("supervise") && args.contains(run_id)
+}
+
+/// Windows has no SIGTERM, so a live holder stays put; the caller reports that
+/// honestly rather than spawning a second supervisor that would just exit.
+#[cfg(not(unix))]
+async fn retire_holder(
+    _lock_path: &std::path::Path,
+    _run_id: &str,
+    _lock: &mut fd_lock::RwLock<std::fs::File>,
+) -> bool {
+    false
+}
+
 pub async fn run(args: crate::SuperviseArgs) -> Result<()> {
     let run_id = args.run_id;
+    if args.restart {
+        let report = resync(&run_id).await?;
+        println!("{}", report.describe(&run_id));
+        return Ok(());
+    }
 
     let store = Store::open()?;
-    let lock_path = log_path(&run_id).with_extension("supervisor.lock");
+    let lock_path = supervisor_lock_path(&run_id);
     let mut supervisor_lock = open_supervisor_lock(&lock_path)?;
-    let _supervisor_guard = match supervisor_lock.try_write() {
+    let mut supervisor_guard = match supervisor_lock.try_write() {
         Ok(guard) => guard,
         Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
         Err(err) => return Err(err.into()),
     };
+    record_holder_pid(&mut supervisor_guard);
     let stored = store
         .get_run(&run_id)?
         .ok_or_else(|| anyhow!("Run {} not found in the local store.", run_id))?;
@@ -1662,6 +1836,40 @@ mod tests {
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The report is what the dashboard shows, so each branch must claim only
+    /// what happened — in particular the "could not retire" case must never
+    /// read as a successful restart.
+    #[test]
+    fn resync_report_describes_only_what_it_did() {
+        let report = |terminal, replaced, spawned| {
+            ResyncReport {
+                terminal,
+                replaced,
+                spawned,
+            }
+            .describe("run-1")
+        };
+        assert!(report(true, false, false).contains("already finished"));
+        assert!(report(false, true, true).contains("Replaced the supervisor"));
+        assert!(report(false, false, true).contains("started one"));
+
+        let stuck = report(false, false, false);
+        assert!(stuck.contains("already running"));
+        assert!(!stuck.contains("Replaced"));
+    }
+
+    /// The identity check is the only thing standing between a recycled pid and
+    /// a stray SIGTERM, so it must reject a live process that is not this run's
+    /// supervisor — here, the test binary itself.
+    #[cfg(unix)]
+    #[test]
+    fn holder_identity_rejects_an_unrelated_process() {
+        let me = std::process::id() as i32;
+        assert!(!holder_is_supervisor(me, "run-1"));
+        // A pid that cannot exist resolves to no process at all.
+        assert!(!holder_is_supervisor(i32::MAX, "run-1"));
     }
 
     #[test]

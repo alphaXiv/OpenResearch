@@ -581,6 +581,11 @@ pub struct ServeArgs {
 pub struct SuperviseArgs {
     /// The run to supervise (must exist in the local store).
     pub run_id: String,
+    /// Retire whatever supervisor is watching this run and start a fresh one,
+    /// re-mirroring its log from the start. The manual fallback for a
+    /// supervisor that is alive but no longer making progress.
+    #[arg(long)]
+    pub restart: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1153,6 +1158,7 @@ mod cli_tests {
         assert!(!should_capture_command(&Command::Supervise(
             SuperviseArgs {
                 run_id: "run-1".into(),
+                restart: false,
             }
         )));
         assert!(!should_capture_command(&Command::Update(UpdateArgs {

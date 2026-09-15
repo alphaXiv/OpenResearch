@@ -468,6 +468,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/instances", get(list_instances))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/resync", post(resync_run))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
@@ -2134,6 +2135,24 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Manual fallback for a supervisor that is alive but no longer advancing the
+/// run's local log: retire it and start a fresh one. Deliberately not gated on
+/// the run looking stuck — the dashboard cannot tell a slow poll from a wedged
+/// one, and `supervise` is restart-idempotent either way.
+async fn resync_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
+    let report = crate::commands::supervise::resync(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "report": report,
+        "message": report.describe(&id),
+    })))
 }
 
 #[derive(Deserialize)]
