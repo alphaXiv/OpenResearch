@@ -22,6 +22,7 @@ import {
   ExternalLink,
   FileOutput,
   FileText,
+  FolderOpen,
   GitBranch,
   X,
 } from "lucide-react";
@@ -32,6 +33,7 @@ import {
   FileChangedError,
   openFileInEditor,
   projectFileUrl,
+  revealFileInManager,
   saveProjectFile,
   type ArtifactEntry,
 } from "../api";
@@ -419,6 +421,22 @@ export function FileViewer({
       setOpeningEditor(false);
     }
   };
+
+  const [revealing, setRevealing] = useState(false);
+  const [revealError, setRevealError] = useState<string | null>(null);
+  // Show the file in the OS file manager (Finder/Explorer), the useful action
+  // for a binary or unrecognized file the dashboard can't preview inline.
+  const revealInManager = async () => {
+    setRevealing(true);
+    setRevealError(null);
+    try {
+      await revealFileInManager(projectId, filePath, { sessionId });
+    } catch (e) {
+      setRevealError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRevealing(false);
+    }
+  };
   const reload = useCallback(() => {
     if (!bufferSession.saving) setNonce((value) => value + 1);
   }, [bufferSession]);
@@ -605,6 +623,18 @@ export function FileViewer({
             onClick={() => void openInEditor()}
           >
             {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
+          </IconButton>
+        )}
+        {onDisk && !remote && (
+          <IconButton
+            size="small"
+            data-tip={revealError ?? m.file_viewer_reveal_in_file_manager()}
+            data-tip-align="end"
+            aria-label={m.file_viewer_reveal_in_file_manager()}
+            disabled={revealing}
+            onClick={() => void revealInManager()}
+          >
+            {revealing ? <Spinner /> : <FolderOpen size={13} />}
           </IconButton>
         )}
       </div>
