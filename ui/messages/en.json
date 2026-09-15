@@ -1150,5 +1150,6 @@
   "new_project_form_extra_topics_comma_separated_e_g_llm": "Extra topics (comma-separated), e.g. llm, benchmark",
   "settings_page_auto_apply_git_hub_topics_for_new_projects": "Auto-apply GitHub topics for new projects",
   "settings_page_auto_apply_git_hub_topics_help": "Tag new repositories with openresearch, and with arxiv-xxxx and paper-repro when the project starts from a paper.",
-  "settings_page_repository_topics": "Repository topics"
+  "settings_page_repository_topics": "Repository topics",
+  "settings_page_add_topics_automatically": "Add topics automatically"
 }

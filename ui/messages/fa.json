@@ -1150,5 +1150,6 @@
   "new_project_form_extra_topics_comma_separated_e_g_llm": "موضوع‌های افزوده (با کاما جدا شوند)، مانند llm, benchmark",
   "settings_page_auto_apply_git_hub_topics_for_new_projects": "اعمال خودکار موضوع‌های GitHub برای پروژه‌های جدید",
   "settings_page_auto_apply_git_hub_topics_help": "مخزن‌های جدید با openresearch برچسب می‌خورند و اگر پروژه از یک مقاله باشد، arxiv-xxxx و paper-repro نیز افزوده می‌شود.",
-  "settings_page_repository_topics": "موضوع‌های مخزن"
+  "settings_page_repository_topics": "موضوع‌های مخزن",
+  "settings_page_add_topics_automatically": "افزودن خودکار موضوع‌ها"
 }

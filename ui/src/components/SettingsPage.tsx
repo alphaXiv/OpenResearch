@@ -3183,7 +3183,7 @@ function GitTab({
                     <Switch
                       type="button"
                       checked={topicsAuto ?? false}
-                      aria-label={m.settings_page_repository_topics()}
+                      aria-label={m.settings_page_add_topics_automatically()}
                       disabled={topicsAuto === null || topicsSaving}
                       onClick={() => setTopicsAuto((current) => !(current ?? false))}
                     />

@@ -646,7 +646,7 @@ export function NewProjectForm({
                     value={githubTopics}
                     onChange={(event) => setGithubTopics(event.target.value)}
                     placeholder={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
-                    aria-label={m.settings_page_repository_topics()}
+                    aria-label={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
                     disabled={pending}
                   />
                 </>

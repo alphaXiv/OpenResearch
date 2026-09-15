@@ -1150,5 +1150,6 @@
   "new_project_form_extra_topics_comma_separated_e_g_llm": "附加 topic（逗号分隔），例如 llm, benchmark",
   "settings_page_auto_apply_git_hub_topics_for_new_projects": "为新项目自动添加 GitHub topic",
   "settings_page_auto_apply_git_hub_topics_help": "为新仓库添加 openresearch；项目来自论文时还会添加 arxiv-xxxx 与 paper-repro。",
-  "settings_page_repository_topics": "仓库 topic"
+  "settings_page_repository_topics": "仓库 topic",
+  "settings_page_add_topics_automatically": "自动添加 topic"
 }

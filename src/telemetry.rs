@@ -294,9 +294,15 @@ pub(crate) fn set_github_for_new_projects(enabled: bool) -> std::io::Result<()> 
 }
 
 pub(crate) fn github_auto_topics_for_new_projects() -> bool {
+    // One load, so the fallback cannot observe a different file than the value
+    // it falls back from when settings.json is rewritten in between.
     load_settings()
-        .and_then(|settings| settings.github_auto_topics_for_new_projects)
-        .unwrap_or_else(github_for_new_projects)
+        .map(|settings| {
+            settings
+                .github_auto_topics_for_new_projects
+                .unwrap_or(settings.github_for_new_projects.unwrap_or(false))
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn set_github_auto_topics_for_new_projects(enabled: bool) -> std::io::Result<()> {
