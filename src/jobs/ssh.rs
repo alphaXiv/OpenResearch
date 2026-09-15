@@ -190,12 +190,27 @@ fn control_path(target: &SshTarget) -> PathBuf {
 
 /// Shared ssh options: setup may prompt, background work never does; on unix one shared
 /// socket lets a single login cover both.
+///
+/// `ServerAlive*` is not decoration. `ConnectTimeout` only bounds the TCP
+/// handshake, and a multiplexed call performs no handshake at all — it hands
+/// the channel to a master that already holds the socket. If that socket is
+/// half-open (laptop sleep, a Wi-Fi/VPN change, a NAT table reaped mid-run)
+/// nothing below the application layer ever notices: the master stays
+/// resident, `ssh -O check` keeps answering "running" because it is a local
+/// unix-socket query, and every channel opened through it blocks forever.
+/// Keepalives are the only thing that turns that into an observable failure —
+/// after `Interval * CountMax` (~90s) the master exits, its control socket
+/// goes away, and callers get a prompt error they can recover from.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=30".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
     ];
     opts.extend(multiplexing_opts(target));
     opts.extend(target.extra_opts.iter().cloned());
@@ -235,13 +250,8 @@ pub(crate) fn forward_args(
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, true);
-    for option in [
-        "ExitOnForwardFailure=yes",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=3",
-    ] {
-        args.extend(["-o".into(), option.into()]);
-    }
+    // Keepalives come from `ssh_opts`; a forward adds only its own failure mode.
+    args.extend(["-o".into(), "ExitOnForwardFailure=yes".into()]);
     args.extend([
         // No PTY: the remote session bearer is delivered over stdin and must
         // never be echoed by terminal line discipline.
@@ -467,7 +477,39 @@ pub(crate) async fn ssh_run(
     ssh_run_bytes(target, remote_cmd, stdin.map(str::as_bytes)).await
 }
 
+/// Ceiling on one non-streaming remote command.
+///
+/// Belt to the keepalives' braces: those let a dead master notice within ~90s,
+/// but nothing bounds a call that is merely pathological (an NFS-blocked
+/// `tail` on a hung mount, a login node under load, a `qstat` behind a stuck
+/// qmaster). The supervisor's poll and log-tail loops are the ones that matter
+/// — each caller treats a timeout as a retryable error, so the cost of being
+/// wrong here is one wasted poll, while the cost of no ceiling at all is a run
+/// whose log silently stops advancing until someone notices by eye.
+const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn ssh_run_bytes(
+    target: &SshTarget,
+    remote_cmd: &str,
+    stdin: Option<&[u8]>,
+) -> Result<String> {
+    match tokio::time::timeout(
+        SSH_EXEC_TIMEOUT,
+        ssh_run_bytes_inner(target, remote_cmd, stdin),
+    )
+    .await
+    {
+        Ok(result) => result,
+        // `kill_on_drop` reaps the child as the future is dropped.
+        Err(_) => Err(anyhow!(
+            "ssh {} timed out after {}s running a remote command.",
+            target.dest,
+            SSH_EXEC_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+async fn ssh_run_bytes_inner(
     target: &SshTarget,
     remote_cmd: &str,
     stdin: Option<&[u8]>,
@@ -525,6 +567,13 @@ async fn ssh_run_bytes(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// As [`ssh_run`], but streams a local file to the remote command's stdin.
+///
+/// Deliberately NOT under [`SSH_EXEC_TIMEOUT`]: this is the source-archive
+/// upload, whose duration scales with the snapshot size and the link, so any
+/// fixed ceiling would abort legitimate transfers. It runs on the user-facing
+/// submit path where a stall is visible, not inside a headless supervisor
+/// loop, and the keepalives in [`ssh_opts`] still bound a dead connection.
 async fn ssh_run_file(
     target: &SshTarget,
     remote_cmd: &str,
@@ -820,7 +869,8 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
+        // BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax
+        let shared = 8 + multiplexing_opts(&target).len();
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
