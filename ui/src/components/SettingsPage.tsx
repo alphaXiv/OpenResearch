@@ -2775,10 +2775,11 @@ function ProjectDefaultsTab() {
     const enabled = !settings.githubAutoTopicsForNewProjects;
     setSaving(true);
     setError(null);
+    // Only the auto-topics default is sent. Echoing the cached prompt-seen flag
+    // could flip it back if another flow just answered the one-time prompt.
     void setProjectDefaultsMutation.mutateAsync([
       settings.githubForNewProjects,
       enabled,
-      settings.githubDefaultPromptSeen,
     ])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))

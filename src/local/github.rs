@@ -207,7 +207,7 @@ pub async fn set_repo_topics(owner: &str, repo: &str, topics: &[String]) -> Resu
     // topics this merge exists to protect.
     let existing = repo_topics(owner, repo).await?;
     let merged = merge_topics(&sanitize_topics(topics), &existing);
-    if merged.is_empty() || merged == existing {
+    if merged.is_empty() || topics_match(&existing, &merged) {
         // Never PUT an empty set (it clears the repo) and skip a no-op write.
         return Ok(());
     }
@@ -253,6 +253,17 @@ async fn repo_topics(owner: &str, repo: &str) -> Result<Vec<String>> {
                 .collect()
         })
         .unwrap_or_default())
+}
+
+/// Whether the repository already carries exactly this set of topics. Order is
+/// deliberately ignored: GitHub need not echo our PUT order back, and an
+/// order-sensitive check would re-PUT on every push.
+fn topics_match(current: &[String], next: &[String]) -> bool {
+    let mut current = sanitize_topics(current);
+    let mut next = sanitize_topics(next);
+    current.sort_unstable();
+    next.sort_unstable();
+    current == next
 }
 
 /// GitHub's topic PUT replaces the whole set, so merge instead of overwrite: a
@@ -496,6 +507,31 @@ mod tests {
             default_topics_for_project(Some("   ")),
             vec!["openresearch"]
         );
+    }
+
+    #[test]
+    fn topic_sets_compare_ignoring_order_and_spacing() {
+        let stored = vec!["openresearch".to_string(), "paper-repro".to_string()];
+        // Same set, different order: GitHub need not echo our PUT order back.
+        let reordered = vec!["paper-repro".to_string(), "openresearch".to_string()];
+        assert!(topics_match(&stored, &reordered));
+
+        // Normalization-only differences also count as unchanged.
+        assert!(topics_match(
+            &stored,
+            &[" Paper_Repro ".to_string(), "OpenResearch".to_string()]
+        ));
+
+        // A genuinely different set still writes.
+        assert!(!topics_match(&stored, &["openresearch".to_string()]));
+        assert!(!topics_match(
+            &stored,
+            &[
+                "openresearch".to_string(),
+                "paper-repro".to_string(),
+                "llm".to_string()
+            ]
+        ));
     }
 
     #[test]
