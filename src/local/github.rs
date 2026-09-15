@@ -363,41 +363,142 @@ fn normalize_topic(input: &str) -> Option<String> {
     (!topic.is_empty()).then_some(topic)
 }
 
+/// Derives the `arxiv-…` topic from whatever the project recorded as its paper
+/// id: a bare id, an `arXiv:`-prefixed one, or a pasted URL.
+///
+/// Every step is total — no slice a malformed id could index past, no unwrap —
+/// and an id that cannot be understood simply yields no topic. Publishing topics
+/// decorates a push that already succeeded, so parsing must never be able to
+/// take the project flow down with it.
 fn normalize_arxiv_topic(paper_id: &str) -> Option<String> {
-    let trimmed = paper_id.trim();
-    // Pasted ids arrive as `arXiv:2401.12345` as often as the bare id; match the
-    // prefix case-insensitively or the scheme word rides into the topic.
-    let stripped = trimmed
-        .get(..6)
-        .filter(|prefix| prefix.eq_ignore_ascii_case("arxiv:"))
-        .map_or(trimmed, |_| trimmed[6..].trim());
-    let id = stripped.split('/').next_back().unwrap_or(stripped);
-    let id = id.strip_suffix(".pdf").unwrap_or(id);
-    let id = strip_arxiv_version(id);
-    if id.is_empty() {
-        // A blank or scheme-only id has nothing to derive a topic from.
+    let raw = paper_id.trim();
+    let path = raw.split(['?', '#']).next().unwrap_or(raw);
+    let path = strip_arxiv_url_prefix(path);
+
+    let id = match_arxiv_id(path)?;
+    normalize_topic(&format!("arxiv-{}", id.replace(['.', '/'], "-")))
+}
+
+/// Drops the scheme, host and `abs`/`pdf` segment of an arXiv URL so only the id
+/// path is left to match. Anything that is not a URL comes back unchanged.
+fn strip_arxiv_url_prefix(raw: &str) -> &str {
+    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
+        return raw;
+    }
+    let Some((_, rest)) = raw.split_once("://") else {
+        return raw;
+    };
+    let Some((_, path)) = rest.split_once('/') else {
+        // Host with no path: nothing left to match.
+        return "";
+    };
+    match path.split_once('/') {
+        Some((kind, tail))
+            if kind.eq_ignore_ascii_case("abs") || kind.eq_ignore_ascii_case("pdf") =>
+        {
+            tail
+        }
+        _ => path,
+    }
+}
+
+/// `Some(id)` when `candidate` is shaped like an arXiv id, new style
+/// (`2401.12345`) or old style (`hep-th/9901001`).
+fn known_arxiv_id_shape(candidate: &str) -> Option<&str> {
+    let digits = |text: &str, min: usize, max: usize| {
+        (min..=max).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    // New style: YYMM.NNNNN.
+    if let Some((head, tail)) = candidate.split_once('.') {
+        if digits(head, 4, 4) && digits(tail, 4, 5) {
+            return Some(candidate);
+        }
+    }
+    // Old style: an archive, optionally with a subcategory, plus a 7-digit
+    // number. The archive may carry a hyphen (`hep-th`), so this must not
+    // require a dot in the head.
+    let (archive, number) = candidate.rsplit_once('/')?;
+    if archive.is_empty() || !digits(number, 7, 7) {
         return None;
     }
-    let id = id.replace('.', "-");
-    normalize_topic(&format!("arxiv-{id}"))
+    let archive_shape = archive.len() <= 32
+        && archive.split('.').all(|part| {
+            !part.is_empty()
+                && part
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')
+        });
+    archive_shape.then_some(candidate)
+}
+
+/// The longest arxiv-shaped id ending `path`, so an old-style `hep-th/9901001`
+/// keeps its archive prefix instead of degrading to `9901001`, a number several
+/// archives can share.
+///
+/// Walks separators through `char_indices`, never a byte offset, so a multi-byte
+/// id cannot land the slice inside a character.
+fn match_arxiv_id(path: &str) -> Option<String> {
+    let cleaned = strip_arxiv_version(path);
+    let mut offset = 0;
+    loop {
+        let candidate = &cleaned[offset..];
+        let candidate = strip_prefix_ignore_case(candidate, "arxiv:").unwrap_or(candidate);
+        let candidate = strip_suffix_ignore_case(candidate, ".pdf");
+        let candidate = candidate.trim_matches('/');
+        if !candidate.is_empty() && known_arxiv_id_shape(candidate).is_some() {
+            return Some(candidate.to_string());
+        }
+        let slash = cleaned[offset..]
+            .char_indices()
+            .find(|(_, ch)| *ch == '/')
+            .map(|(index, _)| index)?;
+        offset += slash + 1;
+    }
+}
+
+/// Case-insensitive prefix strip that compares ASCII only, so a multi-byte input
+/// cannot make it slice through a character.
+fn strip_prefix_ignore_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| &text[prefix.len()..])
+}
+
+/// Case-insensitive suffix strip that compares ASCII only, so a multi-byte input
+/// cannot make it slice through a character.
+fn strip_suffix_ignore_case<'a>(text: &'a str, suffix: &str) -> &'a str {
+    let Some(cut) = text.len().checked_sub(suffix.len()) else {
+        return text;
+    };
+    match text.get(cut..) {
+        Some(tail) if tail.eq_ignore_ascii_case(suffix) => &text[..cut],
+        _ => text,
+    }
 }
 
 /// Drops a trailing `vN` so every version of one paper maps to one topic —
 /// otherwise `2401.12345v1` and `v2` land in separate search buckets.
 ///
 /// Only a `v` followed by digits counts, and only when digits precede it, so an
-/// old-style id like `hep-th/9901001` keeps its trailing `1`.
+/// old-style id like `hep-th/9901001` keeps its trailing `1`. A trailing
+/// extension is tolerated (`2401.12345v2.pdf`) because this runs before the
+/// caller has decided whether to strip one.
 fn strip_arxiv_version(id: &str) -> &str {
-    if let Some((head, tail)) = id.rsplit_once('v') {
-        if !head.is_empty()
-            && head.ends_with(|ch: char| ch.is_ascii_digit())
-            && !tail.is_empty()
-            && tail.chars().all(|ch| ch.is_ascii_digit())
-        {
-            return head;
-        }
+    // Tolerate a trailing extension so `2401.12345v2.pdf` is understood whether
+    // or not the caller strips the `.pdf` first.
+    let tail = strip_suffix_ignore_case(id, ".pdf");
+    // Split on the `v` itself; the trailing digits must stay in the searched
+    // string, so this cannot look only at the digit-stripped prefix.
+    let Some((head, version)) = tail.rsplit_once('v') else {
+        return id;
+    };
+    if version.is_empty() || !version.bytes().all(|byte| byte.is_ascii_digit()) {
+        return id;
     }
-    id
+    if head.is_empty() || !head.ends_with(|ch: char| ch.is_ascii_digit()) {
+        return id;
+    }
+    head
 }
 
 #[cfg(test)]
@@ -492,6 +593,69 @@ mod tests {
         ] {
             assert_eq!(topic(id), expected, "id {id} should normalize");
         }
+    }
+
+    #[test]
+    fn old_style_ids_keep_their_archive_prefix() {
+        // The archive prefix is signal: `9901001` alone is shared across archives.
+        let topic = |id: &str| default_topics_for_project(Some(id));
+        assert_eq!(topic("hep-th/9901001")[1], "arxiv-hep-th-9901001");
+        assert_eq!(topic("cs.CL/0701001")[1], "arxiv-cs-cl-0701001");
+        assert_eq!(
+            topic("https://arxiv.org/abs/hep-th/9901001")[1],
+            "arxiv-hep-th-9901001"
+        );
+        // The version suffix is still dropped, archive prefix and all.
+        assert_eq!(topic("hep-th/9901001v3")[1], "arxiv-hep-th-9901001");
+    }
+
+    #[test]
+    fn unparseable_paper_ids_yield_no_topic_without_panicking() {
+        // Topics decorate a push that already succeeded, so a strange id must
+        // degrade to "no arxiv topic" rather than take the flow down.
+        for id in [
+            "",
+            "   ",
+            "arxiv:",
+            "arXiv:",
+            "not a paper id",
+            "https://example.com/abs/",
+            "https://arxiv.org/abs/",
+            "http://",
+            "https://",
+            "hep-th/",
+            "//",
+            "..",
+            "2401",
+            "2401.",
+            "v2",
+            "日本語のタイトル",
+            "arxiv:日本語",
+            "2401.12345/../../etc/passwd",
+            "x".repeat(500).as_str(),
+            "\u{0}",
+        ] {
+            assert_eq!(
+                default_topics_for_project(Some(id)),
+                vec!["openresearch"],
+                "id {id:?} should publish no arxiv topic"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_ids_cannot_slip_a_bogus_topic_through() {
+        // Path traversal and query strings must not become part of the topic.
+        let topic = |id: &str| default_topics_for_project(Some(id));
+        assert_eq!(
+            topic("https://arxiv.org/abs/2401.12345?context=cs")[1],
+            "arxiv-2401-12345"
+        );
+        assert_eq!(topic("2401.12345#section")[1], "arxiv-2401-12345");
+        assert_eq!(
+            topic("https://arxiv.org/pdf/2401.12345v2.pdf")[1],
+            "arxiv-2401-12345"
+        );
     }
 
     #[test]

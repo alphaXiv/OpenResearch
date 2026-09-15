@@ -261,8 +261,12 @@ export function NewProjectForm({
         requireNewFolder: mode === "blank",
         initializeGit: true,
         githubSyncEnabled,
-        githubAutoTopicsEnabled,
-        githubTopics: parseTopics(githubTopics),
+        // Topic fields are hidden while syncing is off, so sending them would
+        // persist state the user cannot see and could surface later as topics
+        // they never confirmed.
+        ...(githubSyncEnabled
+          ? { githubAutoTopicsEnabled, githubTopics: parseTopics(githubTopics) }
+          : {}),
         locale: getLocale(),
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
