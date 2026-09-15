@@ -3080,19 +3080,24 @@ function GitTab({
   const parseTopicDraft = (raw: string) =>
     raw.split(",").map((topic) => topic.trim()).filter((topic) => topic.length > 0);
 
-  const savedTopics = project ? project.githubTopics.join(", ") : "";
+  // Compare parsed topics, not raw drafts: ", " and "," spell the same set, so
+  // spacing alone must not mark the field dirty and trigger a pointless PATCH.
+  const draftTopics = topicsCustom === null ? null : parseTopicDraft(topicsCustom);
+  const savedTopics = project?.githubTopics ?? null;
   const topicsDirty = Boolean(
-    project && topicsAuto !== null && topicsCustom !== null
-    && (topicsAuto !== project.githubAutoTopicsEnabled || topicsCustom !== savedTopics),
+    project && topicsAuto !== null && draftTopics !== null && savedTopics !== null
+    && (topicsAuto !== project.githubAutoTopicsEnabled
+      || draftTopics.length !== savedTopics.length
+      || draftTopics.some((topic, index) => topic !== savedTopics[index])),
   );
 
   const saveTopics = () => {
-    if (!project || topicsAuto === null || topicsCustom === null) return;
+    if (!project || topicsAuto === null || draftTopics === null) return;
     setTopicsSaving(true);
     setTopicsError(null);
     void updateProject(project.id, {
       githubAutoTopicsEnabled: topicsAuto,
-      githubTopics: parseTopicDraft(topicsCustom),
+      githubTopics: draftTopics,
     })
       .then((updated) => {
         // Re-seed from the server's sanitized values so the field shows what was kept.
@@ -3170,7 +3175,7 @@ function GitTab({
                     <Switch
                       type="button"
                       checked={topicsAuto ?? false}
-                      aria-label={m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+                      aria-label={m.settings_page_repository_topics()}
                       disabled={topicsAuto === null || topicsSaving}
                       onClick={() => setTopicsAuto((current) => !(current ?? false))}
                     />

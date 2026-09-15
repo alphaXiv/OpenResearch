@@ -622,7 +622,7 @@ export function NewProjectForm({
               </span>
               {githubSyncEnabled && (
                 <>
-                  <span className="mt-1 flex flex-row items-center gap-[9px]">
+                  <label className="mt-1 flex flex-row items-center gap-[9px]">
                     <input
                       className="m-0"
                       type="checkbox"
@@ -633,7 +633,7 @@ export function NewProjectForm({
                     <span className="text-sm font-medium leading-[1.3] text-text">
                       {m.new_project_form_auto_apply_repository_topics()}
                     </span>
-                  </span>
+                  </label>
                   <span className="text-xs text-muted">
                     {m.new_project_form_automatic_topics_include_openresearch_and()}
                   </span>
@@ -642,6 +642,7 @@ export function NewProjectForm({
                     value={githubTopics}
                     onChange={(event) => setGithubTopics(event.target.value)}
                     placeholder={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
+                    aria-label={m.settings_page_repository_topics()}
                     disabled={pending}
                   />
                 </>
