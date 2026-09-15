@@ -2370,6 +2370,7 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "zh-CN", label: "简体中文" },
   { id: "fa", label: "فارسی" },
   { id: "ar", label: "العربية" },
+  { id: "es", label: "Español" },
 ];
 
 function AppearanceTab() {
