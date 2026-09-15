@@ -83,10 +83,6 @@ impl LocalProject {
         })
     }
 
-    pub fn github_topics_enabled(&self) -> bool {
-        self.github_enabled() && self.github_auto_topics_enabled
-    }
-
     /// Column order must match `store::PROJECT_COLS`.
     pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> std::result::Result<Self, rusqlite::Error> {
         let github_topics: String = row.get(7)?;
