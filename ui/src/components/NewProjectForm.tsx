@@ -48,6 +48,14 @@ function parsePaperId(input: string): string | null {
   return /^\d{4}\.\d{4,5}(v\d+)?$/.test(id) ? id : null;
 }
 
+/** Splits the comma-separated topics field; the server normalizes and caps them. */
+function parseTopics(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((topic) => topic.trim())
+    .filter((topic) => topic.length > 0);
+}
+
 function parseGithubRepository(url?: string | null): { owner: string; repo: string } | null {
   const match = url?.trim().match(/github\.com[/:]([^/]+)\/([^/?#]+)/i);
   if (!match) return null;
@@ -90,6 +98,8 @@ export function NewProjectForm({
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [githubSyncEnabled, setGithubSyncEnabled] = useState(false);
+  const [githubAutoTopicsEnabled, setGithubAutoTopicsEnabled] = useState(false);
+  const [githubTopics, setGithubTopics] = useState("");
   const [paperQuery, setPaperQuery] = useState("");
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
@@ -127,7 +137,9 @@ export function NewProjectForm({
     if (appliedDefaults.current || !defaultsQuery.data) return;
     appliedDefaults.current = true;
     setGithubSyncEnabled(defaultsQuery.data.githubForNewProjects);
+    setGithubAutoTopicsEnabled(defaultsQuery.data.githubAutoTopicsForNewProjects);
   }, [defaultsQuery.data]);
+
   const previewName = useDebouncedValue(name.trim(), 150);
   const previewQuery = useQuery({ ...githubProjectRepoPreviewQuery(previewName), enabled: previewName === name.trim() });
   const githubRepoName = previewName === name.trim() ? previewQuery.data?.repo ?? slugify(name, 48) : slugify(name, 48);
@@ -249,6 +261,12 @@ export function NewProjectForm({
         requireNewFolder: mode === "blank",
         initializeGit: true,
         githubSyncEnabled,
+        // Topic fields are hidden while syncing is off, so sending them would
+        // persist state the user cannot see and could surface later as topics
+        // they never confirmed.
+        ...(githubSyncEnabled
+          ? { githubAutoTopicsEnabled, githubTopics: parseTopics(githubTopics) }
+          : {}),
         locale: getLocale(),
         ...(mode === "paper" && paper
           ? { paperId: paper.paperId, cloneUrl: paper.repoUrl ?? undefined }
@@ -606,6 +624,33 @@ export function NewProjectForm({
                   {m.new_project_form_sync_experiments_to_git_hub()}
                 </strong>
               </span>
+              {githubSyncEnabled && (
+                <>
+                  <label className="mt-1 flex flex-row items-center gap-[9px]">
+                    <input
+                      className="m-0"
+                      type="checkbox"
+                      checked={githubAutoTopicsEnabled}
+                      onChange={(event) => setGithubAutoTopicsEnabled(event.target.checked)}
+                      disabled={pending}
+                    />
+                    <span className="text-sm font-medium leading-[1.3] text-text">
+                      {m.new_project_form_auto_apply_repository_topics()}
+                    </span>
+                  </label>
+                  <span className="text-xs text-muted">
+                    {m.new_project_form_automatic_topics_include_openresearch_and()}
+                  </span>
+                  <input
+                    className="text-sm font-normal"
+                    value={githubTopics}
+                    onChange={(event) => setGithubTopics(event.target.value)}
+                    placeholder={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
+                    aria-label={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
+                    disabled={pending}
+                  />
+                </>
+              )}
               <span className="flex flex-col gap-[3px] font-sans text-sm font-normal leading-[1.4] text-subtext">
                 <span>
                   {githubDecisionPending

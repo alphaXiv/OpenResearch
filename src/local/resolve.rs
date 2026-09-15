@@ -54,6 +54,7 @@ mod tests {
             paper_id: None,
             created_at: now,
             updated_at: now,
+            ..Default::default()
         }
     }
 

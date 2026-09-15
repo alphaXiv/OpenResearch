@@ -147,6 +147,7 @@ mod tests {
             paper_id: None,
             created_at: 0,
             updated_at: 0,
+            ..Default::default()
         }
     }
 

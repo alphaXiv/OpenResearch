@@ -63,6 +63,7 @@ import {
   disableProjectGithub,
   enableProjectGithub,
   initializeProjectGit,
+  updateProject,
   saveHfToken,
   saveTinkerKey,
   saveModalToken,
@@ -2759,7 +2760,28 @@ function ProjectDefaultsTab() {
     const enabled = !settings.githubForNewProjects;
     setSaving(true);
     setError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
+    // This only answers the sync default, so auto topics are left unset: they
+    // keep following it for anyone who never chose an explicit value. The
+    // trailing flag records that the one-time prompt has been answered.
+    void setProjectDefaultsMutation.mutateAsync([enabled, undefined, true])
+      .then(setSettings)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  const toggleAutoTopics = () => {
+    if (!settings || saving) return;
+    const enabled = !settings.githubAutoTopicsForNewProjects;
+    setSaving(true);
+    setError(null);
+    // The sync default travels along because the endpoint requires it, and
+    // re-sending the value we just read is a no-op. The prompt-seen flag is
+    // deliberately omitted: echoing it from a possibly stale cache could flip it
+    // back after another flow answered the one-time prompt.
+    void setProjectDefaultsMutation.mutateAsync([
+      settings.githubForNewProjects,
+      enabled,
+    ])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2791,6 +2813,21 @@ function ProjectDefaultsTab() {
               aria-label={m.settings_page_enable_git_hub_syncing_for_new_projects()}
               disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
               onClick={toggle}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">
+                {m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+              </div>
+              <p>{m.settings_page_auto_apply_git_hub_topics_help()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.githubAutoTopicsForNewProjects}
+              aria-label={m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+              disabled={saving}
+              onClick={toggleAutoTopics}
             />
           </div>
           {!settings.githubAuthenticated && (
@@ -2966,7 +3003,28 @@ function GitTab({
   const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
+  // The standing auto-topics default, captured when the sync prompt opens.
+  const [defaultPromptAutoTopics, setDefaultPromptAutoTopics] = useState<boolean | null>(null);
+  // Topic editor state. `null` means "not seeded yet"; once the project arrives it
+  // holds the user's edits, so a background refetch cannot clobber typing.
+  const [topicsAuto, setTopicsAuto] = useState<boolean | null>(null);
+  const [topicsCustom, setTopicsCustom] = useState<string | null>(null);
+  const [topicsSaving, setTopicsSaving] = useState(false);
+  const [topicsError, setTopicsError] = useState<string | null>(null);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
+  const topicsProjectId = useRef<string | null>(null);
+
+  // Seed once per project: opening a different project on this tab must not leave
+  // the previous project's topics on screen, where saving would write them onto
+  // the new one. Re-seeding on every project object change would instead fight
+  // the user's typing, so key it on the project id.
+  useEffect(() => {
+    if (!project || topicsProjectId.current === project.id) return;
+    topicsProjectId.current = project.id;
+    setTopicsAuto(project.githubAutoTopicsEnabled);
+    setTopicsCustom(project.githubTopics.join(", "));
+    setTopicsError(null);
+  }, [project]);
 
   const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
@@ -2995,6 +3053,9 @@ function GitTab({
         void queryClient.fetchQuery(getProjectDefaultsQuery())
           .then((defaults) => {
             if (!defaults.githubForNewProjects && !defaults.githubDefaultPromptSeen) {
+              // Remember the standing auto-topics default: this prompt only asks
+              // about syncing, so answering it must not rewrite the other setting.
+              setDefaultPromptAutoTopics(defaults.githubAutoTopicsForNewProjects);
               setDefaultPromptOpen(true);
             }
           })
@@ -3007,10 +3068,53 @@ function GitTab({
   const finishDefaultPrompt = (enabled: boolean) => {
     setDefaultPromptSaving(true);
     setDefaultPromptError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
-      .then(() => setDefaultPromptOpen(false))
+    void setProjectDefaultsMutation.mutateAsync([
+      enabled,
+      defaultPromptAutoTopics ?? enabled,
+      true,
+    ])
+      .then((defaults) => {
+        // Publish the result into the shared cache: other handlers and the
+        // new-project form read these defaults, and a stale entry would make
+        // their next write revert what was just answered here.
+        setScopedQueryData(getProjectDefaultsQuery().queryKey, defaults);
+        setDefaultPromptOpen(false);
+      })
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));
+  };
+
+  /** Splits the comma-separated field; the server normalizes and caps the topics. */
+  const parseTopicDraft = (raw: string) =>
+    raw.split(",").map((topic) => topic.trim()).filter((topic) => topic.length > 0);
+
+  // Compare parsed topics, not raw drafts: ", " and "," spell the same set, so
+  // spacing alone must not mark the field dirty and trigger a pointless PATCH.
+  const draftTopics = topicsCustom === null ? null : parseTopicDraft(topicsCustom);
+  const savedTopics = project?.githubTopics ?? null;
+  const topicsDirty = Boolean(
+    project && topicsAuto !== null && draftTopics !== null && savedTopics !== null
+    && (topicsAuto !== project.githubAutoTopicsEnabled
+      || draftTopics.length !== savedTopics.length
+      || draftTopics.some((topic, index) => topic !== savedTopics[index])),
+  );
+
+  const saveTopics = () => {
+    if (!project || topicsAuto === null || draftTopics === null) return;
+    setTopicsSaving(true);
+    setTopicsError(null);
+    void updateProject(project.id, {
+      githubAutoTopicsEnabled: topicsAuto,
+      githubTopics: draftTopics,
+    })
+      .then((updated) => {
+        // Re-seed from the server's sanitized values so the field shows what was kept.
+        setTopicsAuto(updated.githubAutoTopicsEnabled);
+        setTopicsCustom(updated.githubTopics.join(", "));
+        onProjectUpdate(updated);
+      })
+      .catch((err) => setTopicsError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setTopicsSaving(false));
   };
 
   return (
@@ -3070,6 +3174,34 @@ function GitTab({
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
                   {m.settings_page_disabling_syncing_stops_automatic_pushes_compute_continues_to()}
                 </p>
+                <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+                  <div className="flex flex-row items-center justify-between gap-2.5">
+                    <div>
+                      <div className="text-sm font-medium text-text">{m.settings_page_repository_topics()}</div>
+                      <p className="m-0 text-sm leading-relaxed text-subtext">{m.settings_page_auto_apply_git_hub_topics_help()}</p>
+                    </div>
+                    <Switch
+                      type="button"
+                      checked={topicsAuto ?? false}
+                      aria-label={m.settings_page_add_topics_automatically()}
+                      disabled={topicsAuto === null || topicsSaving}
+                      onClick={() => setTopicsAuto((current) => !(current ?? false))}
+                    />
+                  </div>
+                  <div className="mt-2.5 flex flex-row items-center gap-2.5">
+                    <Input
+                      value={topicsCustom ?? ""}
+                      onChange={(event) => setTopicsCustom(event.target.value)}
+                      placeholder={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
+                      disabled={topicsCustom === null || topicsSaving}
+                      aria-label={m.settings_page_repository_topics()}
+                    />
+                    <Button variant="primary" disabled={!topicsDirty || topicsSaving} onClick={saveTopics}>
+                      {topicsSaving ? m.common_saving() : m.common_save()}
+                    </Button>
+                  </div>
+                  {topicsError && <div className="error mt-2">{topicsError}</div>}
+                </div>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
                   {status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
                   <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>

@@ -49,6 +49,8 @@ export interface Project {
   slug: string;
   githubOwner: string;
   githubRepo: string;
+  githubAutoTopicsEnabled: boolean;
+  githubTopics: string[];
   baselineBranch: string;
   repoPath: string;
   path: string;
@@ -257,6 +259,8 @@ export interface NewProject {
   requireNewFolder?: boolean;
   initializeGit?: boolean;
   githubSyncEnabled?: boolean;
+  githubAutoTopicsEnabled?: boolean;
+  githubTopics?: string[];
   /** UI locale for the starter prompts the server warms up on creation. */
   locale?: string;
 }
@@ -308,7 +312,15 @@ export const resolvePaper = (id: string, signal?: AbortSignal) =>
     (r) => r.paper,
   );
 
-export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
+export const updateProject = (
+  projectId: string,
+  body: {
+    runCommand?: string;
+    name?: string;
+    githubAutoTopicsEnabled?: boolean;
+    githubTopics?: string[];
+  },
+) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
 /** One suggested opening message for the empty chat, written by a model that
@@ -1357,6 +1369,7 @@ export const setLitSources = (body: LitSourcesSettings) =>
 
 export interface ProjectDefaultsSettings {
   githubForNewProjects: boolean;
+  githubAutoTopicsForNewProjects: boolean;
   githubDefaultPromptSeen: boolean;
   ghInstalled: boolean;
   githubAuthenticated: boolean;
@@ -1367,10 +1380,14 @@ export const getProjectDefaults = (signal?: AbortSignal) =>
 
 export const setProjectDefaults = (
   githubForNewProjects: boolean,
+  githubAutoTopicsForNewProjects?: boolean,
   githubDefaultPromptSeen?: boolean,
 ) =>
   post<ProjectDefaultsSettings>("/api/settings/projects", {
     githubForNewProjects,
+    ...(githubAutoTopicsForNewProjects === undefined
+      ? {}
+      : { githubAutoTopicsForNewProjects }),
     ...(githubDefaultPromptSeen === undefined ? {} : { githubDefaultPromptSeen }),
   });
 

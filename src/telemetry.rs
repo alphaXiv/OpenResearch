@@ -152,6 +152,10 @@ pub(crate) struct Settings {
     /// Whether the one-time post-publication default prompt has been answered.
     #[serde(default)]
     pub github_default_prompt_seen: Option<bool>,
+    /// Whether new projects should auto-apply GitHub repository topics when
+    /// GitHub syncing is enabled.
+    #[serde(default)]
+    pub github_auto_topics_for_new_projects: Option<bool>,
     /// Literature sources the user turned off (Settings → Literature sources).
     /// Values are `LitSource::as_str()` names; empty = all sources enabled, so a
     /// source added later defaults to enabled. Enforced by discovery and paper reading.
@@ -287,6 +291,22 @@ pub(crate) fn github_for_new_projects() -> bool {
 
 pub(crate) fn set_github_for_new_projects(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.github_for_new_projects = Some(enabled))
+}
+
+pub(crate) fn github_auto_topics_for_new_projects() -> bool {
+    // One load, so the fallback cannot observe a different file than the value
+    // it falls back from when settings.json is rewritten in between.
+    load_settings()
+        .map(|settings| {
+            settings
+                .github_auto_topics_for_new_projects
+                .unwrap_or(settings.github_for_new_projects.unwrap_or(false))
+        })
+        .unwrap_or(false)
+}
+
+pub(crate) fn set_github_auto_topics_for_new_projects(enabled: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.github_auto_topics_for_new_projects = Some(enabled))
 }
 
 /// Whether orx may apply updates on its own. Defaults to enabled — the whole
