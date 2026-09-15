@@ -652,7 +652,7 @@ function useSshMasterStatuses(hosts: string[]) {
   return [statuses, markRunning] as const;
 }
 
-function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | undefined }) {
+function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting)
     return (
       <span role="status">
@@ -848,7 +848,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
+function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
   if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;

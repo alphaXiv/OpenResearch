@@ -5923,8 +5923,14 @@ async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let running =
-        crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?;
+    // A missing master is meaningful only on platforms that support multiplexing.
+    // Windows opens a new SSH connection for each command; reporting false here
+    // makes a successful preflight immediately look disconnected in the dashboard.
+    let running = if cfg!(unix) {
+        Some(crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?)
+    } else {
+        None
+    };
     Ok(Json(json!({ "running": running })))
 }
 
@@ -7865,6 +7871,17 @@ mod tests {
             serde_json::from_str(r#"{"type":"resize","cols":120,"rows":40}"#).unwrap();
         let SshTerminalInput::Resize { cols, rows } = input;
         assert_eq!((cols, rows), (120, 40));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_ssh_master_status_is_not_a_disconnection() {
+        let response = ssh_master_status(Query(SshPreflightReq {
+            host: "unused-host".into(),
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        assert!(response.0["running"].is_null());
     }
 
     #[test]

@@ -967,7 +967,7 @@ export const saveSshConfig = (content: string, previousContent: string) =>
   put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
 export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
+  get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
 export type RemoteSessionStatus =
   | "connecting"
