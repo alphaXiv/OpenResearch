@@ -202,7 +202,10 @@ pub fn effective_project_topics(
 /// carries. Never clears the repository's topics, and skips the write when the
 /// union changes nothing.
 pub async fn set_repo_topics(owner: &str, repo: &str, topics: &[String]) -> Result<()> {
-    let existing = repo_topics(owner, repo).await.unwrap_or_default();
+    // Read failures must abort rather than degrade to an empty set: PUT replaces
+    // the whole list, so treating "could not read" as "has none" would delete the
+    // topics this merge exists to protect.
+    let existing = repo_topics(owner, repo).await?;
     let merged = merge_topics(&sanitize_topics(topics), &existing);
     if merged.is_empty() || merged == existing {
         // Never PUT an empty set (it clears the repo) and skip a no-op write.
@@ -224,8 +227,8 @@ pub async fn set_repo_topics(owner: &str, repo: &str, topics: &[String]) -> Resu
     Ok(())
 }
 
-/// Topics the repository currently carries. An unreadable list is treated as
-/// empty: the caller then diffs against `[]` and still publishes its own set.
+/// Topics the repository currently carries. Errors propagate to the caller: a
+/// merge computed against a silently-empty read would delete the real topics.
 async fn repo_topics(owner: &str, repo: &str) -> Result<Vec<String>> {
     let endpoint = format!("{}/topics", repository_endpoint(owner, repo));
     let body = gh(

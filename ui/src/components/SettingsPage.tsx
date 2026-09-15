@@ -3001,6 +3001,8 @@ function GitTab({
   const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
+  // The standing auto-topics default, captured when the sync prompt opens.
+  const [defaultPromptAutoTopics, setDefaultPromptAutoTopics] = useState<boolean | null>(null);
   // Topic editor state. `null` means "not seeded yet"; once the project arrives it
   // holds the user's edits, so a background refetch cannot clobber typing.
   const [topicsAuto, setTopicsAuto] = useState<boolean | null>(null);
@@ -3008,12 +3010,19 @@ function GitTab({
   const [topicsSaving, setTopicsSaving] = useState(false);
   const [topicsError, setTopicsError] = useState<string | null>(null);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
+  const topicsProjectId = useRef<string | null>(null);
 
+  // Seed once per project: opening a different project on this tab must not leave
+  // the previous project's topics on screen, where saving would write them onto
+  // the new one. Re-seeding on every project object change would instead fight
+  // the user's typing, so key it on the project id.
   useEffect(() => {
-    if (!project || topicsAuto !== null) return;
+    if (!project || topicsProjectId.current === project.id) return;
+    topicsProjectId.current = project.id;
     setTopicsAuto(project.githubAutoTopicsEnabled);
     setTopicsCustom(project.githubTopics.join(", "));
-  }, [project, topicsAuto]);
+    setTopicsError(null);
+  }, [project]);
 
   const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
@@ -3042,6 +3051,9 @@ function GitTab({
         void queryClient.fetchQuery(getProjectDefaultsQuery())
           .then((defaults) => {
             if (!defaults.githubForNewProjects && !defaults.githubDefaultPromptSeen) {
+              // Remember the standing auto-topics default: this prompt only asks
+              // about syncing, so answering it must not rewrite the other setting.
+              setDefaultPromptAutoTopics(defaults.githubAutoTopicsForNewProjects);
               setDefaultPromptOpen(true);
             }
           })
@@ -3054,7 +3066,11 @@ function GitTab({
   const finishDefaultPrompt = (enabled: boolean) => {
     setDefaultPromptSaving(true);
     setDefaultPromptError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, enabled, true])
+    void setProjectDefaultsMutation.mutateAsync([
+      enabled,
+      defaultPromptAutoTopics ?? enabled,
+      true,
+    ])
       .then(() => setDefaultPromptOpen(false))
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));

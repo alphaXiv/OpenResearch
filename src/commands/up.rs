@@ -1565,16 +1565,16 @@ fn push_project(project: &local::model::LocalProject) -> Result<()> {
 /// or a folder project riding an existing remote — never has another project's
 /// topics (or hand-added ones) wiped out.
 async fn sync_project_topics(project: &local::model::LocalProject) -> Result<()> {
-    if !project.github_topics_enabled() && project.github_topics.is_empty() {
-        // Nothing to derive and no extras configured: publishing an empty set
-        // would only risk clearing whatever the repository already carries.
-        return Ok(());
-    }
     let topics = local::github::effective_project_topics(
         project.paper_id.as_deref(),
         &project.github_topics,
         project.github_auto_topics_enabled,
     );
+    if topics.is_empty() {
+        // Nothing to derive and no extras configured: publishing an empty set
+        // would only risk clearing whatever the repository already carries.
+        return Ok(());
+    }
     local::github::set_repo_topics(&project.github_owner, &project.github_repo, &topics).await
 }
 
@@ -1861,6 +1861,10 @@ async fn update_project(
         project.github_topics = local::github::sanitize_topics(&topics);
     }
     store.update_local_project(&project)?;
+    // A manual edit should reach the repository now rather than waiting for the
+    // next push. The SQLite row above is the source of truth, so a failure here
+    // only warns and leaves the next push to apply it.
+    sync_project_topics_best_effort(&project).await;
     // Re-read: update bumps updated_at, which is also what fires the SSE
     // project.updated diff.
     let project = store
