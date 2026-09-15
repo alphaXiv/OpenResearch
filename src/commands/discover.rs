@@ -1,8 +1,8 @@
 //! Independent literature retrieval primitives for the main agent.
 
 use crate::client::{
-    discover_openalex, discover_papers_by_embedding, discover_papers_by_keyword, LitHit,
-    OpenAlexDiscoveryOptions, PaperDiscoveryOptions, BIORXIV_SOURCE_ID,
+    discover_openalex, discover_papers_by_embedding, discover_papers_by_keyword, search_youcom,
+    LitHit, OpenAlexDiscoveryOptions, PaperDiscoveryOptions, BIORXIV_SOURCE_ID,
 };
 use crate::error::{anyhow, Result};
 use crate::LitSource;
@@ -39,6 +39,10 @@ pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
                 openalex_options(&args, Some(BIORXIV_SOURCE_ID)),
             )
             .await?
+        }
+        crate::DiscoverCommand::Youcom(args) => {
+            ensure_source_enabled(LitSource::Youcom, &disabled)?;
+            search_youcom(&args.query, args.limit).await?
         }
     };
 
