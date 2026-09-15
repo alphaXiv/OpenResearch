@@ -1144,5 +1144,11 @@
   "skills_remove_imported_label": "حذف {name} از OpenResearch",
   "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
   "chat_session_limit_reached": "به سقف مصرف نشست رسیده‌اید",
-  "chat_model_unavailable": "مدل در دسترس نیست"
+  "chat_model_unavailable": "مدل در دسترس نیست",
+  "new_project_form_auto_apply_repository_topics": "اعمال خودکار موضوع‌های مخزن",
+  "new_project_form_automatic_topics_include_openresearch_and": "موضوع‌های خودکار شامل openresearch است و اگر پروژه از یک مقاله باشد، arxiv-xxxx و paper-repro نیز افزوده می‌شود.",
+  "new_project_form_extra_topics_comma_separated_e_g_llm": "موضوع‌های افزوده (با کاما جدا شوند)، مانند llm, benchmark",
+  "settings_page_auto_apply_git_hub_topics_for_new_projects": "اعمال خودکار موضوع‌های GitHub برای پروژه‌های جدید",
+  "settings_page_auto_apply_git_hub_topics_help": "مخزن‌های جدید با openresearch برچسب می‌خورند و اگر پروژه از یک مقاله باشد، arxiv-xxxx و paper-repro نیز افزوده می‌شود.",
+  "settings_page_repository_topics": "موضوع‌های مخزن"
 }

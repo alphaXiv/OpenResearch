@@ -9,6 +9,8 @@ use crate::error::{anyhow, Result};
 
 const UA: &str = concat!("orx/", env!("CARGO_PKG_VERSION"));
 pub const SHALLOW_CLONE_THRESHOLD_KB: u64 = 250 * 1024;
+const MAX_REPO_TOPICS: usize = 20;
+const MAX_TOPIC_LEN: usize = 50;
 
 #[derive(Clone, Copy)]
 pub struct Status {
@@ -158,6 +160,116 @@ pub struct RepoMeta {
     pub archived: bool,
 }
 
+pub fn sanitize_topics(topics: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for topic in topics {
+        if let Some(topic) = normalize_topic(topic) {
+            if out.iter().any(|existing| existing == &topic) {
+                continue;
+            }
+            out.push(topic);
+            if out.len() >= MAX_REPO_TOPICS {
+                break;
+            }
+        }
+    }
+    out
+}
+
+pub fn default_topics_for_project(paper_id: Option<&str>) -> Vec<String> {
+    let mut topics = vec!["openresearch".to_string()];
+    if let Some(id) = paper_id.and_then(normalize_arxiv_topic) {
+        topics.push(id);
+        topics.push("paper-repro".to_string());
+    }
+    topics
+}
+
+pub fn effective_project_topics(
+    paper_id: Option<&str>,
+    custom_topics: &[String],
+    auto_topics_enabled: bool,
+) -> Vec<String> {
+    let mut topics = Vec::new();
+    if auto_topics_enabled {
+        topics.extend(default_topics_for_project(paper_id));
+    }
+    topics.extend(custom_topics.iter().cloned());
+    sanitize_topics(&topics)
+}
+
+/// Publishes `topics` onto the repository, unioned with the topics it already
+/// carries. Never clears the repository's topics, and skips the write when the
+/// union changes nothing.
+pub async fn set_repo_topics(owner: &str, repo: &str, topics: &[String]) -> Result<()> {
+    let existing = repo_topics(owner, repo).await.unwrap_or_default();
+    let merged = merge_topics(&sanitize_topics(topics), &existing);
+    if merged.is_empty() || merged == existing {
+        // Never PUT an empty set (it clears the repo) and skip a no-op write.
+        return Ok(());
+    }
+    let mut args = vec![
+        "api".to_string(),
+        "-X".to_string(),
+        "PUT".to_string(),
+        repository_endpoint(owner, repo),
+    ];
+    args[3].push_str("/topics");
+    for topic in &merged {
+        args.push("-f".to_string());
+        args.push(format!("names[]={topic}"));
+    }
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    gh(&borrowed, Duration::from_secs(20)).await?;
+    Ok(())
+}
+
+/// Topics the repository currently carries. An unreadable list is treated as
+/// empty: the caller then diffs against `[]` and still publishes its own set.
+async fn repo_topics(owner: &str, repo: &str) -> Result<Vec<String>> {
+    let endpoint = format!("{}/topics", repository_endpoint(owner, repo));
+    let body = gh(
+        &[
+            "api",
+            &endpoint,
+            "-H",
+            "Accept: application/vnd.github+json",
+        ],
+        Duration::from_secs(15),
+    )
+    .await?;
+    let parsed: Value = serde_json::from_str(&body)?;
+    Ok(parsed
+        .get("names")
+        .and_then(Value::as_array)
+        .map(|names| {
+            names
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// GitHub's topic PUT replaces the whole set, so merge instead of overwrite: a
+/// repository shared by several projects — or one whose owner added topics by
+/// hand — keeps everything it already had. Desired topics win the cap because
+/// they are the ones this project is asking for.
+fn merge_topics(desired: &[String], existing: &[String]) -> Vec<String> {
+    let mut merged = sanitize_topics(desired);
+    for topic in sanitize_topics(existing) {
+        if merged.len() >= MAX_REPO_TOPICS {
+            break;
+        }
+        if merged.contains(&topic) {
+            continue;
+        }
+        merged.push(topic);
+    }
+    merged
+}
+
 pub async fn viewer_login() -> Result<String> {
     gh(&["api", "user", "--jq", ".login"], Duration::from_secs(10))
         .await
@@ -209,6 +321,71 @@ fn repository_name_exists(error: &str) -> bool {
         .contains("name already exists on this account")
 }
 
+fn normalize_topic(input: &str) -> Option<String> {
+    let mut topic = input
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    while topic.contains("--") {
+        topic = topic.replace("--", "-");
+    }
+    let topic = topic.trim_matches('-').to_string();
+    if topic.is_empty() {
+        return None;
+    }
+    let topic = if topic.len() > MAX_TOPIC_LEN {
+        topic[..MAX_TOPIC_LEN].trim_matches('-').to_string()
+    } else {
+        topic
+    };
+    (!topic.is_empty()).then_some(topic)
+}
+
+fn normalize_arxiv_topic(paper_id: &str) -> Option<String> {
+    let trimmed = paper_id.trim();
+    // Pasted ids arrive as `arXiv:2401.12345` as often as the bare id; match the
+    // prefix case-insensitively or the scheme word rides into the topic.
+    let stripped = trimmed
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("arxiv:"))
+        .map_or(trimmed, |_| trimmed[6..].trim());
+    let id = stripped.split('/').next_back().unwrap_or(stripped);
+    let id = id.strip_suffix(".pdf").unwrap_or(id);
+    let id = strip_arxiv_version(id);
+    if id.is_empty() {
+        // A blank or scheme-only id has nothing to derive a topic from.
+        return None;
+    }
+    let id = id.replace('.', "-");
+    normalize_topic(&format!("arxiv-{id}"))
+}
+
+/// Drops a trailing `vN` so every version of one paper maps to one topic —
+/// otherwise `2401.12345v1` and `v2` land in separate search buckets.
+///
+/// Only a `v` followed by digits counts, and only when digits precede it, so an
+/// old-style id like `hep-th/9901001` keeps its trailing `1`.
+fn strip_arxiv_version(id: &str) -> &str {
+    if let Some((head, tail)) = id.rsplit_once('v') {
+        if !head.is_empty()
+            && head.ends_with(|ch: char| ch.is_ascii_digit())
+            && !tail.is_empty()
+            && tail.chars().all(|ch| ch.is_ascii_digit())
+        {
+            return head;
+        }
+    }
+    id
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +428,89 @@ mod tests {
         assert!(repository_name_exists(
             "GraphQL: Name already exists on this account"
         ));
+    }
+
+    #[test]
+    fn topic_normalization_and_dedup_work() {
+        let topics = sanitize_topics(&[
+            " OpenResearch ".to_string(),
+            "paper_repro".to_string(),
+            "paper--repro".to_string(),
+            "".to_string(),
+        ]);
+        assert_eq!(topics, vec!["openresearch", "paper-repro"]);
+    }
+
+    #[test]
+    fn effective_topics_include_auto_and_custom() {
+        let topics = effective_project_topics(
+            Some("2401.12345v2"),
+            &["Topic-A".to_string(), "paper-repro".to_string()],
+            true,
+        );
+        // The version suffix is dropped, so v1/v2 share one searchable topic.
+        assert_eq!(
+            topics,
+            vec!["openresearch", "arxiv-2401-12345", "paper-repro", "topic-a"]
+        );
+    }
+
+    #[test]
+    fn auto_topics_can_be_disabled_without_losing_extras() {
+        let topics = effective_project_topics(Some("2401.12345"), &["llm".to_string()], false);
+        assert_eq!(topics, vec!["llm"]);
+    }
+
+    #[test]
+    fn arxiv_ids_normalize_across_input_shapes() {
+        let topic = |id: &str| default_topics_for_project(Some(id));
+        let expected = vec![
+            "openresearch".to_string(),
+            "arxiv-2401-12345".to_string(),
+            "paper-repro".to_string(),
+        ];
+        for id in [
+            "2401.12345",
+            "2401.12345v2",
+            "arXiv:2401.12345v12",
+            "https://arxiv.org/abs/2401.12345",
+            "2401.12345.pdf",
+        ] {
+            assert_eq!(topic(id), expected, "id {id} should normalize");
+        }
+    }
+
+    #[test]
+    fn old_style_and_malformed_ids_keep_their_signals() {
+        // Old-style ids end in digits but carry no `vN`, so nothing is stripped.
+        assert_eq!(strip_arxiv_version("hep-th/9901001"), "hep-th/9901001");
+        assert_eq!(strip_arxiv_version("cs.CL/0701001"), "cs.CL/0701001");
+        // A trailing `v` with no digits is part of the id, not a version.
+        assert_eq!(strip_arxiv_version("2401.12345v"), "2401.12345v");
+        // No arxiv id at all leaves the topic off entirely.
+        assert_eq!(default_topics_for_project(None), vec!["openresearch"]);
+        assert_eq!(
+            default_topics_for_project(Some("   ")),
+            vec!["openresearch"]
+        );
+    }
+
+    #[test]
+    fn merging_topics_preserves_what_the_repository_already_had() {
+        let desired = vec!["openresearch".to_string(), "paper-repro".to_string()];
+        let existing = vec!["hand-added".to_string(), "paper-repro".to_string()];
+        assert_eq!(
+            merge_topics(&desired, &existing),
+            vec!["openresearch", "paper-repro", "hand-added"]
+        );
+    }
+
+    #[test]
+    fn merging_topics_preserves_other_projects_and_respects_the_cap() {
+        let desired = vec!["a".to_string()];
+        let existing = (0..30).map(|i| format!("topic-{i}")).collect::<Vec<_>>();
+        let merged = merge_topics(&desired, &existing);
+        assert_eq!(merged.len(), MAX_REPO_TOPICS);
+        assert_eq!(merged[0], "a");
     }
 }

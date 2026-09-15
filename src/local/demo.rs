@@ -376,6 +376,7 @@ fn seed_at(
         paper_id: None,
         created_at: ago(seeded_at, 250, 0),
         updated_at: ago(seeded_at, 6, 0),
+        ..Default::default()
     };
     let experiment = LocalExperiment {
         id: EXPERIMENT_ID.into(),
@@ -1997,6 +1998,7 @@ mod tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                ..Default::default()
             })
             .unwrap();
         let user_files = data.join("files").join(PROJECT_SLUG);

@@ -1327,6 +1327,8 @@ struct CreateProjectReq {
     #[serde(default)]
     initialize_git: bool,
     github_sync_enabled: Option<bool>,
+    github_auto_topics_enabled: Option<bool>,
+    github_topics: Option<Vec<String>>,
     /// UI locale, for the starter prompts warmed up in the background.
     locale: Option<String>,
 }
@@ -1368,6 +1370,10 @@ async fn create_project(
     let github_sync_enabled = req
         .github_sync_enabled
         .unwrap_or_else(crate::config::github_for_new_projects);
+    let github_auto_topics_enabled = req
+        .github_auto_topics_enabled
+        .unwrap_or_else(crate::config::github_auto_topics_for_new_projects);
+    let github_topics = local::github::sanitize_topics(&req.github_topics.unwrap_or_default());
     let repo_size_kb = match clone_url.as_deref() {
         Some(url) => local::github::public_repo_size_kb(url).await,
         None => None,
@@ -1390,6 +1396,8 @@ async fn create_project(
                 run_command,
                 paper_id,
                 paper_pdf,
+                github_auto_topics_enabled,
+                github_topics,
             },
         )?;
         Ok(project)
@@ -1550,6 +1558,37 @@ fn push_project(project: &local::model::LocalProject) -> Result<()> {
     )
 }
 
+/// Applies the project's GitHub repository topics (auto-derived + user extras).
+///
+/// Merge semantics live in `local::github::set_repo_topics`: it unions with what
+/// the repository already carries, so a shared repository — a cloned paper repo,
+/// or a folder project riding an existing remote — never has another project's
+/// topics (or hand-added ones) wiped out.
+async fn sync_project_topics(project: &local::model::LocalProject) -> Result<()> {
+    if !project.github_topics_enabled() && project.github_topics.is_empty() {
+        // Nothing to derive and no extras configured: publishing an empty set
+        // would only risk clearing whatever the repository already carries.
+        return Ok(());
+    }
+    let topics = local::github::effective_project_topics(
+        project.paper_id.as_deref(),
+        &project.github_topics,
+        project.github_auto_topics_enabled,
+    );
+    local::github::set_repo_topics(&project.github_owner, &project.github_repo, &topics).await
+}
+
+/// Topic publication decorates a push that already succeeded, so a GitHub hiccup
+/// here must not fail project creation or an experiment publish.
+async fn sync_project_topics_best_effort(project: &local::model::LocalProject) {
+    if let Err(error) = sync_project_topics(project).await {
+        eprintln!(
+            "orx up: could not update GitHub topics for {}: {error}",
+            project.slug
+        );
+    }
+}
+
 fn github_push_was_rejected(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     error.contains("403")
@@ -1640,6 +1679,8 @@ async fn push_project_for_sync(
 
     project.github_sync_enabled = true;
     Store::open()?.update_local_project(&project)?;
+    // After the row is saved, so a topic failure cannot roll back sync state.
+    sync_project_topics_best_effort(&project).await;
     Ok((project, github_status))
 }
 
@@ -1706,6 +1747,7 @@ async fn push_project_github(State(state): State<AppState>, Path(id): Path<Strin
     .await
     .map_err(|error| ApiError::from(anyhow!("git task failed: {error}")))?
     .map_err(bad_request)?;
+    sync_project_topics_best_effort(&project).await;
     Ok(Json(
         json!({ "project": project_json(&project), "git": git_status }),
     ))
@@ -1775,6 +1817,8 @@ struct UpdateProjectReq {
     name: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     run_command: Option<Option<String>>,
+    github_auto_topics_enabled: Option<bool>,
+    github_topics: Option<Vec<String>>,
 }
 
 async fn update_project(
@@ -1788,9 +1832,13 @@ async fn update_project(
         .admit(&id)
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     reject_if_moving(&state)?;
-    if req.name.is_none() && req.run_command.is_none() {
+    if req.name.is_none()
+        && req.run_command.is_none()
+        && req.github_auto_topics_enabled.is_none()
+        && req.github_topics.is_none()
+    {
         return Err(bad_request(
-            "nothing to update: pass name and/or runCommand",
+            "nothing to update: pass name, runCommand, githubAutoTopicsEnabled, and/or githubTopics",
         ));
     }
     let store = Store::open()?;
@@ -1805,6 +1853,12 @@ async fn update_project(
     }
     if let Some(cmd) = req.run_command {
         project.run_command = cmd.filter(|c| !c.trim().is_empty());
+    }
+    if let Some(enabled) = req.github_auto_topics_enabled {
+        project.github_auto_topics_enabled = enabled;
+    }
+    if let Some(topics) = req.github_topics {
+        project.github_topics = local::github::sanitize_topics(&topics);
     }
     store.update_local_project(&project)?;
     // Re-read: update bumps updated_at, which is also what fires the SSE
@@ -4910,6 +4964,7 @@ fn git_settings_json(github_status: local::github::Status) -> Value {
 fn project_defaults_json(github_status: local::github::Status) -> Value {
     json!({
         "githubForNewProjects": crate::config::github_for_new_projects(),
+        "githubAutoTopicsForNewProjects": crate::config::github_auto_topics_for_new_projects(),
         "githubDefaultPromptSeen": crate::config::github_default_prompt_seen(),
         "ghInstalled": github_status.installed,
         "githubAuthenticated": github_status.authenticated,
@@ -4924,6 +4979,7 @@ async fn project_defaults() -> ApiResult {
 #[serde(rename_all = "camelCase")]
 struct SetProjectDefaultsReq {
     github_for_new_projects: bool,
+    github_auto_topics_for_new_projects: Option<bool>,
     #[serde(default)]
     github_default_prompt_seen: Option<bool>,
 }
@@ -4936,6 +4992,12 @@ async fn set_project_defaults(Json(req): Json<SetProjectDefaultsReq>) -> ApiResu
         ));
     }
     crate::config::set_github_for_new_projects(req.github_for_new_projects)?;
+    // Auto topics only ever apply to a project that syncs, so a client toggling
+    // sync alone keeps them on rather than silently disabling them.
+    crate::config::set_github_auto_topics_for_new_projects(
+        req.github_auto_topics_for_new_projects
+            .unwrap_or(req.github_for_new_projects),
+    )?;
     if let Some(seen) = req.github_default_prompt_seen {
         crate::config::set_github_default_prompt_seen(seen)?;
     }
@@ -8124,6 +8186,7 @@ mod tests {
             paper_id: None,
             created_at: 0,
             updated_at: 0,
+            ..Default::default()
         };
         let json = project_json_with_artifacts_dir(
             &project,

@@ -1144,5 +1144,11 @@
   "skills_remove_imported_label": "从 OpenResearch 移除 {name}",
   "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
   "chat_session_limit_reached": "已达到会话使用限额",
-  "chat_model_unavailable": "模型不可用"
+  "chat_model_unavailable": "模型不可用",
+  "new_project_form_auto_apply_repository_topics": "自动添加仓库 topic",
+  "new_project_form_automatic_topics_include_openresearch_and": "自动 topic 包含 openresearch，当项目来自论文时还会添加 arxiv-xxxx 与 paper-repro。",
+  "new_project_form_extra_topics_comma_separated_e_g_llm": "附加 topic（逗号分隔），例如 llm, benchmark",
+  "settings_page_auto_apply_git_hub_topics_for_new_projects": "为新项目自动添加 GitHub topic",
+  "settings_page_auto_apply_git_hub_topics_help": "为新仓库添加 openresearch；项目来自论文时还会添加 arxiv-xxxx 与 paper-repro。",
+  "settings_page_repository_topics": "仓库 topic"
 }

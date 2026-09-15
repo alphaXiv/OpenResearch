@@ -172,6 +172,8 @@ pub fn create_project(
         run_command,
         paper_id,
         paper_pdf,
+        github_auto_topics_enabled,
+        github_topics,
     } = options;
     let slug = unique_project_slug(store, &slugify(name))?;
     let repo_path = prepare_path(
@@ -205,6 +207,8 @@ pub fn create_project(
         github_owner,
         github_repo,
         github_sync_enabled: false,
+        github_auto_topics_enabled,
+        github_topics,
         baseline_branch,
         repo_path: repo_path.to_string_lossy().to_string(),
         run_command: run_command.filter(|c| !c.trim().is_empty()),
@@ -226,6 +230,8 @@ pub struct CreateProjectOptions {
     pub run_command: Option<String>,
     pub paper_id: Option<String>,
     pub paper_pdf: Option<Vec<u8>>,
+    pub github_auto_topics_enabled: bool,
+    pub github_topics: Vec<String>,
 }
 
 #[cfg(test)]

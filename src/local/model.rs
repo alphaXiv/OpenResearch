@@ -13,6 +13,8 @@ pub struct LocalProject {
     pub github_owner: String,
     pub github_repo: String,
     pub github_sync_enabled: bool,
+    pub github_auto_topics_enabled: bool,
+    pub github_topics: Vec<String>,
     /// Fork point for baseline roots and the clone's default checkout — not
     /// where any experiment lives (legacy roots predating per-baseline
     /// branches may still ride it).
@@ -26,7 +28,44 @@ pub struct LocalProject {
     pub updated_at: i64,
 }
 
+/// Baseline shape for a project row. Production code builds projects from an
+/// explicit literal (all fields are meaningful there), but tests and the demo
+/// seed only care about a few of them — having a default keeps a new column
+/// from breaking every one of those literals.
+impl Default for LocalProject {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            slug: String::new(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            github_sync_enabled: false,
+            github_auto_topics_enabled: false,
+            github_topics: Vec::new(),
+            baseline_branch: "main".to_string(),
+            repo_path: String::new(),
+            run_command: None,
+            paper_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+}
+
 impl LocalProject {
+    /// Test-only project literal; every field the tests do not set takes its
+    /// default. Keeps new schema columns from rippling through fixtures.
+    #[cfg(test)]
+    pub fn for_test(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: id.to_string(),
+            slug: id.to_string(),
+            ..Self::default()
+        }
+    }
+
     pub fn github_enabled(&self) -> bool {
         self.github_sync_enabled && self.has_github_repository()
     }
@@ -44,8 +83,13 @@ impl LocalProject {
         })
     }
 
+    pub fn github_topics_enabled(&self) -> bool {
+        self.github_enabled() && self.github_auto_topics_enabled
+    }
+
     /// Column order must match `store::PROJECT_COLS`.
     pub(crate) fn from_row(row: &rusqlite::Row<'_>) -> std::result::Result<Self, rusqlite::Error> {
+        let github_topics: String = row.get(7)?;
         Ok(Self {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -53,12 +97,14 @@ impl LocalProject {
             github_owner: row.get(3)?,
             github_repo: row.get(4)?,
             github_sync_enabled: row.get(5)?,
-            baseline_branch: row.get(6)?,
-            repo_path: row.get(7)?,
-            run_command: row.get(8)?,
-            paper_id: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
+            github_auto_topics_enabled: row.get(6)?,
+            github_topics: serde_json::from_str::<Vec<String>>(&github_topics).unwrap_or_default(),
+            baseline_branch: row.get(8)?,
+            repo_path: row.get(9)?,
+            run_command: row.get(10)?,
+            paper_id: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
         })
     }
 }

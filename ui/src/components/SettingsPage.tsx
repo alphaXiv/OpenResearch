@@ -63,6 +63,7 @@ import {
   disableProjectGithub,
   enableProjectGithub,
   initializeProjectGit,
+  updateProject,
   saveHfToken,
   saveTinkerKey,
   saveModalToken,
@@ -2759,7 +2760,26 @@ function ProjectDefaultsTab() {
     const enabled = !settings.githubForNewProjects;
     setSaving(true);
     setError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
+    void setProjectDefaultsMutation.mutateAsync([
+      enabled,
+      settings.githubAutoTopicsForNewProjects,
+      true,
+    ])
+      .then(setSettings)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  const toggleAutoTopics = () => {
+    if (!settings || saving) return;
+    const enabled = !settings.githubAutoTopicsForNewProjects;
+    setSaving(true);
+    setError(null);
+    void setProjectDefaultsMutation.mutateAsync([
+      settings.githubForNewProjects,
+      enabled,
+      settings.githubDefaultPromptSeen,
+    ])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2791,6 +2811,21 @@ function ProjectDefaultsTab() {
               aria-label={m.settings_page_enable_git_hub_syncing_for_new_projects()}
               disabled={saving || (!settings.githubAuthenticated && !settings.githubForNewProjects)}
               onClick={toggle}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">
+                {m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+              </div>
+              <p>{m.settings_page_auto_apply_git_hub_topics_help()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.githubAutoTopicsForNewProjects}
+              aria-label={m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+              disabled={saving}
+              onClick={toggleAutoTopics}
             />
           </div>
           {!settings.githubAuthenticated && (
@@ -2966,7 +3001,19 @@ function GitTab({
   const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
+  // Topic editor state. `null` means "not seeded yet"; once the project arrives it
+  // holds the user's edits, so a background refetch cannot clobber typing.
+  const [topicsAuto, setTopicsAuto] = useState<boolean | null>(null);
+  const [topicsCustom, setTopicsCustom] = useState<string | null>(null);
+  const [topicsSaving, setTopicsSaving] = useState(false);
+  const [topicsError, setTopicsError] = useState<string | null>(null);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
+
+  useEffect(() => {
+    if (!project || topicsAuto !== null) return;
+    setTopicsAuto(project.githubAutoTopicsEnabled);
+    setTopicsCustom(project.githubTopics.join(", "));
+  }, [project, topicsAuto]);
 
   const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
@@ -3007,10 +3054,38 @@ function GitTab({
   const finishDefaultPrompt = (enabled: boolean) => {
     setDefaultPromptSaving(true);
     setDefaultPromptError(null);
-    void setProjectDefaultsMutation.mutateAsync([enabled, true])
+    void setProjectDefaultsMutation.mutateAsync([enabled, enabled, true])
       .then(() => setDefaultPromptOpen(false))
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));
+  };
+
+  /** Splits the comma-separated field; the server normalizes and caps the topics. */
+  const parseTopicDraft = (raw: string) =>
+    raw.split(",").map((topic) => topic.trim()).filter((topic) => topic.length > 0);
+
+  const savedTopics = project ? project.githubTopics.join(", ") : "";
+  const topicsDirty = Boolean(
+    project && topicsAuto !== null && topicsCustom !== null
+    && (topicsAuto !== project.githubAutoTopicsEnabled || topicsCustom !== savedTopics),
+  );
+
+  const saveTopics = () => {
+    if (!project || topicsAuto === null || topicsCustom === null) return;
+    setTopicsSaving(true);
+    setTopicsError(null);
+    void updateProject(project.id, {
+      githubAutoTopicsEnabled: topicsAuto,
+      githubTopics: parseTopicDraft(topicsCustom),
+    })
+      .then((updated) => {
+        // Re-seed from the server's sanitized values so the field shows what was kept.
+        setTopicsAuto(updated.githubAutoTopicsEnabled);
+        setTopicsCustom(updated.githubTopics.join(", "));
+        onProjectUpdate(updated);
+      })
+      .catch((err) => setTopicsError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setTopicsSaving(false));
   };
 
   return (
@@ -3070,6 +3145,34 @@ function GitTab({
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
                   {m.settings_page_disabling_syncing_stops_automatic_pushes_compute_continues_to()}
                 </p>
+                <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
+                  <div className="flex flex-row items-center justify-between gap-2.5">
+                    <div>
+                      <div className="text-sm font-medium text-text">{m.settings_page_repository_topics()}</div>
+                      <p className="m-0 text-sm leading-relaxed text-subtext">{m.settings_page_auto_apply_git_hub_topics_help()}</p>
+                    </div>
+                    <Switch
+                      type="button"
+                      checked={topicsAuto ?? false}
+                      aria-label={m.settings_page_auto_apply_git_hub_topics_for_new_projects()}
+                      disabled={topicsAuto === null || topicsSaving}
+                      onClick={() => setTopicsAuto((current) => !(current ?? false))}
+                    />
+                  </div>
+                  <div className="mt-2.5 flex flex-row items-center gap-2.5">
+                    <Input
+                      value={topicsCustom ?? ""}
+                      onChange={(event) => setTopicsCustom(event.target.value)}
+                      placeholder={m.new_project_form_extra_topics_comma_separated_e_g_llm()}
+                      disabled={topicsCustom === null || topicsSaving}
+                      aria-label={m.settings_page_repository_topics()}
+                    />
+                    <Button variant="primary" disabled={!topicsDirty || topicsSaving} onClick={saveTopics}>
+                      {topicsSaving ? m.common_saving() : m.common_save()}
+                    </Button>
+                  </div>
+                  {topicsError && <div className="error mt-2">{topicsError}</div>}
+                </div>
                 <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
                   {status.github.url && <ButtonLink href={status.github.url} target="_blank" rel="noreferrer">{m.settings_page_open_on_git_hub()} <ExternalLink size={12} /></ButtonLink>}
                   <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>

@@ -433,6 +433,8 @@ impl Store {
                 github_owner    TEXT NOT NULL,
                 github_repo     TEXT NOT NULL,
                 github_sync_enabled INTEGER NOT NULL DEFAULT 1,
+                github_auto_topics_enabled INTEGER NOT NULL DEFAULT 0,
+                github_topics   TEXT NOT NULL DEFAULT '[]',
                 baseline_branch TEXT NOT NULL DEFAULT 'main',
                 repo_path       TEXT NOT NULL,
                 run_command     TEXT,
@@ -606,6 +608,8 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE local_projects ADD COLUMN github_auto_topics_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE local_projects ADD COLUMN github_topics TEXT NOT NULL DEFAULT '[]'",
             "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
@@ -670,6 +674,23 @@ impl Store {
                 [],
             )?;
             tx.pragma_update(None, "user_version", 1)?;
+            tx.commit()?;
+        }
+        // Projects that already publish to GitHub predate automatic repository
+        // topics, and the column default (0) would leave them untagged until
+        // someone pushed by hand. Enable auto topics for exactly those rows once,
+        // so the backfill cannot re-fire and re-tag a project the user opted out.
+        let schema_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if schema_version < 2 {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "UPDATE local_projects SET github_auto_topics_enabled = 1
+                 WHERE github_sync_enabled = 1
+                   AND TRIM(github_owner) <> ''
+                   AND TRIM(github_repo) <> ''",
+                [],
+            )?;
+            tx.pragma_update(None, "user_version", 2)?;
             tx.commit()?;
         }
         // Older builds of this branch created a one-root-per-project unique
@@ -1491,8 +1512,9 @@ impl Store {
         messages: &[StoredChatMessage],
     ) -> Result<bool> {
         let tx = self.begin()?;
+        let github_topics = serde_json::to_string(&project.github_topics)?;
         let inserted = tx.execute(
-            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT OR IGNORE INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             params![
                 project.id,
                 project.name,
@@ -1500,6 +1522,8 @@ impl Store {
                 project.github_owner,
                 project.github_repo,
                 project.github_sync_enabled,
+                project.github_auto_topics_enabled,
+                github_topics,
                 project.baseline_branch,
                 project.repo_path,
                 project.run_command,
@@ -1607,11 +1631,13 @@ impl Store {
     }
 
     pub fn create_local_project(&self, p: &LocalProject) -> Result<()> {
+        let github_topics = serde_json::to_string(&p.github_topics)?;
         self.conn.execute(
-            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT INTO local_projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"),
             params![
                 p.id, p.name, p.slug, p.github_owner, p.github_repo,
-                p.github_sync_enabled, p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
+                p.github_sync_enabled, p.github_auto_topics_enabled, github_topics,
+                p.baseline_branch, p.repo_path, p.run_command, p.paper_id,
                 p.created_at, p.updated_at,
             ],
         )?;
@@ -1705,12 +1731,14 @@ impl Store {
         Ok(())
     }
 
-    /// Full-row update by id (name / run_command / branch edits).
+    /// Full-row update by id (name / run_command / branch / topics edits).
     pub fn update_local_project(&self, p: &LocalProject) -> Result<()> {
+        let github_topics = serde_json::to_string(&p.github_topics)?;
         self.conn.execute(
             "UPDATE local_projects SET name = ?2, slug = ?3, github_owner = ?4, github_repo = ?5,
-                    github_sync_enabled = ?6, baseline_branch = ?7, repo_path = ?8,
-                    run_command = ?9, paper_id = ?10, updated_at = ?11
+                    github_sync_enabled = ?6, github_auto_topics_enabled = ?7, github_topics = ?8,
+                    baseline_branch = ?9, repo_path = ?10,
+                    run_command = ?11, paper_id = ?12, updated_at = ?13
              WHERE id = ?1",
             params![
                 p.id,
@@ -1719,6 +1747,8 @@ impl Store {
                 p.github_owner,
                 p.github_repo,
                 p.github_sync_enabled,
+                p.github_auto_topics_enabled,
+                github_topics,
                 p.baseline_branch,
                 p.repo_path,
                 p.run_command,
@@ -3044,7 +3074,8 @@ const SELECT_RUN: &str = "SELECT id, experiment_id, project_id, status, backend_
                                  chat_session_id FROM runs";
 
 const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sync_enabled, \
-                            baseline_branch, repo_path, run_command, paper_id, created_at, updated_at";
+                            github_auto_topics_enabled, github_topics, baseline_branch, repo_path, \
+                            run_command, paper_id, created_at, updated_at";
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, \
@@ -3138,6 +3169,7 @@ mod tests {
                     paper_id: None,
                     created_at: 1,
                     updated_at: 2,
+                    ..Default::default()
                 })
                 .unwrap();
         }
@@ -3285,6 +3317,7 @@ mod tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                ..Default::default()
             })
             .unwrap();
         let mut older = chat_session_fixture("older");
@@ -4972,6 +5005,7 @@ mod tests {
                 paper_id: None,
                 created_at: 1,
                 updated_at: 1,
+                ..Default::default()
             })
             .unwrap();
 
@@ -5082,6 +5116,79 @@ mod tests {
             stored.chat_session_id,
             Some("chat_x".to_string()),
             "the creating session is never overwritten by a later update"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn github_topics_round_trip_through_json_column() {
+        let dir = std::env::temp_dir().join(format!("orx-topics-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let project = LocalProject {
+            id: "p1".into(),
+            name: "P".into(),
+            slug: "p".into(),
+            github_owner: "o".into(),
+            github_repo: "r".into(),
+            github_sync_enabled: true,
+            github_auto_topics_enabled: true,
+            github_topics: vec!["openresearch".into(), "llm".into()],
+            ..Default::default()
+        };
+        store.create_local_project(&project).unwrap();
+        let stored = store.get_local_project("p1").unwrap().unwrap();
+        assert_eq!(stored.github_topics, project.github_topics);
+        assert!(stored.github_auto_topics_enabled);
+        assert_eq!(stored.paper_id, project.paper_id);
+
+        let mut renamed = project.clone();
+        renamed.github_topics = vec!["openresearch".into()];
+        renamed.github_auto_topics_enabled = false;
+        store.update_local_project(&renamed).unwrap();
+        let stored = store.get_local_project("p1").unwrap().unwrap();
+        assert_eq!(stored.github_topics, vec!["openresearch"]);
+        assert!(!stored.github_auto_topics_enabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrated_projects_that_already_sync_get_auto_topics() {
+        let dir = std::env::temp_dir().join(format!("orx-topics-migrate-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for (id, owner, repo, syncing) in [("linked", "o", "r", true), ("unlinked", "", "", false)]
+        {
+            store
+                .create_local_project(&LocalProject {
+                    id: id.into(),
+                    name: id.into(),
+                    slug: id.into(),
+                    github_owner: owner.into(),
+                    github_repo: repo.into(),
+                    github_sync_enabled: syncing,
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        // Simulate an upgrade: rewind the marker so the v2 backfill runs again.
+        store.conn.pragma_update(None, "user_version", 0).unwrap();
+        drop(store);
+
+        let reopened = Store::open_at(dir.clone()).unwrap();
+        assert!(
+            reopened
+                .get_local_project("linked")
+                .unwrap()
+                .unwrap()
+                .github_auto_topics_enabled,
+            "a project already publishing to GitHub gains auto topics"
+        );
+        assert!(
+            !reopened
+                .get_local_project("unlinked")
+                .unwrap()
+                .unwrap()
+                .github_auto_topics_enabled,
+            "a project with no repository stays untouched"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
