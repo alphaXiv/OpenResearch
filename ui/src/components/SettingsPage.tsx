@@ -2760,11 +2760,10 @@ function ProjectDefaultsTab() {
     const enabled = !settings.githubForNewProjects;
     setSaving(true);
     setError(null);
-    void setProjectDefaultsMutation.mutateAsync([
-      enabled,
-      settings.githubAutoTopicsForNewProjects,
-      true,
-    ])
+    // This only answers the sync default, so auto topics are left unset: they
+    // keep following it for anyone who never chose an explicit value. The
+    // trailing flag records that the one-time prompt has been answered.
+    void setProjectDefaultsMutation.mutateAsync([enabled, undefined, true])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2775,8 +2774,10 @@ function ProjectDefaultsTab() {
     const enabled = !settings.githubAutoTopicsForNewProjects;
     setSaving(true);
     setError(null);
-    // Only the auto-topics default is sent. Echoing the cached prompt-seen flag
-    // could flip it back if another flow just answered the one-time prompt.
+    // The sync default travels along because the endpoint requires it, and
+    // re-sending the value we just read is a no-op. The prompt-seen flag is
+    // deliberately omitted: echoing it from a possibly stale cache could flip it
+    // back after another flow answered the one-time prompt.
     void setProjectDefaultsMutation.mutateAsync([
       settings.githubForNewProjects,
       enabled,

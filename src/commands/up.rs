@@ -4996,12 +4996,13 @@ async fn set_project_defaults(Json(req): Json<SetProjectDefaultsReq>) -> ApiResu
         ));
     }
     crate::config::set_github_for_new_projects(req.github_for_new_projects)?;
-    // Auto topics only ever apply to a project that syncs, so a client toggling
-    // sync alone keeps them on rather than silently disabling them.
-    crate::config::set_github_auto_topics_for_new_projects(
-        req.github_auto_topics_for_new_projects
-            .unwrap_or(req.github_for_new_projects),
-    )?;
+    // Only persist auto topics when the client asked for them. Deriving and
+    // storing a value from the sync flag here would pin auto topics to this
+    // answer and stop `github_auto_topics_for_new_projects()` from tracking
+    // later sync changes for a user who never chose an explicit value.
+    if let Some(auto_topics) = req.github_auto_topics_for_new_projects {
+        crate::config::set_github_auto_topics_for_new_projects(auto_topics)?;
+    }
     if let Some(seen) = req.github_default_prompt_seen {
         crate::config::set_github_default_prompt_seen(seen)?;
     }
