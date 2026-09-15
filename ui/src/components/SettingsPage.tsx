@@ -3072,7 +3072,13 @@ function GitTab({
       defaultPromptAutoTopics ?? enabled,
       true,
     ])
-      .then(() => setDefaultPromptOpen(false))
+      .then((defaults) => {
+        // Publish the result into the shared cache: other handlers and the
+        // new-project form read these defaults, and a stale entry would make
+        // their next write revert what was just answered here.
+        setScopedQueryData(getProjectDefaultsQuery().queryKey, defaults);
+        setDefaultPromptOpen(false);
+      })
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));
   };
