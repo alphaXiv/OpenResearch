@@ -490,6 +490,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
+        .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
         .route(
@@ -757,7 +758,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
     ) || path.starts_with("/api/remote/")
-        || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
+        || (path.starts_with("/api/projects/")
+            && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
 }
 
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
@@ -3198,6 +3200,39 @@ async fn open_project_file(
         }
         crate::editors::open_in_default_app(&full)
             .map_err(|e| ApiError::from(anyhow!("could not open file: {e}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
+/// Reveal a checkout file in the machine's file manager (Finder/Explorer),
+/// selecting it where the platform supports that. Resolves and confines the
+/// path exactly like `open_project_file`; the escape hatch for a binary or
+/// unrecognized file the dashboard cannot preview inline.
+async fn reveal_project_file(
+    Path(id): Path<String>,
+    Json(req): Json<OpenProjectFileReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let (_, rel_path) = validated_project_file_path(&req.path)?;
+        if touches_git_dir(&rel_path) {
+            return Err(bad_request("cannot open files under .git"));
+        }
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
+            Ok(p) => p,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+            Err(e) => return Err(ApiError::from(anyhow!("reveal failed: {e}"))),
+        };
+        if !full.starts_with(&root) {
+            return Err(bad_request("path escapes repository"));
+        }
+        crate::editors::reveal_in_file_manager(&full)
+            .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
     })
     .await

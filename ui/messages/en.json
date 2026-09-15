@@ -171,6 +171,7 @@
   "file_viewer_html_preview": "Rendered HTML: {name}",
   "file_viewer_loading": "Loading…",
   "file_viewer_open_in_default_editor": "Open in default editor",
+  "file_viewer_reveal_in_file_manager": "Reveal in file manager",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "Overleaf's copy of this file was pulled while you had unsaved edits, so what you see is no longer what is on disk. Saving now sends this draft to Overleaf instead.",
   "file_viewer_saving": "Saving…",
   "file_viewer_this_pdf_was_compiled_from_an_earlier_version": "This PDF was compiled from an earlier version of the source — recompile to update it.",

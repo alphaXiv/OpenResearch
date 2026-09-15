@@ -509,6 +509,18 @@ export const openFileInEditor = (
     sessionId: opts.sessionId,
   });
 
+/** Reveal a checkout file in the OS file manager (Finder/Explorer) on the
+ * machine running `orx up`, selecting it where the platform supports that. */
+export const revealFileInManager = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/file/reveal`, {
+    path,
+    sessionId: opts.sessionId,
+  });
+
 export interface LatexEngine {
   /** The engine that will run, or null when the machine has none. */
   engine: string | null;
