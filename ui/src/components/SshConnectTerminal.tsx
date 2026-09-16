@@ -169,7 +169,7 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
           onComplete();
           return true;
         }}
-        onClosed={() => setStatus((current) => (current === "failed" ? current : "closed"))}
+        onClosed={() => setStatus((current) => (current === "running" ? "closed" : current))}
       />
     </div>
   );
@@ -189,8 +189,8 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   active?: boolean;
   awaitingApproval?: boolean;
   onComplete: (value: unknown) => boolean;
-  /** `sessionEnded` is false for a failure the server reported while the
-   * session continues (only possible with `shellAfter`). */
+  /** `sessionEnded` is false for a server-reported failure the follow-up shell
+   * continues past (`shellAfter`); true whenever the terminal is done for. */
   onError?: (error: string, sessionEnded: boolean) => void;
   /** The session ended after the command finished (the follow-up shell exited). */
   onClosed?: () => void;
@@ -226,7 +226,11 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     let failed = false;
     let receivedOutput = false;
     const fail = (message: string, sessionEnded: boolean) => {
-      if (failed) return;
+      if (failed) {
+        // A later failure (the follow-up shell not starting) still deserves a line.
+        if (!sessionEnded) terminal.writeln(message);
+        return;
+      }
       failed = true;
       if (!receivedOutput || shellAfter) terminal.writeln(message);
       errorRef.current?.(message, sessionEnded);
@@ -271,7 +275,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
       if (!message) return;
       // After completion only the follow-up shell can fail; the command's result stands.
       if (completed) terminal.writeln(message);
-      else fail(message, false);
+      else fail(message, !shellAfter);
     };
     socket.onerror = () => fail(m.settings_terminal_closed(), true);
     socket.onclose = () => {

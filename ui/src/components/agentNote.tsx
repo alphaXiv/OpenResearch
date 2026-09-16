@@ -3,10 +3,10 @@ import { Check, Copy, Play } from "lucide-react";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 
-/** A backtick command from an `agentNote`, rendered as a code pill with its own
- * copy button so the user can grab it without retyping. */
 const PILL_BUTTON_CLASS_NAME = "inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text";
 
+/** A backtick command from an `agentNote`, rendered as a code pill with its own
+ * copy button so the user can grab it without retyping. */
 function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -47,8 +47,8 @@ function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
 /** Harness `agentNote` strings carry the command to run in backticks
  * (`claude auth login`) — render those spans as copyable code pills so they read
  * as something to type, not prose. Shared by every surface that shows a note:
- * onboarding, the model picker, and the chat panel. Commands `runnable` accepts
- * also get a play button that runs them in place. */
+ * onboarding, settings, the model picker, and the chat panel. Commands
+ * `runnable` accepts also get a play button that runs them in place. */
 export function renderNote(
   note: string | undefined,
   runnable?: { canRun: (command: string) => boolean; onRun: (command: string) => void },

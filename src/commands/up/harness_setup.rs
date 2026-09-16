@@ -246,6 +246,7 @@ async fn run(
         } else {
             None
         };
+        // The lease ends with `run`; the follow-up shell only inherits the path.
         let env: Vec<_> = lease
             .as_ref()
             .map(|lease| vec![("OPENCODE_DB", lease.path().as_os_str().to_owned())])

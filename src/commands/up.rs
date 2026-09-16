@@ -5805,6 +5805,7 @@ async fn run_settings_command(
     ws: WebSocketUpgrade,
     Query(req): Query<RunSettingsCommandReq>,
 ) -> Response {
+    // Before the allowlist reply, so a cross-origin page learns nothing.
     if let Some(rejected) = reject_cross_origin(&headers) {
         return rejected;
     }
