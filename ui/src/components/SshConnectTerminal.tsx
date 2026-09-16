@@ -113,10 +113,10 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
 
 type CommandStatus = "running" | "done" | "failed" | "closed";
 
-/** Runs a settings command (`claude auth login`, `gh auth login`) in place, so
- * the user never has to copy it into a terminal of their own. Framed like an
- * app window; after the command exits the same terminal continues as the
- * user's shell, so a follow-up command needs no copy-paste either. */
+/** Runs a note's command in place (harness setup via `/api/harnesses/setup`,
+ * `gh auth login` via the settings allowlist), so the user never copies it into
+ * a terminal of their own. Framed like an app window; after the command exits
+ * the same terminal continues as the user's shell for follow-ups. */
 export function SettingsCommandTerminal({ path, label, onComplete, onError, onClose }: {
   path: string;
   label: string;
@@ -159,9 +159,9 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
         frame="bare"
         palette="app"
         shellAfter
-        onError={(error) => {
+        onError={(error, sessionEnded) => {
           setStatus("failed");
-          onError(error);
+          if (sessionEnded) onError(error);
         }}
         onComplete={(value) => {
           if (!isComplete(value)) return false;
@@ -169,7 +169,7 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
           onComplete();
           return true;
         }}
-        onClosed={() => setStatus((current) => (current === "done" ? "closed" : current))}
+        onClosed={() => setStatus((current) => (current === "failed" ? current : "closed"))}
       />
     </div>
   );
@@ -184,12 +184,14 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
   frame?: "card" | "bare";
   palette?: TerminalPalette;
   /** The server follows a command that ran with the user's shell, so the socket
-   * stays up, input stays enabled, and only transport failures reach `onError`. */
+   * stays up and input stays enabled after a command failure. */
   shellAfter?: boolean;
   active?: boolean;
   awaitingApproval?: boolean;
   onComplete: (value: unknown) => boolean;
-  onError?: (error: string) => void;
+  /** `sessionEnded` is false for a failure the server reported while the
+   * session continues (only possible with `shellAfter`). */
+  onError?: (error: string, sessionEnded: boolean) => void;
   /** The session ended after the command finished (the follow-up shell exited). */
   onClosed?: () => void;
 }) {
@@ -226,11 +228,10 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", fr
     const fail = (message: string, sessionEnded: boolean) => {
       if (failed) return;
       failed = true;
-      if (!receivedOutput) terminal.writeln(message);
-      // A server-reported failure is followed by the shell, which still takes
-      // input; the header already shows it, so no alert either.
+      if (!receivedOutput || shellAfter) terminal.writeln(message);
+      errorRef.current?.(message, sessionEnded);
+      // A server-reported failure is followed by the shell, which still takes input.
       if (shellAfter && !sessionEnded) return;
-      errorRef.current?.(message);
       terminal.options.disableStdin = true;
       terminal.blur();
       setError(message);

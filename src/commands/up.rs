@@ -5627,8 +5627,8 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let Some(status) = relay_pty(&mut socket, session, None, &mut { DEFAULT_PTY_SIZE }).await
-    else {
+    let mut size = DEFAULT_PTY_SIZE;
+    let Some(status) = relay_pty(&mut socket, session, None, &mut size).await else {
         return;
     };
 
@@ -5676,6 +5676,18 @@ async fn ssh_connect_socket(
     }
 }
 
+/// Record a client resize message in `size`; false when it is not one.
+fn apply_resize(size: &mut PtySize, text: &str) -> bool {
+    match serde_json::from_str(text) {
+        Ok(SshTerminalInput::Resize { cols, rows }) if cols > 0 && rows > 0 => {
+            size.rows = rows;
+            size.cols = cols;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Relay one PTY session; `size` follows the client's resizes so a session
 /// started afterwards can open at the terminal's real dimensions.
 async fn relay_pty(
@@ -5718,12 +5730,8 @@ async fn relay_pty(
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
-                        if cols > 0 && rows > 0 {
-                            size.rows = rows;
-                            size.cols = cols;
-                            let _ = master.resize(*size);
-                        }
+                    if apply_resize(size, &text) {
+                        let _ = master.resize(*size);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
@@ -5768,7 +5776,7 @@ async fn openresearch_terminal(
     let program = std::env::current_exe()
         .map(|exe| exe.to_string_lossy().into_owned())
         .map_err(anyhow::Error::from);
-    command_terminal(&headers, ws, program, args, false, async {}).await
+    command_terminal(&headers, ws, program, args, false).await
 }
 
 /// Commands the settings page may run, keyed by the exact note text. The
@@ -5778,7 +5786,6 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ("gh auth login", &["gh", "auth", "login"]),
     ("hf auth login", &["hf", "auth", "login"]),
     ("claude auth status", &["claude", "auth", "status"]),
-    ("opencode models", &["opencode", "models"]),
 ];
 
 fn settings_command(command: &str) -> Option<&'static [&'static str]> {
@@ -5798,6 +5805,9 @@ async fn run_settings_command(
     ws: WebSocketUpgrade,
     Query(req): Query<RunSettingsCommandReq>,
 ) -> Response {
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
     let Some(argv) = settings_command(req.command.trim()) else {
         return bad_request("command is not runnable from settings").into_response();
     };
@@ -5805,7 +5815,7 @@ async fn run_settings_command(
         .map(|path| path.to_string_lossy().into_owned())
         .ok_or_else(|| anyhow!("{} is not installed", argv[0]));
     let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
-    command_terminal(&headers, ws, program, args, true, async {}).await
+    command_terminal(&headers, ws, program, args, true).await
 }
 
 /// The user's interactive login shell, so follow-up commands see the PATH a
@@ -5816,7 +5826,7 @@ fn interactive_shell() -> (String, Vec<String>) {
         (shell, Vec::new())
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        (shell, vec!["-il".to_string()])
+        (shell, vec!["-i".to_string(), "-l".to_string()])
     }
 }
 
@@ -5834,7 +5844,6 @@ async fn command_terminal(
     program: Result<String>,
     args: Vec<String>,
     shell_after: bool,
-    on_success: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Response {
     if let Some(rejected) = reject_cross_origin(headers) {
         return rejected;
@@ -5842,7 +5851,7 @@ async fn command_terminal(
     ws.on_upgrade(move |mut socket| async move {
         let mut size = DEFAULT_PTY_SIZE;
         let started = match program {
-            Ok(program) => spawn_pty(program, args, size).await,
+            Ok(program) => spawn_pty(program, args, Vec::new(), size).await,
             Err(error) => Err(error),
         };
         let session = match started {
@@ -5862,7 +5871,6 @@ async fn command_terminal(
                 "Command exited with code {}",
                 status.exit_code()
             );
-            on_success.await;
             Ok::<_, anyhow::Error>(())
         }
         .await;
@@ -5878,18 +5886,34 @@ async fn command_terminal(
         {
             return;
         }
-        let (shell, shell_args) = interactive_shell();
-        match spawn_pty(shell, shell_args, size).await {
-            Ok(session) => {
-                relay_pty(&mut socket, session, None, &mut size).await;
-            }
-            Err(error) => send_terminal_error(&mut socket, error).await,
-        }
+        continue_in_shell(&mut socket, &mut size, Vec::new()).await;
     })
 }
 
-async fn spawn_pty(program: String, args: Vec<String>, size: PtySize) -> Result<PtySession> {
-    tokio::task::spawn_blocking(move || start_pty_with_env(&program, args, &[], size)).await?
+/// Hand the terminal to the user's interactive shell, with any env the command
+/// before it needed (OpenCode's isolated store), so follow-ups land in the
+/// same place.
+async fn continue_in_shell(
+    socket: &mut WebSocket,
+    size: &mut PtySize,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+) {
+    let (shell, args) = interactive_shell();
+    match spawn_pty(shell, args, env, *size).await {
+        Ok(session) => {
+            relay_pty(socket, session, None, size).await;
+        }
+        Err(error) => send_terminal_error(socket, error).await,
+    }
+}
+
+async fn spawn_pty(
+    program: String,
+    args: Vec<String>,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+    size: PtySize,
+) -> Result<PtySession> {
+    tokio::task::spawn_blocking(move || start_pty_with_env(&program, args, &env, size)).await?
 }
 
 async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
@@ -8133,6 +8157,22 @@ mod tests {
         })
         .await
         .expect("cancelled PTY did not exit");
+    }
+
+    #[test]
+    fn client_resizes_update_the_tracked_size_only_when_valid() {
+        let mut size = DEFAULT_PTY_SIZE;
+        assert!(apply_resize(
+            &mut size,
+            r#"{"type":"resize","cols":111,"rows":33}"#
+        ));
+        assert_eq!((size.cols, size.rows), (111, 33));
+        assert!(!apply_resize(
+            &mut size,
+            r#"{"type":"resize","cols":0,"rows":9}"#
+        ));
+        assert!(!apply_resize(&mut size, "not json"));
+        assert_eq!((size.cols, size.rows), (111, 33));
     }
 
     #[test]

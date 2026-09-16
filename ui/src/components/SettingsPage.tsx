@@ -287,7 +287,7 @@ type Tab = SettingsTab;
 
 /** Commands the server's settings allowlist accepts; keep in sync with
  * `SETTINGS_COMMANDS` in `src/commands/up.rs`. */
-const SETTINGS_COMMANDS = new Set(["gh auth login", "hf auth login", "claude auth status", "opencode models"]);
+const SETTINGS_COMMANDS = new Set(["gh auth login", "hf auth login", "claude auth status"]);
 
 function settingsCommandPath(command: string) {
   return SETTINGS_COMMANDS.has(command) ? `/api/settings/commands/run?command=${encodeURIComponent(command)}` : undefined;
@@ -305,11 +305,12 @@ function useCommandRun() {
 }
 
 /** A note whose backticked commands get a play button when `resolve` maps
- * them to a terminal route. Never in remote workspaces: the routes are local. */
-function RunnableNote({ note, className, remote, resolve = settingsCommandPath, onRun }: {
+ * them to a terminal route. `disabled` hides every button: remote workspaces
+ * (the routes are local) or a tool that is not installed yet. */
+function RunnableNote({ note, className, disabled, resolve = settingsCommandPath, onRun }: {
   note: string | undefined;
   className: string;
-  remote: boolean;
+  disabled: boolean;
   resolve?: (command: string) => string | undefined;
   onRun: (command: string, path: string) => void;
 }) {
@@ -317,7 +318,7 @@ function RunnableNote({ note, className, remote, resolve = settingsCommandPath, 
   return (
     <p className={className}>
       {renderNote(note, {
-        canRun: (command) => !remote && resolve(command) !== undefined,
+        canRun: (command) => !disabled && resolve(command) !== undefined,
         onRun: (command) => {
           const path = resolve(command);
           if (path) onRun(command, path);
@@ -383,7 +384,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
-  const login = useCommandRun();
+  const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
   const setupCommands = useQuery(getHarnessSetupCommandsQuery());
 
@@ -473,15 +474,15 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           <RunnableNote
             note={h.agentNote}
             className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-            remote={remote}
+            disabled={remote}
             resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
-            onRun={(command, path) => login.start(command, path, h.id)}
+            onRun={(command, path) => setupRun.start(command, path, h.id)}
           />
-          {login.run && (
+          {setupRun.run && (
             // Hidden, not unmounted, while another harness tab is showing: a
             // switch mid-OAuth must not kill the sign-in.
-            <div hidden={login.run.owner !== h.id}>
-              <CommandRunTerminal run={login.run} onComplete={() => load(true, true)} onClose={login.clear} />
+            <div hidden={setupRun.run.owner !== h.id}>
+              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
             </div>
           )}
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
@@ -2159,7 +2160,7 @@ function HfSection({ remote }: { remote: boolean }) {
             <RunnableNote
               note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
               className={SETTINGS_NOTE_CLASS_NAME}
-              remote={remote}
+              disabled={remote}
               onRun={login.start}
             />
           )}
@@ -2944,7 +2945,7 @@ function GitHubCliHelp({
       <RunnableNote
         note={ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login()}
         className="git-card-helper m-0 text-sm leading-relaxed text-text"
-        remote={remote || !ghInstalled}
+        disabled={remote || !ghInstalled}
         onRun={onRun}
       />
       <div className="flex flex-wrap gap-2 mt-2.5">

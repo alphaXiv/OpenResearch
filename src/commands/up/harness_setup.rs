@@ -110,12 +110,8 @@ pub(super) async fn connect(
     ws: WebSocketUpgrade,
     Query(request): Query<SetupRequest>,
 ) -> Response {
-    if !super::same_origin(&headers) {
-        return super::ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "Setup terminal origin rejected".into(),
-        )
-        .into_response();
+    if let Some(rejected) = super::reject_cross_origin(&headers) {
+        return rejected;
     }
     if install_command(&request.harness, cfg!(windows)).is_none() {
         return bad_request("Unknown coding agent").into_response();
@@ -136,8 +132,16 @@ pub(super) async fn connect(
             },
         );
         let mut size = super::DEFAULT_PTY_SIZE;
-        let mut ran = false;
-        let result = run(&state, &mut socket, &request, &attempt, &mut size, &mut ran).await;
+        let mut follow_up = None;
+        let result = run(
+            &state,
+            &mut socket,
+            &request,
+            &attempt,
+            &mut size,
+            &mut follow_up,
+        )
+        .await;
         // Login rejection caches must not mask a successful new login.
         if request.harness == "claude-code" {
             state.claude.clear_runtime_rejection();
@@ -152,16 +156,11 @@ pub(super) async fn connect(
             .await
             .is_err()
             || !request.shell
-            || !ran
         {
             return;
         }
-        let (shell, args) = super::interactive_shell();
-        match super::spawn_pty(shell, args, size).await {
-            Ok(session) => {
-                super::relay_pty(&mut socket, session, None, &mut size).await;
-            }
-            Err(error) => super::send_terminal_error(&mut socket, error).await,
+        if let Some(env) = follow_up {
+            super::continue_in_shell(&mut socket, &mut size, env).await;
         }
     })
 }
@@ -172,7 +171,8 @@ async fn run(
     request: &SetupRequest,
     attempt: &SetupAttempt,
     size: &mut PtySize,
-    ran: &mut bool,
+    // Set once a command actually ran: the env its follow-up shell must share.
+    follow_up: &mut Option<Vec<(&'static str, std::ffi::OsString)>>,
 ) -> Result<(), String> {
     let mut run_command = true;
     if request.trigger == Trigger::Automatic {
@@ -252,6 +252,7 @@ async fn run(
             .unwrap_or_default();
         attempt.record("command_started", "command", None, None, None);
         let pty_size = *size;
+        let shell_env = env.clone();
         let session = match tokio::task::spawn_blocking(move || {
             super::start_pty_with_env(&program, args, &env, pty_size)
         })
@@ -271,7 +272,7 @@ async fn run(
                 return Err(error);
             }
         };
-        *ran = true;
+        *follow_up = Some(shell_env);
         let mut output = String::new();
         match super::relay_pty(socket, session, Some(&mut output), size).await {
             Some(Ok(status)) if status.success() => attempt.record(
@@ -466,11 +467,16 @@ mod tests {
         }))
         .is_err());
         assert!(
-            serde_json::from_value::<SetupRequest>(json!({
-                "harness": "codex", "action": "login", "shell": true
+            !serde_json::from_value::<SetupRequest>(json!({
+                "harness": "codex", "action": "update"
             }))
             .unwrap()
             .shell
         );
+        let uri: axum::http::Uri = "/api/harnesses/setup?harness=codex&action=login&shell=true"
+            .parse()
+            .unwrap();
+        let Query(request) = Query::<SetupRequest>::try_from_uri(&uri).unwrap();
+        assert!(request.shell && matches!(request.action, Action::Login));
     }
 }
