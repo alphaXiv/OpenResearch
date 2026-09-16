@@ -376,13 +376,17 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH, symlinks resolved (see `resolve_symlinks` — codex needs to
-/// find its `codex-code-mode-host` helper next to the real binary).
+/// `codex` on PATH or in installer locations, symlinks resolved — codex needs to
+/// find its `codex-code-mode-host` helper next to the real binary.
 pub fn find_codex() -> Option<PathBuf> {
     find_on_path("codex")
         .or_else(|| {
             let dir = dirs::home_dir()?.join(".local").join("bin");
             crate::local::shell_env::find_in_dir(&dir, "codex")
+        })
+        .or_else(|| {
+            let dir = cfg!(windows).then(dirs::data_local_dir).flatten()?;
+            crate::local::shell_env::find_in_dir(&dir.join("Programs/OpenAI/Codex/bin"), "codex")
         })
         .map(resolve_symlinks)
 }

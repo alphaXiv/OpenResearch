@@ -15,8 +15,12 @@ fn install_command(harness: &str, windows: bool) -> Option<&'static str> {
     match (harness, windows) {
         ("claude-code", false) => Some("curl -fsSL https://claude.ai/install.sh | bash"),
         ("claude-code", true) => Some("irm https://claude.ai/install.ps1 | iex"),
-        ("codex", false) => Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
-        ("codex", true) => Some("npm install -g @openai/codex"),
+        ("codex", false) => {
+            Some("curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh")
+        }
+        ("codex", true) => {
+            Some("$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex")
+        }
         ("opencode", false) => Some("curl -fsSL https://opencode.ai/install | bash"),
         ("opencode", true) => Some("npm install -g opencode-ai"),
         ("cursor", false) => Some("curl https://cursor.com/install -fsS | bash"),
@@ -59,7 +63,7 @@ pub(super) async fn commands() -> Json<Value> {
                     "install": install,
                     "login": login,
                     "update": update,
-                    "requiresNpm": cfg!(windows) && matches!(harness, "codex" | "opencode"),
+                    "requiresNpm": cfg!(windows) && install.starts_with("npm "),
                 }),
             );
         }
@@ -452,6 +456,7 @@ mod tests {
             assert!(update_command(harness).is_some());
         }
         assert!(install_command("codex; touch /tmp/injected", false).is_none());
+        assert!(!install_command("codex", true).unwrap().starts_with("npm "));
         assert!(login_command("sh").is_none());
         assert!(update_command("sh").is_none());
         assert_eq!(update_command("opencode").unwrap().1, vec!["upgrade"]);
