@@ -1174,5 +1174,19 @@
   "onboarding_loading_account": "جارٍ تحميل تفاصيل الحساب…",
   "onboarding_opencode_not_ready": "تعذّر التحقق من جاهزية OpenCode. أعد المحاولة للتحقق من التثبيت والنماذج.",
   "settings_free_models_no_sign_in": "نماذج مجانية · لا يلزم تسجيل الدخول",
-  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر"
+  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر",
+  "folder_browser_open": "فتح المسار",
+  "folder_browser_parent": "المجلد الأصل",
+  "folder_browser_directories": "المجلدات الفرعية",
+  "folder_browser_empty": "لا توجد مجلدات فرعية",
+  "folder_browser_select": "اختيار هذا المجلد",
+  "folder_browser_timeout": "استغرق هذا المجلد وقتًا طويلًا للاستجابة. جرّب مسارًا آخر.",
+  "folder_browser_locations": "المواقع",
+  "folder_browser_computer": "هذا الكمبيوتر",
+  "folder_browser_home": "المجلد الرئيسي",
+  "folder_browser_path_hint": "أدخل المسار الكامل للمجلد",
+  "new_project_parent_folder": "المجلد الأصل",
+  "new_project_choose_parent_folder": "اختيار المجلد الأصل",
+  "new_project_child_folder_name": "اسم المجلد الفرعي الجديد",
+  "new_project_child_folder_invalid": "أدخل اسم مجلد صالحًا، دون فواصل مسارات أو أسماء محجوزة."
 }

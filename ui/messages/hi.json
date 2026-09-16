@@ -1174,5 +1174,19 @@
   "harness_setup_install_preview": "अपने कंप्यूटर पर {agent} डाउनलोड और इंस्टॉल करने के लिए नीचे दी गई कमांड को स्वीकार करें।",
   "harness_setup_update_preview": "अपने कंप्यूटर पर {agent} अपडेट करने के लिए नीचे दी गई कमांड को स्वीकार करें।",
   "harness_setup_approve_run": "स्वीकार करें और चलाएं",
-  "onboarding_choose_another_agent": "दूसरा कोडिंग एजेंट चुनें"
+  "onboarding_choose_another_agent": "दूसरा कोडिंग एजेंट चुनें",
+  "folder_browser_open": "पथ खोलें",
+  "folder_browser_parent": "ऊपरी फ़ोल्डर",
+  "folder_browser_directories": "सबफ़ोल्डर",
+  "folder_browser_empty": "कोई सबफ़ोल्डर नहीं",
+  "folder_browser_select": "यह फ़ोल्डर चुनें",
+  "folder_browser_timeout": "इस फ़ोल्डर ने जवाब देने में बहुत समय लिया। कोई दूसरा पथ आज़माएँ।",
+  "folder_browser_locations": "स्थान",
+  "folder_browser_computer": "यह कंप्यूटर",
+  "folder_browser_home": "होम",
+  "folder_browser_path_hint": "फ़ोल्डर का पूरा पथ दर्ज करें",
+  "new_project_parent_folder": "मूल फ़ोल्डर",
+  "new_project_choose_parent_folder": "मूल फ़ोल्डर चुनें",
+  "new_project_child_folder_name": "नए सबफ़ोल्डर का नाम",
+  "new_project_child_folder_invalid": "पथ विभाजक या आरक्षित नाम के बिना एक मान्य फ़ोल्डर नाम दर्ज करें।"
 }
