@@ -112,7 +112,7 @@ import {
 import { onDataDirMove } from "../events";
 import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
-import { notificationsEnabled, notificationsSupported, setNotificationsEnabled } from "../notifications";
+import { NOTIFICATION_KINDS, notificationsEnabled, notificationsSupported, setNotificationsEnabled, type NotificationKind } from "../notifications";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
@@ -2468,41 +2468,50 @@ function AppearanceTab() {
 
 // --- notifications -----------------------------------------------------------
 
+const NOTIFICATION_LABELS: Record<NotificationKind, () => string> = {
+  runs: m.settings_notifications_runs,
+  prompts: m.settings_notifications_prompts,
+  turns: m.settings_notifications_turns,
+};
+
 function NotificationsTab() {
-  const [enabled, setEnabled] = useState(notificationsEnabled);
+  const [enabled, setEnabled] = useState(() => NOTIFICATION_KINDS.filter(notificationsEnabled));
   const [blocked, setBlocked] = useState(() => Notification.permission === "denied");
 
-  const toggle = () => {
-    if (enabled) {
-      setNotificationsEnabled(false);
-      setEnabled(false);
+  const toggle = (kind: NotificationKind) => {
+    if (enabled.includes(kind)) {
+      setNotificationsEnabled(kind, false);
+      setEnabled(enabled.filter((item) => item !== kind));
       return;
     }
     // Must run inside the click: browsers only prompt for permission on a user gesture.
     void Notification.requestPermission().then((permission) => {
       setBlocked(permission === "denied");
-      setNotificationsEnabled(permission === "granted");
-      setEnabled(permission === "granted");
+      if (permission !== "granted") return;
+      setNotificationsEnabled(kind, true);
+      setEnabled([...enabled, kind]);
     });
   };
 
   return (
     <>
       <h2>{m.settings_notifications_heading()}</h2>
-      <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
-        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
-          <div>
-            <div className="project-default-title text-base font-medium">{m.settings_notifications_browser()}</div>
-            <p>{blocked ? m.settings_notifications_blocked() : m.settings_notifications_description()}</p>
+      <p className="settings-sub mt-0 mx-0 mb-3 text-base leading-relaxed text-text">
+        {blocked ? m.settings_notifications_blocked() : m.settings_notifications_description()}
+      </p>
+      <div className={SETTINGS_CARD_CLASS_NAME}>
+        {NOTIFICATION_KINDS.map((kind, index) => (
+          <div key={kind} className={cn(PROJECT_DEFAULT_ROW_CLASS_NAME, index < NOTIFICATION_KINDS.length - 1 && "pb-3.5")}>
+            <div className="project-default-title text-base font-medium">{NOTIFICATION_LABELS[kind]()}</div>
+            <Switch
+              type="button"
+              checked={enabled.includes(kind)}
+              aria-label={NOTIFICATION_LABELS[kind]()}
+              disabled={blocked}
+              onClick={() => toggle(kind)}
+            />
           </div>
-          <Switch
-            type="button"
-            checked={enabled}
-            aria-label={m.settings_notifications_browser()}
-            disabled={blocked}
-            onClick={toggle}
-          />
-        </div>
+        ))}
       </div>
     </>
   );

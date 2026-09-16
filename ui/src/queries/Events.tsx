@@ -21,7 +21,7 @@ import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projec
 import { listChatSessionsQuery } from "./chat";
 
 import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
-import { newPendingPrompts, notify, runJustFinished } from "../notifications";
+import { newPendingPrompts, notify, runJustFinished, turnJustFinished, type NotificationKind } from "../notifications";
 import { taskLocation } from "../workspaceState";
 import { m } from "../paraglide/messages.js";
 
@@ -41,7 +41,7 @@ export function QueryEvents() {
       if (runJustFinished(run)) {
         const experiment = queryClient.getQueryData(listExperimentsQuery(run.projectId).queryKey)?.find((row) => row.id === run.experimentId);
         const href = experiment?.chatSessionId ? taskLocation(run.projectId, experiment.chatSessionId) : `/projects/${encodeURIComponent(run.projectId)}`;
-        notify(`run:${run.id}`, run.status === "done" ? m.notifications_run_done() : m.notifications_run_failed(), experiment?.title || experiment?.slug || "", () => void router.navigate({ href }));
+        notify("runs", `run:${run.id}`, run.status === "done" ? m.notifications_run_done() : m.notifications_run_failed(), experiment?.title || experiment?.slug || "", () => void router.navigate({ href }));
       }
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
@@ -85,15 +85,20 @@ export function QueryEvents() {
       }, 100);
     });
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
+    const notifySession = (kind: NotificationKind, tag: string, title: string, sessionId: string) => {
+      const session = queryClient.getQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] })
+        .flatMap(([, rows]) => rows ?? []).find((row) => row.id === sessionId);
+      const href = session ? taskLocation(session.projectId, session.id) : "/projects";
+      notify(kind, tag, title, session?.title ?? "", () => void router.navigate({ href }));
+    };
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
       if (event.type === "message") {
-        for (const part of newPendingPrompts(event.message)) {
-          const session = queryClient.getQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] })
-            .flatMap(([, rows]) => rows ?? []).find((row) => row.id === event.sessionId);
-          const href = session ? taskLocation(session.projectId, session.id) : "/projects";
-          notify(`prompt:${event.message.id}:${part.id}`, m.notifications_prompt_waiting(), session?.title ?? "", () => void router.navigate({ href }));
+        for (const part of newPendingPrompts(event.sessionId, event.message)) {
+          notifySession("prompts", `prompt:${event.message.id}:${part.id}`, m.notifications_prompt_waiting(), event.sessionId);
         }
+      } else if (event.type === "busy" && turnJustFinished(event.sessionId, event.busy)) {
+        notifySession("turns", `turn:${event.sessionId}`, m.notifications_turn_done(), event.sessionId);
       }
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
