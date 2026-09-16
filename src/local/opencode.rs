@@ -10,8 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
@@ -24,11 +23,24 @@ use crate::local::model::LocalProject;
 use crate::local::native_store::{self, NativeStore};
 use crate::store;
 
+#[path = "opencode_runtime.rs"]
+mod runtime;
+pub(crate) use runtime::{
+    prepare_database, resolve_binary, resolve_binary_at, start_server, AgentEndpoint, Protocol,
+    ResolvedBinary,
+};
+
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
 /// so rewriting the file retargets a running server without a restart.
 pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) struct ResolvedRuntime {
+    pub binary: ResolvedBinary,
+    pub database: PathBuf,
+    pub store: NativeStore,
+}
 
 /// `opencode` on PATH, else the installer's default drop location.
 pub fn find_opencode() -> Result<PathBuf> {
@@ -363,6 +375,7 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    pub protocol: Protocol,
 }
 
 struct AgentChild {
@@ -372,6 +385,9 @@ struct AgentChild {
     session_id: String,
     model: Option<String>,
     native_store: NativeStore,
+    binary: ResolvedBinary,
+    endpoint: AgentEndpoint,
+    database: native_store::opencode_database::DatabaseLease,
 }
 
 impl AgentChild {
@@ -382,37 +398,8 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
+            protocol: self.binary.protocol,
         }
-    }
-}
-
-/// Poll `/global/health` until opencode answers, watching for early exit.
-async fn wait_healthy(child: &mut Child, port: u16) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()?;
-    let url = format!("http://127.0.0.1:{port}/global/health");
-    let deadline = Instant::now() + HEALTH_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Err(anyhow!(
-                "opencode exited during startup ({status}); see {}",
-                agent_log_path().display()
-            ));
-        }
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                return Ok(());
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "opencode did not become healthy on 127.0.0.1:{port} within {}s; see {}",
-                HEALTH_TIMEOUT.as_secs(),
-                agent_log_path().display()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(400)).await;
     }
 }
 
@@ -424,8 +411,9 @@ async fn spawn_agent(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    binary: ResolvedBinary,
+    database: native_store::opencode_database::DatabaseLease,
 ) -> Result<AgentChild> {
-    let bin = find_opencode()?;
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
     let (repo, config_override) = {
@@ -440,37 +428,13 @@ async fn spawn_agent(
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
         eprintln!("warning: could not install the orx opencode skill: {err}");
     }
-    let port = free_port()?;
-    // The data dir may not exist yet (fresh machine, no Store::open before us).
-    if let Some(parent) = agent_log_path().parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
-    }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(agent_log_path())
-        .map_err(|e| anyhow!("Could not open {}: {}", agent_log_path().display(), e))?;
-
-    let mut cmd = Command::new(&bin);
-    cmd.arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--hostname")
-        .arg("127.0.0.1")
-        // Without --print-logs the log file stays empty and startup failures
-        // are undiagnosable.
-        .arg("--print-logs")
-        .current_dir(&repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().map_err(|e| anyhow!("{e}"))?))
-        .stderr(Stdio::from(log))
-        // Dies with `orx up` when the runtime drops the handle (Ctrl-C, exit).
-        .kill_on_drop(true);
+    let mut cmd = Command::new(&binary.path);
+    cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
     crate::local::local_models::prepare_env(&mut cmd, model)?;
-    cmd.env("OPENCODE_DB", native_store::prepare_opencode(native_store)?);
+    cmd.env("OPENCODE_DB", database.path())
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
@@ -480,20 +444,11 @@ async fn spawn_agent(
         // Project configs load after OPENCODE_CONFIG and would override our
         // headless permission grants, so they are disabled for this child.
         cmd.env("OPENCODE_CONFIG", config)
-            .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1");
+            .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+            .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     }
-    // Own process group: a terminal SIGINT reaches orx up alone, which then
-    // tears the child down deliberately (kill_on_drop / shutdown()).
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {}: {}", bin.display(), e))?;
-    if let Err(err) = wait_healthy(&mut child, port).await {
-        let _ = child.kill().await;
-        return Err(err);
-    }
+    let (child, endpoint) = runtime::start_server(&binary, cmd).await?;
+    let port = endpoint.port()?;
     Ok(AgentChild {
         child,
         port,
@@ -501,6 +456,9 @@ async fn spawn_agent(
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
         native_store,
+        binary,
+        endpoint,
+        database,
     })
 }
 
@@ -512,11 +470,26 @@ pub struct AgentHost {
     model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
-    /// status()/port_for(), and `inner` is never held across a spawn — a slow
+    /// status()/endpoint_for(), and `inner` is never held across a spawn — a slow
     /// clone or health poll must not block status reads or turn replies.
     spawn_lock: Mutex<()>,
     inner: Mutex<HashMap<String, AgentChild>>,
     up_port: std::sync::OnceLock<u16>,
+    starting: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    stopping: std::sync::atomic::AtomicBool,
+}
+
+struct StartupRegistration<'a> {
+    host: &'a AgentHost,
+    session: &'a str,
+}
+
+impl Drop for StartupRegistration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = self.host.starting.lock() {
+            starting.remove(self.session);
+        }
+    }
 }
 
 impl AgentHost {
@@ -526,6 +499,8 @@ impl AgentHost {
             spawn_lock: Mutex::new(()),
             inner: Mutex::new(HashMap::new()),
             up_port: std::sync::OnceLock::new(),
+            starting: std::sync::Mutex::new(HashMap::new()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -540,16 +515,33 @@ impl AgentHost {
         guard.values().map(AgentChild::status).collect()
     }
 
-    /// Loopback port of the session's live server (for inline replies/aborts).
-    pub async fn port_for(&self, session_id: &str) -> Option<u16> {
+    pub(crate) async fn endpoint_for(&self, session_id: &str) -> Option<AgentEndpoint> {
         let mut guard = self.inner.lock().await;
         let agent = guard.get_mut(session_id)?;
         if matches!(agent.child.try_wait(), Ok(None)) {
-            Some(agent.port)
+            Some(agent.endpoint.clone())
         } else {
             guard.remove(session_id);
             None
         }
+    }
+
+    pub(crate) async fn interrupt(&self, session_id: &str, native_id: &str) -> Result<()> {
+        let Some(endpoint) = self.endpoint_for(session_id).await else {
+            return Ok(());
+        };
+        let path = match endpoint.protocol {
+            Protocol::V1 => format!("/session/{native_id}/abort"),
+            Protocol::V2 => format!("/api/session/{native_id}/interrupt"),
+        };
+        endpoint
+            .client
+            .post(format!("{}{path}", endpoint.base_url))
+            .json(&json!({}))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 
     /// Spawn (or reuse) the opencode server for this session. Idempotent when
@@ -558,18 +550,64 @@ impl AgentHost {
         &self,
         project: &LocalProject,
         session_id: &str,
-        native_store: NativeStore,
         model: Option<&str>,
+        runtime: ResolvedRuntime,
+        progress: tokio::sync::watch::Sender<String>,
     ) -> Result<AgentStatus> {
+        let _spawning = self.spawn_lock.lock().await;
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("OpenCode is shutting down"));
+        }
+        let (sender, mut cancel) = tokio::sync::watch::channel(false);
+        self.starting
+            .lock()
+            .map_err(|_| anyhow!("OpenCode startup lock failed"))?
+            .insert(session_id.to_string(), sender);
+        let _registration = StartupRegistration {
+            host: self,
+            session: session_id,
+        };
+        let cancelled = cancel.clone();
+        tokio::select! {
+            result = self.ensure_started(project, session_id, model, runtime, progress, &cancelled) => result,
+            _ = cancel.changed() => Err(anyhow!("OpenCode startup was cancelled")),
+        }
+    }
+
+    async fn ensure_started(
+        &self,
+        project: &LocalProject,
+        session_id: &str,
+        model: Option<&str>,
+        runtime: ResolvedRuntime,
+        progress: tokio::sync::watch::Sender<String>,
+        cancelled: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<AgentStatus> {
+        let ResolvedRuntime {
+            binary,
+            database: database_path,
+            store: native_store,
+        } = runtime;
         let model = model
             .filter(|model| model.starts_with("orx-local-"))
             .or(self.model_override.as_deref());
-        let _spawning = self.spawn_lock.lock().await;
+        let database_path = native_store::opencode_database::normalize_path(&database_path)?;
+        if binary.protocol == Protocol::V1 {
+            let path = database_path.clone();
+            drop(
+                tokio::task::spawn_blocking(move || {
+                    native_store::opencode_database::DatabaseLease::acquire(&path, 1)
+                })
+                .await??,
+            );
+        }
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
                     && agent.native_store == native_store
+                    && agent.binary == binary
+                    && agent.database.path() == database_path
                     && agent.model.as_deref() == model
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
@@ -580,27 +618,57 @@ impl AgentHost {
                 let _ = old.child.kill().await; // kill() also reaps
             }
         }
+        // A binary replacement invalidates every owned child using this database.
+        {
+            let mut guard = self.inner.lock().await;
+            let stale: Vec<String> = guard
+                .iter()
+                .filter(|(_, child)| {
+                    child.database.path() == database_path && child.binary != binary
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in stale {
+                if let Some(mut child) = guard.remove(&id) {
+                    child.child.kill().await?;
+                }
+            }
+        }
+        let database =
+            runtime::prepare_database_with_progress(&binary, &database_path, |message| {
+                progress.send_replace(message.to_string());
+            })
+            .await?;
         // inner released: status()/port reads keep answering while the spawn
         // (clone/fetch + health poll) is in flight instead of hanging.
-        let agent = spawn_agent(
+        let mut agent = spawn_agent(
             project,
             model,
             session_id,
             self.up_port.get().copied(),
             native_store,
+            binary,
+            database,
         )
         .await?;
+        let mut inner = self.inner.lock().await;
+        if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = agent.child.kill().await;
+            return Err(anyhow!("OpenCode startup was cancelled"));
+        }
         let status = agent.status();
-        self.inner
-            .lock()
-            .await
-            .insert(session_id.to_string(), agent);
+        inner.insert(session_id.to_string(), agent);
         Ok(status)
     }
 
     /// Kill and reap one session's child (on session delete). No-op when the
     /// session has none.
     pub async fn kill_session(&self, session_id: &str) {
+        if let Ok(mut starting) = self.starting.lock() {
+            if let Some(cancel) = starting.remove(session_id) {
+                let _ = cancel.send(true);
+            }
+        }
         if let Some(mut agent) = self.inner.lock().await.remove(session_id) {
             let _ = agent.child.kill().await;
         }
@@ -608,6 +676,13 @@ impl AgentHost {
 
     /// Kill and reap every child (also happens via kill_on_drop on exit).
     pub async fn shutdown(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut starting) = self.starting.lock() {
+            for (_, cancel) in starting.drain() {
+                let _ = cancel.send(true);
+            }
+        }
         for (_, mut agent) in self.inner.lock().await.drain() {
             let _ = agent.child.kill().await;
         }
@@ -618,6 +693,22 @@ impl AgentHost {
 mod tests {
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
+
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_migration_or_allow_late_startup() {
+        let host = AgentHost::new(None);
+        let _spawning = host.spawn_lock.lock().await;
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        host.starting.lock().unwrap().insert("chat".into(), cancel);
+        tokio::time::timeout(Duration::from_secs(1), host.kill_session("chat"))
+            .await
+            .unwrap();
+        assert!(*receiver.borrow());
+        tokio::time::timeout(Duration::from_secs(1), host.shutdown())
+            .await
+            .unwrap();
+        assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     fn sample_project() -> LocalProject {
         LocalProject {

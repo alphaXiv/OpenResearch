@@ -122,6 +122,7 @@ import {
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
+  pendingQuestionId,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -4979,30 +4980,11 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // The newest ANSWERABLE unresolved question card's part id: typed composer
-  // text answers IT as a custom answer, instead of racing the held turn with
-  // a new message (which the busy guard would reject/drop). Plan cards have
-  // their own inline revise textarea (PlanStrip) and don't route through
-  // here. Claude + Codex sessions: both accept a note-only reply (codex's
-  // user_input_reply takes the note as the surfaced question's freeform
-  // answer). Opencode is excluded — it rejects note-only replies (see
-  // reply_inline), so its options stay the interface. A held (nativeId) card
-  // is answerable only while its turn is alive — a zombie left by a process
-  // restart must not capture the composer (its own buttons error and the
-  // backend collapses it on the first attempt).
-  const pendingQuestion = useMemo(() => {
-    const harness = activeSession?.harness;
-    if (!activeId || (harness !== "claude-code" && harness !== "codex")) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      for (const part of messages[i].parts) {
-        if (part.type !== "prompt" || !part.prompt || part.prompt.resolved) continue;
-        if (part.prompt.kind !== "question") continue;
-        if (part.prompt.nativeId && !state.busySessions.has(activeId)) return null;
-        return part.id;
-      }
-    }
-    return null;
-  }, [messages, activeSession?.harness, activeId, state.busySessions]);
+  // Native questions own the composer only while their turn is still running.
+  const pendingQuestion = useMemo(
+    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
+    [messages, activeSession?.harness, activeId, state.busySessions],
+  );
   // A pending question card owns typed text, so `!` is just an answer there.
   const bashActive = bashMode && !pendingQuestion;
 
