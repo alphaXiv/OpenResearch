@@ -1,10 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { m } from "../paraglide/messages.js";
+import { Button } from "./ui";
+import { isRecord } from "../workspaceState";
 import { mountTerminal } from "./terminal";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 /** An interactive shell in the project's checkout (the session worktree when one exists). */
 export function ProjectTerminal({ projectId, sessionId, active }: {
@@ -13,17 +11,20 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
   active: boolean;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
+  const mountRef = useRef<ReturnType<typeof mountTerminal> | null>(null);
   const [ended, setEnded] = useState<string | null>(null);
+  const [generation, setGeneration] = useState(0);
 
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, false, true);
-    terminalRef.current = terminal;
+    const mounted = mountTerminal(wrap, false, true);
+    const { terminal, dispose } = mounted;
+    mountRef.current = mounted;
+    setEnded(null);
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const query = new URLSearchParams(sessionId ? { sessionId } : {});
-    const url = new URL(`/api/projects/${encodeURIComponent(projectId)}/terminal?${query}`, `${protocol}//${location.host}`);
+    const url = new URL(`/api/projects/${encodeURIComponent(projectId)}/terminal`, `${protocol}//${location.host}`);
+    if (sessionId) url.searchParams.set("sessionId", sessionId);
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
     let finished = false;
@@ -31,6 +32,7 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
       if (finished) return;
       finished = true;
       terminal.options.disableStdin = true;
+      terminal.blur();
       terminal.writeln(`\r\n${message}`);
       setEnded(message);
     };
@@ -57,11 +59,11 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
         return;
       }
       if (!isRecord(value)) return;
-      if (value.type === "exit") finish(m.terminal_exited({ code: String(value.code) }));
+      if (value.type === "exit") finish(m.workspace_terminal_exited({ code: String(value.code) }));
       else if (value.type === "error" && typeof value.error === "string") finish(value.error);
     };
-    socket.onclose = () => finish(m.terminal_disconnected());
-    socket.onerror = () => finish(m.terminal_disconnected());
+    socket.onclose = () => finish(m.workspace_terminal_disconnected());
+    socket.onerror = () => finish(m.workspace_terminal_disconnected());
 
     return () => {
       socket.onopen = null;
@@ -71,19 +73,31 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
       input.dispose();
       resize.dispose();
       socket.close();
-      terminalRef.current = null;
+      mountRef.current = null;
       dispose();
     };
-  }, [projectId, sessionId]);
+  }, [projectId, sessionId, generation]);
 
   useEffect(() => {
-    if (active && ended === null) terminalRef.current?.focus();
-  }, [active, ended]);
+    if (!active || ended !== null) return;
+    // A terminal mounted while hidden measured a zero-size cell; refit once visible.
+    const frame = requestAnimationFrame(() => {
+      mountRef.current?.fit();
+      mountRef.current?.terminal.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [active, ended, generation]);
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-terminal p-2" role="group" aria-label={m.workspace_terminal()}>
-      <div ref={wrapRef} className="h-full min-h-0 overflow-hidden" />
-      {ended ? <p role="status" className="sr-only">{ended}</p> : null}
+      <div ref={wrapRef} className="min-h-0 flex-1 overflow-hidden" />
+      {/* Mounted whatever the state: a live region inserted with its text is missed by screen readers. */}
+      <p role="status" aria-live="polite" className="sr-only">{ended ?? ""}</p>
+      {ended !== null && (
+        <div className="flex shrink-0 justify-end pt-2">
+          <Button onClick={() => setGeneration((value) => value + 1)}>{m.workspace_terminal_restart()}</Button>
+        </div>
+      )}
     </div>
   );
 }

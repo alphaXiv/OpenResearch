@@ -537,6 +537,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
+        .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
@@ -593,7 +594,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
-        .route("/api/projects/{id}/terminal", get(project_terminal))
         .route(
             "/api/remote/sessions",
             get(remote_sessions).post(create_remote_session),
@@ -5501,6 +5501,7 @@ fn start_pty_in(
     })?;
     let mut command = CommandBuilder::new(program);
     command.args(args);
+    // Every PTY here renders in xterm.js; the daemon's own TERM may be unset.
     command.env("TERM", "xterm-256color");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
@@ -5752,48 +5753,63 @@ async fn project_terminal(
     if !same_origin(&headers) {
         return ApiError(StatusCode::FORBIDDEN, "Terminal origin rejected".into()).into_response();
     }
-    let root = match tokio::task::spawn_blocking(move || {
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        Ok::<_, ApiError>(root)
-    })
-    .await
-    {
-        Ok(Ok(root)) => root,
-        Ok(Err(error)) => return error.into_response(),
-        Err(error) => {
-            return ApiError::from(anyhow!("terminal task failed: {error}")).into_response()
-        }
-    };
     ws.on_upgrade(move |mut socket| async move {
-        let (shell, args) = interactive_shell();
-        let session = match tokio::task::spawn_blocking(move || start_pty_in(&shell, args, Some(&root))).await {
-            Ok(Ok(session)) => session,
-            Ok(Err(error)) => {
-                let _ = socket
-                    .send(Message::Text(json!({ "type": "error", "error": error.to_string() }).to_string().into()))
-                    .await;
-                return;
-            }
-            Err(error) => {
-                let _ = socket
-                    .send(Message::Text(json!({ "type": "error", "error": format!("Terminal task failed: {error}") }).to_string().into()))
-                    .await;
-                return;
-            }
-        };
-        let Some(status) = relay_pty(&mut socket, session).await else {
-            return;
-        };
-        let message = match status {
-            Ok(status) => json!({ "type": "exit", "code": status.exit_code() }),
-            Err(error) => json!({ "type": "error", "error": error }),
+        let result = async {
+            let session = tokio::task::spawn_blocking(move || {
+                let root = project_terminal_root(&id, req.session_id.as_deref())?;
+                let (shell, args) = interactive_shell();
+                start_pty_in(&shell, args, Some(&root))
+            })
+            .await??;
+            let Some(status) = relay_pty(&mut socket, session).await else {
+                return Ok::<_, anyhow::Error>(None);
+            };
+            Ok(Some(status.map_err(|error| anyhow!(error))?))
+        }
+        .await;
+        let message = match result {
+            Ok(Some(status)) => json!({ "type": "exit", "code": status.exit_code() }),
+            Ok(None) => return,
+            Err(error) => json!({ "type": "error", "error": error.to_string() }),
         };
         let _ = socket.send(Message::Text(message.to_string().into())).await;
     })
+}
+
+/// The session worktree or, without a session, the project clone.
+fn project_terminal_root(project_id: &str, session_id: Option<&str>) -> Result<std::path::PathBuf> {
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(project_id)?
+        .ok_or_else(|| anyhow!("project not found"))?;
+    let session_id = session_id.map(str::trim).filter(|s| !s.is_empty());
+    let root = match session_id {
+        Some(session_id) => {
+            let session = store
+                .get_chat_session(session_id)?
+                .filter(|session| session.project_id == project.id)
+                .ok_or_else(|| anyhow!("chat session not found"))?;
+            session_checkout_root(&store, &project, &session.id)
+        }
+        None => resolve_checkout_root(&store, &project, None).map(|(root, _)| root),
+    };
+    root.map_err(|ApiError(_, message)| anyhow!(message))
+}
+
+/// The worktree the harness will create on its first turn, so a command run
+/// before any message acts on the same checkout the agent sees.
+fn session_checkout_root(
+    store: &Store,
+    project: &local::model::LocalProject,
+    session_id: &str,
+) -> std::result::Result<std::path::PathBuf, ApiError> {
+    match local::git::ensure_session_worktree(project, session_id) {
+        Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
+        Err(error) => {
+            eprintln!("orx up: session worktree unavailable, using the clone: {error}");
+            resolve_checkout_root(store, project, Some(session_id)).map(|(root, _)| root)
+        }
+    }
 }
 
 async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -7087,15 +7103,7 @@ async fn run_shell_command(
         let project = store
             .get_local_project(&session.project_id)?
             .ok_or_else(|| not_found("project"))?;
-        // The worktree the harness will create on its first turn, so a command
-        // run before any message acts on the same checkout the agent sees.
-        match local::git::ensure_session_worktree(&project, &session.id) {
-            Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
-            Err(error) => {
-                eprintln!("orx up: session worktree unavailable, using the clone: {error}");
-                resolve_checkout_root(&store, &project, Some(&session_id)).map(|(root, _)| root)
-            }
-        }
+        session_checkout_root(&store, &project, &session.id)
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("shell task failed: {e}")))??;

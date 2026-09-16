@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { isRecord } from "../workspaceState";
 import { mountTerminal } from "./terminal";
 
 export type SshConnectResult =
@@ -9,10 +10,6 @@ export type SshConnectResult =
   | { backend: "slurm"; result: SlurmPreflight };
 
 const TERMINAL_CLASS_NAME = "overflow-hidden rounded-md bg-terminal p-2";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string");

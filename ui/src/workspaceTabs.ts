@@ -29,8 +29,8 @@ export function paneTab(pane: Pane): RightTab {
 export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWorkspace["scroll"], sourceModes: TaskWorkspace["sourceModes"]): TaskWorkspace {
   const home: RightTab[] = [];
   if (state.filesTabOpen) home.push("files");
-  if (state.artifactsTabOpen) home.push("artifacts");
   if (state.terminalTabOpen) home.push("terminal");
+  if (state.artifactsTabOpen) home.push("artifacts");
   if (state.experimentsTabOpen) home.push("experiments");
   const content = [...state.expTabs, ...state.fileTabs, ...state.planTabs, ...state.subagentTabs, ...state.codeTabs];
   const byKey = new Map(content.map((tab) => [rightTabKey(tab), tab]));

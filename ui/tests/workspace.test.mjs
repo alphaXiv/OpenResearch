@@ -148,7 +148,7 @@ test("delayed hydration cannot save defaults or apply a previous project respons
 
 test("pane history keeps task readiness and saved tabs; task switches restore the target snapshot", async () => {
   const writes = [];
-  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }]) } };
+  const document = { ...workspace.emptyProjectWorkspace(), tasks: { one: savedTask(), two: savedTask([{ kind: "home", view: "artifacts" }, { kind: "home", view: "terminal" }]) } };
   const app = host({ getProjectUiState: async () => document, saveProjectUiState: async (...args) => { writes.push(args); } });
   await app.flush();
   assert.equal(app.state.panelOpen, false);
@@ -158,7 +158,7 @@ test("pane history keeps task readiness and saved tabs; task switches restore th
   assert(app.readiness.every(Boolean));
   assert.equal(app.state.fileTabs[0].line, 23);
   app.navigate("p", "two", undefined); await app.flush();
-  assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true);
+  assert.equal(app.state.fileTabs.length, 0); assert.equal(app.state.artifactsTabOpen, true); assert.equal(app.state.terminalTabOpen, true);
   app.navigate("p", "one", undefined); await app.flush();
   assert.equal(app.state.fileTabs[0].line, 23);
   assert.equal(app.state.panelOpen, false);

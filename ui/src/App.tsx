@@ -381,6 +381,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
+  // The session whose terminal tab has been selected: restored tabs spawn
+  // their shell on first selection, not on load.
+  const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
@@ -867,6 +870,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setTerminalTabOpen(true);
     selectRightTab("terminal");
   }, [selectRightTab]);
+  const terminalKey = activeSessionId ?? (projectId ? `project:${projectId}` : null);
+  useEffect(() => {
+    if (panelOpen && rightTab === "terminal") setTerminalStartedFor(terminalKey);
+  }, [panelOpen, rightTab, terminalKey]);
 
   // Live store updates.
   useOrxEvents({
@@ -1316,7 +1323,10 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     (tab: "experiments" | "files" | "artifacts" | "terminal") => {
       if (tab === "experiments") setExperimentsTabOpen(false);
       else if (tab === "files") setFilesTabOpen(false);
-      else if (tab === "terminal") setTerminalTabOpen(false);
+      else if (tab === "terminal") {
+        setTerminalTabOpen(false);
+        setTerminalStartedFor(null);
+      }
       else setArtifactsTabOpen(false);
       forgetRightTab(tab, rightTab === tab);
     },
@@ -1662,6 +1672,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     onClose={() => closeHomeTab("files")}
                   />
                 )}
+                {terminalTabOpen && (
+                  <ClosableTab
+                    active={rightTab === "terminal"}
+                    label={m.workspace_terminal()}
+                    icon={<Terminal size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab("terminal")}
+                    onClose={() => closeHomeTab("terminal")}
+                  />
+                )}
                 {artifactsTabOpen && (
                   <ClosableTab
                     active={rightTab === "artifacts"}
@@ -1678,15 +1697,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     icon={<FlaskConical size={12} className="shrink-0" />}
                     onSelect={() => selectRightTab("experiments")}
                     onClose={() => closeHomeTab("experiments")}
-                  />
-                )}
-                {terminalTabOpen && (
-                  <ClosableTab
-                    active={rightTab === "terminal"}
-                    label={m.workspace_terminal()}
-                    icon={<Terminal size={12} className="shrink-0" />}
-                    onSelect={() => selectRightTab("terminal")}
-                    onClose={() => closeHomeTab("terminal")}
                   />
                 )}
                 {orderedContentTabs.map(renderContentTab)}
@@ -2061,11 +2071,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 )}
               </TabBody>
             )}
-            {terminalTabOpen && activeProject && (
-              // Stays mounted behind other tabs so the shell survives tab switches.
-              <TabBody style={rightTab === "terminal" ? undefined : { display: "none" }}>
+            {/* Hidden rather than unmounted so the shell survives tab switches within the panel. */}
+            {terminalTabOpen && terminalKey !== null && terminalStartedFor === terminalKey && activeProject && (
+              <TabBody className={rightTab === "terminal" ? undefined : "hidden"}>
                 <ProjectTerminal
-                  key={`terminal:${activeSessionId ?? `project:${activeProject.id}`}`}
+                  key={terminalKey}
                   projectId={activeProject.id}
                   sessionId={activeSessionId}
                   active={rightTab === "terminal"}
