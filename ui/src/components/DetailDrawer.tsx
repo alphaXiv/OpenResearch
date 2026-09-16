@@ -15,7 +15,7 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
-import { Button, MenuItem } from "./ui";
+import { Button, MenuItem, showAlert } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -86,8 +86,6 @@ function TerminalView({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [resyncing, setResyncing] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -107,13 +105,6 @@ function TerminalView({
     return idx === -1 ? expRuns.length : expRuns.length - idx;
   };
 
-  // The resync result is a transient acknowledgement, not persistent state.
-  useEffect(() => {
-    if (!notice) return;
-    const timer = setTimeout(() => setNotice(null), 6000);
-    return () => clearTimeout(timer);
-  }, [notice]);
-
   // Close the history dropdown on outside click.
   useEffect(() => {
     if (!historyOpen) return;
@@ -126,28 +117,33 @@ function TerminalView({
 
   async function stop() {
     if (!selectedRun) return;
-    setError(null);
     setPendingRunId(selectedRun.id);
     try {
       await cancelRun(selectedRun.id);
     } catch (err) {
       setPendingRunId(null);
-      setError(err instanceof Error ? err.message : String(err));
+      showAlert(err instanceof Error ? err.message : String(err), "error");
     }
   }
 
   // The supervisor mirrors the backend's log into the local store. When that
   // mirror stops advancing while the job is plainly still running, this is the
   // escape hatch: it replaces the supervisor, which re-mirrors from the start.
+  //
+  // The outcome is phrased here rather than taken from the response: the API's
+  // `message` is CLI copy that names the run id, which this button's own row
+  // already identifies, and which no catalog can translate.
   async function resync() {
     if (!selectedRun) return;
-    setError(null);
-    setNotice(null);
     setResyncing(true);
     try {
-      setNotice(await resyncRun(selectedRun.id));
+      const report = await resyncRun(selectedRun.id);
+      if (report.terminal) showAlert(m.detail_drawer_resync_terminal(), "info");
+      else if (report.replaced) showAlert(m.detail_drawer_resync_replaced(), "success");
+      else if (report.spawned) showAlert(m.detail_drawer_resync_started(), "success");
+      else showAlert(m.detail_drawer_resync_blocked(), "warning");
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      showAlert(err instanceof Error ? err.message : String(err), "error");
     } finally {
       setResyncing(false);
     }
@@ -155,21 +151,11 @@ function TerminalView({
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
         <span className="flex-1" />
-        {error && (
-          <span className="error" role="alert">
-            {error}
-          </span>
-        )}
-        {!error && notice && (
-          <span className="text-sm text-subtext" role="status">
-            {notice}
-          </span>
-        )}
         {live && (
           <Button
             size="small"

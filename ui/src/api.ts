@@ -379,11 +379,23 @@ export const listInstances = () =>
 export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
+/** What a resync actually did. Not always a restart, so the caller reports the
+ *  outcome it got rather than assuming the happy path. */
+export interface ResyncReport {
+  /** The run had already finished; supervision was not restarted. */
+  terminal: boolean;
+  /** A live supervisor was found and retired. */
+  replaced: boolean;
+  /** A fresh supervisor was spawned. */
+  spawned: boolean;
+}
+
 /** Retire the run's supervisor and start a fresh one. The manual fallback for
- *  a supervisor that is alive but no longer advancing the local log mirror;
- *  `message` says what actually happened, which is not always a restart. */
+ *  a supervisor that is alive but no longer advancing the local log mirror.
+ *  The response also carries a `message`, but that one is CLI copy — it names
+ *  the run id and is not localized, so the UI phrases its own from the report. */
 export const resyncRun = (runId: string) =>
-  post<{ ok: boolean; message: string }>(`/api/runs/${runId}/resync`).then((r) => r.message);
+  post<{ ok: boolean; report: ResyncReport }>(`/api/runs/${runId}/resync`).then((r) => r.report);
 
 export interface LogChunk {
   dataBase64: string;

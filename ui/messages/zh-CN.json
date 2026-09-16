@@ -1154,5 +1154,9 @@
   "skills_remove_imported_confirm": "从 OpenResearch 移除“{name}”？源文件将保留在你的编程智能体中。",
   "common_resync": "重新同步",
   "common_resyncing": "正在重新同步…",
-  "detail_drawer_resync_hint": "重启此运行的日志监督进程"
+  "detail_drawer_resync_hint": "重启此运行的日志监督进程",
+  "detail_drawer_resync_replaced": "监督进程已重启 — 日志将从头重新同步。",
+  "detail_drawer_resync_started": "此运行没有监督进程，已启动一个。",
+  "detail_drawer_resync_terminal": "此运行已结束 — 无需重新同步。",
+  "detail_drawer_resync_blocked": "此运行的监督进程正在运行，无法从这里重启。"
 }

@@ -1154,5 +1154,9 @@
   "skills_remove_imported_confirm": "«{name}» از OpenResearch حذف شود؟ فایل‌های اصلی در عامل برنامه‌نویسی شما باقی می‌مانند.",
   "common_resync": "همگام‌سازی مجدد",
   "common_resyncing": "در حال همگام‌سازی…",
-  "detail_drawer_resync_hint": "راه‌اندازی مجدد ناظر گزارش این اجرا"
+  "detail_drawer_resync_hint": "راه‌اندازی مجدد ناظر گزارش این اجرا",
+  "detail_drawer_resync_replaced": "ناظر راه‌اندازی مجدد شد — گزارش از ابتدا دوباره بازتاب می‌یابد.",
+  "detail_drawer_resync_started": "هیچ ناظری این اجرا را دنبال نمی‌کرد. یکی راه‌اندازی شد.",
+  "detail_drawer_resync_terminal": "این اجرا پیش‌تر پایان یافته است — چیزی برای همگام‌سازی نیست.",
+  "detail_drawer_resync_blocked": "ناظری برای این اجرا در حال اجراست و از اینجا قابل راه‌اندازی مجدد نیست."
 }
