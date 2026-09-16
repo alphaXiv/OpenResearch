@@ -25,7 +25,7 @@
         var saved = null;
         try { saved = localStorage.getItem("orx:locale"); } catch (e) {}
         var browserPreferences = navigator.languages || [navigator.language];
-        var supported = ["en", "zh-CN", "fa", "ar"];
+        var supported = ["en", "zh-CN", "fa", "ar", "es", "hi"];
         var match = function (tag) {
           if (!tag) return null;
           var normalized = String(tag).toLowerCase();

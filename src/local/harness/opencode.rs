@@ -71,10 +71,6 @@ impl Harness for OpenCode {
         true
     }
 
-    fn login_command(&self) -> Option<&'static [&'static str]> {
-        Some(&["opencode", "auth", "login"])
-    }
-
     async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
         opencode_one_shot(
             &crate::local::opencode::resolve_binary().await.ok()?,
@@ -86,6 +82,7 @@ impl Harness for OpenCode {
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
+        let mut public_models = HashSet::new();
         let mut config = Value::Null;
         let bin = find_opencode().ok();
         let mut resolved_binary = None;
@@ -114,7 +111,14 @@ impl Harness for OpenCode {
                     Err(anyhow!("OpenCode database inspection failed: {error}"))
                 });
                 if let Err(error) = preflight {
-                    info.auth_state = HarnessAuthState::Unsupported;
+                    info.auth_state = if error
+                        .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
+                        .is_some()
+                    {
+                        HarnessAuthState::Unknown
+                    } else {
+                        HarnessAuthState::Unsupported
+                    };
                     info.agent_note = Some(error.to_string());
                     return Some(info);
                 }
@@ -125,7 +129,7 @@ impl Harness for OpenCode {
                     opencode_models(binary),
                     run_models(binary, &["debug", "config", "--pure"])
                 );
-                models = catalog;
+                (models, public_models) = catalog;
                 config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
                     Some(config) => config,
                     None => Value::Null,
@@ -178,7 +182,11 @@ impl Harness for OpenCode {
             info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
         }
         models.retain(|model| {
-            available.contains(&model.id) || (info.authenticated && !is_local(model))
+            available.contains(&model.id)
+                || (info.authenticated && !is_local(model))
+                || (public_models.contains(&model.id)
+                    && provider_enabled(&config, "opencode")
+                    && !is_local(model))
         });
         // Onboarding and the composer seed their selection from the first model.
         let default = config.get("model").and_then(Value::as_str);
@@ -259,6 +267,13 @@ impl Harness for OpenCode {
         }
         if info.installed && !info.install_broken && !info.agent_ready && config.is_null() {
             info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
+        }
+        if info.auth_state == HarnessAuthState::Unknown && !config.is_null() {
+            info.auth_state = if info.authenticated || info.agent_ready {
+                HarnessAuthState::Ready
+            } else {
+                HarnessAuthState::NeedsLogin
+            };
         }
         if let Err(error) = crate::local::local_models::read() {
             info.agent_note = Some(error.to_string());
@@ -564,18 +579,25 @@ async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String>
 /// Falls back to the plain `opencode models` id list if `--verbose` is
 /// unavailable or unparseable, so an older/newer opencode still yields models
 /// (just without per-model variants).
-async fn opencode_models(binary: &ResolvedBinary) -> Vec<super::ModelInfo> {
+async fn opencode_models(binary: &ResolvedBinary) -> (Vec<super::ModelInfo>, HashSet<String>) {
     let verbose = run_models(binary, &["models", "--verbose"]).await;
     if let Some(out) = &verbose {
         let parsed = parse_verbose_models(out);
         if !parsed.is_empty() {
-            return parsed;
+            let public = parse_verbose_models_filtered(out, true)
+                .into_iter()
+                .map(|model| model.id)
+                .collect();
+            return (parsed, public);
         }
     }
     let Some(plain) = run_models(binary, &["models"]).await else {
-        return Vec::new();
+        return (Vec::new(), HashSet::new());
     };
-    model_id_lines(&plain).map(super::ModelInfo::new).collect()
+    (
+        model_id_lines(&plain).map(super::ModelInfo::new).collect(),
+        HashSet::new(),
+    )
 }
 
 /// One headless request on a throwaway `opencode run` child on
@@ -729,6 +751,10 @@ fn model_id_lines(out: &str) -> impl Iterator<Item = &str> {
 /// dropping every later model, and quietly, because a partial parse doesn't
 /// trigger the plain-list fallback.
 fn parse_verbose_models(out: &str) -> Vec<super::ModelInfo> {
+    parse_verbose_models_filtered(out, false)
+}
+
+fn parse_verbose_models_filtered(out: &str, public_only: bool) -> Vec<super::ModelInfo> {
     let mut models = Vec::new();
     let mut lines = out.lines().peekable();
     while let Some(line) = lines.next() {
@@ -773,6 +799,21 @@ fn parse_verbose_models(out: &str) -> Vec<super::ModelInfo> {
         // An unparseable block still yields the model, just without variants —
         // never drop a model the CLI reported.
         let parsed = serde_json::from_str::<Value>(&block).ok();
+        if public_only
+            && !(header.starts_with("opencode/")
+                && parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/cost/input"))
+                    .and_then(Value::as_f64)
+                    == Some(0.0)
+                && parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/cost/output"))
+                    .and_then(Value::as_f64)
+                    == Some(0.0))
+        {
+            continue;
+        }
         let variants = parsed.as_ref().and_then(variant_ids);
         let name = parsed
             .as_ref()
@@ -1843,6 +1884,23 @@ opencode/glm-5
         m.reasoning_levels
             .as_ref()
             .map(|c| c.iter().map(|c| c.id.as_str()).collect())
+    }
+
+    #[test]
+    fn public_models_require_opencode_and_explicit_zero_cost() {
+        let catalog = r#"opencode/free
+{"cost":{"input":0,"output":0}}
+opencode/paid
+{"cost":{"input":1,"output":2}}
+other/free
+{"cost":{"input":0,"output":0}}
+opencode/unknown
+{}
+"#;
+        let models = parse_verbose_models_filtered(catalog, true);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "opencode/free");
+        assert_eq!(parse_verbose_models(catalog).len(), 4);
     }
 
     #[test]

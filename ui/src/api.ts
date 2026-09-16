@@ -1631,19 +1631,28 @@ export interface Harness {
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
   authMethod?: "oauth" | "apiKey" | "local";
+  accountLoading?: boolean;
   account?: string;
   org?: string;
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
-  /** Interactive sign-in argv (`claude auth login`); offered while signed out. */
-  loginCommand?: string[];
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
   models: HarnessModel[];
   options: HarnessOptions;
 }
+
+export interface HarnessSetupCommands {
+  install: string;
+  login: string;
+  update: string;
+  requiresNpm: boolean;
+}
+
+export const getHarnessSetupCommands = (signal?: AbortSignal) =>
+  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();

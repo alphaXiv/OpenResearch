@@ -175,9 +175,10 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
   );
 }
 
-function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, onComplete, onError, onClosed }: {
+export function CommandTerminal({ path, label, command, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, awaitingApproval = false, onComplete, onError, onClosed }: {
   path: string;
   label: string;
+  command?: string;
   heightClass?: string;
   /** `bare` drops the rounded card so a caller can supply its own chrome. */
   frame?: "card" | "bare";
@@ -186,6 +187,7 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
    * stays up, input stays enabled, and only transport failures reach `onError`. */
   shellAfter?: boolean;
   active?: boolean;
+  awaitingApproval?: boolean;
   onComplete: (value: unknown) => boolean;
   onError?: (error: string) => void;
   /** The session ended after the command finished (the follow-up shell exited). */
@@ -204,8 +206,15 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, false, true, palette);
+    const { terminal, dispose } = mountTerminal(wrap, awaitingApproval, true, palette);
     terminalRef.current = terminal;
+    if (awaitingApproval) {
+      if (command) terminal.writeln(`$ ${command}`);
+      return () => {
+        terminalRef.current = null;
+        dispose();
+      };
+    }
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(path, `${protocol}//${location.host}`);
@@ -236,6 +245,7 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
       }
     });
     socket.onopen = () => {
+      if (command) terminal.writeln(`$ ${command}`);
       socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
     };
     socket.onmessage = (event) => {
@@ -286,15 +296,15 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
       terminalRef.current = null;
       dispose();
     };
-  }, [path, palette, shellAfter]);
+  }, [path, command, awaitingApproval, palette, shellAfter]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
-    terminal.options.disableStdin = !active || error !== null;
-    if (active && error === null) terminal.focus();
+    terminal.options.disableStdin = awaitingApproval || !active || error !== null;
+    if (!awaitingApproval && active && error === null) terminal.focus();
     else terminal.blur();
-  }, [active, error]);
+  }, [active, error, awaitingApproval]);
 
   return (
     <div className={frame === "card" ? "mt-3" : undefined}>

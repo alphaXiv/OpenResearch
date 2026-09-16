@@ -141,9 +141,6 @@ pub struct HarnessInfo {
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
-    /// Static per harness; the dashboard offers it only while signed out.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub login_command: Option<Vec<String>>,
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
@@ -169,7 +166,6 @@ impl HarnessInfo {
             plan: None,
             agent_ready: false,
             agent_note: None,
-            login_command: None,
             supports_steering: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
@@ -358,16 +354,6 @@ pub(super) fn title_case(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn login_command_serializes_only_when_set() {
-        let mut info = HarnessInfo::new("codex", "Codex");
-        let json = serde_json::to_value(&info).unwrap();
-        assert!(json.get("loginCommand").is_none());
-        info.login_command = Some(vec!["codex".into(), "login".into()]);
-        let json = serde_json::to_value(&info).unwrap();
-        assert_eq!(json["loginCommand"], serde_json::json!(["codex", "login"]));
-    }
 
     #[cfg(unix)]
     #[test]

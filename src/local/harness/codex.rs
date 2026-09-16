@@ -379,7 +379,12 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
 /// `codex` on PATH, symlinks resolved (see `resolve_symlinks` — codex needs to
 /// find its `codex-code-mode-host` helper next to the real binary).
 pub fn find_codex() -> Option<PathBuf> {
-    find_on_path("codex").map(resolve_symlinks)
+    find_on_path("codex")
+        .or_else(|| {
+            let dir = dirs::home_dir()?.join(".local").join("bin");
+            crate::local::shell_env::find_in_dir(&dir, "codex")
+        })
+        .map(resolve_symlinks)
 }
 
 /// `find_codex` with the install hint baked in (the `find_opencode` precedent)
@@ -491,10 +496,6 @@ impl Harness for Codex {
         true
     }
 
-    fn login_command(&self) -> Option<&'static [&'static str]> {
-        Some(&["codex", "login"])
-    }
-
     /// The app-server takes `turn/steer` against the active turn; `detect`
     /// withholds it from installations that fall back to the exec path.
     fn supports_steering(&self) -> bool {
@@ -514,9 +515,9 @@ impl Harness for Codex {
         if let Some(provider) = custom_provider.as_ref() {
             // A provider with `requires_openai_auth = false` never writes
             // auth.json; its declared `env_key` is the credential.
+            info.auth_method = provider.env_key.as_ref().map(|_| "apiKey");
             if provider.is_ready() {
                 info.authenticated = true;
-                info.auth_method = provider.env_key.as_ref().map(|_| "apiKey");
             } else if let Some(key) = provider.env_key.as_deref() {
                 info.agent_note = Some(format!(
                     "Set `{key}` for the configured Codex model provider."
@@ -542,6 +543,18 @@ impl Harness for Codex {
             }
         }
 
+        if info.installed && !info.install_broken {
+            info.auth_state = if info.authenticated {
+                super::HarnessAuthState::Ready
+            } else if custom_provider.is_none()
+                && home.join("auth.json").exists()
+                && read_json(home.join("auth.json")).is_none()
+            {
+                super::HarnessAuthState::Unknown
+            } else {
+                super::HarnessAuthState::NeedsLogin
+            };
+        }
         info.agent_ready = info.ready();
         if info.agent_ready {
             // A custom provider's bundled first-party catalog is meaningless,

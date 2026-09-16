@@ -45,6 +45,8 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
+mod harness_setup;
+
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
     let persistent_host = args.remote_host;
@@ -622,7 +624,6 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
-        .route("/api/settings/harnesses/{id}/login", get(harness_login))
         .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
@@ -633,6 +634,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/harnesses/setup/commands",
+            get(harness_setup::commands),
+        )
+        .route("/api/harnesses/setup", get(harness_setup::connect))
         .route(
             "/api/local-models",
             get(list_local_models).post(connect_local_model),
@@ -759,8 +765,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
             | "/api/settings/commands/run"
+            | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
-        || (path.starts_with("/api/settings/harnesses/") && path.ends_with("/login"))
         || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
 }
 
@@ -5492,7 +5498,16 @@ const DEFAULT_PTY_SIZE: PtySize = PtySize {
     pixel_height: 0,
 };
 
-fn start_pty(program: &str, args: Vec<String>, size: PtySize) -> Result<PtySession> {
+fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
+    start_pty_with_env(program, args, &[], DEFAULT_PTY_SIZE)
+}
+
+fn start_pty_with_env(
+    program: &str,
+    args: Vec<String>,
+    env: &[(&str, std::ffi::OsString)],
+    size: PtySize,
+) -> Result<PtySession> {
     use std::io::{Read as _, Write as _};
 
     let pair = native_pty_system().openpty(size)?;
@@ -5506,6 +5521,9 @@ fn start_pty(program: &str, args: Vec<String>, size: PtySize) -> Result<PtySessi
     local::shell_env::export_to(|key, value| command.env(key, value));
     if std::env::var_os("TERM").is_none() {
         command.env("TERM", "xterm-256color");
+    }
+    for (key, value) in env {
+        command.env(key, value);
     }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
@@ -5592,25 +5610,25 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let session =
-        match tokio::task::spawn_blocking(move || start_pty("ssh", args, DEFAULT_PTY_SIZE)).await {
-            Ok(Ok(session)) => session,
-            Ok(Err(error)) => {
-                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-                return;
-            }
-            Err(error) => {
-                send_ssh_connect_error(
-                    &mut socket,
-                    &host,
-                    backend,
-                    format!("SSH terminal task failed: {error}"),
-                )
-                .await;
-                return;
-            }
-        };
-    let Some(status) = relay_pty(&mut socket, session, &mut { DEFAULT_PTY_SIZE }).await else {
+    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
+        Ok(Ok(session)) => session,
+        Ok(Err(error)) => {
+            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+            return;
+        }
+        Err(error) => {
+            send_ssh_connect_error(
+                &mut socket,
+                &host,
+                backend,
+                format!("SSH terminal task failed: {error}"),
+            )
+            .await;
+            return;
+        }
+    };
+    let Some(status) = relay_pty(&mut socket, session, None, &mut { DEFAULT_PTY_SIZE }).await
+    else {
         return;
     };
 
@@ -5663,6 +5681,7 @@ async fn ssh_connect_socket(
 async fn relay_pty(
     socket: &mut WebSocket,
     session: PtySession,
+    mut output: Option<&mut String>,
     size: &mut PtySize,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
@@ -5680,6 +5699,7 @@ async fn relay_pty(
         tokio::select! {
             event = events.recv() => match event {
                 Some(PtyEvent::Output(bytes)) => {
+                    if let Some(output) = output.as_deref_mut() { harness_setup::append_output(output, &bytes); }
                     if socket.send(Message::Binary(bytes.into())).await.is_err() {
                         return None;
                     }
@@ -5718,6 +5738,9 @@ async fn relay_pty(
     {
         match event {
             PtyEvent::Output(bytes) => {
+                if let Some(output) = output.as_deref_mut() {
+                    harness_setup::append_output(output, &bytes);
+                }
                 if socket.send(Message::Binary(bytes.into())).await.is_err() {
                     return None;
                 }
@@ -5748,41 +5771,6 @@ async fn openresearch_terminal(
     command_terminal(&headers, ws, program, args, false, async {}).await
 }
 
-/// Interactive sign-in (`claude auth login`) via the binary detection found, so
-/// a PATH difference can't pick another install; success drops the harness cache.
-async fn harness_login(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-    ws: WebSocketUpgrade,
-) -> Response {
-    if let Some(rejected) = reject_cross_origin(&headers) {
-        return rejected;
-    }
-    let Some(argv) = local::harness::login_command(&id) else {
-        return not_found("harness").into_response();
-    };
-    let cached_bin = state
-        .harnesses
-        .lock()
-        .await
-        .as_ref()
-        .and_then(|(_, payload)| harness_bin_path(payload, &id));
-    let bin = match cached_bin {
-        Some(bin) => Some(bin),
-        None => local::harness::detect_harness(&id)
-            .await
-            .and_then(|harness| harness.bin_path),
-    };
-    let program = bin.ok_or_else(|| anyhow!("{} is not installed", argv[0]));
-    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
-    let cache = state.harnesses.clone();
-    command_terminal(&headers, ws, program, args, true, async move {
-        *cache.lock().await = None;
-    })
-    .await
-}
-
 /// Commands the settings page may run, keyed by the exact note text. The
 /// loopback and origin guards are the security boundary (the session ends in
 /// the user's shell anyway); this list only keeps the button honest.
@@ -5791,11 +5779,6 @@ const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ("hf auth login", &["hf", "auth", "login"]),
     ("claude auth status", &["claude", "auth", "status"]),
     ("opencode models", &["opencode", "models"]),
-    // Installer one-liners need a shell for the pipe.
-    (
-        "curl https://cursor.com/install -fsS | bash",
-        &["sh", "-c", "curl https://cursor.com/install -fsS | bash"],
-    ),
 ];
 
 fn settings_command(command: &str) -> Option<&'static [&'static str]> {
@@ -5837,17 +5820,6 @@ fn interactive_shell() -> (String, Vec<String>) {
     }
 }
 
-fn harness_bin_path(payload: &Value, id: &str) -> Option<String> {
-    payload
-        .get("harnesses")?
-        .as_array()?
-        .iter()
-        .find(|h| h.get("id").and_then(Value::as_str) == Some(id))?
-        .get("binPath")?
-        .as_str()
-        .map(str::to_string)
-}
-
 fn reject_cross_origin(headers: &HeaderMap) -> Option<Response> {
     (!same_origin(headers))
         .then(|| ApiError(StatusCode::FORBIDDEN, "Terminal origin rejected".into()).into_response())
@@ -5880,7 +5852,7 @@ async fn command_terminal(
                 return;
             }
         };
-        let Some(status) = relay_pty(&mut socket, session, &mut size).await else {
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size).await else {
             return;
         };
         let result = async {
@@ -5909,7 +5881,7 @@ async fn command_terminal(
         let (shell, shell_args) = interactive_shell();
         match spawn_pty(shell, shell_args, size).await {
             Ok(session) => {
-                relay_pty(&mut socket, session, &mut size).await;
+                relay_pty(&mut socket, session, None, &mut size).await;
             }
             Err(error) => send_terminal_error(&mut socket, error).await,
         }
@@ -5917,7 +5889,7 @@ async fn command_terminal(
 }
 
 async fn spawn_pty(program: String, args: Vec<String>, size: PtySize) -> Result<PtySession> {
-    tokio::task::spawn_blocking(move || start_pty(&program, args, size)).await?
+    tokio::task::spawn_blocking(move || start_pty_with_env(&program, args, &[], size)).await?
 }
 
 async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
@@ -6889,6 +6861,7 @@ async fn list_harnesses(
                 {
                     let mut payload = payload.clone();
                     overlay_claude_auth(&mut payload, snapshot);
+                    crate::telemetry::harness::capture_initial(&payload);
                     return Json(payload);
                 }
             }
@@ -6939,7 +6912,48 @@ async fn list_harnesses(
         );
     }
     overlay_claude_auth(&mut payload, snapshot);
-    *cache = Some((std::time::Instant::now(), payload.clone()));
+    crate::telemetry::harness::capture_initial(&payload);
+    let cached_at = std::time::Instant::now();
+    let cursor = payload["harnesses"].as_array_mut().and_then(|items| {
+        items
+            .iter_mut()
+            .find(|h| h["id"] == "cursor" && h["authenticated"] == true)
+    });
+    if let Some(cursor) = cursor {
+        if let Some(bin) = cursor["binPath"].as_str().map(std::path::PathBuf::from) {
+            cursor["accountLoading"] = json!(true);
+            let cache = state.harnesses.clone();
+            tokio::spawn(async move {
+                let details = local::harness::cursor::account_details(&bin).await;
+                let mut cache = cache.lock().await;
+                let Some((at, payload)) = cache.as_mut() else {
+                    return;
+                };
+                // A newer detection owns its own account lookup.
+                if *at != cached_at {
+                    return;
+                }
+                let Some(cursor) = payload["harnesses"]
+                    .as_array_mut()
+                    .and_then(|items| items.iter_mut().find(|h| h["id"] == "cursor"))
+                else {
+                    return;
+                };
+                cursor["accountLoading"] = json!(false);
+                if let Some(details) = details {
+                    for (source, target) in [("userEmail", "account"), ("subscriptionTier", "plan")]
+                    {
+                        if let Some(value) =
+                            details[source].as_str().filter(|value| !value.is_empty())
+                        {
+                            cursor[target] = json!(value);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    *cache = Some((cached_at, payload.clone()));
     Json(payload)
 }
 
@@ -7996,7 +8010,6 @@ mod tests {
             "/api/settings/ssh/connect",
             "/api/settings/openresearch/login",
             "/api/settings/openresearch/ssh-key",
-            "/api/settings/harnesses/claude-code/login",
             "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
@@ -8076,7 +8089,6 @@ mod tests {
                 "-c".into(),
                 "read value; printf 'reply:%s\\n' \"$value\"".into(),
             ],
-            DEFAULT_PTY_SIZE,
         )
         .unwrap();
         session
@@ -8108,12 +8120,8 @@ mod tests {
         .expect("PTY did not exit");
         assert!(String::from_utf8_lossy(&output).contains("reply:hello"));
 
-        let mut cancelled = start_pty(
-            "sh",
-            vec!["-c".into(), "trap '' HUP; sleep 30".into()],
-            DEFAULT_PTY_SIZE,
-        )
-        .unwrap();
+        let mut cancelled =
+            start_pty("sh", vec!["-c".into(), "trap '' HUP; sleep 30".into()]).unwrap();
         cancelled.kill.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = cancelled.events.recv().await {
@@ -8125,20 +8133,6 @@ mod tests {
         })
         .await
         .expect("cancelled PTY did not exit");
-    }
-
-    #[test]
-    fn harness_bin_path_reads_the_cached_entry() {
-        let payload = json!({ "harnesses": [
-            { "id": "codex", "binPath": "/opt/codex" },
-            { "id": "cursor" },
-        ] });
-        assert_eq!(
-            harness_bin_path(&payload, "codex").as_deref(),
-            Some("/opt/codex")
-        );
-        assert_eq!(harness_bin_path(&payload, "cursor"), None);
-        assert_eq!(harness_bin_path(&payload, "claude-code"), None);
     }
 
     #[test]
