@@ -167,6 +167,8 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
         "Read-only file system",
         "No such file or directory",
         "command not found",
+        "is not recognized as the name of a cmdlet",
+        "running scripts is disabled on this system",
         "Unsupported platform",
         "Unsupported architecture",
         "The requested URL returned error: 403",
@@ -182,9 +184,14 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
         "ENOSPC",
         "ECONNRESET",
     ];
+    let output = output
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
     let phrases: Vec<_> = PHRASES
         .iter()
-        .filter(|phrase| output.contains(**phrase))
+        .filter(|phrase| output.contains(&phrase.to_ascii_lowercase()))
         .copied()
         .collect();
     (!phrases.is_empty()).then(|| phrases.join("; "))
@@ -232,6 +239,22 @@ mod tests {
         assert_eq!(
             safe_error_excerpt("curl: (22) The requested URL returned error: 403 secret"),
             Some("The requested URL returned error: 403".into())
+        );
+    }
+
+    #[test]
+    fn wrapped_and_mixed_case_errors_keep_only_fixed_diagnostics() {
+        assert_eq!(
+            safe_error_excerpt("npm : The term 'npm' is not recognized as the name of a cmdlet, function, script file, or operable program. C:\\Users\\private"),
+            Some("is not recognized as the name of a cmdlet".into())
+        );
+        assert_eq!(
+            safe_error_excerpt("C:\\Users\\private\\npm.ps1 cannot be loaded because running scripts is\r\n disabled on this system."),
+            Some("running scripts is disabled on this system".into())
+        );
+        assert_eq!(
+            safe_error_excerpt("ERROR: permission denied for secret-token"),
+            Some("Permission denied".into())
         );
     }
 }
