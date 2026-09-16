@@ -1,5 +1,6 @@
 import { cn } from "./ui/cn";
 import { TARGET_LABELS } from "../computeTargets";
+import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -10,6 +11,7 @@ import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
 import {
   getHarnessesQuery,
+  getHarnessSetupCommandsQuery,
   refreshHarnesses,
   getK8sSettingsQuery,
   getModalSettingsQuery,
@@ -283,6 +285,7 @@ type Tab = SettingsTab;
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
+  if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
@@ -295,16 +298,19 @@ function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label:
 }
 
 function AuthLabel({ h }: { h: Harness }) {
+  if (h.id === "opencode" && h.agentReady && !h.authenticated && !h.authMethod) return <>{m.settings_free_models_no_sign_in()}</>;
   if (!h.authMethod) return <>—</>;
   if (h.authMethod === "local") return <>{m.projects_local()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
-function HarnessesTab() {
+function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
+  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const setupCommands = useQuery(getHarnessSetupCommandsQuery());
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -318,6 +324,13 @@ function HarnessesTab() {
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
+      {!remote && setupHarness && setupCommands.data && (
+        <HarnessSetupDialog
+          harness={setupHarness}
+          commands={setupCommands.data[setupHarness.id]}
+          onClose={() => setSetupHarness(null)}
+        />
+      )}
       <div className="harness-tabs mt-3 flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
         {(harnesses ?? []).map((x) => (
           <button
@@ -339,6 +352,11 @@ function HarnessesTab() {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
+            {!remote && h.installed && !h.installBroken && !h.authenticated && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                <SquareTerminal size={14} /> {m.harness_setup_login()}
+              </Button>
+            )}
             <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
               <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
             </Button>
@@ -653,7 +671,7 @@ function useSshMasterStatuses(hosts: string[]) {
   return [statuses, markRunning] as const;
 }
 
-function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | undefined }) {
+function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting)
     return (
       <span role="status">
@@ -849,7 +867,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
+function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
   if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
@@ -3553,7 +3571,7 @@ export function SettingsView({
               <ProjectDefaultsTab />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab />
+              <HarnessesTab remote={remote} />
             </section>
             {!remote && (
               <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>

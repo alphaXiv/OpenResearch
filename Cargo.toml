@@ -1,6 +1,6 @@
 [package]
 name = "openresearch-cli"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
 repository = "https://github.com/alphaXiv/OpenResearch"
@@ -24,7 +24,7 @@ anyhow = "1"
 dirs = "5"
 # bundled: compiles SQLite from source so the static musl builds link cleanly
 # (same reasoning as rustls above — no system library dependency).
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 semver = "1"

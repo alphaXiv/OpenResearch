@@ -68,6 +68,6 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 |---|---|
 | `orx up --remote-host` | Refused. The control channel is a Unix domain socket. |
 | Restart after an update | There is no `exec`, so a restarting `orx up` starts a new process and exits. In a terminal the prompt comes back while the server keeps running in that console, where Ctrl+C still stops it; a supervisor sees the old process exit. |
-| SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page reports a host as "Disconnected" even when it works. Use a key held by an agent, or one without a passphrase. |
+| SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page uses the most recent preflight result instead of reporting a missing multiplexed master as a disconnection. Use a key held by an agent, or one without a passphrase. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |

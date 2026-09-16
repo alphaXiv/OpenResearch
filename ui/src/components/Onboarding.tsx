@@ -2,21 +2,20 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   refreshHarnesses,
   getHarnessesQuery,
+  getHarnessSetupCommandsQuery,
   getProfileQuery,
 } from "../queries/settings";
 import { queryClient } from "../queries/client";
 import { getProjectPathStatusQuery, searchPapersQuery, resolvePaperQuery } from "../queries/projects";
 
 import { m } from "../paraglide/messages.js";
-import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
-import { ArrowLeft, ArrowRight, RefreshCw, X } from "lucide-react";
+import { AlertCircle, ArrowLeft, ArrowRight, RefreshCw, Terminal, X } from "lucide-react";
 import { Wordmark } from "./Wordmark";
 import { useEffect, useRef, useState } from "react";
 import {
   captureUiEvent,
-  harnessModelLabel,
-  fmtNumber,
+  type HarnessSetupCommands,
   completeOnboarding,
   reasoningFor,
   type AgentSelection,
@@ -29,9 +28,7 @@ import {
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
-import lmStudioLogo from "../assets/lm-studio-logo.svg";
-import ollamaLogo from "../assets/ollama-logo.png";
-import omlxLogo from "../assets/omlx-logo.svg";
+import { HarnessSetupDialog } from "./HarnessSetupDialog";
 
 import { Button, LoadingRow, Spinner, StatusIndicator, type StatusTone } from "./ui";
 import { PaperTitle } from "./PaperTitle";
@@ -83,7 +80,9 @@ const ONBOARDING_STEP_NAMES: readonly OnboardingStep[] = ["welcome", "environmen
 export function Onboarding({
   onDone,
   preferredAgent,
+  remote,
 }: {
+  remote: boolean;
   onDone: (project: Project, selection: AgentSelection) => void;
   preferredAgent: AgentSelection | null;
 }) {
@@ -96,10 +95,19 @@ export function Onboarding({
   }, [step]);
   const harnessQuery = useQuery(getHarnessesQuery());
   const pathQuery = useQuery(getProjectPathStatusQuery());
+  const setupCommands = useQuery(getHarnessSetupCommandsQuery());
+  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const [automaticSetup, setAutomaticSetup] = useState(false);
+  const installSocket = useRef<WebSocket | null>(null);
+  const installOutput = useRef("");
+  const setupTask = useRef<Promise<Harness> | null>(null);
+  const automaticSetupStarted = useRef(false);
+  useEffect(() => () => installSocket.current?.close(), []);
   const harnesses = harnessQuery.data ?? null;
   const gitVersion = pathQuery.data?.gitVersion;
   const [finishing, setFinishing] = useState(false);
   const [finishError, setFinishError] = useState<string | null>(null);
+  const [finishErrorDetails, setFinishErrorDetails] = useState("");
   const [preferredHarness, setPreferredHarness] = useState<HarnessId | null>(null);
   const [checking, setChecking] = useState(false);
   const [researchAreas, setResearchAreas] = useState<string[]>([]);
@@ -218,13 +226,80 @@ export function Onboarding({
   const researchProfileValid =
     researchAreas.length > 0 && (!researchAreas.includes("Other") || otherArea.trim().length > 0);
 
-  const finishOnboarding = async () => {
-    const harness = harnesses?.find((item) => item.id === preferredHarness && item.agentReady);
-    if (!harness || finishing) return;
-    const selection = selectionFor(harness, harness.models[0]?.id ?? null);
+  const startAutomaticSetup = () => {
+    if (setupTask.current) return setupTask.current;
+    installOutput.current = "";
+    automaticSetupStarted.current = true;
+    setAutomaticSetup(true);
+    const task = (async () => {
+      await new Promise<void>((resolve, reject) => {
+        const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const socket = new WebSocket(`${protocol}//${location.host}/api/harnesses/setup?harness=opencode&action=install&trigger=automatic`);
+        socket.binaryType = "arraybuffer";
+        const decoder = new TextDecoder();
+        installSocket.current = socket;
+        let complete = false;
+        socket.onmessage = (event) => {
+          if (event.data instanceof ArrayBuffer) {
+            // Keep the latest 64 KiB so noisy installer output cannot grow without bound.
+            installOutput.current = (installOutput.current + decoder.decode(event.data, { stream: true })).slice(-65536);
+            return;
+          }
+          if (typeof event.data !== "string") return;
+          let value: unknown;
+          try { value = JSON.parse(event.data); } catch { return; }
+          if (typeof value !== "object" || value === null || !("type" in value)) return;
+          if (value.type === "complete") {
+            complete = true;
+            socket.close();
+            resolve();
+          } else if (value.type === "error") {
+            socket.close();
+            reject(new Error("error" in value && typeof value.error === "string" ? value.error : m.harness_setup_failed()));
+          }
+        };
+        socket.onerror = () => { socket.close(); reject(new Error(m.settings_terminal_closed())); };
+        socket.onclose = () => {
+          installSocket.current = null;
+          if (!complete) reject(new Error(m.settings_terminal_closed()));
+        };
+      });
+      const detected = await refreshHarnesses(true, true);
+      const opencode = detected.find((h) => h.id === "opencode" && h.agentReady);
+      if (!opencode) throw new Error(m.onboarding_opencode_not_ready());
+      setPreferredHarness("opencode");
+      return opencode;
+    })();
+    setupTask.current = task;
+    void task.catch(() => {});
+    return task;
+  };
+
+  useEffect(() => {
+    if (remote || automaticSetupStarted.current || harnesses?.length !== 4 || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
+    void startAutomaticSetup();
+  }, [harnesses, remote]);
+
+  useEffect(() => {
+    if (step === 1 && automaticSetup) setStep(2);
+  }, [step, automaticSetup]);
+
+  const continueFromWelcome = () => {
+    setStep(automaticSetup ? 2 : 1);
+  };
+
+  const finishOnboarding = async (mode: "complete" | "setup" = "complete") => {
+    if (finishing || (mode === "complete" && (!researchProfileValid || !gitReady))) return;
     setFinishing(true);
     setFinishError(null);
+    setFinishErrorDetails("");
     try {
+      const harness = automaticSetup
+        ? await startAutomaticSetup()
+        : harnesses?.find((item) => item.id === preferredHarness && item.agentReady);
+      if (!harness) throw new Error(m.harness_setup_not_ready());
+      if (mode === "setup") return;
+      const selection = selectionFor(harness, harness.models[0]?.id ?? null);
       const completion = await completeOnboardingMutation.mutateAsync([selection, {
         researchAreas,
         otherArea: researchAreas.includes("Other") ? otherArea : null,
@@ -233,7 +308,10 @@ export function Onboarding({
       }]);
       onDone(completion.project, completion.selection);
     } catch (error) {
-      setFinishError(error instanceof Error ? error.message : String(error));
+      if (automaticSetup) setupTask.current = null;
+      const message = error instanceof Error ? error.message : String(error);
+      setFinishError(message);
+      setFinishErrorDetails([installOutput.current, message].filter(Boolean).join("\n\n"));
     } finally {
       setFinishing(false);
     }
@@ -247,6 +325,18 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
+      {!remote && setupHarness && setupCommands.data && (
+        <HarnessSetupDialog
+          harness={setupHarness}
+          commands={setupCommands.data[setupHarness.id]}
+          onReady={(ready) => {
+            setPreferredHarness(ready.id);
+          }}
+          onClose={() => {
+            setSetupHarness(null);
+          }}
+        />
+      )}
       <div
         className={`home-inner max-w-155 my-0 mx-auto ${
           step === 0 ? "px-8 sm:px-12" : "pt-12 px-6 pb-16"
@@ -302,9 +392,10 @@ export function Onboarding({
             </div>
             <div className="onb-intro-actions relative z-10 mt-8 flex justify-end min-[1120px]:col-start-2 min-[1120px]:row-start-2 min-[1120px]:mt-0 min-[1120px]:self-start">
               <Button variant="primary" size="large"
-                onClick={() => setStep(1)}
+                onClick={continueFromWelcome}
+                disabled={checking && harnesses === null}
               >
-                {m.onboarding_continue()} <ArrowRight size={20} />
+                {checking && harnesses === null ? <Spinner /> : null}{m.onboarding_continue()} <ArrowRight size={20} />
               </Button>
             </div>
           </div>
@@ -344,8 +435,11 @@ export function Onboarding({
                   <AgentCard
                     key={h.id}
                     h={h}
+                    remote={remote}
                     selected={preferredHarness === h.id}
                     onSelect={() => setPreferredHarness(h.id)}
+                    commands={setupCommands.data?.[h.id]}
+                    onSetup={() => setSetupHarness(h)}
                   />
                 ))
               ) : harnessError ? (
@@ -357,6 +451,9 @@ export function Onboarding({
                 </LoadingRow>
               )}
             </div>
+            {setupCommands.isError && <p className={ONB_CARD_META_CLASS_NAME}>
+              {m.harness_setup_load_failed()} <Button variant="ghost" onClick={() => void setupCommands.refetch()}>{m.app_retry()}</Button>
+            </p>}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
               <Button variant="ghost" onClick={() => setStep(0)}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
@@ -392,7 +489,7 @@ export function Onboarding({
           <>
             <div className="onb-eyebrow mb-4.5 flex items-center gap-2 text-xl font-medium text-muted">
               <Wordmark />
-              <span>{m.onboarding_step_2_of_2()}</span>
+              {!automaticSetup && <span>{m.onboarding_step_2_of_2()}</span>}
             </div>
             <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em] onb-profile-title mb-5.5">{m.onboarding_tell_us_about_your_research()}</h2>
             <div className="onb-cards flex flex-col gap-2.5">
@@ -495,14 +592,21 @@ export function Onboarding({
                   : m.onboarding_describe_area_to_continue()}
               </p>
             )}
+            {automaticSetup && !gitReady && (
+              <div className="mt-5" role="status">
+                <LocalGitCard gitVersion={gitVersion} error={gitError} />
+                <p className={GIT_RETRY_HINT_CLASS_NAME}>{gitError ? m.onboarding_retry_connection() : m.onboarding_git_is_required_for_local_experiments_install_git()}</p>
+                <Button onClick={() => load(true, true)} disabled={checking}>{m.onboarding_re_check()}</Button>
+              </div>
+            )}
             <div className="onb-actions flex items-center gap-2.5 mt-5.5">
-              <Button variant="ghost" onClick={() => setStep(1)} disabled={finishing}>
+              <Button variant="ghost" onClick={() => setStep(automaticSetup ? 0 : 1)} disabled={finishing}>
                 <ArrowLeft size={12} /> {m.onboarding_back()}
               </Button>
               <div className="flex-1" />
               <Button variant="primary"
                 onClick={() => void finishOnboarding()}
-                disabled={finishing || preferredHarness === null || !researchProfileValid}
+                disabled={finishing || !gitReady || (!automaticSetup && preferredHarness === null) || !researchProfileValid}
               >
                 {finishing ? (
                   <>
@@ -515,12 +619,33 @@ export function Onboarding({
                 )}
               </Button>
             </div>
-            {preferredHarness === null && (
+            {preferredHarness === null && !automaticSetup && (
               <p className={FINISH_ERROR_CLASS_NAME}>
                 {m.onboarding_your_selected_agent_is_no_longer_ready_go()}
               </p>
             )}
-            {finishError && <p className={FINISH_ERROR_CLASS_NAME}>{finishError}</p>}
+            {finishError && (
+              <div role="alert" className="mt-8 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2.5 rounded-md border border-danger-notice-border bg-accent-red-subtle px-3 py-2">
+                <AlertCircle size={16} className="shrink-0 text-accent-red" />
+                <p className="m-0 min-w-0 flex-1 text-sm text-text break-words">{finishError}</p>
+                {automaticSetup && (
+                  <Button size="small" onClick={() => void finishOnboarding(researchProfileValid && gitReady ? "complete" : "setup")} disabled={finishing}>
+                    {m.app_retry()}
+                  </Button>
+                )}
+                {automaticSetup && (
+                  <Button variant="ghost" size="small" className="col-start-2 justify-self-start" disabled={finishing} onClick={() => {
+                    setAutomaticSetup(false);
+                    setFinishError(null);
+                    setStep(1);
+                  }}>{m.onboarding_choose_another_agent()}</Button>
+                )}
+                <details className="col-start-2 col-span-2 min-w-0 text-sm text-text">
+                  <summary className="cursor-pointer">{m.onboarding_error_details()}</summary>
+                  <pre className="mt-2 mb-0 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md border border-danger-notice-border bg-background px-2 py-1.5 font-mono text-xs">{finishErrorDetails || finishError}</pre>
+                </details>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -537,7 +662,7 @@ function cleanPaperTitle(title: string): string {
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
 function agentBadge(h: Harness): { tone: StatusTone; label: string } {
-  if (h.agentReady) return { tone: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.onboarding_signed_in() };
+  if (h.agentReady) return { tone: "success", label: h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
   if (h.authMethod === "local") return { tone: "warning", label: m.onboarding_server_unavailable() };
@@ -562,13 +687,22 @@ function AgentLogo({ harness }: { harness: HarnessId }) {
 
 function AgentCard({
   h,
+  remote,
   selected,
   onSelect,
+  commands,
+  onSetup,
 }: {
   h: Harness;
+  remote: boolean;
   selected: boolean;
   onSelect: () => void;
+  commands?: HarnessSetupCommands;
+  onSetup: () => void;
 }) {
+  const canSetup = !remote && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
+  const showSetupAction = !h.agentReady && canSetup;
+  const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);
   const visibleBadge: { tone: StatusTone; label: string } = selected
     ? { tone: "success", label: m.onboarding_selected() }
@@ -577,70 +711,65 @@ function AgentCard({
   const meta = [
     h.id === "opencode" && h.account !== "opencode" && h.account,
     h.id === "opencode" && h.plan,
-    version,
-    h.models.length > 0 &&
-    m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.map((model) => ltr(harnessModelLabel(model)))) }),
   ]
     .filter(Boolean)
     .join(" · ");
   const head = (
-    <div className="onb-card-head flex items-center justify-between gap-3">
+    <div className="onb-card-head flex flex-wrap items-center justify-between gap-3">
       <span className="onb-card-identity flex items-center gap-3 min-w-0">
         <AgentLogo harness={h.id} />
-        <span className="onb-card-name text-lg font-semibold tracking-[-0.01em]">{h.name}</span>
+        <span className="flex flex-col gap-1">
+          <span className="onb-card-name flex flex-wrap items-center gap-2 text-base font-semibold tracking-[-0.01em]">
+            {h.name}
+            {showStatusDot && (
+              <StatusIndicator tone={badge.tone} className="font-normal">{badge.label}</StatusIndicator>
+            )}
+          </span>
+          {showSetupAction && !showStatusDot && <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>}
+        </span>
       </span>
-      <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
-    </div>
-  );
-  const localModelsNote = h.id === "opencode" && (
-    <div className="space-y-1 text-sm text-text">
-      <div className="font-medium">{m.onboarding_local_models_title()}</div>
-      <div>
-        {m.onboarding_local_models_compatible()}{" "}
-        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
-          <img src={lmStudioLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain" />LM Studio
-        </span>{", "}
-        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
-          <img src={ollamaLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain dark:invert" />Ollama
-        </span>{m.onboarding_local_models_and()}
-        <span className="inline-flex items-center gap-1 whitespace-nowrap align-baseline">
-          <img src={omlxLogo} alt="" width={14} height={14} className="size-3.5 shrink-0 object-contain" />oMLX
-        </span>.
-      </div>
+      {showSetupAction ? (
+        <Button size="small" onClick={onSetup} disabled={!commands} aria-haspopup="dialog" title={m.harness_setup_opens_terminal()}>
+          <Terminal size={14} />
+          {!h.installed || h.installBroken ? m.harness_setup_install() : h.authState === "unsupported" ? m.harness_setup_update() : m.harness_setup_login()}
+        </Button>
+      ) : (
+        <StatusIndicator tone={visibleBadge.tone}>{visibleBadge.label}</StatusIndicator>
+      )}
     </div>
   );
   // An unready agent can't be selected — render it as a plain container, not a
   // disabled button, so the copy button on its `agentNote` command stays live.
   if (!h.agentReady) {
     return (
-      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
+      <div className="onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected">
         {head}
-        <div className={ONB_CARD_META_CLASS_NAME}>{renderNote(h.agentNote)}</div>
-        {localModelsNote}
+        {h.authState === "unsupported" && version && (
+          <div className={ONB_CARD_META_CLASS_NAME}>{version}</div>
+        )}
+        {(!canSetup || h.authState === "unknown") && h.agentNote && (
+          <div className={`${ONB_CARD_META_CLASS_NAME} [&_code]:whitespace-pre-wrap break-words`}>{renderNote(h.agentNote)}</div>
+        )}
       </div>
     );
   }
   return (
     <button
       type="button"
-      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-5.5 px-6 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected${selected ? " selected" : ""}`}
+      className={`onb-card flex flex-col gap-2.5 bg-background border border-border rounded-lg py-4 px-4 onb-agent-choice w-full text-inherit [font:inherit] text-start transition-[border-color,box-shadow] duration-120 ease-standard [button&]:cursor-pointer [button&:hover]:border-muted [&.selected]:border-accent [&.selected]:shadow-selected${selected ? " selected" : ""}`}
       aria-pressed={selected}
       onClick={onSelect}
     >
       {head}
       {h.id !== "opencode" && (
-        <div className="onb-card-detail text-sm">
-          {h.account ?? m.onboarding_api_key()}
-          {h.plan ? ` · ${h.plan}` : ""}
+        <div className="onb-card-detail flex items-center gap-1.5 text-sm">
+          {h.accountLoading ? <><Spinner /> {m.onboarding_loading_account()}</> : <>
+            {h.account ?? (h.authMethod === "apiKey" ? m.onboarding_api_key() : null)}
+            {h.plan ? ` · ${h.plan}` : ""}
+          </>}
         </div>
       )}
-      <div
-        className={`${ONB_CARD_META_CLASS_NAME} w-full overflow-hidden text-ellipsis whitespace-nowrap`}
-        title={meta}
-      >
-        {meta}
-      </div>
-      {localModelsNote}
+      {meta && <div className={ONB_CARD_META_CLASS_NAME}>{meta}</div>}
     </button>
   );
 }

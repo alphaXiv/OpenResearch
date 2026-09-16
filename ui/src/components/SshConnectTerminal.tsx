@@ -105,11 +105,13 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
   />;
 }
 
-function CommandTerminal({ path, label, heightClass = "h-40", active = true, onComplete, onError }: {
+export function CommandTerminal({ path, label, command, heightClass = "h-40", active = true, awaitingApproval = false, onComplete, onError }: {
   path: string;
   label: string;
+  command?: string;
   heightClass?: string;
   active?: boolean;
+  awaitingApproval?: boolean;
   onComplete: (value: unknown) => boolean;
   onError?: (error: string) => void;
 }) {
@@ -124,8 +126,15 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, false, true);
+    const { terminal, dispose } = mountTerminal(wrap, awaitingApproval, true);
     terminalRef.current = terminal;
+    if (awaitingApproval) {
+      if (command) terminal.writeln(`$ ${command}`);
+      return () => {
+        terminalRef.current = null;
+        dispose();
+      };
+    }
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     const url = new URL(path, `${protocol}//${location.host}`);
@@ -153,6 +162,7 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
       }
     });
     socket.onopen = () => {
+      if (command) terminal.writeln(`$ ${command}`);
       socket.send(JSON.stringify({ type: "resize", cols: terminal.cols, rows: terminal.rows }));
     };
     socket.onmessage = (event) => {
@@ -192,15 +202,15 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
       terminalRef.current = null;
       dispose();
     };
-  }, [path]);
+  }, [path, command, awaitingApproval]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
     if (!terminal) return;
-    terminal.options.disableStdin = !active || error !== null;
-    if (active && error === null) terminal.focus();
+    terminal.options.disableStdin = awaitingApproval || !active || error !== null;
+    if (!awaitingApproval && active && error === null) terminal.focus();
     else terminal.blur();
-  }, [active, error]);
+  }, [active, error, awaitingApproval]);
 
   return (
     <div className="mt-3">

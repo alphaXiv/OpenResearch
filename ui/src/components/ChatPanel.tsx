@@ -111,6 +111,7 @@ import {
   type PromptAnswer,
   type RuntimeInfo,
   type SkillInfo,
+  type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
@@ -121,6 +122,7 @@ import {
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
+  pendingQuestionId,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -4078,8 +4080,15 @@ function SessionRow({
 
 // --- panel -------------------------------------------------------------------
 
-// The four starter prompts progress understand → gap → baseline → experiment.
+// The four starter prompts progress starting point → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
+// A blank project has nothing for a model to read, so its prompts are pre-written.
+const blankStarterPrompts = (): StarterPrompt[] => [
+  { title: m.chat_panel_starter_blank_1_title(), prompt: m.chat_panel_starter_blank_1_prompt() },
+  { title: m.chat_panel_starter_blank_2_title(), prompt: m.chat_panel_starter_blank_2_prompt() },
+  { title: m.chat_panel_starter_blank_3_title(), prompt: m.chat_panel_starter_blank_3_prompt() },
+  { title: m.chat_panel_starter_blank_4_title(), prompt: m.chat_panel_starter_blank_4_prompt() },
+];
 // One outline colour per step so the four boxes read as distinct choices.
 const STARTER_TONES = [
   { box: "border-accent-blue/45", icon: "text-accent-blue" },
@@ -4971,30 +4980,11 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // The newest ANSWERABLE unresolved question card's part id: typed composer
-  // text answers IT as a custom answer, instead of racing the held turn with
-  // a new message (which the busy guard would reject/drop). Plan cards have
-  // their own inline revise textarea (PlanStrip) and don't route through
-  // here. Claude + Codex sessions: both accept a note-only reply (codex's
-  // user_input_reply takes the note as the surfaced question's freeform
-  // answer). Opencode is excluded — it rejects note-only replies (see
-  // reply_inline), so its options stay the interface. A held (nativeId) card
-  // is answerable only while its turn is alive — a zombie left by a process
-  // restart must not capture the composer (its own buttons error and the
-  // backend collapses it on the first attempt).
-  const pendingQuestion = useMemo(() => {
-    const harness = activeSession?.harness;
-    if (!activeId || (harness !== "claude-code" && harness !== "codex")) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      for (const part of messages[i].parts) {
-        if (part.type !== "prompt" || !part.prompt || part.prompt.resolved) continue;
-        if (part.prompt.kind !== "question") continue;
-        if (part.prompt.nativeId && !state.busySessions.has(activeId)) return null;
-        return part.id;
-      }
-    }
-    return null;
-  }, [messages, activeSession?.harness, activeId, state.busySessions]);
+  // Native questions own the composer only while their turn is still running.
+  const pendingQuestion = useMemo(
+    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
+    [messages, activeSession?.harness, activeId, state.busySessions],
+  );
   // A pending question card owns typed text, so `!` is just an answer there.
   const bashActive = bashMode && !pendingQuestion;
 
@@ -5097,7 +5087,9 @@ export function ChatPanel({
     enabled: starterVisible && starterHarness !== null,
     subscribed: starterVisible && starterHarness !== null,
   });
-  const starterPrompts = starterQuery.data?.prompts ?? null;
+  const starterPrompts = starterQuery.data?.blank
+    ? blankStarterPrompts()
+    : (starterQuery.data?.prompts ?? null);
   const starterLoading = starterHarness !== null && starterQuery.isPending;
   // The demo project is the only surface that isn't a user-created project.
   const telemetrySurface: FirstActionSurface =

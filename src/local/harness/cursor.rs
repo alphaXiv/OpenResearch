@@ -70,16 +70,11 @@ impl Harness for Cursor {
         }
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
-            let (status, about) = match bin {
-                Some(bin) => {
-                    tokio::join!(
-                        cursor_command_json(bin, &["status", "--format", "json"]),
-                        cursor_command_json(bin, &["about", "--format", "json"])
-                    )
-                }
-                None => (None, None),
+            let status = match bin {
+                Some(bin) => cursor_command_json(bin, &["status", "--format", "json"]).await,
+                None => None,
             };
-            apply_auth(&mut info, status.as_ref(), about.as_ref());
+            apply_auth(&mut info, status.as_ref());
         }
 
         info.agent_ready = info.ready();
@@ -204,40 +199,40 @@ fn looks_like_cursor(path: &Path) -> bool {
         || crate::paths::canonicalize(path).is_ok_and(|real| mentions_cursor(&real))
 }
 
-fn apply_auth(info: &mut HarnessInfo, status: Option<&Value>, about: Option<&Value>) {
+fn apply_auth(info: &mut HarnessInfo, status: Option<&Value>) {
     let api = api_key("CURSOR_API_KEY");
-    let logged_in = status
-        .and_then(|value| {
-            value
-                .get("isAuthenticated")
-                .and_then(Value::as_bool)
-                .or_else(|| {
-                    value
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(|status| status.eq_ignore_ascii_case("authenticated"))
-                })
-        })
-        .unwrap_or(false);
+    let logged_in = status.and_then(|value| {
+        value
+            .get("isAuthenticated")
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|status| status.eq_ignore_ascii_case("authenticated"))
+            })
+    });
     if api.is_some() {
         info.authenticated = true;
         info.auth_state = HarnessAuthState::Ready;
         info.auth_method = Some("apiKey");
-    } else if logged_in {
+    } else if logged_in == Some(true) {
         info.authenticated = true;
         info.auth_state = HarnessAuthState::Ready;
         info.auth_method = Some("oauth");
-    } else if info.installed && !info.install_broken {
+    } else if logged_in == Some(false) && info.installed && !info.install_broken {
         info.auth_state = HarnessAuthState::NeedsLogin;
     }
 
     let cfg = read_json(native_store::cursor_home(NativeStore::Legacy).join("cli-config.json"));
-    info.account = nonempty_str(about.unwrap_or(&Value::Null), "userEmail").or_else(|| {
-        cfg.as_ref()
-            .and_then(|cfg| cfg.get("authInfo"))
-            .and_then(|auth| nonempty_str(auth, "email"))
-    });
-    info.plan = nonempty_str(about.unwrap_or(&Value::Null), "subscriptionTier");
+    info.account = cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("authInfo"))
+        .and_then(|auth| nonempty_str(auth, "email"));
+}
+
+pub(crate) async fn account_details(bin: &Path) -> Option<Value> {
+    cursor_command_json(bin, &["about", "--format", "json"]).await
 }
 
 async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {

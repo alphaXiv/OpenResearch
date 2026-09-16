@@ -317,17 +317,20 @@ export const resolvePaper = (id: string, signal?: AbortSignal) =>
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
-/** One suggested opening message for the empty chat, written by a model that
- *  read the project. */
+/** One suggested opening message for the empty chat: written by a model that
+ *  read the project, or pre-written when the project is blank. */
 export interface StarterPrompt {
   title: string;
   prompt: string;
 }
 
 export interface ProjectStarterPrompts {
-  /** Empty when the project already has experiments; null when the harness
-   *  could not answer. */
+  /** Empty when the project already has experiments or is blank; null when
+   *  the harness could not answer. */
   prompts: StarterPrompt[] | null;
+  /** The project has nothing to read yet, so the UI offers its pre-written
+   *  prompts instead of model-generated ones. */
+  blank: boolean;
 }
 
 /** Start generating starter prompts for a project that is about to be created,
@@ -973,7 +976,7 @@ export const saveSshConfig = (content: string, previousContent: string) =>
   put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
 export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
+  get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
 export type RemoteSessionStatus =
   | "connecting"
@@ -1628,6 +1631,7 @@ export interface Harness {
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
   authMethod?: "oauth" | "apiKey" | "local";
+  accountLoading?: boolean;
   account?: string;
   org?: string;
   plan?: string;
@@ -1639,6 +1643,16 @@ export interface Harness {
   models: HarnessModel[];
   options: HarnessOptions;
 }
+
+export interface HarnessSetupCommands {
+  install: string;
+  login: string;
+  update: string;
+  requiresNpm: boolean;
+}
+
+export const getHarnessSetupCommands = (signal?: AbortSignal) =>
+  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();

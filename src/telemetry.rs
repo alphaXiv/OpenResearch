@@ -20,6 +20,8 @@
 //!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
+pub(crate) mod harness;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -166,6 +168,8 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    #[serde(default)]
+    harness_snapshot: Option<harness::InitialSnapshot>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -1040,7 +1044,7 @@ impl TelemetrySession {
 pub(crate) const ONBOARDING_STEPS: [&str; 3] = ["welcome", "environment", "profile"];
 pub(crate) const WELCOME_CHOICES: [&str; 3] = ["explore_demo", "create_project", "dismiss"];
 pub(crate) const DEMO_EXPERIMENT_KINDS: [&str; 2] = ["curated", "run"];
-/// Starter prompts are model-generated, so only the slot position is stable.
+/// Starter prompts are usually model-generated, so only the slot position is stable.
 /// The upper bound is headroom — the UI renders whatever the model returns.
 pub(crate) const STARTER_SLOTS: std::ops::RangeInclusive<u8> = 1..=8;
 pub(crate) const FIRST_ACTION_SURFACES: [&str; 2] = ["demo", "project"];
@@ -1885,6 +1889,16 @@ mod tests {
         assert_eq!(build_channel(), "production");
         let payloads = [
             build_payload(
+                "harness_initial_state",
+                "cli-release-contract-test",
+                json!({"harness":"opencode","installation":"installed","auth":"signed_out","authEvidence":"configuration","compatibility":"no_known_requirement","usability":"usable","localConfigured":false}),
+            ),
+            build_payload(
+                "harness_setup",
+                "cli-release-contract-test",
+                json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":"opencode","action":"install","trigger":"automatic","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+            ),
+            build_payload(
                 "command",
                 "cli-release-contract-test",
                 json!({ "command": "up" }),
@@ -2111,6 +2125,8 @@ mod tests {
         assert!(environment_disabled_reason().is_some());
 
         let session = TelemetrySession::start(Some("up"));
+        harness::capture_initial(&json!({"harnesses":[]}));
+        harness::SetupAttempt::new("opencode", "install", "automatic");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true, Some(ProjectCreationMode::Blank));
