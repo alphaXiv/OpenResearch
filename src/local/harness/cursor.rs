@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
@@ -354,8 +354,7 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     } else if matches!(request.quality, OneShotQuality::Cheap) {
         cmd.args(["--model", "auto"]);
     }
-    cmd.arg(&message)
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -369,15 +368,31 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
     cmd.env("CURSOR_DATA_DIR", &cursor_home);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(request.timeout, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let out = tokio::time::timeout(request.timeout, async {
+        let mut child = cmd.spawn().ok()?;
+        send_prompt(&mut child, &message).await.ok()?;
+        child.wait_with_output().await.ok()
+    })
+    .await
+    .ok()??;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+async fn send_prompt(child: &mut tokio::process::Child, prompt: &str) -> Result<()> {
+    // Windows batch launchers reject multiline argv; Cursor accepts the prompt on stdin.
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+    let result = tokio::time::timeout(TURN_WATCHDOG, stdin.write_all(prompt.as_bytes()))
+        .await
+        .map_err(|_| anyhow!("Cursor timed out reading its prompt"))?;
+    match result {
+        // The normal exit path preserves Cursor's diagnostic when it rejects the request early.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.map_err(Into::into),
+    }
 }
 
 fn first_turn_prompt(text: &str) -> String {
@@ -459,9 +474,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         cmd.args(["--resume", native_id]);
     }
     let log_name = format!("cursor-{}", uuid::Uuid::new_v4());
-    cmd.arg(&prompt)
-        .current_dir(&repo)
-        .stdin(Stdio::null())
+    cmd.current_dir(&repo)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(harness_log(&log_name)?))
         .kill_on_drop(true);
@@ -481,6 +495,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
         }
     };
+    send_prompt(&mut child, &prompt).await?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = TurnState::default();
@@ -867,6 +882,59 @@ fn plan_card(parts: &[WirePart], assistant_id: &str, errored: bool) -> Option<Wi
 mod tests {
     use super::*;
     use crate::local::chat::TurnCtx;
+
+    #[tokio::test]
+    async fn prompt_pipe_preserves_multiline_text_and_closes_for_the_launcher() {
+        let root = std::env::temp_dir().join(format!("orx-cursor-stdin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut command = if cfg!(windows) {
+            let launcher = root.join("cursor-agent.cmd");
+            std::fs::write(&launcher, "@powershell.exe -NoProfile -Command \"[Console]::InputEncoding = [Text.UTF8Encoding]::new(); [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); [Console]::Out.Write([Console]::In.ReadToEnd())\"\r\n").unwrap();
+            Command::new(launcher)
+        } else {
+            Command::new("cat")
+        };
+        let prompt = "First line\nSecond line: \"quoted\" & 100% é\n";
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        send_prompt(&mut child, prompt).await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), prompt);
+    }
+
+    #[tokio::test]
+    async fn early_exit_keeps_the_child_status_instead_of_a_broken_pipe_error() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit 23"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 23"]);
+            command
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let status = child.wait().await.unwrap();
+        child.stdin = stdin;
+        send_prompt(&mut child, &"prompt\n".repeat(65536))
+            .await
+            .unwrap();
+        assert_eq!(status.code(), Some(23));
+    }
 
     fn fold(events: &[Value]) -> (TurnCtx, TurnState) {
         let mut ctx = TurnCtx::test_stub();
