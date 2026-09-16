@@ -593,6 +593,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
+        .route("/api/projects/{id}/terminal", get(project_terminal))
         .route(
             "/api/remote/sessions",
             get(remote_sessions).post(create_remote_session),
@@ -5482,6 +5483,14 @@ pub(crate) async fn ssh_connect_to_target(
 }
 
 fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
+    start_pty_in(program, args, None)
+}
+
+fn start_pty_in(
+    program: &str,
+    args: Vec<String>,
+    cwd: Option<&std::path::Path>,
+) -> Result<PtySession> {
     use std::io::{Read as _, Write as _};
 
     let pair = native_pty_system().openpty(PtySize {
@@ -5492,6 +5501,10 @@ fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
     })?;
     let mut command = CommandBuilder::new(program);
     command.args(args);
+    command.env("TERM", "xterm-256color");
+    if let Some(cwd) = cwd {
+        command.cwd(cwd);
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
 
@@ -5711,6 +5724,76 @@ async fn relay_pty(
     }
 
     Some(status)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTerminalReq {
+    session_id: Option<String>,
+}
+
+/// The user's interactive shell: `$SHELL` on Unix, `%COMSPEC%` on Windows.
+fn interactive_shell() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+        (shell, Vec::new())
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        (shell, vec!["-l".into()])
+    }
+}
+
+async fn project_terminal(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    Query(req): Query<ProjectTerminalReq>,
+) -> Response {
+    if !same_origin(&headers) {
+        return ApiError(StatusCode::FORBIDDEN, "Terminal origin rejected".into()).into_response();
+    }
+    let root = match tokio::task::spawn_blocking(move || {
+        let store = Store::open()?;
+        let project = store
+            .get_local_project(&id)?
+            .ok_or_else(|| not_found("project"))?;
+        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+        Ok::<_, ApiError>(root)
+    })
+    .await
+    {
+        Ok(Ok(root)) => root,
+        Ok(Err(error)) => return error.into_response(),
+        Err(error) => {
+            return ApiError::from(anyhow!("terminal task failed: {error}")).into_response()
+        }
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        let (shell, args) = interactive_shell();
+        let session = match tokio::task::spawn_blocking(move || start_pty_in(&shell, args, Some(&root))).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                let _ = socket
+                    .send(Message::Text(json!({ "type": "error", "error": error.to_string() }).to_string().into()))
+                    .await;
+                return;
+            }
+            Err(error) => {
+                let _ = socket
+                    .send(Message::Text(json!({ "type": "error", "error": format!("Terminal task failed: {error}") }).to_string().into()))
+                    .await;
+                return;
+            }
+        };
+        let Some(status) = relay_pty(&mut socket, session).await else {
+            return;
+        };
+        let message = match status {
+            Ok(status) => json!({ "type": "exit", "code": status.exit_code() }),
+            Err(error) => json!({ "type": "error", "error": error }),
+        };
+        let _ = socket.send(Message::Text(message.to_string().into())).await;
+    })
 }
 
 async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {

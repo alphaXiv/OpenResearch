@@ -30,6 +30,7 @@ export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWork
   const home: RightTab[] = [];
   if (state.filesTabOpen) home.push("files");
   if (state.artifactsTabOpen) home.push("artifacts");
+  if (state.terminalTabOpen) home.push("terminal");
   if (state.experimentsTabOpen) home.push("experiments");
   const content = [...state.expTabs, ...state.fileTabs, ...state.planTabs, ...state.subagentTabs, ...state.codeTabs];
   const byKey = new Map(content.map((tab) => [rightTabKey(tab), tab]));
@@ -65,6 +66,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
       if (tab === "experiments") state.experimentsTabOpen = true;
       if (tab === "files") state.filesTabOpen = true;
       if (tab === "artifacts") state.artifactsTabOpen = true;
+      if (tab === "terminal") state.terminalTabOpen = true;
       continue;
     }
     if ("code" in tab) { tab.toggled = new Set(saved?.expanded[rightTabKey(tab)] ?? []); state.codeTabs.push(tab); }
@@ -185,6 +187,7 @@ export type RightTab =
   | "experiments"
   | "files"
   | "artifacts"
+  | "terminal"
   | ExpViewDef
   | FileViewDef
   | PlanViewDef
@@ -220,6 +223,7 @@ export interface RightPaneSessionState {
   experimentsTabOpen: boolean;
   filesTabOpen: boolean;
   artifactsTabOpen: boolean;
+  terminalTabOpen: boolean;
   expTabs: ExpViewDef[];
   fileTabs: FileViewDef[];
   planTabs: PlanViewDef[];
@@ -248,6 +252,7 @@ export function initialRightPaneSessionState(
     experimentsTabOpen: false,
     filesTabOpen: false,
     artifactsTabOpen: false,
+    terminalTabOpen: false,
     expTabs: [],
     fileTabs: [],
     planTabs: [],
@@ -327,6 +332,7 @@ export function applyPane(state: RightPaneSessionState, pane: Pane | undefined):
   if (typeof tab === "string") {
     if (tab === "files") next.filesTabOpen = true;
     else if (tab === "artifacts") next.artifactsTabOpen = true;
+    else if (tab === "terminal") next.terminalTabOpen = true;
     else next.experimentsTabOpen = true;
   } else {
     if ("path" in tab) next.fileTabs = update(state.fileTabs, tab);
