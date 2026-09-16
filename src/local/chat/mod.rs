@@ -5379,12 +5379,8 @@ impl ChatHost {
                 if let Ok(store) = Store::open() {
                     if let Ok(Some(session)) = store.get_chat_session(&session_id) {
                         if session.harness == "opencode" {
-                            if let (Some(nid), Some(port)) = (
-                                &session.native_session_id,
-                                host.opencode.port_for(&session_id).await,
-                            ) {
-                                let url = format!("http://127.0.0.1:{port}/session/{nid}/abort");
-                                let _ = host.http.post(url).body("{}").send().await;
+                            if let Some(nid) = &session.native_session_id {
+                                let _ = host.opencode.interrupt(&session_id, nid).await;
                             }
                         } else if session.harness == "codex" {
                             return host.codex.interrupt_session(&session_id).await;
@@ -6777,6 +6773,12 @@ impl TurnCtx {
     }
 
     /// Record the harness's own session id (CLIs mint/rotate them per turn).
+    pub fn persist_native_session_id(&mut self, native_id: &str) -> Result<()> {
+        Store::open()?.set_chat_session_native_id(&self.session_id, Some(native_id))?;
+        self.native_session_id = Some(native_id.to_string());
+        Ok(())
+    }
+
     pub fn set_native_session_id(&mut self, native_id: &str) {
         if self.native_session_id.as_deref() == Some(native_id) {
             return;
