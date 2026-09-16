@@ -622,6 +622,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route("/api/settings/harnesses/{id}/login", get(harness_login))
+        .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
             get(openresearch_ssh_key),
@@ -756,7 +758,9 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/ssh/connect"
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
+            | "/api/settings/commands/run"
     ) || path.starts_with("/api/remote/")
+        || (path.starts_with("/api/settings/harnesses/") && path.ends_with("/login"))
         || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
 }
 
@@ -5726,7 +5730,123 @@ async fn openresearch_terminal(
     ws: WebSocketUpgrade,
     args: Vec<String>,
 ) -> Response {
-    if !same_origin(&headers) {
+    let program = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().into_owned())
+        .map_err(anyhow::Error::from);
+    command_terminal(&headers, ws, program, args, false, async {}).await
+}
+
+/// Run a harness's interactive sign-in (`claude auth login`) in the embedded
+/// terminal, via the binary detection found so PATH differences can't pick
+/// another install. Completion drops the harness cache so the next listing
+/// sees the new credentials.
+async fn harness_login(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Some(argv) = local::harness::login_command(&id) else {
+        return not_found("harness").into_response();
+    };
+    let cached_bin = state
+        .harnesses
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|(_, payload)| harness_bin_path(payload, &id));
+    let bin = match cached_bin {
+        Some(bin) => Some(bin),
+        None => local::harness::detect_harness(&id)
+            .await
+            .and_then(|harness| harness.bin_path),
+    };
+    let program = bin.ok_or_else(|| anyhow!("{} is not installed", argv[0]));
+    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
+    let cache = state.harnesses.clone();
+    command_terminal(&headers, ws, program, args, true, async move {
+        *cache.lock().await = None;
+    })
+    .await
+}
+
+/// Commands the settings page may run in its embedded terminal, keyed by the
+/// exact text shown in the note. A fixed list keeps the websocket from being a
+/// general shell: anything else is refused before a PTY exists.
+const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
+    ("gh auth login", &["gh", "auth", "login"]),
+    ("hf auth login", &["hf", "auth", "login"]),
+    ("claude auth status", &["claude", "auth", "status"]),
+    ("opencode models", &["opencode", "models"]),
+    // Installer one-liners need a shell for the pipe.
+    (
+        "curl https://cursor.com/install -fsS | bash",
+        &["sh", "-c", "curl https://cursor.com/install -fsS | bash"],
+    ),
+];
+
+fn settings_command(command: &str) -> Option<&'static [&'static str]> {
+    SETTINGS_COMMANDS
+        .iter()
+        .find(|(text, _)| *text == command)
+        .map(|(_, argv)| *argv)
+}
+
+#[derive(Deserialize)]
+struct RunSettingsCommandReq {
+    command: String,
+}
+
+async fn run_settings_command(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Query(req): Query<RunSettingsCommandReq>,
+) -> Response {
+    let Some(argv) = settings_command(req.command.trim()) else {
+        return bad_request("command is not runnable from settings").into_response();
+    };
+    let program = local::shell_env::find_on_path(argv[0])
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("{} is not installed", argv[0]));
+    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
+    command_terminal(&headers, ws, program, args, true, async {}).await
+}
+
+/// The user's interactive login shell, so follow-up commands see the PATH a
+/// fresh terminal would (an installer that just added `~/.local/bin`, say).
+fn interactive_shell() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        (shell, Vec::new())
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        (shell, vec!["-il".to_string()])
+    }
+}
+
+fn harness_bin_path(payload: &Value, id: &str) -> Option<String> {
+    payload
+        .get("harnesses")?
+        .as_array()?
+        .iter()
+        .find(|h| h.get("id").and_then(Value::as_str) == Some(id))?
+        .get("binPath")?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Run `program` in a PTY relayed over the websocket. With `shell_after`, the
+/// completion message is followed by the user's interactive shell in the same
+/// terminal, so a follow-up command needs no copy-paste either.
+async fn command_terminal(
+    headers: &HeaderMap,
+    ws: WebSocketUpgrade,
+    program: Result<String>,
+    args: Vec<String>,
+    shell_after: bool,
+    on_success: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Response {
+    if !same_origin(headers) {
         return ApiError(
             StatusCode::FORBIDDEN,
             "Login terminal origin rejected".into(),
@@ -5735,11 +5855,8 @@ async fn openresearch_terminal(
     }
     ws.on_upgrade(move |mut socket| async move {
         let result = async {
-            let session = tokio::task::spawn_blocking(move || {
-                let exe = std::env::current_exe()?;
-                start_pty(&exe.to_string_lossy(), args)
-            })
-            .await??;
+            let program = program?;
+            let session = tokio::task::spawn_blocking(move || start_pty(&program, args)).await??;
             let Some(status) = relay_pty(&mut socket, session).await else {
                 return Ok::<_, anyhow::Error>(None);
             };
@@ -5749,6 +5866,7 @@ async fn openresearch_terminal(
                 "Command exited with code {}",
                 status.exit_code()
             );
+            on_success.await;
             Ok(Some(()))
         }
         .await;
@@ -5757,7 +5875,33 @@ async fn openresearch_terminal(
             Ok(None) => return,
             Err(error) => json!({ "type": "error", "error": error.to_string() }),
         };
-        let _ = socket.send(Message::Text(message.to_string().into())).await;
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_err()
+            || !shell_after
+        {
+            return;
+        }
+        let (shell, shell_args) = interactive_shell();
+        let session = tokio::task::spawn_blocking(move || start_pty(&shell, shell_args))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|session| session);
+        match session {
+            Ok(session) => {
+                relay_pty(&mut socket, session).await;
+            }
+            Err(error) => {
+                let _ = socket
+                    .send(Message::Text(
+                        json!({ "type": "error", "error": error.to_string() })
+                            .to_string()
+                            .into(),
+                    ))
+                    .await;
+            }
+        }
     })
 }
 
@@ -7827,6 +7971,8 @@ mod tests {
             "/api/settings/ssh/connect",
             "/api/settings/openresearch/login",
             "/api/settings/openresearch/ssh-key",
+            "/api/settings/harnesses/claude-code/login",
+            "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
         ] {
@@ -7949,6 +8095,16 @@ mod tests {
         })
         .await
         .expect("cancelled PTY did not exit");
+    }
+
+    #[test]
+    fn settings_commands_are_an_exact_allowlist() {
+        assert_eq!(
+            settings_command("gh auth login"),
+            Some(&["gh", "auth", "login"][..])
+        );
+        assert_eq!(settings_command("gh auth login; rm -rf ~"), None);
+        assert_eq!(settings_command("gh"), None);
     }
 
     #[tokio::test]

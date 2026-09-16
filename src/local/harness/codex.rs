@@ -491,6 +491,10 @@ impl Harness for Codex {
         true
     }
 
+    fn login_command(&self) -> Option<&'static [&'static str]> {
+        Some(&["codex", "login"])
+    }
+
     /// The app-server takes `turn/steer` against the active turn; `detect`
     /// withholds it from installations that fall back to the exec path.
     fn supports_steering(&self) -> bool {

@@ -458,6 +458,10 @@ impl Harness for ClaudeCode {
         true
     }
 
+    fn login_command(&self) -> Option<&'static [&'static str]> {
+        Some(&["claude", "auth", "login"])
+    }
+
     /// The resident child holds stdin open, so a second stream-json user
     /// message reaches the turn already running.
     fn supports_steering(&self) -> bool {

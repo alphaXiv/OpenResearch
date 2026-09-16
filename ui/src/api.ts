@@ -1636,6 +1636,8 @@ export interface Harness {
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** Interactive sign-in argv (`claude auth login`); offered while signed out. */
+  loginCommand?: string[];
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;

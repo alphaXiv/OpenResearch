@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
+import { Check, X } from "lucide-react";
 import type { SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
-import { mountTerminal } from "./terminal";
+import { Spinner } from "./ui/Spinner";
+import { mountTerminal, type TerminalPalette } from "./terminal";
 
 export type SshConnectResult =
   | { backend: "ssh"; result: SshPreflight }
@@ -105,26 +107,100 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
   />;
 }
 
-function CommandTerminal({ path, label, heightClass = "h-40", active = true, onComplete, onError }: {
+type CommandStatus = "running" | "done" | "failed" | "closed";
+
+/** Runs a settings command (`claude auth login`, `gh auth login`) in place, so
+ * the user never has to copy it into a terminal of their own. Framed like an
+ * app window; after the command exits the same terminal continues as the
+ * user's shell, so a follow-up command needs no copy-paste either. */
+export function SettingsCommandTerminal({ path, label, onComplete, onError, onClose }: {
+  path: string;
+  label: string;
+  onComplete: () => void;
+  onError: (error: string) => void;
+  onClose: () => void;
+}) {
+  const [status, setStatus] = useState<CommandStatus>("running");
+  return (
+    <div className="mt-4 overflow-hidden rounded-lg border border-border bg-terminal-app">
+      <div className="flex h-9 items-center gap-3 border-b border-b-border-variant bg-surface ps-3 pe-1.5">
+        <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-subtext">
+          {label}
+        </code>
+        <span role="status" className="flex shrink-0 items-center gap-1.5 text-xs text-subtext">
+          {status === "running" ? (
+            <><Spinner className="border-t-accent-amber" /> {m.settings_command_terminal_running()}</>
+          ) : status === "done" ? (
+            <><Check size={13} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
+          ) : status === "failed" ? (
+            <><X size={13} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
+          ) : (
+            m.settings_command_terminal_closed()
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={m.settings_command_terminal_close()}
+          title={m.settings_command_terminal_close()}
+          className="ms-1 inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent text-muted [&:hover]:bg-highlight [&:hover]:text-text"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <CommandTerminal
+        path={path}
+        label={label}
+        heightClass="h-80"
+        frame="bare"
+        palette="app"
+        shellAfter
+        onError={(error) => {
+          setStatus("failed");
+          onError(error);
+        }}
+        onComplete={(value) => {
+          if (!isRecord(value) || value.type !== "complete") return false;
+          setStatus("done");
+          onComplete();
+          return true;
+        }}
+        onClosed={() => setStatus("closed")}
+      />
+    </div>
+  );
+}
+
+function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, onComplete, onError, onClosed }: {
   path: string;
   label: string;
   heightClass?: string;
+  /** `bare` drops the rounded card so a caller can supply its own chrome. */
+  frame?: "card" | "bare";
+  palette?: TerminalPalette;
+  /** The server keeps the session open as a shell once the command reports
+   * completion or failure, so the socket stays up and input stays enabled. */
+  shellAfter?: boolean;
   active?: boolean;
   onComplete: (value: unknown) => boolean;
   onError?: (error: string) => void;
+  /** The session ended after completion (the follow-up shell exited). */
+  onClosed?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
   const completeRef = useRef(onComplete);
   const errorRef = useRef(onError);
+  const closedRef = useRef(onClosed);
   const [error, setError] = useState<string | null>(null);
   completeRef.current = onComplete;
   errorRef.current = onError;
+  closedRef.current = onClosed;
 
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, false, true);
+    const { terminal, dispose } = mountTerminal(wrap, false, true, palette);
     terminalRef.current = terminal;
     terminal.focus();
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
@@ -134,14 +210,16 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
     let completed = false;
     let failed = false;
     let receivedOutput = false;
-    const fail = (message: string) => {
+    const fail = (message: string, sessionEnded: boolean) => {
       if (failed) return;
       failed = true;
       if (!receivedOutput) terminal.writeln(message);
+      errorRef.current?.(message);
+      // A server-reported failure is followed by the shell, which still takes input.
+      if (shellAfter && !sessionEnded) return;
       terminal.options.disableStdin = true;
       terminal.blur();
       setError(message);
-      errorRef.current?.(message);
     };
 
     const input = terminal.onData((data) => {
@@ -170,15 +248,23 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
       }
       if (completeRef.current(value)) {
         completed = true;
-        socket.close();
+        if (!shellAfter) socket.close();
         return;
       }
       const message = serverError(value);
-      if (message) fail(message);
+      if (message) fail(message, false);
     };
-    socket.onerror = () => fail(m.settings_terminal_closed());
+    socket.onerror = () => fail(m.settings_terminal_closed(), true);
     socket.onclose = () => {
-      if (!completed && !failed) fail(m.settings_terminal_closed());
+      if (!completed && !failed) {
+        fail(m.settings_terminal_closed(), true);
+        return;
+      }
+      if (shellAfter) {
+        terminal.options.disableStdin = true;
+        terminal.blur();
+        closedRef.current?.();
+      }
     };
 
     return () => {
@@ -192,7 +278,7 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
       terminalRef.current = null;
       dispose();
     };
-  }, [path]);
+  }, [path, palette, shellAfter]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -203,9 +289,9 @@ function CommandTerminal({ path, label, heightClass = "h-40", active = true, onC
   }, [active, error]);
 
   return (
-    <div className="mt-3">
+    <div className={frame === "card" ? "mt-3" : undefined}>
       <div
-        className={`${heightClass} ${TERMINAL_CLASS_NAME}`}
+        className={`${heightClass} ${frame === "card" ? TERMINAL_CLASS_NAME : "overflow-hidden bg-terminal-app p-3"}`}
         role="group"
         aria-label={label}
       >

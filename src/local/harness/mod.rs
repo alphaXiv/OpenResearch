@@ -267,6 +267,13 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// The interactive sign-in command (`claude auth login`), as argv. The
+    /// dashboard runs it in an embedded terminal via the detected binary, so
+    /// the first element is only the name shown to the user.
+    fn login_command(&self) -> Option<&'static [&'static str]> {
+        None
+    }
+
     /// Run one chat turn: spawn the CLI, parse its event stream, push wire
     /// parts onto `ctx`. Default is "not a chat harness".
     async fn run_turn(&self, _ctx: &mut TurnCtx) -> TurnResult {
@@ -538,12 +545,23 @@ async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
             };
         }
         info.options = harness.options();
+        info.login_command = harness
+            .login_command()
+            .map(|argv| argv.iter().map(|arg| arg.to_string()).collect());
         // The trait is the ceiling: a `detect` narrows it for an installation
         // whose run path can't steer. A steering harness whose `detect` forgets
         // to set it reports false and silently queues every send.
         info.supports_steering &= harness.supports_steering();
         info
     })
+}
+
+/// Sign-in argv for a chat harness, or `None` when it has no login command.
+pub fn login_command(id: &str) -> Option<&'static [&'static str]> {
+    registry()
+        .into_iter()
+        .find(|h| h.id() == id && h.supports_chat())
+        .and_then(|h| h.login_command())
 }
 
 pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {

@@ -121,7 +121,7 @@ import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { OpenResearchSetupTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
@@ -280,6 +280,57 @@ const SETTINGS_STACK_SECTION_CLASS_NAME = [
 export type SettingsTab = import("../workspaceState").SettingsSection;
 type Tab = SettingsTab;
 
+// --- runnable notes ----------------------------------------------------------
+
+/** Commands the server's settings allowlist accepts; keep in sync with
+ * `SETTINGS_COMMANDS` in `src/commands/up.rs`. */
+const SETTINGS_COMMANDS = new Set([
+  "gh auth login",
+  "hf auth login",
+  "claude auth status",
+  "opencode models",
+  "curl https://cursor.com/install -fsS | bash",
+]);
+
+function settingsCommandPath(command: string) {
+  return SETTINGS_COMMANDS.has(command) ? `/api/settings/commands/run?command=${encodeURIComponent(command)}` : undefined;
+}
+
+/** A note whose backticked commands get a play button when `resolve` maps them
+ * to a terminal route; the terminal opens directly under the note. */
+function RunnableNote({ note, className, resolve = settingsCommandPath, onComplete }: {
+  note: string | undefined;
+  className: string;
+  resolve?: (command: string) => string | undefined;
+  onComplete?: () => void;
+}) {
+  const [run, setRun] = useState<{ command: string; path: string; attempt: number } | null>(null);
+  if (!note) return null;
+  return (
+    <>
+      <p className={className}>
+        {renderNote(note, {
+          canRun: (command) => resolve(command) !== undefined,
+          onRun: (command) => {
+            const path = resolve(command);
+            if (path) setRun((current) => ({ command, path, attempt: (current?.attempt ?? 0) + 1 }));
+          },
+        })}
+      </p>
+      {run && (
+        <SettingsCommandTerminal
+          key={`${run.command}-${run.attempt}`}
+          path={run.path}
+          label={run.command}
+          onComplete={() => onComplete?.()}
+          onError={(error) => showAlert(error, "error")}
+          onClose={() => setRun(null)}
+        />
+      )}
+    </>
+  );
+}
+
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
@@ -300,7 +351,13 @@ function AuthLabel({ h }: { h: Harness }) {
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
-function HarnessesTab() {
+/** The sign-in command can run whenever the binary can: a note only mentions it
+ * when signing in (or re-adding a rejected key) is the fix. */
+function canLoginInTerminal(h: Harness) {
+  return Boolean(h.loginCommand) && h.installed && !h.installBroken;
+}
+
+function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
@@ -377,7 +434,19 @@ function HarnessesTab() {
                 : m.settings_none()}
             </span>
           </div>
-          {h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{renderNote(h.agentNote)}</p>}
+          <RunnableNote
+            key={h.id}
+            note={h.agentNote}
+            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+            resolve={(command) => {
+              if (remote) return undefined;
+              if (h.loginCommand && command === h.loginCommand.join(" ") && canLoginInTerminal(h)) {
+                return `/api/settings/harnesses/${encodeURIComponent(h.id)}/login`;
+              }
+              return settingsCommandPath(command);
+            }}
+            onComplete={() => load(true, true)}
+          />
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
@@ -1699,7 +1768,7 @@ function BackendDetailPage({
   );
 }
 
-function QuickSetupDialog({ target, onClose }: { target: ComputeTargetSummary; onClose: () => void }) {
+function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSummary; remote: boolean; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
 
@@ -1744,7 +1813,7 @@ function QuickSetupDialog({ target, onClose }: { target: ComputeTargetSummary; o
         </IconButton>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
-      {target.id === "hf" && <HfSection />}
+      {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}
       {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
@@ -1853,7 +1922,7 @@ function ComputeTab({
               </div>
             </section>
           )}
-          {selected && <QuickSetupDialog target={selected} onClose={() => setSelectedTarget(null)} />}
+          {selected && <QuickSetupDialog target={selected} remote={remote} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
@@ -1970,7 +2039,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   return null;
 }
 
-function HfSection() {
+function HfSection({ remote }: { remote: boolean }) {
   const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
 
   const settingsOptions = getHfSettingsQuery();
@@ -2049,9 +2118,12 @@ function HfSection() {
             </p>
           )}
           {settings.validationStatus === "valid" && settings.jobsWrite === null && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_hf_token_help({ login: ltr("hf auth login"), url: ltr("huggingface.co/settings/tokens") })}
-            </p>
+            <RunnableNote
+              note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
+              className={SETTINGS_NOTE_CLASS_NAME}
+              resolve={(command) => (remote ? undefined : settingsCommandPath(command))}
+              onComplete={() => void settingsQuery.refetch()}
+            />
           )}
         </>
       )}
@@ -2741,7 +2813,7 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function ProjectDefaultsTab() {
+function ProjectDefaultsTab({ remote }: { remote: boolean }) {
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
   const settingsOptions = getProjectDefaultsQuery();
@@ -2797,7 +2869,7 @@ function ProjectDefaultsTab() {
           </div>
           {!settings.githubAuthenticated && (
             <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-              <GitHubCliHelp ghInstalled={settings.ghInstalled} onCheck={load} />
+              <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} />
             </div>
           )}
           {error && <div className="error">{error}</div>}
@@ -2809,9 +2881,11 @@ function ProjectDefaultsTab() {
 
 function GitHubCliHelp({
   ghInstalled,
+  remote,
   onCheck,
 }: {
   ghInstalled: boolean;
+  remote: boolean;
   onCheck: () => Promise<void>;
 }) {
   const [checking, setChecking] = useState(false);
@@ -2822,9 +2896,12 @@ function GitHubCliHelp({
 
   return (
     <>
-      <p className="git-card-helper m-0 text-sm leading-relaxed text-text">
-        {renderNote(ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login())}
-      </p>
+      <RunnableNote
+        note={ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login()}
+        className="git-card-helper m-0 text-sm leading-relaxed text-text"
+        resolve={(command) => (remote || !ghInstalled ? undefined : settingsCommandPath(command))}
+        onComplete={() => void onCheck()}
+      />
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
           <ButtonLink variant="primary"
@@ -2950,9 +3027,11 @@ function OverleafCard() {
 function GitTab({
   project,
   onProjectUpdate,
+  remote,
 }: {
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
+  remote: boolean;
 }) {
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
@@ -3051,7 +3130,7 @@ function GitTab({
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load()} />
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} />
               </div>
             )}
             {status.github.authenticated && !status.github.enabled && (
@@ -3549,10 +3628,10 @@ export function SettingsView({
               <AppearanceTab />
             </section>
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <ProjectDefaultsTab />
+              <ProjectDefaultsTab remote={remote} />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab />
+              <HarnessesTab remote={remote} />
             </section>
             {!remote && (
               <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
@@ -3591,6 +3670,7 @@ export function SettingsView({
         <GitTab
           project={project}
           onProjectUpdate={onProjectUpdate}
+          remote={remote}
         />
       )}
     </div>

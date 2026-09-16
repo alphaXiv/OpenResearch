@@ -68,6 +68,10 @@ impl Harness for OpenCode {
         true
     }
 
+    fn login_command(&self) -> Option<&'static [&'static str]> {
+        Some(&["opencode", "auth", "login"])
+    }
+
     async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
         opencode_one_shot(&find_opencode().ok()?, request).await
     }

@@ -141,6 +141,9 @@ pub struct HarnessInfo {
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
+    /// Static per harness; the dashboard offers it only while signed out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_command: Option<Vec<String>>,
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
@@ -166,6 +169,7 @@ impl HarnessInfo {
             plan: None,
             agent_ready: false,
             agent_note: None,
+            login_command: None,
             supports_steering: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),

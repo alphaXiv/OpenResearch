@@ -63,6 +63,10 @@ impl Harness for Cursor {
         true
     }
 
+    fn login_command(&self) -> Option<&'static [&'static str]> {
+        Some(&["agent", "login"])
+    }
+
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         if let Some(bin) = find_cursor() {
