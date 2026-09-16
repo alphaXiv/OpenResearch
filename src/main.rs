@@ -18,6 +18,7 @@ mod commands;
 mod compute;
 mod config;
 mod error;
+mod folder_browser;
 mod folder_picker;
 mod invocation;
 mod jobs;

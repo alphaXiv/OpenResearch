@@ -16,7 +16,6 @@ import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight, CircleAlert, FolderOpen } from "lucide-react";
 import {
   createProject,
-  pickProjectFolder,
   type PaperHit,
   type Project,
   type ResolvedPaper,
@@ -24,6 +23,8 @@ import {
 } from "../api";
 import { Button } from "./ui";
 import { PaperTitle } from "./PaperTitle";
+import { ProjectFolderBrowser } from "./ProjectFolderBrowser";
+import { childProjectPath } from "../lib/projectFolder";
 
 function useDebouncedValue(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
@@ -86,6 +87,9 @@ export function NewProjectForm({
   const [path, setPath] = useState("");
   const [pathTouched, setPathTouched] = useState(false);
   const [pickingFolder, setPickingFolder] = useState(false);
+  const [blankParentPath, setBlankParentPath] = useState("~/OpenResearch");
+  // null derives the subfolder name from the project name; a string is the user's edit.
+  const [blankFolderName, setBlankFolderName] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -94,14 +98,17 @@ export function NewProjectForm({
   const [paper, setPaper] = useState<ResolvedPaper | null>(null);
   const [choosingPaper, setChoosingPaper] = useState(false);
   const seq = useRef(0);
-  const folderPickSeq = useRef(0);
   const drafts = useRef<Record<Mode, ProjectDraft>>({
     blank: { name: "", nameTouched: false, path: "", pathTouched: false },
     folder: { name: "", nameTouched: false, path: "", pathTouched: false },
     paper: { name: "", nameTouched: false, path: "", pathTouched: false },
   });
   const paperGithubRepo = mode === "paper" ? parseGithubRepository(paper?.repoUrl) : null;
-  const automaticBlankProjectPath = name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "";
+  const childFolderName = blankFolderName ?? (name.trim() ? slugify(name, 48) : "");
+  const childPath = childProjectPath(blankParentPath, childFolderName);
+  const automaticBlankProjectPath = remote
+    ? (name.trim() ? `~/OpenResearch/${slugify(name, 48)}` : "")
+    : childPath ?? "";
   const automaticPaperProjectPath = `~/OpenResearch/${slugify(name || paper?.title || paper?.paperId || "")}`;
   const projectPath = mode === "blank" && !pathTouched
     ? automaticBlankProjectPath
@@ -111,6 +118,11 @@ export function NewProjectForm({
   const checkedPath = useDebouncedValue(projectPath.trim(), 200);
   const pathQuery = useQuery({ ...getProjectPathStatusQuery(checkedPath), enabled: Boolean(checkedPath) && checkedPath === projectPath.trim() });
   const pathStatus = checkedPath === projectPath.trim() ? pathQuery.data ?? null : null;
+  // The default ~/OpenResearch path does not reveal the server OS. Once the
+  // existing path check resolves it, apply that platform's child-name rules too.
+  const invalidChildFolder = !remote && mode === "blank" && Boolean(childFolderName.trim()) && (
+    !childPath || Boolean(pathStatus?.resolvedPath && !childProjectPath(pathStatus.resolvedPath, childFolderName))
+  );
   const pathError = checkedPath === projectPath.trim() ? pathQuery.error?.message ?? null : null;
   const checkingPath = Boolean(projectPath.trim()) && (checkedPath !== projectPath.trim() || pathQuery.isFetching);
   const existingGithubRepo = paperGithubRepo ?? (
@@ -172,7 +184,6 @@ export function NewProjectForm({
 
   function changePaper() {
     seq.current += 1;
-    folderPickSeq.current += 1;
     setPaper(null);
     setPaperQuery("");
     setChoosingPaper(false);
@@ -191,7 +202,6 @@ export function NewProjectForm({
   function chooseMode(next: Mode) {
     if (next === mode) return;
     seq.current += 1;
-    folderPickSeq.current += 1;
     drafts.current[mode] = { name, nameTouched, path, pathTouched };
     const nextDraft = drafts.current[next];
     setMode(next);
@@ -204,27 +214,14 @@ export function NewProjectForm({
     setPathTouched(nextDraft.pathTouched);
   }
 
-  async function chooseLocalFolder() {
-    if (pickingFolder) return;
-    const request = ++folderPickSeq.current;
-    setPickingFolder(true);
-    setError(null);
-    try {
-      const selected = await pickProjectFolder();
-      if (request !== folderPickSeq.current || !selected) return;
-      setPathTouched(true);
-      setPath(selected);
-      void queryClient.invalidateQueries(getProjectPathStatusQuery(selected));
-      if (mode === "folder" && !nameTouched) {
-        const folderName = selected.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
-        if (folderName) setName(folderName);
-      }
-    } catch (err) {
-      if (request === folderPickSeq.current) {
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    } finally {
-      if (request === folderPickSeq.current) setPickingFolder(false);
+  function chooseLocalFolder(selected: string) {
+    setPickingFolder(false);
+    setPathTouched(true);
+    setPath(selected);
+    void queryClient.invalidateQueries(getProjectPathStatusQuery(selected));
+    if (mode === "folder" && !nameTouched) {
+      const folderName = selected.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+      if (folderName) setName(folderName);
     }
   }
 
@@ -307,14 +304,17 @@ export function NewProjectForm({
     nonemptyPaperCloneFolder ||
     unusableBlankPaperFolder;
   const blankDestinationHasError =
+    invalidChildFolder ||
     (pathTouched && !projectPath.trim()) || invalidProjectDestination || existingBlankFolder;
-  const blankDestinationError = pathTouched && !projectPath.trim()
-    ? m.new_project_location_required()
-    : invalidProjectDestination
-      ? m.new_project_destination_is_file()
-      : existingBlankFolder
-        ? m.new_project_folder_exists()
-        : null;
+  const blankDestinationError = invalidChildFolder
+    ? m.new_project_child_folder_invalid()
+    : pathTouched && !projectPath.trim()
+      ? m.new_project_location_required()
+      : invalidProjectDestination
+        ? m.new_project_destination_is_file()
+        : existingBlankFolder
+          ? m.new_project_folder_exists()
+          : null;
   const paperDestinationError = pathTouched && !projectPath.trim()
     ? m.new_project_location_required()
     : invalidProjectDestination
@@ -334,6 +334,7 @@ export function NewProjectForm({
     !gitMissing &&
     !missingLocalFolder &&
     !existingBlankFolder &&
+    !invalidChildFolder &&
     !invalidProjectDestination &&
     !nonemptyPaperCloneFolder &&
     !unusableBlankPaperFolder &&
@@ -484,21 +485,25 @@ export function NewProjectForm({
               )}
             </label>
           ) : mode === "folder" && !remote ? (
-            <button
-              data-initial-focus
-              type="button"
-              className="folder-picker-control"
-              aria-label={path ? m.new_project_change_folder({ path: ltr(path) }) : m.new_project_choose_existing_folder()}
-              disabled={pickingFolder}
-              title={path || undefined}
-              onClick={() => void chooseLocalFolder()}
-            >
-              <FolderOpen className={path ? "folder-picker-icon" : "folder-picker-icon placeholder"} size={16} />
-              <span className={path ? "text-sm" : "placeholder"}>
-                {pickingFolder ? m.new_project_choosing() : path || m.new_project_choose_existing_folder()}
-              </span>
-              <ChevronRight className="folder-picker-chevron" size={15} />
-            </button>
+            <>
+              <button
+                data-initial-focus
+                type="button"
+                className="folder-picker-control"
+                aria-label={path ? m.new_project_change_folder({ path: ltr(path) }) : m.new_project_choose_existing_folder()}
+                disabled={pickingFolder}
+                title={path || undefined}
+                onClick={() => { setPickingFolder(true); setError(null); }}
+              >
+                <FolderOpen className={path ? "folder-picker-icon" : "folder-picker-icon placeholder"} size={16} />
+                <span className={path ? "text-sm" : "placeholder"}>
+                  {path || m.new_project_choose_existing_folder()}
+                </span>
+                <ChevronRight className="folder-picker-chevron" size={15} />
+              </button>
+              {pickingFolder && <ProjectFolderBrowser initialPath={path}
+                onSelect={chooseLocalFolder} onCancel={() => setPickingFolder(false)} />}
+            </>
           ) : mode === "folder" ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>
@@ -515,6 +520,42 @@ export function NewProjectForm({
                 dir="ltr"
               />
             </label>
+          ) : !remote ? (
+            <div className="flex flex-col gap-3">
+              <div className="project-location-field">
+                <span className="project-location-label">{m.new_project_parent_folder()}</span>
+                <button type="button" className="folder-picker-control" disabled={pickingFolder}
+                  aria-label={m.new_project_choose_parent_folder()}
+                  title={blankParentPath}
+                  onClick={() => { setPickingFolder(true); setError(null); }}>
+                  <FolderOpen className="folder-picker-icon" size={16} />
+                  <span className="min-w-0 flex-1 truncate text-left text-sm" dir="ltr">{blankParentPath}</span>
+                  <ChevronRight className="folder-picker-chevron" size={15} />
+                </button>
+              </div>
+              {pickingFolder && <ProjectFolderBrowser
+                label={m.new_project_choose_parent_folder()}
+                initialPath={blankParentPath === "~/OpenResearch" ? "" : blankParentPath}
+                onSelect={(selected) => {
+                  setBlankParentPath(selected);
+                  setPickingFolder(false);
+                }} onCancel={() => setPickingFolder(false)} />}
+              <label className="project-location-field">
+                <span className="project-location-label">{m.new_project_child_folder_name()}</span>
+                <input className="text-sm font-normal" value={childFolderName}
+                  onChange={(event) => setBlankFolderName(event.target.value.trim() ? event.target.value : null)}
+                  placeholder="my-research" spellCheck={false} dir="ltr"
+                  aria-describedby={blankDestinationHasError ? "blank-destination-description" : undefined} />
+              </label>
+              <div className="project-location-field">
+                <span className="project-location-label">{m.new_project_form_project_location()}</span>
+                <span className="break-all text-sm text-subtext" dir="ltr">{projectPath || "—"}</span>
+                {checkingPath && <span className="sr-only" role="status">{m.new_project_form_checking_project_location()}</span>}
+                {blankDestinationHasError && <span id="blank-destination-description" className="folder-picker-hint error !text-accent-red" role="alert">
+                  {blankDestinationError}
+                </span>}
+              </div>
+            </div>
           ) : name.trim() ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>

@@ -837,7 +837,6 @@
   "new_project_clone_destination": "Destino del clon",
   "new_project_change_folder": "Cambiar la carpeta del proyecto; carpeta actual: {path}",
   "new_project_choose_existing_folder": "Elige una carpeta de proyecto existente",
-  "new_project_choosing": "Eligiendo…",
   "new_project_advanced_connect_github": "Avanzado · Conectar GitHub",
   "new_project_advanced_sync_on": "Avanzado · Sincronización con GitHub activada",
   "new_project_advanced": "Avanzado",
@@ -1187,5 +1186,18 @@
   "onboarding_choose_another_agent": "Elegir otro agente de programación",
   "image_zoom_out": "Alejar",
   "image_zoom_in": "Acercar",
-  "image_zoom_reset": "Restablecer zoom para ajustar"
+  "image_zoom_reset": "Restablecer zoom para ajustar",
+  "folder_browser_parent": "Carpeta superior",
+  "folder_browser_directories": "Subcarpetas",
+  "folder_browser_empty": "No hay subcarpetas",
+  "folder_browser_select": "Seleccionar esta carpeta",
+  "folder_browser_timeout": "La carpeta tardó demasiado en responder. Prueba otra ruta.",
+  "folder_browser_locations": "Ubicaciones",
+  "folder_browser_computer": "Este equipo",
+  "folder_browser_home": "Carpeta personal",
+  "folder_browser_path_hint": "Introduce la ruta completa de una carpeta",
+  "new_project_parent_folder": "Carpeta principal",
+  "new_project_choose_parent_folder": "Elegir carpeta principal",
+  "new_project_child_folder_name": "Nombre de la nueva subcarpeta",
+  "new_project_child_folder_invalid": "Introduce un nombre de carpeta válido, sin separadores de ruta ni nombres reservados."
 }

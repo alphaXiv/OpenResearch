@@ -837,7 +837,6 @@
   "new_project_clone_destination": "Clone destination",
   "new_project_change_folder": "Change project folder; current folder: {path}",
   "new_project_choose_existing_folder": "Choose an existing project folder",
-  "new_project_choosing": "Choosing…",
   "new_project_advanced_connect_github": "Advanced · Connect GitHub",
   "new_project_advanced_sync_on": "Advanced · GitHub sync on",
   "new_project_advanced": "Advanced",
@@ -1187,5 +1186,18 @@
   "onboarding_choose_another_agent": "Choose another coding agent",
   "image_zoom_out": "Zoom out",
   "image_zoom_in": "Zoom in",
-  "image_zoom_reset": "Reset zoom to fit"
+  "image_zoom_reset": "Reset zoom to fit",
+  "folder_browser_parent": "Parent folder",
+  "folder_browser_directories": "Subfolders",
+  "folder_browser_empty": "No subfolders",
+  "folder_browser_select": "Select this folder",
+  "folder_browser_timeout": "This folder took too long to respond. Try a different path.",
+  "folder_browser_locations": "Locations",
+  "folder_browser_computer": "This PC",
+  "folder_browser_home": "Home",
+  "folder_browser_path_hint": "Enter a full folder path",
+  "new_project_parent_folder": "Parent folder",
+  "new_project_choose_parent_folder": "Choose parent folder",
+  "new_project_child_folder_name": "New subfolder name",
+  "new_project_child_folder_invalid": "Enter a valid folder name, without path separators or reserved names."
 }
