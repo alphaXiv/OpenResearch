@@ -381,8 +381,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
   const [terminalTabOpen, setTerminalTabOpen] = useState(false);
-  // The session whose terminal tab has been selected: restored tabs spawn
-  // their shell on first selection, not on load.
+  // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
   const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
@@ -872,7 +871,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [selectRightTab]);
   const terminalKey = activeSessionId ?? (projectId ? `project:${projectId}` : null);
   useEffect(() => {
-    if (panelOpen && rightTab === "terminal") setTerminalStartedFor(terminalKey);
+    if (!panelOpen) setTerminalStartedFor(null);
+    else if (rightTab === "terminal") setTerminalStartedFor(terminalKey);
+    else setTerminalStartedFor((current) => (current === terminalKey ? current : null));
   }, [panelOpen, rightTab, terminalKey]);
 
   // Live store updates.
@@ -1721,7 +1722,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 </IconButton>
               </div>
             </div>
-            {rightTab === "terminal" ? null : !workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
+            {/* The terminal body is the standalone TabBody after this chain. */}
+            {rightTab === "terminal" && terminalTabOpen ? null : !workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
               <TabBody><Spinner /></TabBody>
             ) : (expTab && (!tabExperiment || (selectedRunId && !runs.some((run) => run.id === selectedRunId && run.experimentId === expTab.id))))
               || (requestedCodeTab && !codeExperiment)
@@ -2072,7 +2074,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             )}
             {/* Hidden rather than unmounted so the shell survives tab switches within the panel. */}
-            {terminalTabOpen && terminalKey !== null && terminalStartedFor === terminalKey && activeProject && (
+            {terminalTabOpen && terminalStartedFor !== null && terminalStartedFor === terminalKey && activeProject && (
               <TabBody className={rightTab === "terminal" ? undefined : "hidden"}>
                 <ProjectTerminal
                   key={terminalKey}

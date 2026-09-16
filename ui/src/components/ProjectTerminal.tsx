@@ -95,7 +95,7 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
       <p role="status" aria-live="polite" className="sr-only">{ended ?? ""}</p>
       {ended !== null && (
         <div className="flex shrink-0 justify-end pt-2">
-          <Button onClick={() => setGeneration((value) => value + 1)}>{m.workspace_terminal_restart()}</Button>
+          <Button autoFocus onClick={() => setGeneration((value) => value + 1)}>{m.workspace_terminal_restart()}</Button>
         </div>
       )}
     </div>
