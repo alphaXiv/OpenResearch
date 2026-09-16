@@ -1,3 +1,5 @@
+#project insight
+
 # LF in the working tree on every platform. SYSTEM_PROMPT.md and the
 # agent-skills SKILL.md files are include_str!'d at build time, and a CRLF
 # checkout ships a binary whose own `\n`-boundary parsing of them fails.
