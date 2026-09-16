@@ -1174,5 +1174,19 @@
   "harness_setup_install_preview": "Aprueba el siguiente comando para descargar e instalar {agent} en tu equipo.",
   "harness_setup_update_preview": "Aprueba el siguiente comando para actualizar {agent} en tu equipo.",
   "harness_setup_approve_run": "Aprobar y ejecutar",
-  "onboarding_choose_another_agent": "Elegir otro agente de programación"
+  "onboarding_choose_another_agent": "Elegir otro agente de programación",
+  "folder_browser_open": "Abrir ruta",
+  "folder_browser_parent": "Carpeta superior",
+  "folder_browser_directories": "Subcarpetas",
+  "folder_browser_empty": "No hay subcarpetas",
+  "folder_browser_select": "Seleccionar esta carpeta",
+  "folder_browser_timeout": "La carpeta tardó demasiado en responder. Prueba otra ruta.",
+  "folder_browser_locations": "Ubicaciones",
+  "folder_browser_computer": "Este equipo",
+  "folder_browser_home": "Carpeta personal",
+  "folder_browser_path_hint": "Introduce la ruta completa de una carpeta",
+  "new_project_parent_folder": "Carpeta principal",
+  "new_project_choose_parent_folder": "Elegir carpeta principal",
+  "new_project_child_folder_name": "Nombre de la nueva subcarpeta",
+  "new_project_child_folder_invalid": "Introduce un nombre de carpeta válido, sin separadores de ruta ni nombres reservados."
 }

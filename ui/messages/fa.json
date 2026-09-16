@@ -1174,5 +1174,19 @@
   "harness_setup_install_preview": "برای دانلود و نصب {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_update_preview": "برای به‌روزرسانی {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_approve_run": "تأیید و اجرا",
-  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر"
+  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر",
+  "folder_browser_open": "باز کردن مسیر",
+  "folder_browser_parent": "پوشهٔ والد",
+  "folder_browser_directories": "زیرپوشه‌ها",
+  "folder_browser_empty": "زیرپوشه‌ای وجود ندارد",
+  "folder_browser_select": "انتخاب این پوشه",
+  "folder_browser_timeout": "زمان پاسخ پوشه تمام شد. مسیر دیگری را امتحان کنید.",
+  "folder_browser_locations": "مکان‌ها",
+  "folder_browser_computer": "این رایانه",
+  "folder_browser_home": "خانه",
+  "folder_browser_path_hint": "مسیر کامل پوشه را وارد کنید",
+  "new_project_parent_folder": "پوشهٔ والد",
+  "new_project_choose_parent_folder": "انتخاب پوشهٔ والد",
+  "new_project_child_folder_name": "نام زیرپوشهٔ جدید",
+  "new_project_child_folder_invalid": "یک نام پوشهٔ معتبر، بدون جداکنندهٔ مسیر یا نام‌های رزروشده وارد کنید."
 }

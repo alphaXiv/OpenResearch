@@ -1174,5 +1174,19 @@
   "harness_setup_install_preview": "Approve the command below to download and install {agent} on your computer.",
   "harness_setup_update_preview": "Approve the command below to update {agent} on your computer.",
   "harness_setup_approve_run": "Approve and run",
-  "onboarding_choose_another_agent": "Choose another coding agent"
+  "onboarding_choose_another_agent": "Choose another coding agent",
+  "folder_browser_open": "Open path",
+  "folder_browser_parent": "Parent folder",
+  "folder_browser_directories": "Subfolders",
+  "folder_browser_empty": "No subfolders",
+  "folder_browser_select": "Select this folder",
+  "folder_browser_timeout": "This folder took too long to respond. Try a different path.",
+  "folder_browser_locations": "Locations",
+  "folder_browser_computer": "This PC",
+  "folder_browser_home": "Home",
+  "folder_browser_path_hint": "Enter a full folder path",
+  "new_project_parent_folder": "Parent folder",
+  "new_project_choose_parent_folder": "Choose parent folder",
+  "new_project_child_folder_name": "New subfolder name",
+  "new_project_child_folder_invalid": "Enter a valid folder name, without path separators or reserved names."
 }
