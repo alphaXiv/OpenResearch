@@ -1,4 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { Terminal as Xterm } from "@xterm/xterm";
 import {
   refreshHarnesses,
   getHarnessesQuery,
@@ -237,10 +238,16 @@ export function Onboarding({
         const socket = new WebSocket(`${protocol}//${location.host}/api/harnesses/setup?harness=opencode&action=install&trigger=automatic`);
         socket.binaryType = "arraybuffer";
         const decoder = new TextDecoder();
+        // ConPTY waits for terminal replies even when installation runs without a visible terminal.
+        const terminal = new Xterm();
+        terminal.onData((data) => {
+          if (socket.readyState === WebSocket.OPEN) socket.send(new TextEncoder().encode(data));
+        });
         installSocket.current = socket;
         let complete = false;
         socket.onmessage = (event) => {
           if (event.data instanceof ArrayBuffer) {
+            terminal.write(new Uint8Array(event.data));
             // Keep the latest 64 KiB so noisy installer output cannot grow without bound.
             installOutput.current = (installOutput.current + decoder.decode(event.data, { stream: true })).slice(-65536);
             return;
@@ -260,6 +267,7 @@ export function Onboarding({
         };
         socket.onerror = () => { socket.close(); reject(new Error(m.settings_terminal_closed())); };
         socket.onclose = () => {
+          terminal.dispose();
           installSocket.current = null;
           if (!complete) reject(new Error(m.settings_terminal_closed()));
         };

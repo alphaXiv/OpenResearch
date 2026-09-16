@@ -18,7 +18,7 @@ fn install_command(harness: &str, windows: bool) -> Option<&'static str> {
         ("codex", false) => Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
         ("codex", true) => Some("npm install -g @openai/codex"),
         ("opencode", false) => Some("curl -fsSL https://opencode.ai/install | bash"),
-        ("opencode", true) => Some("npm install -g opencode-ai"),
+        ("opencode", true) => Some(include_str!("install_opencode.ps1")),
         ("cursor", false) => Some("curl https://cursor.com/install -fsS | bash"),
         ("cursor", true) => Some("irm 'https://cursor.com/install?win32=true' | iex"),
         _ => None,
@@ -59,7 +59,7 @@ pub(super) async fn commands() -> Json<Value> {
                     "install": install,
                     "login": login,
                     "update": update,
-                    "requiresNpm": cfg!(windows) && matches!(harness, "codex" | "opencode"),
+                    "requiresNpm": cfg!(windows) && install.starts_with("npm "),
                 }),
             );
         }
