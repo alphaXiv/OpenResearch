@@ -178,7 +178,7 @@ impl Harness for Cursor {
 }
 
 /// `cursor-agent` on PATH, else an `agent` binary that is actually Cursor, else
-/// the installer drop under `~/.local/bin`. `agent` is a generic name, so a
+/// the platform's installer drop location. `agent` is a generic name, so a
 /// hit is only accepted when the path (or the symlink it resolves to) names
 /// Cursor.
 pub(crate) fn find_cursor() -> Option<PathBuf> {
@@ -187,8 +187,18 @@ pub(crate) fn find_cursor() -> Option<PathBuf> {
         .or_else(|| {
             let home = dirs::home_dir()?;
             let local = home.join(".local").join("bin");
-            find_in_dir(&local, "cursor-agent")
-                .or_else(|| find_in_dir(&local, "agent").filter(|path| looks_like_cursor(path)))
+            let windows = cfg!(windows)
+                .then(dirs::data_local_dir)
+                .flatten()
+                .map(|dir| dir.join("cursor-agent"));
+            [Some(local), windows]
+                .into_iter()
+                .flatten()
+                .find_map(|dir| {
+                    find_in_dir(&dir, "cursor-agent").or_else(|| {
+                        find_in_dir(&dir, "agent").filter(|path| looks_like_cursor(path))
+                    })
+                })
         })
         .map(resolve_symlinks)
 }
