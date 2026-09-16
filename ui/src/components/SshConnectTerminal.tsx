@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { Check, X } from "lucide-react";
 import type { SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { isRecord } from "../workspaceState";
-import { mountTerminal } from "./terminal";
+import { Spinner } from "./ui/Spinner";
+import { mountTerminal, type TerminalPalette } from "./terminal";
 
 export type SshConnectResult =
   | { backend: "ssh"; result: SshPreflight }
@@ -46,6 +48,10 @@ function connectionResult(value: unknown): SshConnectResult | null {
     return { backend: "slurm", result: value.result };
   }
   return null;
+}
+
+function isComplete(value: unknown) {
+  return isRecord(value) && value.type === "complete";
 }
 
 function serverError(value: unknown): string | null {
@@ -95,35 +101,111 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
     heightClass="h-80"
     onError={onError}
     onComplete={(value) => {
-      if (!isRecord(value) || value.type !== "complete") return false;
+      if (!isComplete(value)) return false;
       onComplete();
       return true;
     }}
   />;
 }
 
-export function CommandTerminal({ path, label, command, heightClass = "h-40", active = true, awaitingApproval = false, onComplete, onError }: {
+type CommandStatus = "running" | "done" | "failed" | "closed";
+
+/** Runs a note's command in place (harness setup via `/api/harnesses/setup`,
+ * `gh auth login` via the settings allowlist), so the user never copies it into
+ * a terminal of their own. Framed like an app window; after the command exits
+ * the same terminal continues as the user's shell for follow-ups. */
+export function SettingsCommandTerminal({ path, label, onComplete, onError, onClose }: {
+  path: string;
+  label: string;
+  onComplete: () => void;
+  onError: (error: string) => void;
+  onClose: () => void;
+}) {
+  const [status, setStatus] = useState<CommandStatus>("running");
+  return (
+    <div className="mt-4 overflow-hidden rounded-lg border border-border">
+      <div className="flex h-9 items-center gap-3 border-b border-b-border-variant bg-surface ps-3 pe-1.5">
+        <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-subtext">
+          {label}
+        </code>
+        <span role="status" className="flex shrink-0 items-center gap-1.5 text-xs text-subtext">
+          {status === "running" ? (
+            <><Spinner className="border-t-accent-amber" /> {m.settings_command_terminal_running()}</>
+          ) : status === "done" ? (
+            <><Check size={13} strokeWidth={2.5} className="text-accent-green" /> {m.settings_command_terminal_done()}</>
+          ) : status === "failed" ? (
+            <><X size={13} strokeWidth={2.5} className="text-accent-red" /> {m.settings_command_terminal_failed()}</>
+          ) : (
+            m.settings_command_terminal_closed()
+          )}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={m.settings_command_terminal_close()}
+          title={m.settings_command_terminal_close()}
+          className="ms-1 inline-flex h-6 w-6 shrink-0 cursor-pointer items-center justify-center rounded-md border-0 bg-transparent text-muted [&:hover]:bg-highlight [&:hover]:text-text"
+        >
+          <X size={14} />
+        </button>
+      </div>
+      <CommandTerminal
+        path={path}
+        label={label}
+        heightClass="h-80"
+        frame="bare"
+        palette="app"
+        shellAfter
+        onError={(error, sessionEnded) => {
+          setStatus("failed");
+          if (sessionEnded) onError(error);
+        }}
+        onComplete={(value) => {
+          if (!isComplete(value)) return false;
+          setStatus("done");
+          onComplete();
+          return true;
+        }}
+        onClosed={() => setStatus((current) => (current === "running" ? "closed" : current))}
+      />
+    </div>
+  );
+}
+
+export function CommandTerminal({ path, label, command, heightClass = "h-40", frame = "card", palette = "dark", shellAfter = false, active = true, awaitingApproval = false, onComplete, onError, onClosed }: {
   path: string;
   label: string;
   command?: string;
   heightClass?: string;
+  /** `bare` drops the rounded card so a caller can supply its own chrome. */
+  frame?: "card" | "bare";
+  palette?: TerminalPalette;
+  /** The server follows a command that ran with the user's shell, so the socket
+   * stays up and input stays enabled after a command failure. */
+  shellAfter?: boolean;
   active?: boolean;
   awaitingApproval?: boolean;
   onComplete: (value: unknown) => boolean;
-  onError?: (error: string) => void;
+  /** `sessionEnded` is false for a server-reported failure the follow-up shell
+   * continues past (`shellAfter`); true whenever the terminal is done for. */
+  onError?: (error: string, sessionEnded: boolean) => void;
+  /** The session ended after the command finished (the follow-up shell exited). */
+  onClosed?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<ReturnType<typeof mountTerminal>["terminal"] | null>(null);
   const completeRef = useRef(onComplete);
   const errorRef = useRef(onError);
+  const closedRef = useRef(onClosed);
   const [error, setError] = useState<string | null>(null);
   completeRef.current = onComplete;
   errorRef.current = onError;
+  closedRef.current = onClosed;
 
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const { terminal, dispose } = mountTerminal(wrap, awaitingApproval, true);
+    const { terminal, dispose } = mountTerminal(wrap, awaitingApproval, true, palette);
     terminalRef.current = terminal;
     if (awaitingApproval) {
       if (command) terminal.writeln(`$ ${command}`);
@@ -140,14 +222,20 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", ac
     let completed = false;
     let failed = false;
     let receivedOutput = false;
-    const fail = (message: string) => {
-      if (failed) return;
+    const fail = (message: string, sessionEnded: boolean) => {
+      if (failed) {
+        // A later failure (the follow-up shell not starting) still deserves a line.
+        if (!sessionEnded) terminal.writeln(message);
+        return;
+      }
       failed = true;
-      if (!receivedOutput) terminal.writeln(message);
+      if (!receivedOutput || shellAfter) terminal.writeln(message);
+      errorRef.current?.(message, sessionEnded);
+      // A server-reported failure is followed by the shell, which still takes input.
+      if (shellAfter && !sessionEnded) return;
       terminal.options.disableStdin = true;
       terminal.blur();
       setError(message);
-      errorRef.current?.(message);
     };
 
     const input = terminal.onData((data) => {
@@ -177,15 +265,26 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", ac
       }
       if (completeRef.current(value)) {
         completed = true;
-        socket.close();
+        if (!shellAfter) socket.close();
         return;
       }
       const message = serverError(value);
-      if (message) fail(message);
+      if (!message) return;
+      // After completion only the follow-up shell can fail; the command's result stands.
+      if (completed) terminal.writeln(message);
+      else fail(message, !shellAfter);
     };
-    socket.onerror = () => fail(m.settings_terminal_closed());
+    socket.onerror = () => fail(m.settings_terminal_closed(), true);
     socket.onclose = () => {
-      if (!completed && !failed) fail(m.settings_terminal_closed());
+      if (!completed && !failed) {
+        fail(m.settings_terminal_closed(), true);
+        return;
+      }
+      if (shellAfter) {
+        terminal.options.disableStdin = true;
+        terminal.blur();
+        closedRef.current?.();
+      }
     };
 
     return () => {
@@ -199,7 +298,7 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", ac
       terminalRef.current = null;
       dispose();
     };
-  }, [path, command, awaitingApproval]);
+  }, [path, command, awaitingApproval, palette, shellAfter]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -210,9 +309,9 @@ export function CommandTerminal({ path, label, command, heightClass = "h-40", ac
   }, [active, error, awaitingApproval]);
 
   return (
-    <div className="mt-3">
+    <div className={frame === "card" ? "mt-3" : undefined}>
       <div
-        className={`${heightClass} ${TERMINAL_CLASS_NAME}`}
+        className={`${heightClass} ${frame === "card" ? TERMINAL_CLASS_NAME : `overflow-hidden p-3 ${palette === "app" ? "bg-terminal-app" : "bg-terminal"}`}`}
         role="group"
         aria-label={label}
       >

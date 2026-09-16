@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use portable_pty::PtySize;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -98,6 +99,9 @@ pub(super) struct SetupRequest {
     action: Action,
     #[serde(default)]
     trigger: Trigger,
+    /// Continue into the user's shell once the command has run (settings play button).
+    #[serde(default)]
+    shell: bool,
 }
 
 pub(super) async fn connect(
@@ -106,12 +110,8 @@ pub(super) async fn connect(
     ws: WebSocketUpgrade,
     Query(request): Query<SetupRequest>,
 ) -> Response {
-    if !super::same_origin(&headers) {
-        return super::ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "Setup terminal origin rejected".into(),
-        )
-        .into_response();
+    if let Some(rejected) = super::reject_cross_origin(&headers) {
+        return rejected;
     }
     if install_command(&request.harness, cfg!(windows)).is_none() {
         return bad_request("Unknown coding agent").into_response();
@@ -131,7 +131,17 @@ pub(super) async fn connect(
                 "manual"
             },
         );
-        let result = run(&state, &mut socket, &request, &attempt).await;
+        let mut size = super::DEFAULT_PTY_SIZE;
+        let mut follow_up = None;
+        let result = run(
+            &state,
+            &mut socket,
+            &request,
+            &attempt,
+            &mut size,
+            &mut follow_up,
+        )
+        .await;
         // Login rejection caches must not mask a successful new login.
         if request.harness == "claude-code" {
             state.claude.clear_runtime_rejection();
@@ -141,7 +151,17 @@ pub(super) async fn connect(
             Ok(()) => json!({ "type": "complete" }),
             Err(error) => json!({ "type": "error", "error": error }),
         };
-        let _ = socket.send(Message::Text(message.to_string().into())).await;
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_err()
+            || !request.shell
+        {
+            return;
+        }
+        if let Some(env) = follow_up {
+            super::continue_in_shell(&mut socket, &mut size, env).await;
+        }
     })
 }
 
@@ -150,6 +170,9 @@ async fn run(
     socket: &mut WebSocket,
     request: &SetupRequest,
     attempt: &SetupAttempt,
+    size: &mut PtySize,
+    // Set once a command actually ran: the env its follow-up shell must share.
+    follow_up: &mut Option<Vec<(&'static str, std::ffi::OsString)>>,
 ) -> Result<(), String> {
     let mut run_command = true;
     if request.trigger == Trigger::Automatic {
@@ -223,13 +246,16 @@ async fn run(
         } else {
             None
         };
+        // The lease ends with `run`; the follow-up shell only inherits the path.
         let env: Vec<_> = lease
             .as_ref()
             .map(|lease| vec![("OPENCODE_DB", lease.path().as_os_str().to_owned())])
             .unwrap_or_default();
         attempt.record("command_started", "command", None, None, None);
+        let pty_size = *size;
+        let shell_env = env.clone();
         let session = match tokio::task::spawn_blocking(move || {
-            super::start_pty_with_env(&program, args, &env, None)
+            super::start_pty_with_env(&program, args, &env, pty_size, None)
         })
         .await
         .map_err(|error| error.to_string())
@@ -247,8 +273,9 @@ async fn run(
                 return Err(error);
             }
         };
+        *follow_up = Some(shell_env);
         let mut output = String::new();
-        match super::relay_pty(socket, session, Some(&mut output)).await {
+        match super::relay_pty(socket, session, Some(&mut output), size).await {
             Some(Ok(status)) if status.success() => attempt.record(
                 "command_completed",
                 "command",
@@ -388,6 +415,7 @@ mod tests {
             harness: "opencode".into(),
             action: Action::Install,
             trigger: Trigger::Manual,
+            shell: false,
         };
         assert!(setup_verified(&request, Some(&h)));
         request.trigger = Trigger::Automatic;
@@ -439,5 +467,17 @@ mod tests {
             "harness": "codex", "action": "exec"
         }))
         .is_err());
+        assert!(
+            !serde_json::from_value::<SetupRequest>(json!({
+                "harness": "codex", "action": "update"
+            }))
+            .unwrap()
+            .shell
+        );
+        let uri: axum::http::Uri = "/api/harnesses/setup?harness=codex&action=login&shell=true"
+            .parse()
+            .unwrap();
+        let Query(request) = Query::<SetupRequest>::try_from_uri(&uri).unwrap();
+        assert!(request.shell && matches!(request.action, Action::Login));
     }
 }

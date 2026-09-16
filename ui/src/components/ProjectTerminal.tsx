@@ -18,7 +18,7 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
   useEffect(() => {
     const wrap = wrapRef.current;
     if (!wrap) return;
-    const mounted = mountTerminal(wrap, false, true);
+    const mounted = mountTerminal(wrap, false, true, "app");
     const { terminal, dispose } = mounted;
     mountRef.current = mounted;
     setEnded(null);
@@ -89,7 +89,7 @@ export function ProjectTerminal({ projectId, sessionId, active }: {
   }, [active, ended, generation]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-terminal p-2" role="group" aria-label={m.workspace_terminal()}>
+    <div className="flex h-full min-h-0 flex-col bg-terminal-app p-2" role="group" aria-label={m.workspace_terminal()}>
       <div ref={wrapRef} className="min-h-0 flex-1 overflow-hidden" />
       {/* Mounted whatever the state: a live region inserted with its text is missed by screen readers. */}
       <p role="status" aria-live="polite" className="sr-only">{ended ?? ""}</p>
