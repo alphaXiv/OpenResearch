@@ -6,6 +6,7 @@ import {
 } from "./settings";
 import { dispatchChat } from "./chatStore";
 import { useEffect } from "react";
+import { useRouter } from "@tanstack/react-router";
 import {
   emitEntity,
   onDataDirMove,
@@ -20,6 +21,9 @@ import { listProjectsQuery, listRunsQuery, listExperimentsQuery } from "./projec
 import { listChatSessionsQuery } from "./chat";
 
 import { artifactFamilies, liveFamilies, invalidateFamilies, removeSession } from "./invalidation";
+import { newPendingPrompts, notify, runJustFinished } from "../notifications";
+import { taskLocation } from "../workspaceState";
+import { m } from "../paraglide/messages.js";
 
 function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefined, next: T) {
   if (!rows) return undefined;
@@ -30,9 +34,15 @@ function upsert<T extends { id: string; updatedAt: number }>(rows: T[] | undefin
 
 export function QueryEvents() {
   const scope = workspaceScope();
+  const router = useRouter();
   useOrxEventStream({
     onRun(run) {
       if (!isCurrentScope(scope)) return;
+      if (runJustFinished(run)) {
+        const experiment = queryClient.getQueryData(listExperimentsQuery(run.projectId).queryKey)?.find((row) => row.id === run.experimentId);
+        const href = experiment?.chatSessionId ? taskLocation(run.projectId, experiment.chatSessionId) : `/projects/${encodeURIComponent(run.projectId)}`;
+        notify(`run:${run.id}`, run.status === "done" ? m.notifications_run_done() : m.notifications_run_failed(), experiment?.title || experiment?.slug || "", () => void router.navigate({ href }));
+      }
       const old = queryClient.getQueryData(listRunsQuery(run.projectId).queryKey)?.find((row) => row.id === run.id);
       markLiveUpdate(queryClient, listRunsQuery(run.projectId).queryKey, run.id);
       queryClient.setQueryData(listRunsQuery(run.projectId).queryKey, (rows) => upsert(rows, run));
@@ -77,6 +87,14 @@ export function QueryEvents() {
     const offMove = onDataDirMove((event) => { if (event.type === "done") invalidateFamilies(["getDataDir"], scope); });
     const offChat = onChatEvent((event) => {
       if (!isCurrentScope(scope)) return;
+      if (event.type === "message") {
+        for (const part of newPendingPrompts(event.message)) {
+          const session = queryClient.getQueriesData<ChatSession[]>({ queryKey: [...scope, "listChatSessions"] })
+            .flatMap(([, rows]) => rows ?? []).find((row) => row.id === event.sessionId);
+          const href = session ? taskLocation(session.projectId, session.id) : "/projects";
+          notify(`prompt:${event.message.id}:${part.id}`, m.notifications_prompt_waiting(), session?.title ?? "", () => void router.navigate({ href }));
+        }
+      }
       if (event.type === "session") markLiveUpdate(queryClient, listChatSessionsQuery(event.session.projectId).queryKey, event.session.id);
       else if (event.type === "busy" || event.type === "usage") markLiveUpdate(queryClient, [...scope, "listChatSessions"], event.sessionId);
       if (event.type === "message" || event.type === "queued" || event.type === "branch") {

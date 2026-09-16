@@ -112,6 +112,7 @@ import {
 import { onDataDirMove } from "../events";
 import { useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
+import { notificationsEnabled, notificationsSupported, setNotificationsEnabled } from "../notifications";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { setLocale, useLocale } from "../locale";
@@ -2465,6 +2466,48 @@ function AppearanceTab() {
   );
 }
 
+// --- notifications -----------------------------------------------------------
+
+function NotificationsTab() {
+  const [enabled, setEnabled] = useState(notificationsEnabled);
+  const [blocked, setBlocked] = useState(() => Notification.permission === "denied");
+
+  const toggle = () => {
+    if (enabled) {
+      setNotificationsEnabled(false);
+      setEnabled(false);
+      return;
+    }
+    // Must run inside the click: browsers only prompt for permission on a user gesture.
+    void Notification.requestPermission().then((permission) => {
+      setBlocked(permission === "denied");
+      setNotificationsEnabled(permission === "granted");
+      setEnabled(permission === "granted");
+    });
+  };
+
+  return (
+    <>
+      <h2>{m.settings_notifications_heading()}</h2>
+      <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
+        <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+          <div>
+            <div className="project-default-title text-base font-medium">{m.settings_notifications_browser()}</div>
+            <p>{blocked ? m.settings_notifications_blocked() : m.settings_notifications_description()}</p>
+          </div>
+          <Switch
+            type="button"
+            checked={enabled}
+            aria-label={m.settings_notifications_browser()}
+            disabled={blocked}
+            onClick={toggle}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
 // --- updates -----------------------------------------------------------------
 
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
@@ -3568,6 +3611,11 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
+            {notificationsSupported() && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <NotificationsTab />
+              </section>
+            )}
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <ProjectDefaultsTab />
             </section>
