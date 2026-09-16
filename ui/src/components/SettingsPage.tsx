@@ -296,38 +296,55 @@ function settingsCommandPath(command: string) {
   return SETTINGS_COMMANDS.has(command) ? `/api/settings/commands/run?command=${encodeURIComponent(command)}` : undefined;
 }
 
-/** A note whose backticked commands get a play button when `resolve` maps them
- * to a terminal route; the terminal opens directly under the note. */
-function RunnableNote({ note, className, resolve = settingsCommandPath, onComplete }: {
+type CommandRun = { command: string; path: string; attempt: number; owner?: string };
+
+/** The run outlives the note that started it: a successful sign-in removes
+ * the note (and often its whole card section), and the terminal must stay. */
+function useCommandRun() {
+  const [run, setRun] = useState<CommandRun | null>(null);
+  const start = (command: string, path: string, owner?: string) =>
+    setRun((current) => ({ command, path, owner, attempt: (current?.attempt ?? 0) + 1 }));
+  return { run, start, clear: () => setRun(null) };
+}
+
+/** A note whose backticked commands get a play button when `resolve` maps
+ * them to a terminal route. Never in remote workspaces: the routes are local. */
+function RunnableNote({ note, className, remote, resolve = settingsCommandPath, onRun }: {
   note: string | undefined;
   className: string;
+  remote: boolean;
   resolve?: (command: string) => string | undefined;
-  onComplete?: () => void;
+  onRun: (command: string, path: string) => void;
 }) {
-  const [run, setRun] = useState<{ command: string; path: string; attempt: number } | null>(null);
   if (!note) return null;
   return (
-    <>
-      <p className={className}>
-        {renderNote(note, {
-          canRun: (command) => resolve(command) !== undefined,
-          onRun: (command) => {
-            const path = resolve(command);
-            if (path) setRun((current) => ({ command, path, attempt: (current?.attempt ?? 0) + 1 }));
-          },
-        })}
-      </p>
-      {run && (
-        <SettingsCommandTerminal
-          key={`${run.command}-${run.attempt}`}
-          path={run.path}
-          label={run.command}
-          onComplete={() => onComplete?.()}
-          onError={(error) => showAlert(error, "error")}
-          onClose={() => setRun(null)}
-        />
-      )}
-    </>
+    <p className={className}>
+      {renderNote(note, {
+        canRun: (command) => !remote && resolve(command) !== undefined,
+        onRun: (command) => {
+          const path = resolve(command);
+          if (path) onRun(command, path);
+        },
+      })}
+    </p>
+  );
+}
+
+function CommandRunTerminal({ run, onComplete, onClose }: {
+  run: CommandRun | null;
+  onComplete: () => void;
+  onClose: () => void;
+}) {
+  if (!run) return null;
+  return (
+    <SettingsCommandTerminal
+      key={`${run.command}-${run.attempt}`}
+      path={run.path}
+      label={run.command}
+      onComplete={onComplete}
+      onError={(error) => showAlert(error, "error")}
+      onClose={onClose}
+    />
   );
 }
 
@@ -353,8 +370,9 @@ function AuthLabel({ h }: { h: Harness }) {
 
 /** The sign-in command can run whenever the binary can: a note only mentions it
  * when signing in (or re-adding a rejected key) is the fix. */
-function canLoginInTerminal(h: Harness) {
-  return Boolean(h.loginCommand) && h.installed && !h.installBroken;
+function harnessLoginPath(h: Harness, command: string) {
+  if (!h.loginCommand || command !== h.loginCommand.join(" ") || !h.installed || h.installBroken) return undefined;
+  return `/api/settings/harnesses/${encodeURIComponent(h.id)}/login`;
 }
 
 function HarnessesTab({ remote }: { remote: boolean }) {
@@ -362,6 +380,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
+  const login = useCommandRun();
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -435,18 +454,19 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             </span>
           </div>
           <RunnableNote
-            key={h.id}
             note={h.agentNote}
             className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
-            resolve={(command) => {
-              if (remote) return undefined;
-              if (h.loginCommand && command === h.loginCommand.join(" ") && canLoginInTerminal(h)) {
-                return `/api/settings/harnesses/${encodeURIComponent(h.id)}/login`;
-              }
-              return settingsCommandPath(command);
-            }}
-            onComplete={() => load(true, true)}
+            remote={remote}
+            resolve={(command) => harnessLoginPath(h, command) ?? settingsCommandPath(command)}
+            onRun={(command, path) => login.start(command, path, h.id)}
           />
+          {login.run && (
+            // Hidden, not unmounted, while another harness tab is showing: a
+            // switch mid-OAuth must not kill the sign-in.
+            <div hidden={login.run.owner !== h.id}>
+              <CommandRunTerminal run={login.run} onComplete={() => load(true, true)} onClose={login.clear} />
+            </div>
+          )}
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
@@ -2053,6 +2073,7 @@ function HfSection({ remote }: { remote: boolean }) {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const login = useCommandRun();
 
   async function refresh() {
     if (saving || refreshing || (!settings && !loadError)) return;
@@ -2121,10 +2142,11 @@ function HfSection({ remote }: { remote: boolean }) {
             <RunnableNote
               note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
               className={SETTINGS_NOTE_CLASS_NAME}
-              resolve={(command) => (remote ? undefined : settingsCommandPath(command))}
-              onComplete={() => void settingsQuery.refetch()}
+              remote={remote}
+              onRun={login.start}
             />
           )}
+          <CommandRunTerminal run={login.run} onComplete={() => void settingsQuery.refetch()} onClose={login.clear} />
         </>
       )}
       <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
@@ -2827,6 +2849,7 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
   const error = actionError ?? settingsQuery.error?.message ?? null;
 
   const load = async () => { await settingsQuery.refetch({ cancelRefetch: false }); };
+  const gh = useCommandRun();
 
   const toggle = () => {
     if (!settings || saving) return;
@@ -2869,9 +2892,10 @@ function ProjectDefaultsTab({ remote }: { remote: boolean }) {
           </div>
           {!settings.githubAuthenticated && (
             <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-              <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} />
+              <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} onRun={gh.start} />
             </div>
           )}
+          <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
         </div>
       )}
@@ -2883,10 +2907,12 @@ function GitHubCliHelp({
   ghInstalled,
   remote,
   onCheck,
+  onRun,
 }: {
   ghInstalled: boolean;
   remote: boolean;
   onCheck: () => Promise<void>;
+  onRun: (command: string, path: string) => void;
 }) {
   const [checking, setChecking] = useState(false);
   const check = () => {
@@ -2899,8 +2925,8 @@ function GitHubCliHelp({
       <RunnableNote
         note={ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login()}
         className="git-card-helper m-0 text-sm leading-relaxed text-text"
-        resolve={(command) => (remote || !ghInstalled ? undefined : settingsCommandPath(command))}
-        onComplete={() => void onCheck()}
+        remote={remote || !ghInstalled}
+        onRun={onRun}
       />
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
@@ -3037,6 +3063,7 @@ function GitTab({
 
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
+  const gh = useCommandRun();
   const status = statusQuery.data ?? null;
   const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
     setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
@@ -3130,9 +3157,10 @@ function GitTab({
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} />
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} onRun={gh.start} />
               </div>
             )}
+            <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
             {status.github.authenticated && !status.github.enabled && (
               <>
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">

@@ -359,6 +359,16 @@ pub(super) fn title_case(word: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn login_command_serializes_only_when_set() {
+        let mut info = HarnessInfo::new("codex", "Codex");
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("loginCommand").is_none());
+        info.login_command = Some(vec!["codex".into(), "login".into()]);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["loginCommand"], serde_json::json!(["codex", "login"]));
+    }
+
     #[cfg(unix)]
     #[test]
     fn resolve_symlinks_dereferences_to_real_binary() {

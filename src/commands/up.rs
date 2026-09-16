@@ -5485,17 +5485,28 @@ pub(crate) async fn ssh_connect_to_target(
     ws.on_upgrade(move |socket| ssh_connect_socket(socket, host, req.backend, target))
 }
 
-fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
+const DEFAULT_PTY_SIZE: PtySize = PtySize {
+    rows: 24,
+    cols: 80,
+    pixel_width: 0,
+    pixel_height: 0,
+};
+
+fn start_pty(program: &str, args: Vec<String>, size: PtySize) -> Result<PtySession> {
     use std::io::{Read as _, Write as _};
 
-    let pair = native_pty_system().openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
+    let pair = native_pty_system().openpty(size)?;
     let mut command = CommandBuilder::new(program);
     command.args(args);
+    // App mode never puts the imported shell env into the process env, so a
+    // child sees launchd's PATH and config dirs unless they are exported here.
+    if let Some(path) = local::shell_env::search_path() {
+        command.env("PATH", path);
+    }
+    local::shell_env::export_to(|key, value| command.env(key, value));
+    if std::env::var_os("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
 
@@ -5581,24 +5592,25 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let session = match tokio::task::spawn_blocking(move || start_pty("ssh", args)).await {
-        Ok(Ok(session)) => session,
-        Ok(Err(error)) => {
-            send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
-            return;
-        }
-        Err(error) => {
-            send_ssh_connect_error(
-                &mut socket,
-                &host,
-                backend,
-                format!("SSH terminal task failed: {error}"),
-            )
-            .await;
-            return;
-        }
-    };
-    let Some(status) = relay_pty(&mut socket, session).await else {
+    let session =
+        match tokio::task::spawn_blocking(move || start_pty("ssh", args, DEFAULT_PTY_SIZE)).await {
+            Ok(Ok(session)) => session,
+            Ok(Err(error)) => {
+                send_ssh_connect_error(&mut socket, &host, backend, error.to_string()).await;
+                return;
+            }
+            Err(error) => {
+                send_ssh_connect_error(
+                    &mut socket,
+                    &host,
+                    backend,
+                    format!("SSH terminal task failed: {error}"),
+                )
+                .await;
+                return;
+            }
+        };
+    let Some(status) = relay_pty(&mut socket, session, &mut { DEFAULT_PTY_SIZE }).await else {
         return;
     };
 
@@ -5646,9 +5658,12 @@ async fn ssh_connect_socket(
     }
 }
 
+/// Relay one PTY session; `size` follows the client's resizes so a session
+/// started afterwards can open at the terminal's real dimensions.
 async fn relay_pty(
     socket: &mut WebSocket,
     session: PtySession,
+    size: &mut PtySize,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
         master,
@@ -5685,12 +5700,9 @@ async fn relay_pty(
                 Some(Ok(Message::Text(text))) => {
                     if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
                         if cols > 0 && rows > 0 {
-                            let _ = master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
+                            size.rows = rows;
+                            size.cols = cols;
+                            let _ = master.resize(*size);
                         }
                     }
                 }
@@ -5736,16 +5748,17 @@ async fn openresearch_terminal(
     command_terminal(&headers, ws, program, args, false, async {}).await
 }
 
-/// Run a harness's interactive sign-in (`claude auth login`) in the embedded
-/// terminal, via the binary detection found so PATH differences can't pick
-/// another install. Completion drops the harness cache so the next listing
-/// sees the new credentials.
+/// Interactive sign-in (`claude auth login`) via the binary detection found, so
+/// a PATH difference can't pick another install; success drops the harness cache.
 async fn harness_login(
     State(state): State<AppState>,
     Path(id): Path<String>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
     let Some(argv) = local::harness::login_command(&id) else {
         return not_found("harness").into_response();
     };
@@ -5770,9 +5783,9 @@ async fn harness_login(
     .await
 }
 
-/// Commands the settings page may run in its embedded terminal, keyed by the
-/// exact text shown in the note. A fixed list keeps the websocket from being a
-/// general shell: anything else is refused before a PTY exists.
+/// Commands the settings page may run, keyed by the exact note text. The
+/// loopback and origin guards are the security boundary (the session ends in
+/// the user's shell anyway); this list only keeps the button honest.
 const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
     ("gh auth login", &["gh", "auth", "login"]),
     ("hf auth login", &["hf", "auth", "login"]),
@@ -5835,9 +5848,14 @@ fn harness_bin_path(payload: &Value, id: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Run `program` in a PTY relayed over the websocket. With `shell_after`, the
-/// completion message is followed by the user's interactive shell in the same
-/// terminal, so a follow-up command needs no copy-paste either.
+fn reject_cross_origin(headers: &HeaderMap) -> Option<Response> {
+    (!same_origin(headers))
+        .then(|| ApiError(StatusCode::FORBIDDEN, "Terminal origin rejected".into()).into_response())
+}
+
+/// Run `program` in a PTY relayed over the websocket. With `shell_after`, a
+/// command that ran is followed by the user's interactive shell in the same
+/// terminal, at the size the client last reported.
 async fn command_terminal(
     headers: &HeaderMap,
     ws: WebSocketUpgrade,
@@ -5846,20 +5864,26 @@ async fn command_terminal(
     shell_after: bool,
     on_success: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Response {
-    if !same_origin(headers) {
-        return ApiError(
-            StatusCode::FORBIDDEN,
-            "Login terminal origin rejected".into(),
-        )
-        .into_response();
+    if let Some(rejected) = reject_cross_origin(headers) {
+        return rejected;
     }
     ws.on_upgrade(move |mut socket| async move {
+        let mut size = DEFAULT_PTY_SIZE;
+        let started = match program {
+            Ok(program) => spawn_pty(program, args, size).await,
+            Err(error) => Err(error),
+        };
+        let session = match started {
+            Ok(session) => session,
+            Err(error) => {
+                send_terminal_error(&mut socket, error).await;
+                return;
+            }
+        };
+        let Some(status) = relay_pty(&mut socket, session, &mut size).await else {
+            return;
+        };
         let result = async {
-            let program = program?;
-            let session = tokio::task::spawn_blocking(move || start_pty(&program, args)).await??;
-            let Some(status) = relay_pty(&mut socket, session).await else {
-                return Ok::<_, anyhow::Error>(None);
-            };
             let status = status.map_err(|error| anyhow!(error))?;
             anyhow::ensure!(
                 status.success(),
@@ -5867,12 +5891,11 @@ async fn command_terminal(
                 status.exit_code()
             );
             on_success.await;
-            Ok(Some(()))
+            Ok::<_, anyhow::Error>(())
         }
         .await;
         let message = match result {
-            Ok(Some(())) => json!({ "type": "complete" }),
-            Ok(None) => return,
+            Ok(()) => json!({ "type": "complete" }),
             Err(error) => json!({ "type": "error", "error": error.to_string() }),
         };
         if socket
@@ -5884,25 +5907,27 @@ async fn command_terminal(
             return;
         }
         let (shell, shell_args) = interactive_shell();
-        let session = tokio::task::spawn_blocking(move || start_pty(&shell, shell_args))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|session| session);
-        match session {
+        match spawn_pty(shell, shell_args, size).await {
             Ok(session) => {
-                relay_pty(&mut socket, session).await;
+                relay_pty(&mut socket, session, &mut size).await;
             }
-            Err(error) => {
-                let _ = socket
-                    .send(Message::Text(
-                        json!({ "type": "error", "error": error.to_string() })
-                            .to_string()
-                            .into(),
-                    ))
-                    .await;
-            }
+            Err(error) => send_terminal_error(&mut socket, error).await,
         }
     })
+}
+
+async fn spawn_pty(program: String, args: Vec<String>, size: PtySize) -> Result<PtySession> {
+    tokio::task::spawn_blocking(move || start_pty(&program, args, size)).await?
+}
+
+async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error.to_string() })
+                .to_string()
+                .into(),
+        ))
+        .await;
 }
 
 /// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
@@ -8051,6 +8076,7 @@ mod tests {
                 "-c".into(),
                 "read value; printf 'reply:%s\\n' \"$value\"".into(),
             ],
+            DEFAULT_PTY_SIZE,
         )
         .unwrap();
         session
@@ -8082,8 +8108,12 @@ mod tests {
         .expect("PTY did not exit");
         assert!(String::from_utf8_lossy(&output).contains("reply:hello"));
 
-        let mut cancelled =
-            start_pty("sh", vec!["-c".into(), "trap '' HUP; sleep 30".into()]).unwrap();
+        let mut cancelled = start_pty(
+            "sh",
+            vec!["-c".into(), "trap '' HUP; sleep 30".into()],
+            DEFAULT_PTY_SIZE,
+        )
+        .unwrap();
         cancelled.kill.send(()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(event) = cancelled.events.recv().await {
@@ -8095,6 +8125,20 @@ mod tests {
         })
         .await
         .expect("cancelled PTY did not exit");
+    }
+
+    #[test]
+    fn harness_bin_path_reads_the_cached_entry() {
+        let payload = json!({ "harnesses": [
+            { "id": "codex", "binPath": "/opt/codex" },
+            { "id": "cursor" },
+        ] });
+        assert_eq!(
+            harness_bin_path(&payload, "codex").as_deref(),
+            Some("/opt/codex")
+        );
+        assert_eq!(harness_bin_path(&payload, "cursor"), None);
+        assert_eq!(harness_bin_path(&payload, "claude-code"), None);
     }
 
     #[test]

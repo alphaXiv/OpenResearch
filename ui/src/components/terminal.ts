@@ -5,11 +5,27 @@ import { Terminal } from "@xterm/xterm";
 /** `dark` is the always-dark log terminal; `app` follows the light/dark theme. */
 export type TerminalPalette = "dark" | "app";
 
+const ANSI_NAMES = [
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue", "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+
 function readTheme(disableStdin: boolean, palette: TerminalPalette) {
-  const rootStyles = getComputedStyle(document.documentElement);
+  const root = document.documentElement;
+  const rootStyles = getComputedStyle(root);
   const token = (name: string) =>
     rootStyles.getPropertyValue(palette === "app" ? `--term-app-${name}` : `--term-${name}`).trim();
+  // xterm's default ANSI colors assume a dark background; the light theme
+  // supplies its own so bright prompts stay legible.
+  const ansi: Record<string, string> = {};
+  if (palette === "app" && root.dataset.theme !== "dark") {
+    for (const name of ANSI_NAMES) {
+      const value = rootStyles.getPropertyValue(`--term-app-ansi-${name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`).trim();
+      if (value) ansi[name] = value;
+    }
+  }
   return {
+    ...ansi,
     background: token("bg"),
     foreground: token("foreground"),
     cursor: disableStdin ? token("bg") : token("foreground"),
@@ -38,7 +54,7 @@ export function mountTerminal(
   const themeObserver =
     palette === "app"
       ? new MutationObserver(() => {
-          terminal.options.theme = readTheme(disableStdin, palette);
+          terminal.options.theme = readTheme(terminal.options.disableStdin ?? disableStdin, palette);
         })
       : null;
   themeObserver?.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });

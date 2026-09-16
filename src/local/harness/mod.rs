@@ -558,10 +558,7 @@ async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
 
 /// Sign-in argv for a chat harness, or `None` when it has no login command.
 pub fn login_command(id: &str) -> Option<&'static [&'static str]> {
-    registry()
-        .into_iter()
-        .find(|h| h.id() == id && h.supports_chat())
-        .and_then(|h| h.login_command())
+    chat_harness(id).and_then(|h| h.login_command())
 }
 
 pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
@@ -712,6 +709,22 @@ mod tests {
         assert!(tail.len() <= 12);
         assert!(tail.ends_with("new"));
         assert!(value.ends_with(tail));
+    }
+
+    /// The note text names the same command the play button runs.
+    #[test]
+    fn login_command_per_harness() {
+        assert_eq!(
+            login_command("claude-code"),
+            Some(&["claude", "auth", "login"][..])
+        );
+        assert_eq!(login_command("codex"), Some(&["codex", "login"][..]));
+        assert_eq!(login_command("cursor"), Some(&["agent", "login"][..]));
+        assert_eq!(
+            login_command("opencode"),
+            Some(&["opencode", "auth", "login"][..])
+        );
+        assert_eq!(login_command("nonexistent"), None);
     }
 
     /// Pin each harness's native permission vocabulary and Plan activation.

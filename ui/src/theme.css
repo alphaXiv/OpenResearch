@@ -162,6 +162,23 @@
   --term-app-bg: #fdfbfb;
   --term-app-foreground: #1d1b1a;
   --term-app-selection: #e9e2d8;
+  /* Light-theme ANSI palette; the dark theme keeps xterm's defaults. */
+  --term-app-ansi-black: #1d1b1a;
+  --term-app-ansi-red: #c0392b;
+  --term-app-ansi-green: #3d8b37;
+  --term-app-ansi-yellow: #b26a00;
+  --term-app-ansi-blue: #2a6fcb;
+  --term-app-ansi-magenta: #8e44ad;
+  --term-app-ansi-cyan: #1a8a7a;
+  --term-app-ansi-white: #8f8a85;
+  --term-app-ansi-bright-black: #6b6663;
+  --term-app-ansi-bright-red: #d94654;
+  --term-app-ansi-bright-green: #5eb64c;
+  --term-app-ansi-bright-yellow: #da9100;
+  --term-app-ansi-bright-blue: #3a8dff;
+  --term-app-ansi-bright-magenta: #9c5cff;
+  --term-app-ansi-bright-cyan: #209a84;
+  --term-app-ansi-bright-white: #1d1b1a;
   --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
   --editor-selection: color-mix(in oklab, var(--primary) 22%, transparent);
   /* Shared reading width for chat, markdown, and plan surfaces. */

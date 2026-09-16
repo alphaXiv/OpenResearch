@@ -53,6 +53,10 @@ function connectionResult(value: unknown): SshConnectResult | null {
   return null;
 }
 
+function isComplete(value: unknown) {
+  return isRecord(value) && value.type === "complete";
+}
+
 function serverError(value: unknown): string | null {
   return isRecord(value) && value.type === "error" && typeof value.error === "string"
     ? value.error
@@ -100,7 +104,7 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
     heightClass="h-80"
     onError={onError}
     onComplete={(value) => {
-      if (!isRecord(value) || value.type !== "complete") return false;
+      if (!isComplete(value)) return false;
       onComplete();
       return true;
     }}
@@ -122,7 +126,7 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
 }) {
   const [status, setStatus] = useState<CommandStatus>("running");
   return (
-    <div className="mt-4 overflow-hidden rounded-lg border border-border bg-terminal-app">
+    <div className="mt-4 overflow-hidden rounded-lg border border-border">
       <div className="flex h-9 items-center gap-3 border-b border-b-border-variant bg-surface ps-3 pe-1.5">
         <code dir="ltr" className="min-w-0 flex-1 truncate font-mono text-xs text-subtext">
           {label}
@@ -160,12 +164,12 @@ export function SettingsCommandTerminal({ path, label, onComplete, onError, onCl
           onError(error);
         }}
         onComplete={(value) => {
-          if (!isRecord(value) || value.type !== "complete") return false;
+          if (!isComplete(value)) return false;
           setStatus("done");
           onComplete();
           return true;
         }}
-        onClosed={() => setStatus("closed")}
+        onClosed={() => setStatus((current) => (current === "done" ? "closed" : current))}
       />
     </div>
   );
@@ -178,13 +182,13 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
   /** `bare` drops the rounded card so a caller can supply its own chrome. */
   frame?: "card" | "bare";
   palette?: TerminalPalette;
-  /** The server keeps the session open as a shell once the command reports
-   * completion or failure, so the socket stays up and input stays enabled. */
+  /** The server follows a command that ran with the user's shell, so the socket
+   * stays up, input stays enabled, and only transport failures reach `onError`. */
   shellAfter?: boolean;
   active?: boolean;
   onComplete: (value: unknown) => boolean;
   onError?: (error: string) => void;
-  /** The session ended after completion (the follow-up shell exited). */
+  /** The session ended after the command finished (the follow-up shell exited). */
   onClosed?: () => void;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -214,9 +218,10 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
       if (failed) return;
       failed = true;
       if (!receivedOutput) terminal.writeln(message);
-      errorRef.current?.(message);
-      // A server-reported failure is followed by the shell, which still takes input.
+      // A server-reported failure is followed by the shell, which still takes
+      // input; the header already shows it, so no alert either.
       if (shellAfter && !sessionEnded) return;
+      errorRef.current?.(message);
       terminal.options.disableStdin = true;
       terminal.blur();
       setError(message);
@@ -252,7 +257,10 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
         return;
       }
       const message = serverError(value);
-      if (message) fail(message, false);
+      if (!message) return;
+      // After completion only the follow-up shell can fail; the command's result stands.
+      if (completed) terminal.writeln(message);
+      else fail(message, false);
     };
     socket.onerror = () => fail(m.settings_terminal_closed(), true);
     socket.onclose = () => {
@@ -291,7 +299,7 @@ function CommandTerminal({ path, label, heightClass = "h-40", frame = "card", pa
   return (
     <div className={frame === "card" ? "mt-3" : undefined}>
       <div
-        className={`${heightClass} ${frame === "card" ? TERMINAL_CLASS_NAME : "overflow-hidden bg-terminal-app p-3"}`}
+        className={`${heightClass} ${frame === "card" ? TERMINAL_CLASS_NAME : `overflow-hidden p-3 ${palette === "app" ? "bg-terminal-app" : "bg-terminal"}`}`}
         role="group"
         aria-label={label}
       >

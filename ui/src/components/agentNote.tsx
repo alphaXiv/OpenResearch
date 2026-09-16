@@ -5,15 +5,17 @@ import { ltr } from "../i18n";
 
 /** A backtick command from an `agentNote`, rendered as a code pill with its own
  * copy button so the user can grab it without retyping. */
+const PILL_BUTTON_CLASS_NAME = "inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text";
+
 function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
   const [copied, setCopied] = useState(false);
   return (
     <span className="cmd-inline inline-flex items-center gap-1 align-baseline">
-      <code className="font-mono text-sm">{cmd}</code>
+      <code dir="ltr" className="font-mono text-sm">{cmd}</code>
       {onRun && (
         <button
           type="button"
-          className="cmd-inline-run inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text"
+          className={`cmd-inline-run ${PILL_BUTTON_CLASS_NAME}`}
           onClick={onRun}
           aria-label={m.a11y_run_command({ value: ltr(cmd) })}
           title={m.a11y_run_command({ value: ltr(cmd) })}
@@ -23,7 +25,7 @@ function CommandPill({ cmd, onRun }: { cmd: string; onRun?: () => void }) {
       )}
       <button
         type="button"
-        className="cmd-inline-copy inline-flex items-center p-0.5 border-0 rounded-xs bg-none bg-transparent text-muted cursor-pointer [&:hover]:bg-surface [&:hover]:text-text"
+        className={`cmd-inline-copy ${PILL_BUTTON_CLASS_NAME}`}
         onClick={() => {
           void navigator.clipboard
             .writeText(cmd)
