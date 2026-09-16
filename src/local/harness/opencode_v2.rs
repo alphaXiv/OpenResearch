@@ -609,6 +609,21 @@ fn reconnect_command(path: &Path) -> String {
     }
 }
 
+fn selectable_model(model: &Value, connected: &HashSet<&str>) -> bool {
+    if model["enabled"] != true {
+        return false;
+    }
+    // V2 scopes the catalog to available providers; anonymous Zen must also be explicitly free.
+    model["providerID"] != "opencode"
+        || connected.contains("opencode")
+        || model["cost"].as_array().is_some_and(|tiers| {
+            !tiers.is_empty()
+                && tiers.iter().all(|cost| {
+                    cost["input"].as_f64() == Some(0.0) && cost["output"].as_f64() == Some(0.0)
+                })
+        })
+}
+
 pub(super) async fn detect(
     binary: crate::local::opencode::ResolvedBinary,
     mut info: HarnessInfo,
@@ -656,7 +671,7 @@ pub(super) async fn detect(
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter(|model| model["enabled"] == true)
+                .filter(|model| selectable_model(model, &connected))
                 .filter_map(|model| {
                     let provider = model["providerID"].as_str()?;
                     let id = model["id"].as_str()?;
@@ -675,11 +690,15 @@ pub(super) async fn detect(
                 .collect();
             info.authenticated = !connected.is_empty();
             info.agent_ready = !info.models.is_empty();
+            info.auth_state = if info.authenticated || info.agent_ready {
+                HarnessAuthState::Ready
+            } else {
+                HarnessAuthState::NeedsLogin
+            };
             if !info.agent_ready {
                 if info.authenticated {
                     info.agent_note = Some("OpenCode V2 listed no enabled models. Check its model configuration and re-check OpenCode.".into());
                 } else {
-                    info.auth_state = HarnessAuthState::NeedsLogin;
                     info.agent_note = Some(format!(
                         "Connect a provider for OpenResearch's OpenCode V2 database: `{}`",
                         reconnect_command(&native_store::opencode_db(NativeStore::Isolated))
@@ -836,5 +855,27 @@ mod tests {
             field_answer(&form["fields"][0], &["Continue".into()]).unwrap(),
             json!("yes")
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_zen_requires_explicitly_free_enabled_models() {
+        let mut model =
+            json!({"providerID":"opencode", "enabled":true, "cost":[{"input":0,"output":0}]});
+        let anonymous = HashSet::new();
+        assert!(selectable_model(&model, &anonymous));
+        model["cost"][0]["output"] = json!(1);
+        assert!(!selectable_model(&model, &anonymous));
+        assert!(selectable_model(&model, &HashSet::from(["opencode"])));
+        model["cost"] = json!([]);
+        assert!(!selectable_model(&model, &anonymous));
+        model["providerID"] = json!("custom-local-provider");
+        assert!(selectable_model(&model, &anonymous));
+        model["enabled"] = json!(false);
+        assert!(!selectable_model(&model, &anonymous));
     }
 }

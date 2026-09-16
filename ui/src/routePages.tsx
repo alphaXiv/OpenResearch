@@ -93,6 +93,7 @@ export function ProjectsPage() {
         : !projects || !state ? <RoutePending />
           : projects.length === 0 && !state.onboardingCompleted ? (
             <Onboarding
+              remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}
               onDone={(project) => {
                 clearReadDemoSessions();

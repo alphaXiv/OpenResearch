@@ -528,14 +528,8 @@ pub fn is_chat_harness(id: &str) -> bool {
 
 async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
     harness.detect().await.map(|mut info| {
-        if info.auth_state == HarnessAuthState::Unknown {
-            info.auth_state = if info.agent_ready {
-                HarnessAuthState::Ready
-            } else if info.installed && !info.install_broken && info.id != "claude-code" {
-                HarnessAuthState::NeedsLogin
-            } else {
-                HarnessAuthState::Unknown
-            };
+        if info.auth_state == HarnessAuthState::Unknown && info.agent_ready {
+            info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
         // The trait is the ceiling: a `detect` narrows it for an installation
