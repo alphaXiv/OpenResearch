@@ -446,6 +446,14 @@ mod tests {
     #[test]
     fn setup_accepts_only_known_agents_and_actions() {
         for harness in crate::telemetry::harness::IDS {
+            // DSH has no install/login/update CLI — omit those buttons.
+            if harness == "dsh" {
+                assert!(install_command(harness, false).is_none());
+                assert!(install_command(harness, true).is_none());
+                assert!(login_command(harness).is_none());
+                assert!(update_command(harness).is_none());
+                continue;
+            }
             assert!(install_command(harness, false).is_some());
             assert!(install_command(harness, true).is_some());
             assert!(login_command(harness).is_some());

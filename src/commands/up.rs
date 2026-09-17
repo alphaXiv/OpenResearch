@@ -108,7 +108,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
     let stopping = Arc::new(AtomicBool::new(false));
     let state = AppState {
         agent: agent.clone(),
-        chat: Arc::new(ChatHost::new(agent.clone(), codex.clone(), claude.clone())),
+        chat: Arc::new(ChatHost::new(
+            agent.clone(),
+            codex.clone(),
+            claude.clone(),
+            Arc::new(local::dsh::DshHost::new()),
+        )),
         claude: claude.clone(),
         harnesses: Arc::new(tokio::sync::Mutex::new(None)),
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
@@ -1883,6 +1888,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
         state.chat.claude.forget_session(&session.id).await;
+        state.chat.dsh.kill_session(&session.id).await;
     }
     store.delete_local_project(&id)?;
     for session in &sessions {

@@ -21,6 +21,7 @@ pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
+pub(crate) mod dsh;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
@@ -486,6 +487,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
+        Box::new(dsh::Dsh),
     ]
 }
 
@@ -797,6 +799,14 @@ mod tests {
         assert_eq!(cursor.default_permission_mode, Some("auto"));
         assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
         assert!(cursor.reasoning_levels.is_empty());
+
+        let dsh = options_for("dsh");
+        assert!(dsh.permission_modes.is_empty());
+        assert_eq!(dsh.default_permission_mode, None);
+        assert_eq!(dsh.plan_activation, None);
+        // Reasoning comes from ACP configOptions per model, not harness ads.
+        assert!(dsh.reasoning_levels.is_empty());
+        assert_eq!(dsh.default_reasoning_level, None);
     }
 
     /// Every advertised permission-mode id must round-trip through

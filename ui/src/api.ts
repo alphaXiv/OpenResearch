@@ -1463,7 +1463,7 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "dsh";
 
 export interface HarnessModel {
   id: string;
@@ -1652,7 +1652,7 @@ export interface HarnessSetupCommands {
 }
 
 export const getHarnessSetupCommands = (signal?: AbortSignal) =>
-  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
+  get<Partial<Record<HarnessId, HarnessSetupCommands>>>("/api/harnesses/setup/commands", signal);
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();

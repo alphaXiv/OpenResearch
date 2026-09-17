@@ -5581,6 +5581,7 @@ requires_openai_auth = false
                 std::sync::Arc::new(crate::local::opencode::AgentHost::new(None)),
                 std::sync::Arc::new(crate::local::codex::CodexHost::new()),
                 std::sync::Arc::new(crate::local::claude::ClaudeHost::new()),
+                std::sync::Arc::new(crate::local::dsh::DshHost::new()),
             )),
             session_id: "s".into(),
             native_session_id: None,

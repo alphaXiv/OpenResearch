@@ -144,4 +144,5 @@ test("live OpenCode questions route composer text to the existing prompt", () =>
   }
   assert.equal(pendingQuestionId([message({ ...question, prompt: { ...question.prompt, resolved: true } })], "opencode", true), null);
   assert.equal(pendingQuestionId([message(question)], "cursor", true), null);
+  assert.equal(pendingQuestionId([message(question)], "dsh", true), null);
 });

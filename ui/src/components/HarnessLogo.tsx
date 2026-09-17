@@ -19,6 +19,13 @@ export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?:
       </svg>
     );
   }
+  if (harness === "dsh") {
+    return (
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="#4D6BFE" aria-hidden="true">
+        <path d="M12 2.2 21 7.4v9.2L12 21.8 3 16.6V7.4L12 2.2Zm0 4.3L7.2 9.2v5.6L12 17.5l4.8-2.7V9.2L12 6.5Z" />
+      </svg>
+    );
+  }
   if (harness === "cursor") {
     // Official 2.5D cube + inset cursor (Cursor brand kit). The 2D silhouette
     // collapses to a diamond at the 14px picker size.

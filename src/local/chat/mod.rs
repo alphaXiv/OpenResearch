@@ -1868,6 +1868,8 @@ pub struct ChatHost {
     /// Persistent Claude Code child manager (one resident child per session;
     /// only the claude adapter spawns it).
     pub claude: Arc<crate::local::claude::ClaudeHost>,
+    /// Lazy DeepSeek Harness ACP manager (only the dsh adapter spawns it).
+    pub dsh: Arc<crate::local::dsh::DshHost>,
     http: reqwest::Client,
     events: broadcast::Sender<(&'static str, Value)>,
     /// Sessions with a turn reserved, running, or settling after interruption.
@@ -2769,6 +2771,7 @@ impl ChatHost {
         opencode: Arc<AgentHost>,
         codex: Arc<crate::local::codex::CodexHost>,
         claude: Arc<crate::local::claude::ClaudeHost>,
+        dsh: Arc<crate::local::dsh::DshHost>,
     ) -> Self {
         let (events, _) = broadcast::channel(256);
         let mut restored_queue: HashMap<String, VecDeque<QueuedMessage>> = HashMap::new();
@@ -2786,6 +2789,7 @@ impl ChatHost {
             opencode,
             codex,
             claude,
+            dsh,
             http: reqwest::Client::new(),
             events,
             turns: Mutex::new(HashMap::new()),
@@ -2818,6 +2822,7 @@ impl ChatHost {
         let _ = self.up_port.set(port);
         self.opencode.set_up_port(port);
         self.codex.set_up_port(port);
+        self.dsh.set_up_port(port);
     }
 
     /// The bound `orx up` port, if this host runs under a server (None in
@@ -3101,6 +3106,7 @@ impl ChatHost {
         self.opencode.shutdown().await;
         self.codex.shutdown().await;
         self.claude.shutdown().await;
+        self.dsh.shutdown().await;
     }
 
     pub async fn busy_sessions(&self) -> Vec<String> {
@@ -5386,6 +5392,8 @@ impl ChatHost {
                             return host.codex.interrupt_session(&session_id).await;
                         } else if session.harness == "claude-code" {
                             host.claude.kill_session(&session_id).await;
+                        } else if session.harness == "dsh" {
+                            host.dsh.interrupt_session(&session_id).await;
                         }
                     }
                 }
@@ -5852,6 +5860,7 @@ impl ChatHost {
         self.opencode.kill_session(session_id).await;
         self.codex.kill_session(session_id).await;
         self.claude.forget_session(session_id).await;
+        self.dsh.kill_session(session_id).await;
         self.respond_locks.lock().await.remove(session_id);
         self.recovery_locks.lock().await.remove(session_id);
         self.queue_dispatch_cancelled
@@ -6636,6 +6645,7 @@ impl TurnCtx {
                 Arc::new(AgentHost::new(None)),
                 Arc::new(crate::local::codex::CodexHost::new()),
                 Arc::new(crate::local::claude::ClaudeHost::new()),
+                Arc::new(crate::local::dsh::DshHost::new()),
             )),
             turn_id: "test-turn".into(),
             durable: false,
@@ -8231,6 +8241,7 @@ mod cap_tests {
             Arc::new(AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
         host.turns
             .lock()
@@ -8675,6 +8686,7 @@ mod bridge_tests {
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         )
     }
 
@@ -9170,6 +9182,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ))
     }
 
@@ -9560,6 +9573,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
         host.queued.lock().unwrap().insert(
             "owner".into(),
@@ -9622,6 +9636,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
 
         drop(store);
@@ -9643,6 +9658,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
         let moving = std::sync::atomic::AtomicBool::new(true);
 
@@ -9668,6 +9684,7 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
         host.turns
             .lock()
@@ -9801,6 +9818,7 @@ mod steering_tests {
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             Arc::new(crate::local::claude::ClaudeHost::new()),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ))
     }
 

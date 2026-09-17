@@ -325,6 +325,8 @@ export function Onboarding({
     }
   };
 
+  const setupForDialog = setupHarness ? setupCommands.data?.[setupHarness.id] : undefined;
+
   return (
     <div
       className={`home flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges] bg-canvas onboarding ${
@@ -333,10 +335,10 @@ export function Onboarding({
           : "[&_.home-inner]:max-w-140 [&_.home-inner]:pt-24"
         }`}
     >
-      {!remote && setupHarness && setupCommands.data && (
+      {!remote && setupHarness && setupForDialog && (
         <HarnessSetupDialog
           harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
+          commands={setupForDialog}
           onReady={(ready) => {
             setPreferredHarness(ready.id);
           }}
@@ -447,6 +449,7 @@ export function Onboarding({
                     selected={preferredHarness === h.id}
                     onSelect={() => setPreferredHarness(h.id)}
                     commands={setupCommands.data?.[h.id]}
+                    commandsReady={setupCommands.isSuccess}
                     onSetup={() => setSetupHarness(h)}
                   />
                 ))
@@ -699,6 +702,7 @@ function AgentCard({
   selected,
   onSelect,
   commands,
+  commandsReady,
   onSetup,
 }: {
   h: Harness;
@@ -706,9 +710,11 @@ function AgentCard({
   selected: boolean;
   onSelect: () => void;
   commands?: HarnessSetupCommands;
+  commandsReady?: boolean;
   onSetup: () => void;
 }) {
-  const canSetup = !remote && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
+  const needsSetup = !h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown"));
+  const canSetup = !remote && needsSetup && (!!commands || !commandsReady);
   const showSetupAction = !h.agentReady && canSetup;
   const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);
