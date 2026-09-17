@@ -1144,20 +1144,42 @@ async fn gateway_ssh_connect(
     super::up::ssh_connect_to_target(headers, ws, req, session.target.clone()).await
 }
 
-pub(crate) async fn loopback_guard(request: Request, next: Next) -> Response {
-    loopback_guard_inner(request, next, true).await
+/// Which Host headers the request guard accepts, mirroring how widely the
+/// dashboard is bound. Loopback-bound servers stay strict; servers bound
+/// beyond loopback accept private/link-local/CGNAT hosts only.
+#[derive(Clone, Copy)]
+pub(crate) enum HostPolicy {
+    Loopback,
+    Private,
+}
+
+pub(crate) async fn policy_guard(
+    State(policy): State<HostPolicy>,
+    request: Request,
+    next: Next,
+) -> Response {
+    loopback_guard_inner(request, next, true, policy).await
 }
 
 async fn gateway_loopback_guard(request: Request, next: Next) -> Response {
-    loopback_guard_inner(request, next, false).await
+    loopback_guard_inner(request, next, false, HostPolicy::Loopback).await
 }
 
-async fn loopback_guard_inner(request: Request, next: Next, allow_dev_origin: bool) -> Response {
+async fn loopback_guard_inner(
+    request: Request,
+    next: Next,
+    allow_dev_origin: bool,
+    host_policy: HostPolicy,
+) -> Response {
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok());
-    let Some(host) = host.filter(|value| loopback_host(value)) else {
+    let host_is_valid = match host_policy {
+        HostPolicy::Loopback => host.filter(|value| loopback_host(value)),
+        HostPolicy::Private => host.filter(|value| private_host(value)),
+    };
+    let Some(host) = host_is_valid else {
         return secure_response(gateway_error(
             StatusCode::BAD_REQUEST,
             "Invalid Host header.".into(),
@@ -1229,19 +1251,49 @@ fn secure_response(mut response: Response) -> Response {
     response
 }
 
-fn loopback_host(value: &str) -> bool {
-    let host = if value.starts_with('[') {
+fn split_host(value: &str) -> &str {
+    if value.starts_with('[') {
         value
             .split_once(']')
             .map(|(host, _)| host.trim_start_matches('['))
             .unwrap_or(value)
     } else {
         value.split_once(':').map(|(host, _)| host).unwrap_or(value)
-    };
+    }
+}
+
+fn loopback_host(value: &str) -> bool {
+    let host = split_host(value);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|address| address.is_loopback())
+}
+
+/// Hosts accepted when the dashboard is bound beyond loopback (e.g.
+/// `orx up --host 0.0.0.0` on a trusted LAN): loopback, plus private
+/// (RFC 1918), link-local, CGNAT (Tailscale `100.64.0.0/10`), and IPv6 ULA
+/// addresses. Public addresses and non-literal hostnames stay rejected, so
+/// DNS-rebinding against this wider bind still cannot use an attacker domain.
+fn private_host(value: &str) -> bool {
+    let host = split_host(value);
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || is_tailscale_cgnat(&v4)
+        }
+        Ok(std::net::IpAddr::V6(v6)) => {
+            v6.is_loopback() || v6.is_unicast_link_local() || (v6.segments()[0] & 0xfe00) == 0xfc00
+        }
+        Err(_) => false,
+    }
+}
+
+fn is_tailscale_cgnat(v4: &std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    octets[0] == 100 && (64..=127).contains(&octets[1])
 }
 
 async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serde_json::Value> {
@@ -2421,6 +2473,32 @@ mod tests {
         }
         for host in ["example.com", "127.0.0.2.evil.test", "[2001:db8::1]:4791"] {
             assert!(!loopback_host(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn private_hosts_cover_lan_ranges_but_stay_off_the_internet() {
+        for host in [
+            "127.0.0.1:4791",
+            "[::1]:4791",
+            "localhost:4791",
+            "192.168.1.75:4791",
+            "10.0.0.5:4791",
+            "172.16.3.4:4791",
+            "100.92.54.38:4791",   // Tailscale CGNAT
+            "169.254.1.1:4791",    // link-local
+            "[fd7a:115c::1]:4791", // IPv6 ULA
+            "[fe80::1]:4791",
+        ] {
+            assert!(private_host(host), "{host}");
+        }
+        for host in [
+            "example.com",
+            "192.168.1.75.evil.test",
+            "8.8.8.8:4791",
+            "[2001:4860:4860::8888]:4791",
+        ] {
+            assert!(!private_host(host), "{host}");
         }
     }
 
