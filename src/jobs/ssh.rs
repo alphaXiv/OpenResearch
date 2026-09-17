@@ -378,6 +378,22 @@ pub fn master_login_command(target: &SshTarget) -> Result<String> {
     Ok(parts.join(" "))
 }
 
+/// The ControlPath a live master is listening on, for anyone riding the
+/// session from outside orx (a shell, another tool, a coding agent poking at
+/// the host directly). It is a real unix socket on disk — `ssh -S <this> --
+/// <dest> <cmd>` authenticates nothing and just hands the channel to
+/// whichever process already holds it, orx or not. `None` on Windows, where
+/// there is no master to point at.
+#[cfg(unix)]
+pub fn control_path_for_riding(target: &SshTarget) -> Option<PathBuf> {
+    Some(control_path(target))
+}
+
+#[cfg(not(unix))]
+pub fn control_path_for_riding(_target: &SshTarget) -> Option<std::path::PathBuf> {
+    None
+}
+
 const MASTER_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Try to (re)establish the master WITHOUT a terminal.

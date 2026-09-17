@@ -77,6 +77,13 @@ async fn status(args: SshConnectArgs) -> Result<()> {
     let target = SshTarget::alias(host);
     if ssh::master_is_running(&target).await.unwrap_or(false) {
         println!("\u{2713} {host}: shared session is live.");
+        if let Some(control_path) = ssh::control_path_for_riding(&target) {
+            println!(
+                "  It's a real socket on disk, not something private to orx — anything running \
+                 as you can ride it directly:\n\n    ssh -S {} -- {host} '<command>'",
+                control_path.display(),
+            );
+        }
     } else {
         println!(
             "\u{2717} {host}: no shared session. Run `{} ssh connect {host}`.",
