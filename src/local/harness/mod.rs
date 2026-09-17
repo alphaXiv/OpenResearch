@@ -804,14 +804,9 @@ mod tests {
         assert!(dsh.permission_modes.is_empty());
         assert_eq!(dsh.default_permission_mode, None);
         assert_eq!(dsh.plan_activation, None);
-        assert_eq!(
-            reasoning_ids(&dsh),
-            ["default", "off", "low", "high", "max"]
-        );
-        assert_eq!(
-            dsh.default_reasoning_level.as_deref(),
-            Some(REASONING_DEFAULT_ID)
-        );
+        // Reasoning comes from ACP configOptions per model, not harness ads.
+        assert!(dsh.reasoning_levels.is_empty());
+        assert_eq!(dsh.default_reasoning_level, None);
     }
 
     /// Every advertised permission-mode id must round-trip through
