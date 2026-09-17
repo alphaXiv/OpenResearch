@@ -9,13 +9,54 @@ export function commandLabel(skill: SkillInfo): string {
   return `${skill.plugin ? `${commandDisplayName(skill.plugin)}: ` : ""}${commandDisplayName(skill.name)}`;
 }
 
-export const PLAN_COMMAND: SkillInfo = {
-  name: "plan",
-  get description() {
-    return m.plan_command_description();
-  },
-  source: "command",
+/** Built-in commands the dashboard runs instead of sending, same on every harness. */
+export const COMPOSER_COMMANDS = ["plan", "new", "resume", "model", "copy", "export"] as const;
+
+export type ComposerCommandName = (typeof COMPOSER_COMMANDS)[number];
+
+const COMMAND_DESCRIPTIONS: Record<ComposerCommandName, () => string> = {
+  plan: () => m.plan_command_description(),
+  new: () => m.new_command_description(),
+  resume: () => m.resume_command_description(),
+  model: () => m.model_command_description(),
+  copy: () => m.copy_command_description(),
+  export: () => m.export_command_description(),
 };
+
+function composerCommand(name: ComposerCommandName): SkillInfo {
+  return {
+    name,
+    get description() {
+      return COMMAND_DESCRIPTIONS[name]();
+    },
+    source: "command",
+  };
+}
+
+export function isComposerCommand(name: string): name is ComposerCommandName {
+  return COMPOSER_COMMANDS.some((command) => command === name);
+}
+
+/** Alternate spellings the agents' own CLIs use, accepted but not listed. */
+const COMMAND_ALIASES: Record<string, ComposerCommandName> = { clear: "new" };
+
+export function resolveComposerCommand(name: string): ComposerCommandName | null {
+  const lower = name.toLowerCase();
+  if (isComposerCommand(lower)) return lower;
+  return Object.hasOwn(COMMAND_ALIASES, lower) ? COMMAND_ALIASES[lower] : null;
+}
+
+function aliasesOf(name: ComposerCommandName): string[] {
+  return Object.keys(COMMAND_ALIASES).filter((alias) => COMMAND_ALIASES[alias] === name);
+}
+
+/** Menu filtering: a command is also reachable by the aliases it answers to. */
+export function commandMatchesQuery(skill: SkillInfo, query: string): boolean {
+  if (skill.name.toLowerCase().startsWith(query)) return true;
+  if (skill.plugin && `${skill.plugin}:${skill.name}`.toLowerCase().startsWith(query)) return true;
+  return skill.source === "command" && isComposerCommand(skill.name)
+    && aliasesOf(skill.name).some((alias) => alias.startsWith(query));
+}
 
 export interface SlashCommandContext {
   query: string;
@@ -108,28 +149,46 @@ export function removeSlashCommand(
   return { text: before + after, cursor: before.length };
 }
 
+/** Plan is the one command a harness can lack; the rest are the dashboard's own. */
+function availableCommands(
+  planActivation: "permission" | "command" | null | undefined,
+): ComposerCommandName[] {
+  return COMPOSER_COMMANDS.filter((name) => name !== "plan" || planActivation);
+}
+
 export function commandsForHarness(
   skills: SkillInfo[],
   planActivation: "permission" | "command" | null | undefined,
 ): SkillInfo[] {
-  const availableSkills = skills.filter(
-    (skill) => skill.name.toLowerCase() !== PLAN_COMMAND.name,
-  );
-  if (planActivation) availableSkills.push(PLAN_COMMAND);
+  // Every skill is inserted and resolved by its bare name, a plugin's included,
+  // so one sharing a command's name (or alias) would shadow it.
+  const availableSkills = skills.filter((skill) => !resolveComposerCommand(skill.name));
+  for (const name of availableCommands(planActivation)) availableSkills.push(composerCommand(name));
   return availableSkills.sort((a, b) => {
     const group = Number(b.source === "command") - Number(a.source === "command");
     return group || commandLabel(a).localeCompare(commandLabel(b), undefined, { sensitivity: "base" });
   });
 }
 
-export function parsePlanCommand(
+/** The command a typed message runs instead of sending, minus its token.
+ *
+ * Plan composes with a prompt, so its token is taken from anywhere in the
+ * message. The rest are whole-message commands: prose that merely mentions
+ * `/export` or asks what `/clear` does must still reach the agent. */
+export function parseComposerCommand(
   text: string,
   planActivation: "permission" | "command" | null | undefined,
-): { prompt: string } | null {
-  if (!planActivation) return null;
-  const token = /(^|\s)\/plan(?=\s|$)/gi;
-  if (!token.test(text)) return null;
-  return { prompt: text.replace(token, "").trim() };
+): { name: ComposerCommandName; prompt: string } | null {
+  for (const name of availableCommands(planActivation)) {
+    const spellings = [name, ...aliasesOf(name)].join("|");
+    if (name === "plan") {
+      const token = new RegExp(`(^|\\s)\\/(?:${spellings})(?=\\s|$)`, "gi");
+      if (token.test(text)) return { name, prompt: text.replace(token, "").trim() };
+    } else if (new RegExp(`^\\/(?:${spellings})$`, "i").test(text.trim())) {
+      return { name, prompt: "" };
+    }
+  }
+  return null;
 }
 
 export function effectiveCommandPlanMode(

@@ -1,7 +1,7 @@
-import { ListChecks, WandSparkles } from "lucide-react";
 import { useLayoutEffect, useRef } from "react";
 import type { SkillInfo } from "../api";
-import { commandLabel } from "../planCommand";
+import { commandLabel } from "../composerCommands";
+import { CommandIcon } from "./SkillChips";
 import { m } from "../paraglide/messages.js";
 
 /** Slash-skill dropdown above the composer. Open/filter/keyboard state lives
@@ -38,11 +38,7 @@ export function SkillMenu({
           }}
           onMouseEnter={() => onHover(i)}
         >
-          {s.source === "command" && s.name === "plan" ? (
-            <ListChecks size={16} strokeWidth={1.5} className="shrink-0" aria-hidden="true" />
-          ) : (
-            <WandSparkles size={16} strokeWidth={1.5} className="shrink-0" aria-hidden="true" />
-          )}
+          <CommandIcon name={s.name} className="shrink-0" />
           <span className="skill-name shrink-0">
             {commandLabel(s)}
           </span>

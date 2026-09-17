@@ -1832,6 +1832,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Every project's sessions for the composer's `/resume` picker, capped so a
+    /// long-lived install cannot turn one dialog open into a multi-megabyte read.
+    pub fn list_all_chat_sessions(&self) -> Result<Vec<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions ORDER BY updated_at DESC LIMIT 500"
+        ))?;
+        let rows = stmt.query_map([], row_to_chat_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn list_chat_session_project_ids(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
@@ -4093,6 +4103,35 @@ mod tests {
                 .parent_session_id
                 .as_deref(),
             Some("chat_parent")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_resume_picker_sees_every_project_newest_first() {
+        let dir = std::env::temp_dir().join(format!("orx-store-allchats-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        for (id, project, updated_at) in [
+            ("chat_old", "proj_1", 10),
+            ("chat_other_project", "proj_2", 30),
+            ("chat_middle", "proj_1", 20),
+        ] {
+            let mut session = chat_session_fixture(id);
+            session.project_id = project.into();
+            session.updated_at = updated_at;
+            store.create_chat_session(&session).unwrap();
+        }
+
+        let all = store.list_all_chat_sessions().unwrap();
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["chat_other_project", "chat_middle", "chat_old"]
+        );
+        assert_eq!(
+            store.list_chat_sessions_by_project("proj_1").unwrap().len(),
+            2
         );
 
         let _ = std::fs::remove_dir_all(&dir);

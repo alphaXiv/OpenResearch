@@ -1,7 +1,7 @@
-import type { ButtonHTMLAttributes } from "react";
+import type { ButtonHTMLAttributes, Ref } from "react";
 import { cn } from "./cn";
 
-export function MenuItem({ active = false, danger = false, size = "default", className, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; danger?: boolean; size?: "default" | "compact" }) {
+export function MenuItem({ active = false, danger = false, size = "default", className, ...props }: ButtonHTMLAttributes<HTMLButtonElement> & { active?: boolean; danger?: boolean; size?: "default" | "compact"; ref?: Ref<HTMLButtonElement> }) {
   return (
     <button
       className={cn(

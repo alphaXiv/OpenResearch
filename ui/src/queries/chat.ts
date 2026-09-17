@@ -15,6 +15,14 @@ export const listChatSessionsQuery = (projectId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+/** The `/resume` picker's one-shot list: no live merge, refetched each open. */
+export const listAllChatSessionsQuery = () => queryOptions({
+  queryKey: workspaceKey("listAllChatSessions"),
+  queryFn: async ({ signal }) =>
+    (await api.listAllChatSessions(signal)).filter((row) => !deletedSessionIds.has(row.id)),
+  staleTime: 0,
+});
+
 export const getChatMessagesQuery = (sessionId: string) => queryOptions({
   queryKey: workspaceKey("getChatMessages", sessionId),
   queryFn: async ({ signal, client, queryKey }) => {
