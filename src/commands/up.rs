@@ -43,12 +43,20 @@ use crate::store::{
 };
 use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
-use crate::{browser, UpArgs};
+use crate::{browser, commands::up_remote::HostPolicy, UpArgs};
 
 mod harness_setup;
 
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
+    let host = args.host.clone();
+    // Host-header validation follows the bind: loopback-bound servers stay
+    // strict, wider binds accept private/link-local/CGNAT Hosts only.
+    let host_policy = match host.parse::<std::net::IpAddr>() {
+        Ok(address) if address.is_loopback() => HostPolicy::Loopback,
+        _ if host.eq_ignore_ascii_case("localhost") => HostPolicy::Loopback,
+        _ => HostPolicy::Private,
+    };
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
         let callback = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
@@ -67,7 +75,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     )?;
     // Blocks only for a relaunched server, whose predecessor still holds the port.
     updates::await_replaced_parent();
-    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+    let listener = match tokio::net::TcpListener::bind((host.as_str(), port)).await {
         Ok(listener) => listener,
         // A second double-click should reach the running dashboard, not fail on its port.
         Err(error)
@@ -75,14 +83,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
                 && crate::owns_its_console()
                 && dashboard_is_serving(port).await =>
         {
-            let url = format!("http://127.0.0.1:{port}");
+            let url = match host_policy {
+                HostPolicy::Loopback => format!("http://127.0.0.1:{port}"),
+                HostPolicy::Private => format!("http://localhost:{port}"),
+            };
             eprintln!("orx up: already running — opening {url}");
             if !args.no_browser {
                 browser::open_browser(&url);
             }
             return Ok(());
         }
-        Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
+        Err(error) => return Err(anyhow!("Could not bind {host}:{port}: {error}")),
     };
     let actual_port = listener.local_addr()?.port();
     // Open early so the schema exists before any request or agent spawn.
@@ -162,7 +173,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         live_events.emit_event(name, data)
     }));
 
-    let app = router(state.clone(), remote_auth.clone());
+    let app = router(state.clone(), remote_auth.clone(), host_policy);
     let url = format!("http://127.0.0.1:{actual_port}");
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
     let control_server = if persistent_host {
@@ -427,7 +438,7 @@ impl ProjectLifecycle {
     }
 }
 
-fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
+fn router(state: AppState, remote_auth: Option<RemoteAuth>, host_policy: HostPolicy) -> Router {
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/onboarding/complete", post(complete_onboarding))
@@ -700,8 +711,9 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         // above the client-side per-file limit so a full message still fits.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state);
-    let app = app.layer(middleware::from_fn(
-        crate::commands::up_remote::loopback_guard,
+    let app = app.layer(middleware::from_fn_with_state(
+        host_policy,
+        crate::commands::up_remote::policy_guard,
     ));
     match remote_auth {
         Some(auth) => app.layer(middleware::from_fn_with_state(auth, require_remote_auth)),

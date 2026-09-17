@@ -552,6 +552,14 @@ pub struct UpArgs {
     /// Port to bind on 127.0.0.1. With `--remote`, the local presentation port.
     #[arg(long, default_value_t = 4791)]
     pub port: u16,
+    /// Interface address to bind the dashboard to. Defaults to `127.0.0.1`.
+    /// Use `0.0.0.0` to expose the dashboard on the local network — the
+    /// dashboard has no authentication, so only bind wider on a network you
+    /// trust. Host-header validation is relaxed accordingly: loopback binds
+    /// accept loopback Hosts only; wider binds also accept private, link-local,
+    /// and CGNAT (Tailscale) addresses, never public addresses or hostnames.
+    #[arg(long, default_value = "127.0.0.1", value_name = "ADDR")]
+    pub host: String,
     /// Run `orx up` on a remote box over SSH and forward it here. The value is
     /// an `~/.ssh/config` host alias, or `user@host` (append `:PORT` for a
     /// non-standard SSH port, e.g. `root@1.2.3.4:38455`). Only user@host + port
