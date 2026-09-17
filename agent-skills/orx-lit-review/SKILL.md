@@ -178,3 +178,31 @@ so sanity-check it before treating it as the implementation.
 
 All discovery and paper commands honor the user's disabled literature-source
 settings; do not work around an error saying a source is disabled.
+
+## Explain papers with original figures and tables
+
+Use figures regularly in literature-review explanations, placing them beside
+what they explain. When discussing experimental results or data, include the
+paper's relevant graphs or tables. When explaining architectures, methods, or
+designs, include the original architecture or design figure. Select useful
+visual evidence rather than adding decorative figures or a figure for every
+search result; discovery-only lists still stop after retrieval.
+
+For alphaXiv papers, open the original PDF linked by alphaXiv, verify the paper
+and version, and crop the relevant figure or table directly from that PDF.
+Render at a resolution that keeps axes, labels, legends, and table entries
+readable at chat size. Preserve the original panels and any caption or footnote
+needed to interpret the evidence. Do not substitute alphaXiv's small extracted
+JPEG thumbnails, redraw the results, or generate a lookalike figure. For papers
+from other enabled sources, use their original paper PDF.
+
+Inspect the crop before presenting it. Explain what it shows and any important
+limits, and cite the alphaXiv paper link with the PDF page and figure/table
+number. When linking the PDF directly, use the original alphaXiv-hosted PDF URL
+observed on the paper page, not an invented URL or an arxiv.org link. If the
+PDF or an extraction tool is unavailable, say so; do not invent an image or
+claim one is shown.
+
+Save the crop to a durable file in the session working tree and embed it in the
+response using the session playbook's Markdown image syntax. Chat-only crops
+need not be published as artifacts. Keep the file for later transcript reads.

@@ -1987,6 +1987,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : subagentTab ? (
               <SubagentTab
+                projectId={projectId}
                 // Remount per spawn part so the seed + subscription reset cleanly.
                 key={subagentTab.spawnPartId}
                 sessionId={subagentTab.sessionId}
