@@ -78,8 +78,17 @@ label an inference instead of presenting it as an observation.
   alone is not evidence.
 - Artifacts use `<file path="artifacts/<relative-path>" />`.
 
-Every project file or artifact mentioned in prose must use a file tag. Paths in
-commands and code fences are exempt. Emit file and run tags as raw text, never
+Display images inline with Markdown: `![Description](path/to/figure.png)`.
+Use a session-relative path, `artifacts/<relative-path>`, or an absolute local
+path, not a `file://` URL (forward slashes on Windows). For any path containing
+spaces, use `![Description](<path with spaces/figure.png>)`; percent-encode a
+literal `%` as `%25`. Keep the file available for later
+reads of the conversation. Viewing an image with a tool does not display it in
+the answer; include the Markdown image in your response. Use file tags when
+linking a file, not when showing an image.
+
+Every other project file or artifact mentioned in prose must use a file tag.
+Paths in commands and code fences are exempt. Emit file and run tags as raw text, never
 inside backticks or fences. Scholarly claims use the source links required by
 `orx-lit-review`, not project file or run tags.
 

@@ -144,7 +144,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { Md } from "./Md";
+import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -6072,31 +6072,33 @@ export function ChatPanel({
             }}
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
-              <Transcript
-                key={activeId}
-                scrollRef={threadRef}
-                scrollToEndRef={scrollToEndRef}
-                stickToBottom={stickToBottom}
-                onPinToBottom={pinTranscriptToBottom}
-                messages={messages}
-                allMessages={allMessages}
-                canFork={canFork}
-                onFork={forkTurn}
-                onSelectFork={selectBranch}
-                busy={busy}
-                onOpenFile={openFileInSession}
-                onOpenRun={onOpenRun}
-                onOpenSpawnedSession={openSpawnedSession}
-                runExperimentName={runExperimentName}
-                onOpenExperiment={onOpenExperiment}
-                experimentName={experimentName}
-                onRespond={respond}
-                onOpenPlan={openPlan}
-                onOpenSubagent={openSubagent}
-                recoveringTurnId={recoveringTurnId}
-                onRecover={recoverFailedTurn}
-                skills={commands}
-              />
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <Transcript
+                  key={activeId}
+                  scrollRef={threadRef}
+                  scrollToEndRef={scrollToEndRef}
+                  stickToBottom={stickToBottom}
+                  onPinToBottom={pinTranscriptToBottom}
+                  messages={messages}
+                  allMessages={allMessages}
+                  canFork={canFork}
+                  onFork={forkTurn}
+                  onSelectFork={selectBranch}
+                  busy={busy}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                  onOpenSpawnedSession={openSpawnedSession}
+                  runExperimentName={runExperimentName}
+                  onOpenExperiment={onOpenExperiment}
+                  experimentName={experimentName}
+                  onRespond={respond}
+                  onOpenPlan={openPlan}
+                  onOpenSubagent={openSubagent}
+                  recoveringTurnId={recoveringTurnId}
+                  onRecover={recoverFailedTurn}
+                  skills={commands}
+                />
+              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
