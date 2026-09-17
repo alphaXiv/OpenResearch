@@ -15,12 +15,8 @@ fn install_command(harness: &str, windows: bool) -> Option<&'static str> {
     match (harness, windows) {
         ("claude-code", false) => Some("curl -fsSL https://claude.ai/install.sh | bash"),
         ("claude-code", true) => Some("irm https://claude.ai/install.ps1 | iex"),
-        ("codex", false) => {
-            Some("curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh")
-        }
-        ("codex", true) => {
-            Some("$env:CODEX_NON_INTERACTIVE='1'; irm https://chatgpt.com/codex/install.ps1 | iex")
-        }
+        ("codex", false) => Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
+        ("codex", true) => Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
         ("opencode", false) => Some("curl -fsSL https://opencode.ai/install | bash"),
         ("opencode", true) => Some("npm install -g opencode-ai"),
         ("cursor", false) => Some("curl https://cursor.com/install -fsS | bash"),
