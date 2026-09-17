@@ -396,14 +396,15 @@ function HarnessesTab({ remote }: { remote: boolean }) {
   };
 
   const h = harnesses?.find((x) => x.id === active);
+  const setupForDialog = setupHarness ? setupCommands.data?.[setupHarness.id] : undefined;
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      {!remote && setupHarness && setupCommands.data && (
+      {!remote && setupHarness && setupForDialog && (
         <HarnessSetupDialog
           harness={setupHarness}
-          commands={setupCommands.data[setupHarness.id]}
+          commands={setupForDialog}
           onClose={() => setSetupHarness(null)}
         />
       )}
@@ -428,8 +429,8 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && h.installed && !h.installBroken && !h.authenticated && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
-              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+            {!remote && setupCommands.data?.[h.id] && h.installed && !h.installBroken && !h.authenticated && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+              <Button size="small" onClick={() => setSetupHarness(h)} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
             )}

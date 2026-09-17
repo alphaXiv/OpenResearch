@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::Value;
 
-pub(crate) const IDS: [&str; 4] = ["claude-code", "codex", "opencode", "cursor"];
+pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor", "dsh"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InitialSnapshot {
@@ -213,7 +213,7 @@ mod tests {
             &json!({"harnesses":[{"id":"opencode","installed":true}]}),
         );
         assert_eq!(first, restarted.harness_snapshot.unwrap().payload);
-        assert_eq!(first["events"].as_array().unwrap().len(), 4);
+        assert_eq!(first["events"].as_array().unwrap().len(), IDS.len());
     }
     #[test]
     fn distinguishes_free_auth_unknown_and_unsupported() {

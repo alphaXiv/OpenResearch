@@ -569,8 +569,12 @@ async function waitFor(description, timeout, predicate, processRecord = null, lo
 }
 
 async function waitForBackend(state) {
-  await waitFor('the backend readiness message', BACKEND_TIMEOUT_MS, () =>
-    existsSync(state.backendLog) && readFileSync(state.backendLog, 'utf8').includes('dashboard on'),
+  await waitFor('the backend readiness message', BACKEND_TIMEOUT_MS, () => {
+    if (!existsSync(state.backendLog)) return false
+    const log = readFileSync(state.backendLog, 'utf8')
+    // Local prints "dashboard on"; remote-host style prints "serving on".
+    return log.includes('dashboard on') || log.includes('serving on')
+  },
   state.backendProcess, state.backendLog)
   await waitFor('the backend API', BACKEND_TIMEOUT_MS, () =>
     httpReady(`http://127.0.0.1:${state.backendPort}/api/projects`),

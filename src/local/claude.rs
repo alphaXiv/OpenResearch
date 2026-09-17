@@ -1409,6 +1409,7 @@ mod tests {
             Arc::new(crate::local::opencode::AgentHost::new(None)),
             Arc::new(crate::local::codex::CodexHost::new()),
             host.clone(),
+            Arc::new(crate::local::dsh::DshHost::new()),
         ));
         host.forget_session("deleted").await;
         let (tx, _rx) = mpsc::unbounded_channel();
