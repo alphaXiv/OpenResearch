@@ -5,10 +5,12 @@ import {
   Clock3,
   FolderTree,
   GitCommitHorizontal,
+  Hash,
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  backendJobLabel,
   fmtDuration,
   runDisplayStatus,
   timeAgo,
@@ -120,6 +122,12 @@ export function ExperimentOverview({
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-[5px] [&_code]:text-text [&_code]:text-xs">
                 <StatusBadge status={runDisplayStatus(latestRun)} />
                 <BackendBadge backend={latestRun.backend} />
+                {backendJobLabel(latestRun.backend) && (
+                  <span title={m.experiment_overview_job()}>
+                    <Hash size={13} />
+                    <code>{backendJobLabel(latestRun.backend)}</code>
+                  </span>
+                )}
                 <span title={m.experiment_overview_started()}>
                   <CalendarDays size={13} />
                   {fmtDate(latestRun.createdAt)}

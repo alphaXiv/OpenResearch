@@ -2167,6 +2167,43 @@ export function backendDetail(backend: Run["backend"]): string {
   return "";
 }
 
+/** A short, human-legible identifier for the job a run's backend descriptor
+ *  points at — the thing a person would read to tell one compute job apart
+ *  from another of the same kind (an SGE job id, a Slurm job id, an ssh
+ *  host). Mirrors `BackendDescriptor::job_label` in src/jobs/mod.rs; keep the
+ *  two in sync. Empty before submission has recorded a job id, or for a kind
+ *  this doesn't recognize. */
+export function backendJobLabel(backend: Run["backend"]): string {
+  if (!backend) return "";
+  const kind = backendKind(backend);
+  const jobId = typeof backend.jobId === "string" ? backend.jobId : "";
+  const namespace = typeof backend.namespace === "string" ? backend.namespace : "";
+  switch (kind) {
+    case "sge_job":
+      return jobId && namespace ? `SGE ${jobId} @ ${namespace}` : "";
+    case "slurm_job":
+      return jobId && namespace ? `Slurm ${jobId} @ ${namespace}` : "";
+    case "ssh_job":
+      return namespace ? `ssh ${namespace}` : "";
+    case "hf_job":
+      return jobId && namespace ? `HF ${namespace}/${jobId}` : "";
+    case "k8s_job":
+      return jobId && namespace ? `k8s ${namespace}/${jobId}` : "";
+    case "modal_job":
+      return jobId ? `Modal ${jobId}` : "";
+    case "ray_job":
+      return jobId && namespace ? `Ray ${jobId} @ ${namespace}` : "";
+    case "openresearch_job":
+      return jobId && namespace ? `OpenResearch ${jobId} (${namespace})` : "";
+    case "local_job":
+      return "Local";
+    case "tinker_job":
+      return "Tinker";
+    default:
+      return "";
+  }
+}
+
 export interface LocalModelConnection {
   id: string;
   name: string;

@@ -150,6 +150,7 @@
   "experiment_overview_duration": "Duration",
   "experiment_overview_exit": "exit",
   "experiment_overview_from": "from",
+  "experiment_overview_job": "Job",
   "experiment_overview_logs": "Logs",
   "experiment_overview_run": "Run",
   "experiment_overview_run_history": "Run history",

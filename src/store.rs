@@ -238,6 +238,20 @@ pub struct RunWakeup {
     pub state: String,
 }
 
+/// A queued outbound notification (e.g. a Slack message) awaiting delivery.
+/// See [`Store::enqueue_notification`].
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Consumed by the notifier (P0.4).
+pub struct StoredNotification {
+    pub id: String,
+    pub created_at: i64,
+    pub kind: String,
+    pub payload_json: String,
+    pub sent_at: Option<i64>,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunWakeupRegistration {
     Scheduled,
@@ -499,6 +513,22 @@ impl Store {
                 root       TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (project_id, tex_path)
             );
+            CREATE TABLE IF NOT EXISTS run_supervisors (
+                run_id  TEXT PRIMARY KEY,
+                seen_at INTEGER NOT NULL,
+                state   TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notifications_outbox (
+                id           TEXT PRIMARY KEY,
+                created_at   INTEGER NOT NULL,
+                kind         TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                sent_at      INTEGER,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                last_error   TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_notifications_outbox_pending
+                ON notifications_outbox(sent_at, created_at);
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -547,6 +577,8 @@ impl Store {
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
+            "ALTER TABLE chat_turns ADD COLUMN resume_at INTEGER",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN turn_id TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -951,6 +983,39 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Record that a supervisor is alive and actively polling this run.
+    /// Deliberately separate from `runs.updated_at` (touched by
+    /// [`Store::update_status`]): a heartbeat every few seconds must not look
+    /// like a status change to the SSE diff `orx up` sends the dashboard, or
+    /// every live run would re-broadcast on every poll. `state` is a short
+    /// tag such as `"polling"`, `"stalled"`, or `"gone-wait"` — whatever the
+    /// backend's poll loop is doing right now, not a run status.
+    #[allow(dead_code)] // Consumed by the supervisor heartbeat + stale-run sweep (T2).
+    pub fn touch_supervisor(&self, run_id: &str, state: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO run_supervisors (run_id, seen_at, state) VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET seen_at = excluded.seen_at, state = excluded.state",
+            params![run_id, now_ms(), state],
+        )?;
+        Ok(())
+    }
+
+    /// The last heartbeat a run's supervisor recorded, if any —
+    /// `(seen_at millis, state)`. `None` means no supervisor has ever
+    /// reported in for this run (it may still be alive on an older build
+    /// that predates the heartbeat, or it may genuinely be gone).
+    #[allow(dead_code)] // Consumed by the run-identity UI (T1) and the stale-run sweep (T2).
+    pub fn get_supervisor_heartbeat(&self, run_id: &str) -> Result<Option<(i64, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT seen_at, state FROM run_supervisors WHERE run_id = ?1",
+                params![run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn list_runs_by_project(&self, project_id: &str) -> Result<Vec<StoredRun>> {
         let mut stmt = self.conn.prepare(&format!(
             "{SELECT_RUN} WHERE project_id = ?1 ORDER BY created_at DESC"
@@ -1120,6 +1185,98 @@ impl Store {
             params![run_id, chat_session_id, token, now_ms()],
         )?;
         Ok(delivered == 1)
+    }
+
+    /// Record which chat turn a delivered run wake-up landed on, so a later
+    /// step can tell whether that turn's synthesis came from a run outcome
+    /// (and post about it) rather than an ordinary message.
+    #[allow(dead_code)] // Consumed by the Slack run-outcome notification (T6).
+    pub fn set_run_wakeup_turn_id(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        turn_id: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_run_wakeups SET turn_id = ?3
+             WHERE run_id = ?1 AND chat_session_id = ?2",
+            params![run_id, chat_session_id, turn_id],
+        )?;
+        Ok(())
+    }
+
+    /// The chat turn a delivered run wake-up landed on, if recorded.
+    #[allow(dead_code)] // Consumed by the Slack run-outcome notification (T6).
+    pub fn run_wakeup_turn_id(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT turn_id FROM chat_run_wakeups WHERE run_id = ?1 AND chat_session_id = ?2",
+                params![run_id, chat_session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
+    /// Queue a notification (e.g. a Slack message) for delivery by whatever
+    /// process drains the outbox. Durable and process-independent: a
+    /// detached `orx supervise` can enqueue one exactly like `orx up` can.
+    /// Returns the row's generated id.
+    #[allow(dead_code)] // Consumed by the notifier (P0.4) and its callers (T3, T6).
+    pub fn enqueue_notification(&self, kind: &str, payload_json: &str) -> Result<String> {
+        let id = format!("notif_{}", uuid::Uuid::new_v4());
+        self.conn.execute(
+            "INSERT INTO notifications_outbox (id, created_at, kind, payload_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, now_ms(), kind, payload_json],
+        )?;
+        Ok(id)
+    }
+
+    /// Unsent notifications, oldest first, for the drainer to attempt.
+    #[allow(dead_code)] // Consumed by the notifier (P0.4).
+    pub fn list_pending_notifications(&self, limit: usize) -> Result<Vec<StoredNotification>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, created_at, kind, payload_json, sent_at, attempts, last_error
+             FROM notifications_outbox
+             WHERE sent_at IS NULL
+             ORDER BY created_at ASC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit as i64], |row| {
+            Ok(StoredNotification {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                kind: row.get(2)?,
+                payload_json: row.get(3)?,
+                sent_at: row.get(4)?,
+                attempts: row.get(5)?,
+                last_error: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    #[allow(dead_code)] // Consumed by the notifier (P0.4).
+    pub fn mark_notification_sent(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notifications_outbox SET sent_at = ?2 WHERE id = ?1",
+            params![id, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    #[allow(dead_code)] // Consumed by the notifier (P0.4).
+    pub fn mark_notification_attempt_failed(&self, id: &str, error: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notifications_outbox SET attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
+            params![id, error],
+        )?;
+        Ok(())
     }
 
     pub fn create_chat_spawn(&self, spawn: &ChatSpawn) -> Result<()> {
@@ -2126,9 +2283,9 @@ impl Store {
              (id, session_id, user_message_id, assistant_message_id, client_turn_id,
               request_hash, prepared_input, settings_json, state, delivery_state,
               attempt_count, next_retry_at, error_kind, error_message, recovery_action,
-              recovered_by_turn_id, created_at, updated_at)
+              recovered_by_turn_id, created_at, updated_at, resume_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                     ?14, ?15, ?16, ?17, ?18)",
+                     ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 turn.id,
                 turn.session_id,
@@ -2148,6 +2305,7 @@ impl Store {
                 turn.recovered_by_turn_id,
                 turn.created_at,
                 turn.updated_at,
+                turn.resume_at,
             ],
         )?;
         tx.commit()?;
@@ -2328,6 +2486,34 @@ impl Store {
             ],
         )?;
         Ok(changed > 0)
+    }
+
+    /// Schedule an automatic recovery replay for a `failed` turn — e.g. a
+    /// usage-limit's parsed reset time. A no-op once the turn has already
+    /// been recovered (`recovered_by_turn_id` set) or moved on from `failed`.
+    #[allow(dead_code)] // Consumed by the usage-limit auto-continue scheduler (T3).
+    pub fn set_turn_resume_at(&self, turn_id: &str, resume_at: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET resume_at = ?2
+             WHERE id = ?1 AND state = 'failed' AND recovered_by_turn_id IS NULL",
+            params![turn_id, resume_at],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Failed turns whose scheduled resume time has arrived and that no one
+    /// has recovered yet, oldest due first. The caller (`watch_runs`) replays
+    /// each one's `recovery_action` through [`ChatHost::recover_turn`].
+    #[allow(dead_code)] // Consumed by the usage-limit auto-continue scheduler (T3).
+    pub fn list_due_turn_resumes(&self) -> Result<Vec<StoredChatTurn>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_TURN_COLS} FROM chat_turns
+             WHERE state = 'failed' AND recovered_by_turn_id IS NULL
+               AND resume_at IS NOT NULL AND resume_at <= ?1
+             ORDER BY resume_at ASC"
+        ))?;
+        let rows = stmt.query_map(params![now_ms()], row_to_chat_turn)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     pub fn interrupt_chat_turn(&self, id: &str) -> Result<()> {
@@ -2855,6 +3041,12 @@ pub struct StoredChatTurn {
     pub recovered_by_turn_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// When set on a `failed` turn, the time (unix millis) a scheduler should
+    /// replay its `recovery_action` automatically — e.g. a parsed "usage
+    /// limit resets at" time — without a person clicking Continue. `None`
+    /// for every ordinary failure, which keeps today's manual-only recovery
+    /// as the default.
+    pub resume_at: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -2877,7 +3069,7 @@ pub enum ChatTurnAdmission {
 const CHAT_TURN_COLS: &str = "id, session_id, user_message_id, assistant_message_id, \
     client_turn_id, request_hash, prepared_input, settings_json, state, delivery_state, \
     attempt_count, next_retry_at, error_kind, error_message, recovery_action, \
-    recovered_by_turn_id, created_at, updated_at";
+    recovered_by_turn_id, created_at, updated_at, resume_at";
 
 fn row_to_chat_turn(
     row: &rusqlite::Row<'_>,
@@ -2901,6 +3093,7 @@ fn row_to_chat_turn(
         recovered_by_turn_id: row.get(15)?,
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
+        resume_at: row.get(18)?,
     })
 }
 
@@ -3365,6 +3558,7 @@ mod tests {
             recovered_by_turn_id: None,
             created_at: 2,
             updated_at: 2,
+            resume_at: None,
         }
     }
 
@@ -4436,6 +4630,137 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["run_early", "run_late"]
         );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn supervisor_heartbeat_upserts_without_touching_run_updated_at() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-heartbeat-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let run = run_fixture("run_1", "running", None);
+        let updated_at_before = run.updated_at;
+        store.upsert_run(&run).unwrap();
+
+        assert_eq!(store.get_supervisor_heartbeat("run_1").unwrap(), None);
+        store.touch_supervisor("run_1", "polling").unwrap();
+        let (seen_at, state) = store.get_supervisor_heartbeat("run_1").unwrap().unwrap();
+        assert_eq!(state, "polling");
+        assert!(seen_at > 0);
+        // A heartbeat is not a status change: it must never re-touch the run
+        // row the SSE diff watches, or every live run would re-broadcast on
+        // every poll.
+        assert_eq!(
+            store.get_run("run_1").unwrap().unwrap().updated_at,
+            updated_at_before
+        );
+
+        // A second heartbeat upserts in place rather than erroring or
+        // duplicating the row.
+        store.touch_supervisor("run_1", "stalled").unwrap();
+        let (seen_at_2, state_2) = store.get_supervisor_heartbeat("run_1").unwrap().unwrap();
+        assert_eq!(state_2, "stalled");
+        assert!(seen_at_2 >= seen_at);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn turn_resume_is_scheduled_only_on_an_unrecovered_failure_and_becomes_due_on_time() {
+        let dir = std::env::temp_dir().join(format!("orx-store-resume-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let turn = chat_turn_fixture("one", "client-1");
+        store.admit_chat_turn(None, &turn).unwrap();
+
+        // Scheduling before the turn has failed is refused: nothing to resume yet.
+        assert!(!store.set_turn_resume_at("one", now_ms() + 1000).unwrap());
+        assert_eq!(store.list_due_turn_resumes().unwrap().len(), 0);
+
+        store
+            .fail_chat_turn(
+                "one",
+                "unknown",
+                "claude_limit_terminal",
+                "hit a limit",
+                Some("continue"),
+            )
+            .unwrap();
+        assert!(store.set_turn_resume_at("one", now_ms() + 60_000).unwrap());
+        // Not due yet.
+        assert_eq!(store.list_due_turn_resumes().unwrap().len(), 0);
+
+        // Reschedule to the past and it becomes due.
+        assert!(store.set_turn_resume_at("one", now_ms() - 1).unwrap());
+        let due = store.list_due_turn_resumes().unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "one");
+
+        // Once recovered, it drops out even if still "due" by time.
+        assert!(store.mark_chat_turn_recovered("one", "two").unwrap());
+        assert_eq!(store.list_due_turn_resumes().unwrap().len(), 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_wakeup_turn_id_round_trips_once_a_wakeup_row_exists() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-wakeup-turn-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "done", Some("chat_A")))
+            .unwrap();
+        store.register_run_wakeup("run_1", "chat_A").unwrap();
+
+        assert_eq!(store.run_wakeup_turn_id("run_1", "chat_A").unwrap(), None);
+        store
+            .set_run_wakeup_turn_id("run_1", "chat_A", "turn_xyz")
+            .unwrap();
+        assert_eq!(
+            store
+                .run_wakeup_turn_id("run_1", "chat_A")
+                .unwrap()
+                .as_deref(),
+            Some("turn_xyz")
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn notification_outbox_lists_pending_then_drops_out_once_sent() {
+        let dir = std::env::temp_dir().join(format!("orx-store-notify-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        let id = store
+            .enqueue_notification("job_submitted", "{\"runId\":\"run_1\"}")
+            .unwrap();
+        let pending = store.list_pending_notifications(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id);
+        assert_eq!(pending[0].attempts, 0);
+        assert_eq!(pending[0].sent_at, None);
+
+        store
+            .mark_notification_attempt_failed(&id, "connection reset")
+            .unwrap();
+        let pending = store.list_pending_notifications(10).unwrap();
+        assert_eq!(pending[0].attempts, 1);
+        assert_eq!(pending[0].last_error.as_deref(), Some("connection reset"));
+
+        store.mark_notification_sent(&id).unwrap();
+        assert_eq!(store.list_pending_notifications(10).unwrap().len(), 0);
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);

@@ -11,6 +11,10 @@ pub struct Run {
     pub duration_secs: i64,
     pub updated_display: String,
     pub result_markdown: Option<String>,
+    /// A short job identifier from the run's backend descriptor (e.g. `SGE
+    /// 1234567 @ scc1`), or `None` before submission recorded one. See
+    /// [`crate::jobs::BackendDescriptor::job_label`].
+    pub job_label: Option<String>,
 }
 
 impl From<&StoredRun> for Run {
@@ -23,6 +27,9 @@ impl From<&StoredRun> for Run {
             duration_secs: crate::local::run_duration_secs(run),
             updated_display: crate::local::fmt_ago(run.updated_at),
             result_markdown: run.result_markdown.clone(),
+            job_label: crate::jobs::BackendDescriptor::parse(&run.backend_json)
+                .ok()
+                .and_then(|d| d.job_label()),
         }
     }
 }
