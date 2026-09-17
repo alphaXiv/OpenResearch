@@ -97,6 +97,7 @@ import {
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
 import { ProjectTerminal } from "./components/ProjectTerminal";
+import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
 import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
@@ -162,7 +163,7 @@ function parseFilePath(
   }
   // A home-anchored path (`~` or `~/…`) is disk, never a repo file — the backend
   // expands the `~`, so hand it over verbatim.
-  if (path === "~" || path.startsWith("~/")) return { path, source: "abs" };
+  if (path === "~" || path.startsWith("~/") || isWindowsDrivePath(path)) return { path, source: "abs" };
   // `path` relative to `base` (`""` when equal), else null. macOS symlinks
   // `/tmp`→`/private/tmp` and `/var`→`/private/var`, so an agent-inlined path
   // and the stored dir can differ only by that prefix — strip it on both sides.

@@ -388,6 +388,12 @@ export const Md = memo(function Md({
       if (!src || typeof src !== "string") return null;
       const resolved = imageSrc ? imageSrc(src) : src;
       if (!resolved) return null;
+      const target = chatImageSrc && !resolveImageSrc ? chatImageTarget(src) : null;
+      const path = target && (target.source === "artifact" ? `artifacts/${target.path}` : target.path);
+      const open = path && onOpenFile
+        ? (intent: TabOpenIntent) => onOpenFile(path, undefined, undefined, undefined, intent)
+        : null;
+      const gestures = open ? tabOpenGestureHandlers<HTMLImageElement>(open, { stopPropagation: true }) : undefined;
       return (
         <MarkdownImage
           {...rest}
@@ -395,8 +401,14 @@ export const Md = memo(function Md({
           src={resolved}
           fallbackSrc={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
           alt={alt ?? ""}
+          role={open ? "button" : undefined}
+          tabIndex={open ? 0 : undefined}
+          aria-label={open && path ? m.a11y_open_file_in_panel({ path: ltr(alt || path) }) : undefined}
+          {...gestures}
+          // Open the viewer even when Markdown wraps the image in an external link.
+          onClick={gestures ? (event) => { event.preventDefault(); gestures.onClick(event); } : undefined}
           loading="lazy"
-          className={`block max-w-full h-auto my-3 rounded-sm border border-border ${className ?? ""}`}
+          className={`block max-w-full h-auto my-3 rounded-sm border border-border ${open ? "cursor-pointer focus-visible:outline-2 focus-visible:outline-primary" : ""} ${className ?? ""}`}
        />
       );
     },

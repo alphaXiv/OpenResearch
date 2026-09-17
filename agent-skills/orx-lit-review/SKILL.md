@@ -191,15 +191,22 @@ search result; discovery-only lists still stop after retrieval.
 For alphaXiv papers, open the original PDF linked by alphaXiv, verify the paper
 and version, and crop the relevant figure or table directly from that PDF.
 Render at a resolution that keeps axes, labels, legends, and table entries
-readable at chat size. Preserve the original panels and any caption or footnote
-needed to interpret the evidence. Do not substitute alphaXiv's small extracted
-JPEG thumbnails, redraw the results, or generate a lookalike figure. For papers
-from other enabled sources, use their original paper PDF.
+readable at chat size. Crop to the figure or table itself, excluding the printed
+caption and surrounding prose. Preserve panel titles, axes, labels, legends,
+and table headings; do not remove text that is part of the visual. Do not
+substitute alphaXiv's small extracted JPEG thumbnails, redraw the results, or
+generate a lookalike figure. For papers from other enabled sources, use their
+original paper PDF.
 
-Inspect the crop before presenting it. Explain what it shows and any important
-limits, and cite the alphaXiv paper link with the PDF page and figure/table
-number. When linking the PDF directly, use the original alphaXiv-hosted PDF URL
-observed on the paper page, not an invented URL or an arxiv.org link. If the
+Inspect the crop before presenting it. Immediately below the Markdown image,
+write a short caption as normal chat text. Use the original caption as factual
+grounding, but write your own description tailored to the user's question and
+the surrounding discussion. Explain what to notice and why it matters, retaining
+important qualifications from the original caption or footnotes. Do not bake
+this caption into the image or rely on image alt text to display it. Include
+the figure/table number and cite the alphaXiv paper link with the PDF page.
+When linking the PDF directly, use the original alphaXiv-hosted PDF URL observed
+on the paper page, not an invented URL or an arxiv.org link. If the
 PDF or an extraction tool is unavailable, say so; do not invent an image or
 claim one is shown.
 
