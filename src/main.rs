@@ -24,6 +24,10 @@ mod jobs;
 // Local mode (`orx up`): builds out across stages; not all of it is wired yet.
 #[allow(dead_code)]
 mod local;
+// The outbox drain loop and its Slack transport; nothing constructs a
+// provider from Settings and starts the loop yet.
+#[allow(dead_code)]
+mod notify;
 mod output;
 mod paths;
 mod plane;
