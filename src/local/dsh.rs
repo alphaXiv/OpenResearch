@@ -1,7 +1,8 @@
 //! DeepSeek Harness ACP host — one long-lived `dsh --profile acp` child per
-//! chat session, speaking newline-delimited JSON-RPC over stdio (`jsonrpc`
-//! field omitted, same as Codex). Requests flow both ways: the agent sends
-//! `session/request_permission` which we must answer by id.
+//! chat session, speaking newline-delimited JSON-RPC over stdio. Outbound
+//! lines always include `jsonrpc: "2.0"` (DSH rejects the handshake without
+//! it). Requests flow both ways: the agent sends `session/request_permission`
+//! which we must answer by id.
 
 use std::collections::{HashMap, HashSet};
 use std::process::Stdio;

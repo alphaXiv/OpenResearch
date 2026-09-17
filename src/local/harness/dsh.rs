@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::detect::{api_key, probe_bin, HarnessAuthState, HarnessInfo, ModelInfo};
-use super::options::{resolve_reasoning, HarnessOptions};
+use super::options::{reasoning_choices, reasoning_tiers, HarnessOptions, REASONING_DEFAULT_ID};
 use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, TURN_WATCHDOG};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -67,21 +67,7 @@ impl Harness for Dsh {
 
         let cache = load_verify_cache();
         if let Some(cache) = cache.filter(|c| c.ok) {
-            info = info.with_models(
-                cache
-                    .models
-                    .into_iter()
-                    .map(|m| {
-                        let mut model = ModelInfo::new(m.id)
-                            .with_label(m.display_name.as_deref(), m.description.as_deref());
-                        if let Some(levels) = m.reasoning_levels {
-                            let refs: Vec<&str> = levels.iter().map(String::as_str).collect();
-                            model = model.with_reasoning(&refs);
-                        }
-                        model
-                    })
-                    .collect(),
-            );
+            info = info.with_models(cache.models.into_iter().map(model_from_cached).collect());
         }
 
         if info.install_broken {
@@ -185,16 +171,22 @@ struct VerifyCache {
     models: Vec<CachedModel>,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CachedModel {
     id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
-    /// Reasoning ids last observed for this model via ACP `configOptions`.
+    /// Non-empty ACP reasoning ids last seen for this model (never `""` / never OR `default`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reasoning_levels: Option<Vec<String>>,
+    /// ACP offered `value: ""` ("Provider default") for this model.
+    #[serde(default)]
+    reasoning_empty_default: bool,
+    /// First-seen ACP `currentValue` for this model (may be `""`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_current: Option<String>,
 }
 
 fn verify_cache_path() -> PathBuf {
@@ -206,22 +198,85 @@ fn load_verify_cache() -> Option<VerifyCache> {
     serde_json::from_str(&raw).ok()
 }
 
-fn store_verify_cache(models: &[ModelInfo]) {
+fn model_from_cached(m: CachedModel) -> ModelInfo {
+    let mut model =
+        ModelInfo::new(m.id).with_label(m.display_name.as_deref(), m.description.as_deref());
+    let Some(levels) = m.reasoning_levels else {
+        return model;
+    };
+    let refs: Vec<&str> = levels.iter().map(String::as_str).collect();
+    if m.reasoning_empty_default {
+        model = model.with_reasoning(&refs);
+        model.default_reasoning_level = Some(REASONING_DEFAULT_ID.to_string());
+    } else if let Some(cur) = m
+        .reasoning_current
+        .as_deref()
+        .filter(|c| !c.is_empty() && levels.iter().any(|l| l == *c))
+    {
+        model = model.with_reasoning_default(&refs, cur);
+    } else {
+        model.reasoning_levels = Some(if refs.is_empty() {
+            Vec::new()
+        } else {
+            reasoning_tiers(&refs)
+        });
+    }
+    model
+}
+
+fn store_verify_cache(
+    models: &[ModelInfo],
+    current_id: Option<&str>,
+    rc: &ReasoningConfig,
+    prior: Option<&VerifyCache>,
+) {
     let cache = VerifyCache {
         ok: true,
         models: models
             .iter()
-            .map(|m| CachedModel {
-                id: m.id.clone(),
-                display_name: m.display_name.clone(),
-                description: m.description.clone(),
-                reasoning_levels: m.reasoning_levels.as_ref().map(|choices| {
-                    choices
-                        .iter()
-                        .map(|c| c.id.clone())
-                        .filter(|id| id != super::options::REASONING_DEFAULT_ID)
-                        .collect()
-                }),
+            .map(|m| {
+                let prior_m = prior.and_then(|c| c.models.iter().find(|p| p.id == m.id));
+                let (levels, empty, current) = if current_id == Some(m.id.as_str()) {
+                    (
+                        Some(rc.levels.clone()),
+                        rc.empty_provider_default,
+                        // ponytail: first-seen currentValue only — sticky restore target
+                        prior_m
+                            .and_then(|p| p.reasoning_current.clone())
+                            .or_else(|| rc.current.clone()),
+                    )
+                } else if let Some(p) = prior_m {
+                    (
+                        p.reasoning_levels.clone(),
+                        p.reasoning_empty_default,
+                        p.reasoning_current.clone(),
+                    )
+                } else {
+                    let levels = m.reasoning_levels.as_ref().map(|choices| {
+                        choices
+                            .iter()
+                            .map(|c| c.id.clone())
+                            .filter(|id| id != REASONING_DEFAULT_ID)
+                            .collect::<Vec<_>>()
+                    });
+                    let empty = m
+                        .reasoning_levels
+                        .as_ref()
+                        .is_some_and(|c| c.iter().any(|x| x.id == REASONING_DEFAULT_ID));
+                    (
+                        levels,
+                        empty,
+                        prior_m.and_then(|p| p.reasoning_current.clone()),
+                    )
+                };
+                CachedModel {
+                    id: m.id.clone(),
+                    display_name: m.display_name.clone(),
+                    description: m.description.clone(),
+                    reasoning_levels: levels,
+                    reasoning_empty_default: empty,
+                    reasoning_current: current,
+                }
             })
             .collect(),
     };
@@ -266,23 +321,121 @@ fn push_model(out: &mut Vec<ModelInfo>, leaf: &Value) {
     ));
 }
 
-/// Leaf `value` ids from the `reasoning_effort` / `thought_level` config option.
-pub(crate) fn reasoning_ids_from_config(config_options: &Value) -> Vec<String> {
-    let Some(arr) = config_options.as_array() else {
-        return Vec::new();
+/// ACP `reasoning_effort` / `thought_level` option, decoded for OR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReasoningConfig {
+    /// Non-empty ACP option values (never `""`).
+    pub levels: Vec<String>,
+    /// ACP listed `value: ""` ("Provider default").
+    pub empty_provider_default: bool,
+    /// ACP `currentValue` (may be `""`).
+    pub current: Option<String>,
+}
+
+/// Parse reasoning options from ACP `configOptions`. Empty-string Provider
+/// default is tracked separately and never appears in [`ReasoningConfig::levels`].
+pub(crate) fn parse_reasoning_config(config_options: &Value) -> ReasoningConfig {
+    let empty = ReasoningConfig {
+        levels: Vec::new(),
+        empty_provider_default: false,
+        current: None,
     };
-    arr.iter()
-        .find(|o| {
-            o.get("id").and_then(Value::as_str) == Some("reasoning_effort")
-                || o.get("category").and_then(Value::as_str) == Some("thought_level")
-        })
-        .and_then(|o| o.get("options").and_then(Value::as_array))
-        .map(|opts| {
-            opts.iter()
-                .filter_map(|o| o.get("value").and_then(Value::as_str).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+    let Some(arr) = config_options.as_array() else {
+        return empty;
+    };
+    let Some(opt) = arr.iter().find(|o| {
+        o.get("id").and_then(Value::as_str) == Some("reasoning_effort")
+            || o.get("category").and_then(Value::as_str) == Some("thought_level")
+    }) else {
+        return empty;
+    };
+    let current = match opt.get("currentValue") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(other) if !other.is_null() => Some(other.to_string()),
+        _ => None,
+    };
+    let mut empty_provider_default = false;
+    let mut levels = Vec::new();
+    if let Some(opts) = opt.get("options").and_then(Value::as_array) {
+        for o in opts {
+            let Some(v) = o.get("value").and_then(Value::as_str) else {
+                continue;
+            };
+            if v.is_empty() {
+                empty_provider_default = true;
+                continue;
+            }
+            // Avoid colliding with OR's Default sentinel id.
+            if v == REASONING_DEFAULT_ID {
+                continue;
+            }
+            levels.push(v.to_string());
+        }
+    }
+    ReasoningConfig {
+        levels,
+        empty_provider_default,
+        current,
+    }
+}
+
+/// Non-empty ACP reasoning ids only (no `""`). Prefer [`parse_reasoning_config`].
+pub(crate) fn reasoning_ids_from_config(config_options: &Value) -> Vec<String> {
+    parse_reasoning_config(config_options).levels
+}
+
+/// Map an OpenResearch reasoning id to the ACP wire value that must be sent.
+///
+/// - OR `default` + ACP offered `""` → send `""` (clears a sticky prior effort).
+/// - OR `default` without ACP `""` → first-seen ACP `currentValue` if it is a
+///   concrete tier; otherwise skip (do not invent an effort).
+/// - Concrete tier in the allowed set → send that tier.
+/// - Anything else → skip.
+pub(crate) fn acp_reasoning_value(
+    or_level: Option<&str>,
+    levels: &[String],
+    empty_provider_default: bool,
+    restore_current: Option<&str>,
+) -> Option<String> {
+    let level = or_level?;
+    if level == REASONING_DEFAULT_ID {
+        if empty_provider_default {
+            return Some(String::new());
+        }
+        return restore_current
+            .filter(|c| !c.is_empty() && levels.iter().any(|l| l == *c))
+            .map(str::to_string);
+    }
+    levels.iter().find(|l| l.as_str() == level).cloned()
+}
+
+fn attach_reasoning(model: &mut ModelInfo, rc: &ReasoningConfig) {
+    let refs: Vec<&str> = rc.levels.iter().map(String::as_str).collect();
+    if rc.empty_provider_default {
+        model.reasoning_levels = Some(if refs.is_empty() {
+            // Still expose Default ↔ "" when that is the only ACP choice.
+            reasoning_choices(&[])
+        } else {
+            reasoning_choices(&refs)
+        });
+        model.default_reasoning_level = Some(REASONING_DEFAULT_ID.to_string());
+        return;
+    }
+    if let Some(cur) = rc
+        .current
+        .as_deref()
+        .filter(|c| !c.is_empty() && rc.levels.iter().any(|l| l == *c))
+    {
+        model.reasoning_levels = Some(reasoning_tiers(&refs));
+        model.default_reasoning_level = Some(cur.to_string());
+        return;
+    }
+    model.reasoning_levels = Some(if refs.is_empty() {
+        Vec::new()
+    } else {
+        reasoning_tiers(&refs)
+    });
+    model.default_reasoning_level = None;
 }
 
 fn current_model_id(config_options: &Value) -> Option<String> {
@@ -322,17 +475,11 @@ pub(crate) fn ingest_config_options(config_options: &Value, prior: &[ModelInfo])
     if models.is_empty() && !prior.is_empty() {
         models = prior.to_vec();
     }
-    let reasoning = reasoning_ids_from_config(config_options);
+    let rc = parse_reasoning_config(config_options);
     let current = current_model_id(config_options);
-    let reasoning_refs: Vec<&str> = reasoning.iter().map(String::as_str).collect();
     for model in &mut models {
         if current.as_deref() == Some(model.id.as_str()) {
-            model.reasoning_levels = Some(if reasoning_refs.is_empty() {
-                Vec::new()
-            } else {
-                super::options::reasoning_choices(&reasoning_refs)
-            });
-            model.default_reasoning_level = None;
+            attach_reasoning(model, &rc);
         } else if let Some(prev) = prior.iter().find(|p| p.id == model.id) {
             model.reasoning_levels = prev.reasoning_levels.clone();
             model.default_reasoning_level = prev.default_reasoning_level.clone();
@@ -342,27 +489,22 @@ pub(crate) fn ingest_config_options(config_options: &Value, prior: &[ModelInfo])
 }
 
 fn remember_config(config_options: &Value) {
-    let prior = load_verify_cache()
-        .filter(|c| c.ok)
-        .map(|c| {
-            c.models
-                .into_iter()
-                .map(|m| {
-                    let mut model = ModelInfo::new(m.id)
-                        .with_label(m.display_name.as_deref(), m.description.as_deref());
-                    if let Some(levels) = m.reasoning_levels {
-                        let refs: Vec<&str> = levels.iter().map(String::as_str).collect();
-                        model = model.with_reasoning(&refs);
-                    }
-                    model
-                })
-                .collect::<Vec<_>>()
-        })
+    let prior_cache = load_verify_cache().filter(|c| c.ok);
+    let prior: Vec<ModelInfo> = prior_cache
+        .as_ref()
+        .map(|c| c.models.iter().cloned().map(model_from_cached).collect())
         .unwrap_or_default();
     let models = ingest_config_options(config_options, &prior);
-    if !models.is_empty() {
-        store_verify_cache(&models);
+    if models.is_empty() {
+        return;
     }
+    let rc = parse_reasoning_config(config_options);
+    store_verify_cache(
+        &models,
+        current_model_id(config_options).as_deref(),
+        &rc,
+        prior_cache.as_ref(),
+    );
 }
 
 pub(crate) fn permission_reply(approve: bool) -> Value {
@@ -622,32 +764,33 @@ async fn apply_config(
             config = opts;
         }
     }
-    let mut allowed = reasoning_ids_from_config(&config);
-    if allowed.is_empty() {
-        // Reused child without a fresh configOptions payload — use cache for
-        // the selected (or last-known) model.
-        if let Some(cache) = load_verify_cache().filter(|c| c.ok) {
-            let key = ctx.model.as_deref().or_else(|| {
-                cache
-                    .models
-                    .iter()
-                    .find(|m| m.reasoning_levels.is_some())
-                    .map(|m| m.id.as_str())
-            });
-            if let Some(key) = key {
-                if let Some(levels) = cache
-                    .models
-                    .iter()
-                    .find(|m| m.id == key)
-                    .and_then(|m| m.reasoning_levels.as_ref())
-                {
-                    allowed = levels.clone();
-                }
-            }
+    let mut rc = parse_reasoning_config(&config);
+    let cache = load_verify_cache().filter(|c| c.ok);
+    let cached = cache.as_ref().and_then(|c| {
+        let key = ctx.model.as_deref().or_else(|| {
+            c.models
+                .iter()
+                .find(|m| m.reasoning_levels.is_some() || m.reasoning_empty_default)
+                .map(|m| m.id.as_str())
+        })?;
+        c.models.iter().find(|m| m.id == key)
+    });
+    if rc.levels.is_empty() && !rc.empty_provider_default {
+        if let Some(m) = cached {
+            rc.levels = m.reasoning_levels.clone().unwrap_or_default();
+            rc.empty_provider_default = m.reasoning_empty_default;
         }
     }
-    let allowed_refs: Vec<&str> = allowed.iter().map(String::as_str).collect();
-    if let Some(effort) = resolve_reasoning(ctx.reasoning_level.as_deref(), &allowed_refs) {
+    // First-seen currentValue is the restore target — not the latest ACP current.
+    let restore = cached
+        .and_then(|m| m.reasoning_current.as_deref())
+        .or(rc.current.as_deref());
+    if let Some(effort) = acp_reasoning_value(
+        ctx.reasoning_level.as_deref(),
+        &rc.levels,
+        rc.empty_provider_default,
+        restore,
+    ) {
         let result = client
             .request(
                 "session/set_config_option",
@@ -1038,6 +1181,70 @@ mod tests {
         assert!(o.default_reasoning_level.is_none());
     }
 
+    fn choice_ids(model: &ModelInfo) -> Vec<&str> {
+        model
+            .reasoning_levels
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn provider_default_empty_maps_to_or_default_not_blank_ui() {
+        let flash = "[\"deepseek-official\",\"deepseek-v4-flash\"]";
+        let cfg = json!([{
+            "id": "model",
+            "currentValue": flash,
+            "options": [{"options": [{"value": flash, "name": "Flash"}]}]
+        }, {
+            "id": "reasoning_effort",
+            "category": "thought_level",
+            "currentValue": "",
+            "options": [
+                {"value": "", "name": "Provider default"},
+                {"value": "off"}, {"value": "low"}, {"value": "high"}
+            ]
+        }]);
+        let rc = parse_reasoning_config(&cfg);
+        assert!(rc.empty_provider_default);
+        assert_eq!(rc.levels, ["off", "low", "high"]);
+        assert_eq!(rc.current.as_deref(), Some(""));
+
+        let models = ingest_config_options(&cfg, &[]);
+        let ids = choice_ids(models.iter().find(|m| m.id == flash).unwrap());
+        assert_eq!(ids, ["default", "off", "low", "high"]);
+        assert!(!ids.iter().any(|id| id.is_empty()));
+        assert_eq!(
+            models[0].default_reasoning_level.as_deref(),
+            Some(REASONING_DEFAULT_ID)
+        );
+        assert_eq!(
+            acp_reasoning_value(Some("default"), &rc.levels, true, Some("")),
+            Some(String::new())
+        );
+        assert_eq!(
+            acp_reasoning_value(Some("high"), &rc.levels, true, Some("")),
+            Some("high".into())
+        );
+    }
+
+    #[test]
+    fn high_to_default_sends_empty_acp_value() {
+        let levels = vec!["off".into(), "low".into(), "high".into()];
+        // Sticky session was on high; user picks Default → must clear via "".
+        assert_eq!(
+            acp_reasoning_value(Some("default"), &levels, true, Some("high")),
+            Some(String::new())
+        );
+        // Shared resolve_reasoning would return None (skip send) — that is wrong for DSH.
+        assert!(
+            super::super::options::resolve_reasoning(Some("default"), &["off", "low", "high"])
+                .is_none()
+        );
+    }
+
     #[test]
     fn ingest_attaches_reasoning_only_to_current_model() {
         let flash = "[\"deepseek-official\",\"deepseek-v4-flash\"]";
@@ -1056,24 +1263,19 @@ mod tests {
             {
                 "id": "reasoning_effort",
                 "category": "thought_level",
+                "currentValue": "",
                 "options": [
+                    {"value": "", "name": "Provider default"},
                     {"value": "off"}, {"value": "low"}, {"value": "high"}
                 ]
             }
         ]);
         let first = ingest_config_options(&cfg_flash, &[]);
         assert_eq!(first.len(), 2);
-        let flash_ids: Vec<_> = first
-            .iter()
-            .find(|m| m.id == flash)
-            .unwrap()
-            .reasoning_levels
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(flash_ids, ["default", "off", "low", "high"]);
+        assert_eq!(
+            choice_ids(first.iter().find(|m| m.id == flash).unwrap()),
+            ["default", "off", "low", "high"]
+        );
         assert!(first
             .iter()
             .find(|m| m.id == pro)
@@ -1081,6 +1283,7 @@ mod tests {
             .reasoning_levels
             .is_none());
 
+        // Pro has no Provider-default "" — keep ACP truth (tiers + currentValue).
         let cfg_pro = json!([
             {
                 "id": "model",
@@ -1094,54 +1297,63 @@ mod tests {
             },
             {
                 "id": "reasoning_effort",
+                "currentValue": "max",
                 "options": [{"value": "off"}, {"value": "max"}]
             }
         ]);
         let second = ingest_config_options(&cfg_pro, &first);
-        let pro_ids: Vec<_> = second
-            .iter()
-            .find(|m| m.id == pro)
-            .unwrap()
-            .reasoning_levels
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(pro_ids, ["default", "off", "max"]);
+        let pro_m = second.iter().find(|m| m.id == pro).unwrap();
+        assert_eq!(choice_ids(pro_m), ["off", "max"]);
+        assert_eq!(pro_m.default_reasoning_level.as_deref(), Some("max"));
+        // No invented OR Default when ACP has no "".
+        assert!(!choice_ids(pro_m).contains(&"default"));
         // Prior flash reasoning retained after switching away.
-        let flash_ids: Vec<_> = second
-            .iter()
-            .find(|m| m.id == flash)
-            .unwrap()
-            .reasoning_levels
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|c| c.id.as_str())
-            .collect();
-        assert_eq!(flash_ids, ["default", "off", "low", "high"]);
-        assert_ne!(flash_ids.as_slice(), pro_ids.as_slice());
+        assert_eq!(
+            choice_ids(second.iter().find(|m| m.id == flash).unwrap()),
+            ["default", "off", "low", "high"]
+        );
+        // Stale OR default on a model without "" restores first-seen current.
+        assert_eq!(
+            acp_reasoning_value(
+                Some("default"),
+                &["off".into(), "max".into()],
+                false,
+                Some("max")
+            ),
+            Some("max".into())
+        );
+        assert_eq!(
+            acp_reasoning_value(Some("default"), &["off".into(), "max".into()], false, None),
+            None
+        );
     }
 
     #[test]
-    fn resolve_reasoning_uses_config_allowed_set() {
-        let allowed = ["off", "max"];
-        assert_eq!(resolve_reasoning(Some("max"), &allowed), Some("max"));
-        assert_eq!(resolve_reasoning(Some("high"), &allowed), None);
-        assert_eq!(resolve_reasoning(Some("default"), &allowed), None);
+    fn acp_reasoning_rejects_unknown_tiers() {
+        let levels = vec!["off".into(), "max".into()];
+        assert_eq!(
+            acp_reasoning_value(Some("max"), &levels, false, Some("off")),
+            Some("max".into())
+        );
+        assert_eq!(
+            acp_reasoning_value(Some("high"), &levels, false, Some("off")),
+            None
+        );
     }
 
     #[cfg(unix)]
     fn write_fake_dsh(dir: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt;
         let bin = dir.join("dsh");
-        // Stateful fake: two prompts, a tool turn, cancel, and resume.
+        // Stateful fake: two prompts, a tool turn, cancel, resume, and
+        // model/reasoning configOptions that differ per model.
         std::fs::write(
             &bin,
             r#"#!/usr/bin/env python3
 import json, sys, os
-STATE = os.environ.get("ORX_DSH_FAKE_STATE", "")
+LOG = os.environ.get("ORX_DSH_FAKE_STATE", "")
+FLASH = '["p","flash"]'
+PRO = '["p","pro"]'
 if "--version" in sys.argv:
     print("dsh 0.0.1"); raise SystemExit(0)
 
@@ -1153,6 +1365,42 @@ def write(obj):
     sys.stdout.write(json.dumps(obj, separators=(",", ":")) + "\n")
     sys.stdout.flush()
 
+def log(event):
+    if not LOG: return
+    with open(LOG, "a") as f:
+        f.write(json.dumps(event) + "\n")
+
+def reasoning_for(model):
+    if model == PRO:
+        return {
+            "id": "reasoning_effort",
+            "currentValue": "max",
+            "options": [{"value": "off"}, {"value": "max"}],
+        }
+    return {
+        "id": "reasoning_effort",
+        "category": "thought_level",
+        "currentValue": "",
+        "options": [
+            {"value": "", "name": "Provider default"},
+            {"value": "off"}, {"value": "low"}, {"value": "high"},
+        ],
+    }
+
+def config_for(model):
+    return [
+        {
+            "id": "model",
+            "currentValue": model,
+            "options": [{"options": [
+                {"value": FLASH, "name": "Flash"},
+                {"value": PRO, "name": "Pro"},
+            ]}],
+        },
+        reasoning_for(model),
+    ]
+
+current_model = FLASH
 prompt_n = 0
 while True:
     msg = read()
@@ -1163,21 +1411,22 @@ while True:
     elif method == "authenticate":
         write({"id": mid, "result": {}})
     elif method == "session/new":
+        current_model = FLASH
         write({"id": mid, "result": {
             "sessionId": "fake-session",
-            "configOptions": [{"id": "model", "options": [
-                {"value": "[\"p\",\"m\"]", "name": "M"}
-            ]}]
+            "configOptions": config_for(current_model),
         }})
     elif method == "session/resume":
         write({"id": mid, "result": {
             "sessionId": params.get("sessionId", "fake-session"),
-            "configOptions": [{"id": "model", "options": [
-                {"value": "[\"p\",\"m\"]", "name": "M"}
-            ]}]
+            "configOptions": config_for(current_model),
         }})
     elif method == "session/set_config_option":
-        write({"id": mid, "result": {"configOptions": []}})
+        cid, value = params.get("configId"), params.get("value")
+        log({"set": cid, "value": value})
+        if cid == "model":
+            current_model = value
+        write({"id": mid, "result": {"configOptions": config_for(current_model)}})
     elif method == "session/prompt":
         prompt_n += 1
         sid = params.get("sessionId")
@@ -1229,6 +1478,7 @@ while True:
         let bin = dir.join("dsh");
         // Avoid mutating PATH (races other detect tests). Prefer an override env.
         let prev = std::env::var_os("ORX_DSH_BIN");
+        let prev_state = std::env::var_os("ORX_DSH_FAKE_STATE");
         std::env::set_var("ORX_DSH_BIN", &bin);
         let host = Arc::new(crate::local::dsh::DshHost::new());
         let result = f(host.clone(), dir.clone()).await;
@@ -1236,6 +1486,10 @@ while True:
         match prev {
             Some(v) => std::env::set_var("ORX_DSH_BIN", v),
             None => std::env::remove_var("ORX_DSH_BIN"),
+        }
+        match prev_state {
+            Some(v) => std::env::set_var("ORX_DSH_FAKE_STATE", v),
+            None => std::env::remove_var("ORX_DSH_FAKE_STATE"),
         }
         let _ = std::fs::remove_dir_all(&dir);
         result.unwrap();
@@ -1348,6 +1602,123 @@ while True:
             assert_eq!(stop4, "end_turn");
             assert!(u4.iter().any(|p| {
                 p.pointer("/update/content/text").and_then(Value::as_str) == Some("TURN2")
+            }));
+            Ok(())
+        })
+        .await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fake_dsh_model_switch_returns_config_and_default_sends_empty() {
+        with_fake_dsh(|host, dir| async move {
+            let log = dir.join("config-log.jsonl");
+            std::env::set_var("ORX_DSH_FAKE_STATE", &log);
+
+            let client = host.ensure("fake-orx-config").await?;
+            let created = client
+                .request(
+                    "session/new",
+                    json!({ "cwd": dir.to_string_lossy(), "mcpServers": [] }),
+                )
+                .await?;
+            let sid = created
+                .get("sessionId")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let flash = created
+                .pointer("/configOptions/0/currentValue")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string();
+            let flash_cfg = created.get("configOptions").cloned().unwrap();
+            let flash_rc = parse_reasoning_config(&flash_cfg);
+            assert!(flash_rc.empty_provider_default);
+            let flash_models = ingest_config_options(&flash_cfg, &[]);
+            assert_eq!(
+                choice_ids(flash_models.iter().find(|m| m.id == flash).unwrap()),
+                ["default", "off", "low", "high"]
+            );
+
+            let pro = "[\"p\",\"pro\"]";
+            let switched = client
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": sid,
+                        "configId": "model",
+                        "value": pro,
+                    }),
+                )
+                .await?;
+            let pro_cfg = switched.get("configOptions").cloned().unwrap();
+            let pro_rc = parse_reasoning_config(&pro_cfg);
+            assert!(!pro_rc.empty_provider_default);
+            assert_eq!(pro_rc.levels, ["off", "max"]);
+            let after = ingest_config_options(&pro_cfg, &flash_models);
+            assert_eq!(
+                choice_ids(after.iter().find(|m| m.id == pro).unwrap()),
+                ["off", "max"]
+            );
+            // Prior flash list retained.
+            assert_eq!(
+                choice_ids(after.iter().find(|m| m.id == flash).unwrap()),
+                ["default", "off", "low", "high"]
+            );
+
+            // Switch back to flash, set high, then Default → ACP must see "".
+            let _ = client
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": sid,
+                        "configId": "model",
+                        "value": flash,
+                    }),
+                )
+                .await?;
+            let _ = client
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": sid,
+                        "configId": "reasoning_effort",
+                        "value": "high",
+                    }),
+                )
+                .await?;
+            let wire =
+                acp_reasoning_value(Some(REASONING_DEFAULT_ID), &flash_rc.levels, true, Some(""));
+            assert_eq!(wire.as_deref(), Some(""));
+            let _ = client
+                .request(
+                    "session/set_config_option",
+                    json!({
+                        "sessionId": sid,
+                        "configId": "reasoning_effort",
+                        "value": wire.unwrap(),
+                    }),
+                )
+                .await?;
+
+            let raw = std::fs::read_to_string(&log).unwrap();
+            let events: Vec<Value> = raw
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect();
+            assert!(events.iter().any(|e| {
+                e.get("set").and_then(Value::as_str) == Some("model")
+                    && e.get("value").and_then(Value::as_str) == Some(pro)
+            }));
+            assert!(events.iter().any(|e| {
+                e.get("set").and_then(Value::as_str) == Some("reasoning_effort")
+                    && e.get("value").and_then(Value::as_str) == Some("high")
+            }));
+            assert!(events.iter().any(|e| {
+                e.get("set").and_then(Value::as_str) == Some("reasoning_effort")
+                    && e.get("value").and_then(Value::as_str) == Some("")
             }));
             Ok(())
         })
