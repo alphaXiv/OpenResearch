@@ -9,6 +9,7 @@ export const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
   k8s: m.compute_target_k8s,
   ssh: m.compute_target_ssh,
   slurm: m.compute_target_slurm,
+  sge: m.compute_target_sge,
   ray: m.compute_target_ray,
   openresearch: m.compute_target_openresearch,
 };

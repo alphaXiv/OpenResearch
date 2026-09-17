@@ -134,6 +134,7 @@ async fn submit_controller_run(
         source_digest: None,
         source_path: None,
         source_size: None,
+        run_dir: None,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {

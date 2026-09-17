@@ -468,6 +468,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/instances", get(list_instances))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/resync", post(resync_run))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
@@ -609,6 +610,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(slurm_settings).post(set_slurm_settings),
         )
         .route("/api/settings/slurm/preflight", post(slurm_preflight))
+        .route(
+            "/api/settings/sge",
+            get(sge_settings).post(set_sge_settings),
+        )
+        .route("/api/settings/sge/preflight", post(sge_preflight))
         .route(
             "/api/settings/ray",
             get(ray_settings).post(set_ray_settings),
@@ -2129,6 +2135,24 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Manual fallback for a supervisor that is alive but no longer advancing the
+/// run's local log: retire it and start a fresh one. Deliberately not gated on
+/// the run looking stuck — the dashboard cannot tell a slow poll from a wedged
+/// one, and `supervise` is restart-idempotent either way.
+async fn resync_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
+    let report = crate::commands::supervise::resync(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "report": report,
+        "message": report.describe(&id),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -5363,6 +5387,7 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
 pub(crate) enum SshConnectBackend {
     Ssh,
     Slurm,
+    Sge,
 }
 
 #[derive(Deserialize)]
@@ -5618,6 +5643,10 @@ async fn ssh_connect_socket(
         SshConnectBackend::Slurm => {
             let result = crate::jobs::slurm::preflight(&host).await;
             ("slurm", slurm_preflight_value(&result), None)
+        }
+        SshConnectBackend::Sge => {
+            let result = crate::jobs::sge::preflight(&host).await;
+            ("sge", sge_preflight_value(&result), None)
         }
     };
     if socket
@@ -6128,6 +6157,165 @@ fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
     })
 }
 
+// --- sge ----------------------------------------------------------------------
+
+use crate::jobs::sge;
+
+/// One payload powers the whole settings card: stored cluster defaults plus the
+/// ssh hosts to pick a login node from. Every value is the RESOLVED default
+/// rather than the raw `Option`, so the card shows what a launch will actually
+/// do instead of a row of blanks.
+fn sge_settings_json() -> Value {
+    let settings = sge::load_settings().ok().flatten().unwrap_or_default();
+    json!({
+        "host": settings.host,
+        "workDir": settings.work_dir.clone().unwrap_or_else(|| sge::DEFAULT_WORK_DIR.to_string()),
+        "sccProject": settings.scc_project_or_default(),
+        "pe": settings.pe_or_default(),
+        "slots": settings.slots_or_default(),
+        "timeLimit": settings.time_limit_or_default(),
+        "gpus": settings.gpus_or_default(),
+        "gpuType": settings.gpu_type_or_default(),
+        "hosts": list_ssh_hosts(),
+    })
+}
+
+async fn sge_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(sge_settings_json())))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSgeSettingsReq {
+    /// `None` leaves the field alone; `Some("")` clears it back to the default.
+    host: Option<String>,
+    work_dir: Option<String>,
+    scc_project: Option<String>,
+    pe: Option<String>,
+    /// The counts are numbers, not strings, so an absent field and an explicit
+    /// `null` have to be told apart — see [`deserialize_present`]. `None`
+    /// leaves the field alone; `Some(None)` clears it back to the default.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    slots: Option<Option<u32>>,
+    time_limit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    gpus: Option<Option<u32>>,
+    gpu_type: Option<String>,
+}
+
+/// Distinguish "field absent" from "field present and null".
+///
+/// A plain `Option<T>` collapses both to `None`, which for these settings would
+/// make "leave this alone" and "reset this to the default" indistinguishable.
+/// The custom deserializer only runs when the key is actually present, so
+/// `#[serde(default)]` supplies `None` for an absent field while an explicit
+/// `null` arrives as `Some(None)`.
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let mut settings = sge::load_settings()?.unwrap_or_default();
+        let norm = |v: String| Some(v.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(h) = req.host {
+            settings.host = norm(h);
+        }
+        if let Some(w) = req.work_dir {
+            // Reject a path that would fail every later launch — or, worse,
+            // silently land the run in a quota'd home directory.
+            let w = norm(w);
+            if let Some(w) = &w {
+                sge::validate_work_dir(w).map_err(bad_request)?;
+            }
+            settings.work_dir = w;
+        }
+        if let Some(p) = req.scc_project {
+            settings.scc_project = norm(p);
+        }
+        if let Some(p) = req.pe {
+            settings.pe = norm(p);
+        }
+        if let Some(slots) = req.slots {
+            if let Some(n) = slots {
+                if n == 0 || n > 64 {
+                    return Err(bad_request("slots must be between 1 and 64"));
+                }
+            }
+            settings.slots = slots;
+        }
+        if let Some(t) = req.time_limit {
+            let t = norm(t);
+            if let Some(t) = &t {
+                crate::jobs::huggingface::parse_timeout(t).map_err(bad_request)?;
+            }
+            settings.time_limit = t;
+        }
+        if let Some(gpus) = req.gpus {
+            // 0 is meaningful — it is how a CPU-only default is expressed, so
+            // only the upper bound is checked.
+            if let Some(n) = gpus {
+                if n > 16 {
+                    return Err(bad_request("gpus must be 16 or fewer"));
+                }
+            }
+            settings.gpus = gpus;
+        }
+        if let Some(t) = req.gpu_type {
+            let t = norm(t);
+            if let Some(t) = &t {
+                // The complex uses the `==` relop, so an unknown or miscased
+                // value is unschedulable rather than merely wrong.
+                if sge::canonical_gpu_type(t).is_none() {
+                    return Err(bad_request(format!(
+                        "Unknown gpu_type {t:?}. Valid types: {}.",
+                        sge::SCC_GPU_TYPES.join(", ")
+                    )));
+                }
+            }
+            settings.gpu_type = t.and_then(|t| sge::canonical_gpu_type(&t).map(str::to_string));
+        }
+        sge::save_settings(&settings)?;
+        Ok(Json(sge_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SgePreflightReq {
+    host: String,
+}
+
+/// Live check for one login node: reachable, Grid Engine CLI + snapshot tools,
+/// the ControlMaster prerequisite, and the user's valid `-P` projects.
+async fn sge_preflight(Json(req): Json<SgePreflightReq>) -> ApiResult {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+    let p = sge::preflight(&host).await;
+    Ok(Json(sge_preflight_value(&p)))
+}
+
+fn sge_preflight_value(p: &sge::SgePreflight) -> Value {
+    json!({
+        "reachable": p.reachable,
+        "sgeFound": p.sge_found,
+        "toolsFound": p.tools_found,
+        "authBlocked": p.auth_blocked,
+        "masterRunning": p.master_running,
+        "projects": p.projects,
+        "error": p.error,
+    })
+}
+
 // --- ray --------------------------------------------------------------------
 
 use crate::jobs::ray;
@@ -6288,6 +6476,8 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
     let slurm_host = slurm_settings.as_ref().and_then(|s| s.host.clone());
+    let sge_settings = crate::jobs::sge::load_settings().ok().flatten();
+    let sge_host = sge_settings.as_ref().and_then(|s| s.host.clone());
     let (ray_resolved, ray_source) = crate::jobs::ray::resolve_address_with_source();
     let ray_configured = !matches!(ray_source, crate::jobs::ray::AddressSource::Default);
     let ray_source_label = match ray_source {
@@ -6374,6 +6564,20 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
                     Some(partition) => format!("Login node {h} / partition {partition}"),
                     None => format!("Login node {h}"),
                 },
+            ),
+        },
+        {
+            "id": "sge",
+            "configured": sge_host.is_some(),
+            "summary": sge_host.as_ref().map_or_else(
+                || "No login node configured".to_string(),
+                |h| format!(
+                    "Login node {h} / project {}",
+                    sge_settings
+                        .as_ref()
+                        .map(|s| s.scc_project_or_default())
+                        .unwrap_or_else(|| crate::jobs::sge::DEFAULT_SCC_PROJECT.to_string())
+                ),
             ),
         },
         {
@@ -7802,6 +8006,35 @@ mod tests {
         .unwrap();
         let result = set_project_ui_state(Path("project".into()), Json(unsupported)).await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// The counts are numbers on the wire, and the request has to tell three
+    /// cases apart: absent (leave alone), null (reset to the default), and a
+    /// value. A plain `Option<u32>` collapses the first two, and a string would
+    /// not deserialize at all — which is what the dashboard used to send.
+    #[test]
+    fn sge_counts_distinguish_absent_from_null_from_a_value() {
+        let parse = |body: &str| serde_json::from_str::<SetSgeSettingsReq>(body).unwrap();
+
+        let absent = parse(r#"{"host":"scc1"}"#);
+        assert_eq!(absent.slots, None, "an absent field must leave slots alone");
+        assert_eq!(absent.gpus, None);
+
+        let cleared = parse(r#"{"slots":null,"gpus":null}"#);
+        assert_eq!(
+            cleared.slots,
+            Some(None),
+            "an explicit null must clear slots back to the default"
+        );
+        assert_eq!(cleared.gpus, Some(None));
+
+        let set = parse(r#"{"slots":16,"gpus":2}"#);
+        assert_eq!(set.slots, Some(Some(16)));
+        assert_eq!(set.gpus, Some(Some(2)));
+
+        // The regression this replaced: the dashboard sent "16" and axum
+        // rejected the whole body with a deserialization error.
+        assert!(serde_json::from_str::<SetSgeSettingsReq>(r#"{"slots":"16"}"#).is_err());
     }
 
     #[test]

@@ -36,6 +36,7 @@ pub mod overleaf_live;
 pub mod projects;
 pub mod ray;
 pub mod resolve;
+pub mod sge;
 pub mod shell_env;
 pub mod skills;
 pub mod slurm;
@@ -91,6 +92,7 @@ pub const BACKENDS: &[&str] = &[
     "k8s",
     "ssh",
     "slurm",
+    "sge",
     "ray",
     "openresearch",
 ];
@@ -99,7 +101,7 @@ pub const BACKENDS: &[&str] = &[
 /// one; slurm's is an optional GRES spec; ray's is optional resource hints).
 /// k8s (manifest), ssh (host), and local (this machine's hardware) have no
 /// flavor axis.
-pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "ray", "openresearch"];
+pub const FLAVORED_BACKENDS: &[&str] = &["hf", "modal", "slurm", "sge", "ray", "openresearch"];
 
 /// The subset whose launches FAIL without a `--flavor` — the playbook warns
 /// about these when they're the default with no saved flavor.

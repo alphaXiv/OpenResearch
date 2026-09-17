@@ -379,6 +379,24 @@ export const listInstances = () =>
 export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
 
+/** What a resync actually did. Not always a restart, so the caller reports the
+ *  outcome it got rather than assuming the happy path. */
+export interface ResyncReport {
+  /** The run had already finished; supervision was not restarted. */
+  terminal: boolean;
+  /** A live supervisor was found and retired. */
+  replaced: boolean;
+  /** A fresh supervisor was spawned. */
+  spawned: boolean;
+}
+
+/** Retire the run's supervisor and start a fresh one. The manual fallback for
+ *  a supervisor that is alive but no longer advancing the local log mirror.
+ *  The response also carries a `message`, but that one is CLI copy — it names
+ *  the run id and is not localized, so the UI phrases its own from the report. */
+export const resyncRun = (runId: string) =>
+  post<{ ok: boolean; report: ResyncReport }>(`/api/runs/${runId}/resync`).then((r) => r.report);
+
 export interface LogChunk {
   dataBase64: string;
   nextOffset: number;
@@ -1089,6 +1107,57 @@ export interface SlurmPreflight {
   error: string | null;
 }
 
+// --- settings: sge (Sun Grid Engine) -----------------------------------------
+
+export interface SgeSettings {
+  /** Default login node (an ~/.ssh/config alias); null = must pass --host. */
+  host: string | null;
+  /** Absolute shared scratch/work directory outside $HOME; null = the default. */
+  workDir: string | null;
+  /** Grid Engine project (`qsub -P`); null = the cluster decides. */
+  sccProject: string | null;
+  /** Parallel environment (`qsub -pe <pe> <slots>`); null = the default. */
+  pe: string | null;
+  /** Slots (cores) requested for the parallel environment; null = the default. */
+  slots: number | null;
+  timeLimit: string | null;
+  /** GPUs requested (`-l gpus=`); null = the default. */
+  gpus: number | null;
+  /** GPU model filter (`-l gpu_type=`), e.g. L40S; null = any. */
+  gpuType: string | null;
+  /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
+  hosts: SshHost[];
+}
+
+export const getSgeSettings = (signal?: AbortSignal) => get<SgeSettings>("/api/settings/sge", signal);
+
+/**
+ * Omitting a field leaves it alone. Clearing it back to the cluster default is
+ * an empty string for the text fields and `null` for the counts — they are
+ * numbers on the wire, so `""` would fail to deserialize.
+ */
+export const saveSgeSettings = (body: {
+  host?: string;
+  workDir?: string;
+  sccProject?: string;
+  pe?: string;
+  slots?: number | null;
+  timeLimit?: string;
+  gpus?: number | null;
+  gpuType?: string;
+}) => post<SgeSettings>("/api/settings/sge", body);
+
+export interface SgePreflight {
+  reachable: boolean;
+  sgeFound: boolean;
+  toolsFound: boolean;
+  /** The login node answered, but the session needs a Duo/2FA approval first. */
+  authBlocked: boolean;
+  masterRunning: boolean;
+  projects: string[];
+  error: string | null;
+}
+
 // --- settings: ray ------------------------------------------------------------
 
 export interface RaySettings {
@@ -1127,6 +1196,7 @@ export type ComputeTargetId =
   | "k8s"
   | "ssh"
   | "slurm"
+  | "sge"
   | "ray"
   | "openresearch";
 

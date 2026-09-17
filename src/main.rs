@@ -98,6 +98,9 @@ enum Command {
     #[command(name = "ssh-key")]
     SshKey(SshKeyArgs),
 
+    /// Open the shared SSH session that orx's background work rides on.
+    Ssh(SshArgs),
+
     /// Operate on one local experiment node.
     Exp(ExpArgs),
 
@@ -285,6 +288,34 @@ pub struct ComputeArgs {
     pub provider: Option<String>,
 }
 
+/// `orx ssh connect <host>` — authenticate once, interactively, and leave the
+/// multiplexed master running for every later background call.
+///
+/// This exists because a plain `ssh <host>` does NOT help: orx keeps its
+/// control socket in a private `/tmp/orx-ssh-<uid>-<hash>/` directory, so a
+/// normal login authenticates a session orx cannot see. On a cluster whose
+/// sshd requires `publickey,keyboard-interactive` (BU's SCC and Duo), batch
+/// ssh can never answer the second factor, making this master the only way in.
+#[derive(Args, Debug)]
+pub struct SshArgs {
+    #[command(subcommand)]
+    pub command: SshCommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SshCommand {
+    /// Authenticate to `host` and keep the shared session open.
+    Connect(SshConnectArgs),
+    /// Report whether the shared session for `host` is live.
+    Status(SshConnectArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct SshConnectArgs {
+    /// An ~/.ssh/config host alias (e.g. the cluster login node).
+    pub host: String,
+}
+
 #[derive(Args, Debug)]
 pub struct SshKeyArgs {
     #[command(subcommand)]
@@ -463,11 +494,13 @@ pub struct ExpRunArgs {
     /// account, billed per second), `k8s` (a Job on your own Kubernetes
     /// cluster), `ssh` (a detached process on one of your own boxes), `slurm`
     /// (a batch job on your Slurm cluster, submitted via its login node),
+    /// `sge` (a batch job on your Sun Grid Engine cluster, e.g. BU's SCC,
+    /// submitted via its login node),
     /// `ray` (a job on your Ray cluster, via the Ray Jobs API), `openresearch`
     /// (an ephemeral OpenResearch GPU/CPU box billed to your org; needs
     /// `orx login`), `tinker` (a local controller using remote Tinker model
     /// compute), or `local` (a detached process on this machine). k8s,
-    /// ssh, slurm, ray, openresearch, tinker, and local are local
+    /// ssh, slurm, sge, ray, openresearch, tinker, and local are local
     /// experiments only. orx submits the job and a detached supervisor
     /// records status and logs locally. Omitted on a local experiment: launches on
     /// the configured default compute target, if set.
@@ -477,7 +510,11 @@ pub struct ExpRunArgs {
     /// h200, … With `--backend modal`: a Modal GPU (t4, l4, a10g, a100,
     /// a100-80gb, l40s, h100, h200, or e.g. h100:2) or cpu/cpu-large. With
     /// `--backend slurm`: a GPU request as a GRES spec (h100:2 → --gres=gpu:h100:2;
-    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend ray`: optional
+    /// plain `gpu` → one GPU; omit for CPU-only). With `--backend sge`: a GPU
+    /// request (A100:2 → `-l gpus=2 -l gpu_type=A100`; plain `gpu` or a bare
+    /// count → the configured default type; `cpu` → no GPU; omit for the
+    /// configured default, 1 GPU). A value containing `=` is passed through
+    /// verbatim as `-l` requests. With `--backend ray`: optional
     /// entrypoint resources (`cpu:2`, `gpu:1`, `gpu:1,mem:8GiB`; omit to reserve
     /// nothing). With `--backend openresearch`: a GPU id from `orx compute`
     /// (h100_sxm, or h100_sxm:2 for two) or a CPU flavor (cpu5c/cpu5g/cpu5m, or
@@ -490,8 +527,8 @@ pub struct ExpRunArgs {
     #[arg(long)]
     pub org: Option<String>,
     /// The ~/.ssh/config host alias to run on (with `--backend ssh`), or the
-    /// cluster login node (with `--backend slurm`; defaults to the slurm
-    /// settings' host).
+    /// cluster login node (with `--backend slurm` or `--backend sge`; defaults
+    /// to that backend's configured host).
     #[arg(long)]
     pub host: Option<String>,
     /// Repo-relative path to the k8s manifest on the experiment branch (with
@@ -505,12 +542,14 @@ pub struct ExpRunArgs {
     /// `--backend k8s`, set the image in the manifest instead.
     #[arg(long)]
     pub image: Option<String>,
-    /// Job timeout (with `--backend hf/modal/k8s/slurm/openresearch`): 90s,
+    /// Job timeout (with `--backend hf/modal/k8s/slurm/sge/openresearch`): 90s,
     /// 30m, 4h, 1d. Default 4h (HF's own default is only 30 minutes). With
     /// `--backend k8s` it becomes activeDeadlineSeconds unless the manifest
     /// sets its own. With `--backend slurm` it becomes `#SBATCH --time=` and
     /// has no 4h default — unset falls back to the slurm settings, then the
-    /// cluster's own limit. With `--backend openresearch` it bounds the run's
+    /// cluster's own limit. With `--backend sge` it becomes `#$ -l h_rt=` and
+    /// falls back to the sge settings (12h by default). With
+    /// `--backend openresearch` it bounds the run's
     /// wall clock on the box (the box itself is deleted when the run ends).
     /// Not supported with `--backend ray` (Ray Jobs have no time limit).
     #[arg(long)]
@@ -542,6 +581,11 @@ pub struct ServeArgs {
 pub struct SuperviseArgs {
     /// The run to supervise (must exist in the local store).
     pub run_id: String,
+    /// Retire whatever supervisor is watching this run and start a fresh one,
+    /// re-mirroring its log from the start. The manual fallback for a
+    /// supervisor that is alive but no longer making progress.
+    #[arg(long)]
+    pub restart: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1006,6 +1050,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Compute(_) => "compute",
         Command::Instance(_) => "instance",
         Command::SshKey(_) => "ssh-key",
+        Command::Ssh(_) => "ssh",
         Command::Exp(_) => "exp",
         Command::Skill(_) => "skill",
         Command::Skills(_) => "skills",
@@ -1051,6 +1096,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         Command::CreateExperiment(args) => commands::create_experiment::run(args).await,
         Command::Compute(args) => commands::compute::run(args).await,
         Command::Instance(args) => commands::instance::run(args).await,
+        Command::Ssh(args) => commands::ssh::run(args).await,
         Command::SshKey(args) => match args.command {
             SshKeyCommand::Add(a) => commands::ssh_key::add(a.path).await,
             SshKeyCommand::List => commands::ssh_key::list().await,
@@ -1132,6 +1178,7 @@ mod cli_tests {
         assert!(!should_capture_command(&Command::Supervise(
             SuperviseArgs {
                 run_id: "run-1".into(),
+                restart: false,
             }
         )));
         assert!(!should_capture_command(&Command::Update(UpdateArgs {

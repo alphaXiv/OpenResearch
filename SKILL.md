@@ -26,18 +26,18 @@ expands on the why; these are the non-negotiables.
    Until then it is **provisional**: seeding it, fixing its deps, and making it
    run all happen on its own branch (`orx-experiment-tree`). To try an idea,
    branch a **child** and edit the child.
-2. **The run command *and* the environment are a fixed contract — identical on
+2. **The run command _and_ the environment are a fixed contract — identical on
    every node.** A child inherits its parent's run command verbatim; leave it
    alone. Do **not** give nodes different start commands, and do **not** vary
    behavior through environment variables or env-prefixed commands
-   (`LR=3e-4 python …`). The *only* thing that may differ between nodes is the
+   (`LR=3e-4 python …`). The _only_ thing that may differ between nodes is the
    **committed code/config** on the node's git branch. Set the local project's
    command once with `orx project edit <projectId> --run-command '<cmd>'`.
 3. **Vary code, not knobs-in-the-command.** Encode hyperparameters in the
    code/config files and branch a child per variant — never sweep them by editing
-   the run command or passing env vars. Every node runs the *same* command over
-   *different code*, so their logged result summaries stay comparable.
-4. **Grow the tree downward, not sideways.** Fan a little *within* a round (the
+   the run command or passing env vars. Every node runs the _same_ command over
+   _different code_, so their logged result summaries stay comparable.
+4. **Grow the tree downward, not sideways.** Fan a little _within_ a round (the
    options of one decision), then **descend onto that round's winner** for the
    next round. A root with a long row of direct children and no grandchildren is
    the failure mode. See "Shape the tree" in the `orx-experiment-tree` module.
@@ -66,40 +66,45 @@ ids from `orx projects`, `orx project view`, and `orx runs` respectively. Each
 group below has a module (`orx skill <name>`) with the full flags and rules.
 
 ### Auth
-| Command | What it does |
-|---|---|
+
+| Command                       | What it does                                      |
+| ----------------------------- | ------------------------------------------------- |
 | `orx login [--api-url <url>]` | Open a browser, do loopback OAuth, store a token. |
-| `orx logout` | Remove the stored token. |
+| `orx logout`                  | Remove the stored token.                          |
 
 ### Discover (project- and experiment-scoped)
-| Command | What it does |
-|---|---|
-| `orx projects [--json]` | List projects in the local `orx` store. |
-| `orx orgs [--json]` | List organization ids available for OpenResearch compute (login required). |
-| `orx project view <projectId>` | Show a local project's details and experiment tree. **Experiment ids come from here.** |
-| `orx runs <projectId> [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.** |
+
+| Command                                    | What it does                                                                           |
+| ------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `orx projects [--json]`                    | List projects in the local `orx` store.                                                |
+| `orx orgs [--json]`                        | List organization ids available for OpenResearch compute (login required).             |
+| `orx project view <projectId>`             | Show a local project's details and experiment tree. **Experiment ids come from here.** |
+| `orx runs <projectId> [--experiment <id>]` | List runs as a table, newest first. **Run ids come from here.**                        |
 
 ### Run evidence (run-scoped) — module `orx-evidence`
-| Command | What it does |
-|---|---|
+
+| Command                                                     | What it does               |
+| ----------------------------------------------------------- | -------------------------- |
 | `orx logs <runId> [--head] [--bytes <n>] [--range <s>:<e>]` | Read a run's terminal log. |
 
 ### Create and run experiments (write) — modules `orx-create`, `orx-compute`, `orx-git`
-| Command | What it does |
-|---|---|
-| `orx up` | Open the local dashboard to import or create a local project. |
-| `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
-| `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
-| `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
-| `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
-| `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
-| `orx exp desc <expId> [--set "<text>" \| --stdin]` | Read or overwrite the experiment's description. |
-| `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]` | Delegate an independent task to a helper session; see `orx-agent-delegation`. |
+
+| Command                                                                            | What it does                                                                      |
+| ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `orx up`                                                                           | Open the local dashboard to import or create a local project.                     |
+| `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]`         | Edit a local project's name or fixed run command.                                 |
+| `orx create-experiment <localProjectId> --title "<t>" [...]`                       | Add a local experiment node; prints its Git branch.                               |
+| `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog.                                                 |
+| `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)`                   | Spin up a standalone instance in an org; see `orx-instances`.                     |
+| `orx exp status/run/cancel/wait/wake <localExpId>`                                 | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |
+| `orx exp desc <expId> [--set "<text>" \| --stdin]`                                 | Read or overwrite the experiment's description.                                   |
+| `orx agent spawn "<task>" [--title "<t>"] [--stdin] [--no-wake]`                   | Delegate an independent task to a helper session; see `orx-agent-delegation`.     |
 
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
 
 ### Literature & papers — alphaXiv / OpenAlex / bioRxiv (no login required) — module `orx-lit-review`
+
 Use before any web search for academic/research queries (paper, author, blog, model release).
 | Command | What it does |
 |---|---|
@@ -110,14 +115,16 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
 
 ### Skills & templates — module `orx-customize`
-| Command | What it does |
-|---|---|
-| `orx skills add <path>` | Save a reusable skill from a `SKILL.md` file or skill ZIP across projects. |
+
+| Command                    | What it does                                                                       |
+| -------------------------- | ---------------------------------------------------------------------------------- |
+| `orx skills add <path>`    | Save a reusable skill from a `SKILL.md` file or skill ZIP across projects.         |
 | `orx templates add <path>` | Save a reusable LaTeX template from a `.tex` file or template ZIP across projects. |
 
 ### Meta
-| Command | What it does |
-|---|---|
+
+| Command                       | What it does                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- |
 | `orx skill [name[/resource]]` | Print this overview, one bundled module, or a lazily loaded module resource such as `compute/hf`. |
 
 ## Modules

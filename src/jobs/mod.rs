@@ -11,6 +11,7 @@ pub mod localbox;
 pub mod modal;
 pub mod openresearch;
 pub mod ray;
+pub mod sge;
 pub mod slurm;
 pub mod ssh;
 pub mod tinker;
@@ -92,6 +93,11 @@ pub struct BackendDescriptor {
     pub source_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_size: Option<u64>,
+    /// Absolute remote run dir (sge_job only). Pinned at submit so a later
+    /// `workDir` settings edit cannot strand a live run's supervisor away from
+    /// its log and exit_code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_dir: Option<String>,
 }
 
 impl BackendDescriptor {
@@ -149,6 +155,20 @@ impl BackendDescriptor {
             (Some(host), Some(id)) => Ok((host, id)),
             _ => Err(anyhow!(
                 "Backend descriptor is missing the slurm host/job id — was the job submitted?"
+            )),
+        }
+    }
+
+    /// The SGE (host, job id) handle; the login-node host rides on `namespace`,
+    /// and the absolute run dir on `run_dir`.
+    pub fn sge_ref(&self) -> Result<(&str, &str)> {
+        if self.kind != "sge_job" {
+            return Err(anyhow!("Unsupported backend kind: {}", self.kind));
+        }
+        match (self.namespace.as_deref(), self.job_id.as_deref()) {
+            (Some(host), Some(id)) => Ok((host, id)),
+            _ => Err(anyhow!(
+                "Backend descriptor is missing the sge host/job id — was the job submitted?"
             )),
         }
     }
@@ -264,6 +284,7 @@ mod tests {
             source_digest: None,
             source_path: None,
             source_size: None,
+            run_dir: None,
         }
     }
 

@@ -34,7 +34,7 @@ function sendPreparation() {
   return prefix;
 }
 
-for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["host", "partition", "account", "timeLimit"]], ["Ray", ["address"]]]) {
+for (const [name, fields] of [["K8s", ["context", "namespace"]], ["Slurm", ["host", "partition", "account", "timeLimit"]], ["Sge", ["host", "workDir", "sccProject", "pe", "slots", "timeLimit"]], ["Ray", ["address"]]]) {
   test(`${name} settings refresh clean fields while preserving edits`, () => {
     const file = source("SettingsPage.tsx");
     const component = file.statements.find((node) => ts.isFunctionDeclaration(node) && node.name.text === `${name}Section`);

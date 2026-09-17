@@ -1,7 +1,7 @@
 // Brand marks for the compute backends. Most are inline SVGs; Tinker uses the
 // supplied Thinking Machines raster mark.
 
-import { Laptop, Server } from "lucide-react";
+import { Grid3x3, Laptop, Server } from "lucide-react";
 import { backendDetail, backendKind, type Run } from "../api";
 import slurmLogo from "../assets/slurm-logo.svg";
 import thinkingMachinesLogo from "../assets/thinking-machines.png";
@@ -20,6 +20,8 @@ function backendName(kind: string): string {
       return "SSH";
     case "slurm_job":
       return "Slurm";
+    case "sge_job":
+      return "Sun Grid Engine";
     case "ray_job":
       return "Ray";
     case "openresearch_job":
@@ -168,6 +170,8 @@ export function BackendLogo({ kind, size = 16 }: { kind: string; size?: number }
       return <Server size={size} strokeWidth={1.5} />;
     case "slurm_job":
       return <SlurmLogo size={size} />;
+    case "sge_job":
+      return <Grid3x3 size={size} strokeWidth={1.5} />;
     case "ray_job":
       return <RayLogo size={size} />;
     case "openresearch_job":

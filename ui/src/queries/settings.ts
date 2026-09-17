@@ -33,6 +33,12 @@ export const getSlurmSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getSgeSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSgeSettings"),
+  queryFn: ({ signal }) => api.getSgeSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getRaySettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getRaySettings"),
   queryFn: ({ signal }) => api.getRaySettings(signal),

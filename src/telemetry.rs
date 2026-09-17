@@ -1007,7 +1007,7 @@ impl TelemetrySession {
 ///   `target="openresearch"` provisions an ephemeral OpenResearch box. Every
 ///   current dispatch uses the local store path, so callers pass `true` today.
 /// - `target`: for a run, a COARSE compute label — the backend/provider name
-///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"ray"`, `"openresearch"`,
+///   (`"hf"`, `"modal"`, `"k8s"`, `"ssh"`, `"slurm"`, `"sge"`, `"ray"`, `"openresearch"`,
 ///   `"local"`) for local-mode runs. `None` for `create` (no compute).
 ///   Always a fixed enum label, never an id, name, or path.
 ///
