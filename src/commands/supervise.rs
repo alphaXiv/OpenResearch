@@ -1338,6 +1338,16 @@ async fn cancel_slurm(host: &str, job_id: &str, run_id: &str, cancel_sent: &mut 
 /// write still in flight over NFS, which is the common benign GONE.
 const ACCT_ESCALATION_POLLS: &[u32] = &[4, 12, 36];
 
+/// Whether a GONE poll count should (re-)probe `qacct`: the fixed early
+/// rungs above, then every 24 polls (~2 min) forever after. Accounting files
+/// can lag, so an empty answer at 36 isn't necessarily the last word —
+/// worth rechecking occasionally even past that, for the (rarer) run that
+/// stays unconfirmed long past the unconfirmed ceiling.
+fn should_probe_accounting(gone_polls: u32) -> bool {
+    ACCT_ESCALATION_POLLS.contains(&gone_polls)
+        || (gone_polls > 36 && (gone_polls - 36).is_multiple_of(24))
+}
+
 /// Transport health, tracked apart from the job's own state.
 enum Transport {
     Up,
@@ -1410,8 +1420,19 @@ async fn run_sge(
     let mut cancel_polls = 0u32;
     let mut gone_polls = 0u32;
     let mut blocked_polls = 0u32;
+    let mut unknown_state_polls = 0u32;
+    // How many qacct probes have come back with no record at all — as
+    // opposed to a probe that never got a chance to run, or one whose task
+    // itself failed. Two of these is the scheduler affirmatively saying it
+    // has never heard of this job, not just "not yet".
+    let mut acct_none_polls = 0u32;
     let mut transport = Transport::Up;
     let mut acct: Option<tokio::task::JoinHandle<Result<Option<sge::AcctRecord>>>> = None;
+    // Reflects the PREVIOUS iteration's outcome, written at the top of each
+    // new one — never behind by more than one ~5s poll, and (unlike sprinkling
+    // a write at each of this loop's several `continue` sites) structurally
+    // can't miss a branch, including ones added here later.
+    let mut supervisor_state = "polling".to_string();
     // A supervisor restarted after a reboot has no master; try to get one back
     // before the first poll so the common case never shows a banner at all.
     let _ = ssh::ensure_master_headless(&sge::login(&host)).await;
@@ -1427,6 +1448,9 @@ async fn run_sge(
         };
 
     loop {
+        if let Err(err) = store.touch_supervisor(&run_id, &supervisor_state) {
+            eprintln!("supervise {run_id}: heartbeat write failed: {err}");
+        }
         let probe = sge::inspect_job(&host, &dir, &job_id).await;
 
         // --- transport fault: never a verdict about the job ---
@@ -1454,6 +1478,7 @@ async fn run_sge(
                     let _ = store.set_result_markdown(&run_id, "");
                 }
                 transport = Transport::Up;
+                supervisor_state = "polling".to_string();
                 // Poll again immediately — we may have missed a terminal state.
                 continue;
             }
@@ -1476,6 +1501,7 @@ async fn run_sge(
                 grace_expired,
                 announced,
             };
+            supervisor_state = "stalled".to_string();
             tokio::time::sleep(stall_backoff(probes, grace_expired)).await;
             continue;
         }
@@ -1484,6 +1510,7 @@ async fn run_sge(
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
+                supervisor_state = "inspect-error".to_string();
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             }
@@ -1504,6 +1531,7 @@ async fn run_sge(
         if job.stage == "BLOCKED" {
             blocked_polls += 1;
             if blocked_polls < 2 {
+                supervisor_state = "blocked-wait".to_string();
                 tokio::time::sleep(POLL_INTERVAL).await;
                 continue;
             }
@@ -1523,7 +1551,7 @@ async fn run_sge(
         // --- GONE: left the queue with no exit code; escalate to accounting ---
         if job.stage == "GONE" {
             gone_polls += 1;
-            if acct.is_none() && ACCT_ESCALATION_POLLS.contains(&gone_polls) {
+            if acct.is_none() && should_probe_accounting(gone_polls) {
                 let (h, j) = (host.clone(), job_id.clone());
                 acct = Some(tokio::spawn(
                     async move { sge::probe_accounting(&h, &j).await },
@@ -1532,27 +1560,70 @@ async fn run_sge(
             // Harvest without ever awaiting it inside the loop's cadence.
             if acct.as_ref().is_some_and(|h| h.is_finished()) {
                 if let Some(handle) = acct.take() {
-                    if let Ok(Ok(Some(rec))) = handle.await {
-                        job = sge::map_acct_record(&rec);
+                    match handle.await {
+                        Ok(Ok(Some(rec))) => job = sge::map_acct_record(&rec),
+                        // A clean answer with nothing in it — the scheduler
+                        // itself has no memory of this job, not just "hasn't
+                        // gotten around to it yet" (a failed probe or one
+                        // whose task panicked says nothing either way).
+                        Ok(Ok(None)) => acct_none_polls += 1,
+                        _ => {}
                     }
                 }
             }
             if job.stage == "GONE" {
-                if gone_polls >= 60 {
+                // Two accounting probes agreeing the job is unknown is a
+                // stronger signal than elapsed polls alone, so it earns a
+                // shorter wait than the unconfirmed default.
+                let confirmed_unknown = acct_none_polls >= 2;
+                let ceiling = if confirmed_unknown { 36 } else { 60 };
+                if gone_polls >= ceiling {
                     job = sge::JobState {
                         stage: "ERROR".to_string(),
-                        message: Some(
+                        message: Some(if confirmed_unknown {
+                            "job left the queue without an exit code, and the scheduler's own accounting has no record of it (killed or node lost?)"
+                                .to_string()
+                        } else {
                             "job left the queue without an exit code (killed or node lost?)"
-                                .to_string(),
-                        ),
+                                .to_string()
+                        }),
                     };
                 } else {
+                    supervisor_state = "gone-wait".to_string();
                     tokio::time::sleep(POLL_INTERVAL).await;
                     continue;
                 }
             }
         } else {
             gone_polls = 0;
+            acct_none_polls = 0;
+        }
+
+        // --- Silent RUNNING fallback: an unrecognized qstat token maps to
+        // RUNNING as a safe default (never wedge a run into a false terminal
+        // verdict) — but if it keeps recurring, the job is more likely gone
+        // from the scheduler than genuinely running; qstat's state column has
+        // no "unknown" value of its own to report that directly. ---
+        let is_unknown_state = job.stage == "RUNNING"
+            && job.message.as_deref().is_some_and(|msg| {
+                msg.starts_with("unrecognized sge state:")
+                    || msg.starts_with("unexpected inspect output:")
+            });
+        if is_unknown_state {
+            unknown_state_polls += 1;
+            supervisor_state = "unknown-state".to_string();
+            if unknown_state_polls >= 12 {
+                job = sge::JobState {
+                    stage: "ERROR".to_string(),
+                    message: Some(
+                        "the scheduler kept returning a state this backend doesn't recognize — treating the job as gone"
+                            .to_string(),
+                    ),
+                };
+            }
+        } else {
+            unknown_state_polls = 0;
+            supervisor_state = "polling".to_string();
         }
 
         let stage = job.stage.as_str();
@@ -1858,6 +1929,20 @@ mod tests {
         let stuck = report(false, false, false);
         assert!(stuck.contains("already running"));
         assert!(!stuck.contains("Replaced"));
+    }
+
+    #[test]
+    fn accounting_probes_at_the_fixed_rungs_then_every_24_polls_after() {
+        for poll in [4, 12, 36] {
+            assert!(should_probe_accounting(poll), "rung at {poll}");
+        }
+        for poll in [1, 3, 5, 11, 13, 35, 37, 47, 59] {
+            assert!(!should_probe_accounting(poll), "no probe at {poll}");
+        }
+        // Past the last fixed rung, every 24 polls forever — 60, 84, 108…
+        for poll in [60, 84, 108] {
+            assert!(should_probe_accounting(poll), "post-rung probe at {poll}");
+        }
     }
 
     /// The identity check is the only thing standing between a recycled pid and

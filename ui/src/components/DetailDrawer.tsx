@@ -1,10 +1,11 @@
 import { m } from "../paraglide/messages.js";
-import { ChevronDown, CircleStop, RefreshCw } from "lucide-react";
+import { ChevronDown, CircleStop, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   cancelRun,
   resyncRun,
   runDisplayStatus,
+  supervisorStateLabel,
   timeAgo,
   type Experiment,
   type Project,
@@ -155,6 +156,17 @@ function TerminalView({
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
+        {live && supervisorStateLabel(selectedRun?.supervisorState) && (
+          <span
+            className="term-supervisor-state inline-flex items-center gap-1 shrink-0 py-0.5 px-1.5 rounded-sm bg-accent-amber/15 text-accent-amber text-xs font-medium"
+            title={supervisorStateLabel(selectedRun?.supervisorState) ?? undefined}
+          >
+            <TriangleAlert size={12} className="shrink-0" aria-hidden="true" />
+            <span className="max-w-45 overflow-hidden text-ellipsis whitespace-nowrap">
+              {supervisorStateLabel(selectedRun?.supervisorState)}
+            </span>
+          </span>
+        )}
         <span className="flex-1" />
         {live && (
           <Button

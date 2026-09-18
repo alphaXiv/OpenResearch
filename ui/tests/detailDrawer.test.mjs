@@ -13,12 +13,12 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now" },
+  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now", supervisorStateLabel: () => null },
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
   "./ui": { Button: ({ children }) => React.createElement("button", null, children) },
-  "lucide-react": { ChevronDown: () => null, CircleStop: () => null },
+  "lucide-react": { ChevronDown: () => null, CircleStop: () => null, TriangleAlert: () => null },
 };
 const exports = {};
 new Function("require", "exports", compiled)((name) => mocks[name] ?? require(name), exports);

@@ -142,6 +142,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         });
     }
+    {
+        let moving = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SUPERVISOR_SWEEP_INTERVAL).await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let _gate = gate.lock().await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                sweep_stale_supervisors().await;
+            }
+        });
+    }
 
     spawn_agent_preflight();
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
@@ -827,6 +844,14 @@ struct ApiRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
     cancel_requested: bool,
+    /// The supervisor's last heartbeat — absent for a backend that doesn't
+    /// write one (anything but SGE today), or before its first poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_seen_at: Option<i64>,
+    /// `polling | stalled | inspect-error | blocked-wait | gone-wait |
+    /// unknown-state` — see `run_sge`'s heartbeat sites in supervise.rs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_state: Option<String>,
 }
 
 impl From<&StoredRun> for ApiRun {
@@ -845,7 +870,23 @@ impl From<&StoredRun> for ApiRun {
             ended_at: run.ended_at,
             exit_code: run.exit_code,
             cancel_requested: run.cancel_requested,
+            supervisor_seen_at: None,
+            supervisor_state: None,
         }
+    }
+}
+
+impl ApiRun {
+    /// Fills in the supervisor heartbeat fields — separate from `From`
+    /// because the heartbeat lives in its own table (`run_supervisors`), not
+    /// on `StoredRun`, so building one needs a `Store` a plain conversion
+    /// doesn't have.
+    fn with_heartbeat(mut self, heartbeat: Option<(i64, String)>) -> Self {
+        if let Some((seen_at, state)) = heartbeat {
+            self.supervisor_seen_at = Some(seen_at);
+            self.supervisor_state = Some(state);
+        }
+        self
     }
 }
 
@@ -2084,15 +2125,17 @@ fn backend_for_run(
 }
 
 async fn get_run(Path(id): Path<String>) -> ApiResult {
-    let run = Store::open()?
-        .get_run(&id)?
-        .ok_or_else(|| not_found("run"))?;
+    let store = Store::open()?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     let backend = backend_for_run(&run)?;
     let run = backend.status(&run).await.map_err(bad_request)?;
     if is_terminal(&run.status) {
         backend.cleanup(&run).await.map_err(bad_request)?;
     }
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+    let heartbeat = store.get_supervisor_heartbeat(&run.id).unwrap_or(None);
+    Ok(Json(
+        json!({ "run": ApiRun::from(&run).with_heartbeat(heartbeat) }),
+    ))
 }
 
 /// Newest-first cap for the cross-project instances list. Generous: the store
@@ -2112,9 +2155,10 @@ async fn list_instances() -> ApiResult {
         .collect();
     let mut instances: Vec<Value> = Vec::new();
     for run in store.list_runs(INSTANCES_LIMIT)? {
+        let heartbeat = store.get_supervisor_heartbeat(&run.id).unwrap_or(None);
         // ApiRun is a plain serializable struct, so this can't realistically
         // fail; propagate rather than emit a malformed row if it ever does.
-        let mut value = serde_json::to_value(ApiRun::from(&run))
+        let mut value = serde_json::to_value(ApiRun::from(&run).with_heartbeat(heartbeat))
             .map_err(|e| anyhow!("serialize run {}: {e}", run.id))?;
         if let (Some(obj), Some(name)) = (value.as_object_mut(), names.get(&run.project_id)) {
             obj.insert("projectName".into(), json!(name));
@@ -2135,6 +2179,64 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+const SUPERVISOR_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A supervisor's heartbeat (or, for a backend that doesn't write one, its
+/// run's own `updated_at`) older than this is stale enough to resync
+/// automatically — comfortably past the ~5s SGE poll cadence, so it only
+/// fires on a supervisor that is actually gone or wedged, not a slow poll.
+const SUPERVISOR_STALE_AFTER_MS: i64 = 3 * 60 * 1000;
+
+/// Automatic counterpart to the manual Resync button: every
+/// [`SUPERVISOR_SWEEP_INTERVAL`], resync any active run whose supervisor has
+/// gone quiet — the "shows running but the process died or the SSH master
+/// wedged" gap the manual button exists for, closed without a person having
+/// to notice and click it.
+///
+/// Safe by the same reasoning `resync` itself documents: replacing a
+/// *healthy* supervisor is harmless (restart-idempotent, remirrors from byte
+/// zero), so a false positive here costs nothing but one extra respawn. A
+/// backend that never calls `touch_supervisor` (anything but SGE today) has
+/// no heartbeat row, so this falls back to the run's own `updated_at` — a
+/// coarser signal, but the same safe-to-resync guarantee applies.
+async fn sweep_stale_supervisors() {
+    let Ok(store) = Store::open() else { return };
+    let Ok(runs) = store.list_active_runs() else {
+        return;
+    };
+    for run in runs {
+        match store.get_local_experiment(&run.experiment_id) {
+            Ok(Some(_)) => {}
+            // Matches the startup sweep's own guard (up.rs, near the top of
+            // `run`): an orphaned run with no experiment left isn't ours to
+            // touch.
+            _ => continue,
+        }
+        let stale = match store.get_supervisor_heartbeat(&run.id) {
+            Ok(Some((seen_at, _state))) => now_ms() - seen_at > SUPERVISOR_STALE_AFTER_MS,
+            Ok(None) => now_ms() - run.updated_at > SUPERVISOR_STALE_AFTER_MS,
+            Err(_) => false,
+        };
+        if !stale {
+            continue;
+        }
+        match crate::commands::supervise::resync(&run.id).await {
+            Ok(report) if report.replaced || report.spawned => {
+                eprintln!(
+                    "orx up: supervisor sweep resynced run {}: {}",
+                    run.id,
+                    report.describe(&run.id)
+                );
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!(
+                "orx up: supervisor sweep resync failed for run {}: {err}",
+                run.id
+            ),
+        }
+    }
 }
 
 /// Manual fallback for a supervisor that is alive but no longer advancing the
@@ -7662,13 +7764,17 @@ impl Drop for DashboardClientGuard {
     }
 }
 
+/// status, updated_at, minute-bucketed supervisor heartbeat (seen_at bucket,
+/// state) — the last-seen shape of one run, for `EventCursor::runs`.
+type RunCursorEntry = (String, i64, Option<(i64, String)>);
+
 /// Diff state for one SSE subscriber.
 #[derive(Default)]
 struct EventCursor {
     projects: HashMap<String, i64>,
     experiments: HashMap<String, i64>,
     files: HashMap<String, u64>,
-    runs: HashMap<String, (String, i64)>,
+    runs: HashMap<String, RunCursorEntry>,
     log_offsets: HashMap<String, u64>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
@@ -7766,17 +7872,35 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
     }
 
     for run in store.list_runs(200)? {
+        // A terminal run's supervisor is gone for good, so its heartbeat is
+        // moot — skip the extra query for the common case (most runs in this
+        // 200-row window are history, not live).
+        let heartbeat = if is_terminal(&run.status) {
+            None
+        } else {
+            store.get_supervisor_heartbeat(&run.id).unwrap_or(None)
+        };
+        // Bucketed to the minute: the heartbeat's `seen_at` itself moves on
+        // every ~5s poll, which would otherwise re-emit every active run on
+        // every tick. A state change (e.g. polling -> stalled) still lands
+        // within one bucket's width at worst.
+        let heartbeat_cursor = heartbeat
+            .as_ref()
+            .map(|(seen_at, state)| (seen_at / 60_000, state.clone()));
         let changed = match cursor.runs.get(&run.id) {
             None => true,
-            Some((status, updated)) => *status != run.status || *updated != run.updated_at,
+            Some((status, updated, hb)) => {
+                *status != run.status || *updated != run.updated_at || *hb != heartbeat_cursor
+            }
         };
         if changed {
-            cursor
-                .runs
-                .insert(run.id.clone(), (run.status.clone(), run.updated_at));
+            cursor.runs.insert(
+                run.id.clone(),
+                (run.status.clone(), run.updated_at, heartbeat_cursor),
+            );
             out.push(json_event(
                 "run.updated",
-                &json!({ "run": ApiRun::from(&run) }),
+                &json!({ "run": ApiRun::from(&run).with_heartbeat(heartbeat) }),
             ));
         }
         if first {
