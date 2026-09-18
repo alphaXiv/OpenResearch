@@ -411,6 +411,42 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const workspaceCardVisible = mainView === "chat" && !panelOpen && workspaceWide;
   // The agents rail is a floating panel too: fixed-width, collapsible.
   const [railOpen, setRailOpen] = useState(true);
+  const [mobile, setMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches);
+  const [mobileRailOpen, setMobileRailOpen] = useState(false);
+  const railVisible = mobile ? mobileRailOpen : railOpen;
+  const mobileDrawerOpen = mobile && mobileRailOpen;
+  const closeRail = () => mobile ? setMobileRailOpen(false) : setRailOpen(false);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => { setMobile(media.matches); setMobileRailOpen(false); };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    setMobileRailOpen(false);
+  }, [location.pathname]);
+  useEffect(() => {
+    if (!mobile || !mobileRailOpen) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const rail = document.querySelector<HTMLElement>(".session-rail");
+    const targets = () => Array.from(rail?.querySelectorAll<HTMLElement>("button:not(:disabled), a[href], input, [tabindex='0']") ?? []).filter((element) => element.getClientRects().length > 0);
+    targets()[0]?.focus();
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation(); setMobileRailOpen(false);
+      } else if (event.key === "Tab") {
+        const focusable = targets(), first = focusable[0], last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, [mobile, mobileRailOpen]);
+
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const currentRightPaneStateRef = useRef<RightPaneSessionState>(initialRightPaneSessionState());
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
@@ -1440,6 +1476,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const codeTab = requestedCodeTab
     ? (codeTabs.find((tab) => sameCodeTab(tab, requestedCodeTab)) ?? null)
     : null;
+  let activeWorkspaceView: "files" | "artifacts" | "experiments" | "terminal" | null = null;
+  if (expTab || codeTab) {
+    activeWorkspaceView = "experiments";
+  } else if (fileTab) {
+    activeWorkspaceView = fileTab.source === "artifacts" ? "artifacts" : "files";
+  } else if (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") {
+    activeWorkspaceView = rightTab;
+  }
   const contentTabByKey = new Map<string, ContentTab>();
   for (const tab of [...expTabs, ...fileTabs, ...planTabs, ...subagentTabs, ...codeTabs]) {
     contentTabByKey.set(rightTabKey(tab), tab);
@@ -1536,6 +1580,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     );
   };
 
+
   if (!destination || destination.kind === "resume") return null;
 
   if (startupError) {
@@ -1577,9 +1622,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     <RailHeader
       projectName={projects.find((p) => p.id === projectId)?.name ?? ""}
       onHome={() => void router.navigate({ to: "/projects" })}
-      onNewProject={() => setNewProjectOpen(true)}
-      onRepository={() => selectMainView("git")}
-      onCollapse={() => setRailOpen(false)}
+      onNewProject={() => { setMobileRailOpen(false); setNewProjectOpen(true); }}
+      onRepository={() => { setMobileRailOpen(false); selectMainView("git"); }}
+      onCollapse={closeRail}
     />
   );
 
@@ -1589,15 +1634,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       {runtime.kind === "local" && <UpdateBanner status={updateStatus} />}
       {workspaceError && <div role="alert" className="flex items-center gap-2 px-4 py-2 text-subtext"><span>{workspaceError}</span><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>}
       <div className={`app-body workspace-body relative flex flex-1 min-h-0 py-0 px-3.5 ${workspaceCardVisible ? "workspace-card-visible" : ""}`}>
+        {mobile && mobileRailOpen && <button className="mobile-rail-backdrop fixed inset-0 z-70 bg-modal-backdrop" aria-label={m.header_hide_sidebar()} onClick={() => setMobileRailOpen(false)} />}
         {projectId && (
           <ChatPanel
             projectId={projectId}
             projectName={activeProject?.name ?? ""}
             railHeader={railHeader}
-            railOpen={railOpen}
-            onShowRail={() => setRailOpen(true)}
+            railOpen={railVisible}
+            contentInert={mobile && (mobileRailOpen || (mainView === "chat" && panelOpen))}
+            onShowRail={() => mobile ? setMobileRailOpen(true) : setRailOpen(true)}
             mainView={mainView}
-            onSelectMainView={selectMainView}
+            onSelectMainView={(view) => { setMobileRailOpen(false); selectMainView(view); }}
             onOpenFile={openChatFile}
             onOpenRun={openRunLogs}
             runExperimentName={runExperimentName}
@@ -1612,7 +1659,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
             }
             activeSessionId={activeSessionId}
-            onActiveSessionChange={onActiveSessionChange}
+            onActiveSessionChange={(...args) => { setMobileRailOpen(false); onActiveSessionChange(...args); }}
             preferredAgent={uiState.preferredAgent}
             onPreferredAgentChange={persistPreferredAgent}
           >
@@ -1633,12 +1680,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && (
           <WorkspaceTools
+            inert={mobileDrawerOpen}
             expanded={workspaceCardVisible}
             experiments={experiments}
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
             rightOffset={panelOpen ? panelWidth + 28 : undefined}
-            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
+            activeView={panelOpen ? activeWorkspaceView : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
             sessionId={activeSessionId}
@@ -1652,6 +1700,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         )}
         {mainView === "chat" && panelOpen && (
           <aside
+            inert={mobileDrawerOpen}
             className={`right-pane relative shrink-0 min-w-0 flex flex-col mt-5 me-0 mb-5 ms-3.5 bg-canvas [&.max]:fixed [&.max]:inset-2.5 [&.max]:m-0 [&.max]:z-60 [&.max]:shadow-panel-max border border-border rounded-lg overflow-hidden shadow-elevated ${panelMax ? "max" : ""}`}
             style={panelMax ? undefined : { width: panelWidth }}
             data-onboarding="experiments"
