@@ -899,7 +899,14 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut command = if cfg!(windows) {
             let launcher = root.join("cursor-agent.cmd");
-            std::fs::write(&launcher, "@powershell.exe -NoProfile -Command \"[Console]::InputEncoding = [Text.UTF8Encoding]::new(); [Console]::OutputEncoding = [Text.UTF8Encoding]::new(); [Console]::Out.Write([Console]::In.ReadToEnd())\"\r\n").unwrap();
+            std::fs::write(
+                &launcher,
+                format!(
+                    "@\"{}\" -c cat\r\n",
+                    crate::local::bash::program().to_string_lossy()
+                ),
+            )
+            .unwrap();
             Command::new(launcher)
         } else {
             Command::new("cat")
