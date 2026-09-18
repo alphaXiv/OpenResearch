@@ -47,9 +47,10 @@ offers a Restart button once the new version is on disk.
 `orx.exe` is not code-signed yet, so Windows shows "Windows protected your PC"
 on first run. Choose **More info** → **Run anyway**.
 
-Signing is planned, but it will not make this go away immediately: since 2024
-even an EV certificate has to earn SmartScreen reputation through download
-volume like any other, so early builds will keep showing the warning.
+Signing is planned ([setup runbook](windows-signing.md)), but it will not make
+this go away immediately: since 2024 even an EV certificate has to earn
+SmartScreen reputation through download volume like any other, so early builds
+will keep showing the warning.
 
 ### Long paths
 
