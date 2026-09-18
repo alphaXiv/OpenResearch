@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn local_job_lifecycle() {
         // The only test that touches ORX_DATA_DIR, so the global env is safe.
-        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", uuid::Uuid::new_v4()));
         std::env::set_var("ORX_DATA_DIR", &base);
 
         let dir = run_job(&LocalJobSpec {
