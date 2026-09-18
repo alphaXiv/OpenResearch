@@ -13,11 +13,14 @@ const compiled = ts.transpileModule(source, {
 }).outputText;
 const mocks = {
   "../paraglide/messages.js": { m: new Proxy({}, { get: (_, name) => () => String(name) }) },
-  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now" },
+  "../api": { runDisplayStatus: () => "complete", timeAgo: () => "now", backendJobLabel: () => "" },
   "./ExperimentOverview": { ExperimentOverview: () => null },
   "./LogTerminal": { LogTerminal: ({ runId }) => `LOG:${runId}` },
   "./StatusBadge": { StatusBadge: () => null },
-  "./ui": { Button: ({ children }) => React.createElement("button", null, children) },
+  "./ui": {
+    Button: ({ children }) => React.createElement("button", null, children),
+    CopyButton: () => null,
+  },
   "lucide-react": { ChevronDown: () => null, CircleStop: () => null },
 };
 const exports = {};

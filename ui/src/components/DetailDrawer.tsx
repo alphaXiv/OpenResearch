@@ -2,6 +2,7 @@ import { m } from "../paraglide/messages.js";
 import { ChevronDown, CircleStop, RefreshCw } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+  backendJobLabel,
   cancelRun,
   resyncRun,
   runDisplayStatus,
@@ -15,7 +16,7 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
-import { Button, MenuItem, showAlert } from "./ui";
+import { Button, CopyButton, MenuItem, showAlert } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -155,6 +156,12 @@ function TerminalView({
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
+        {selectedRun && backendJobLabel(selectedRun.backend) && (
+          <span className="term-job inline-flex items-center gap-1 min-w-0 text-xs text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={m.experiment_overview_job()}>
+            <code>{backendJobLabel(selectedRun.backend)}</code>
+            <CopyButton text={backendJobLabel(selectedRun.backend)} title={m.md_copy()} />
+          </span>
+        )}
         <span className="flex-1" />
         {live && (
           <Button

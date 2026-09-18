@@ -12,6 +12,9 @@ export const STATUS_STYLES: Record<string, StatusStyle> = {
   failed: { tone: "danger", live: false },
   running: { tone: "info", live: true },
   starting: { tone: "warning", live: true },
+  // Same live/tone as "starting" — "queued" is a display-only relabeling of
+  // it (see `runDisplayStatus`), not a distinct stored run status.
+  queued: { tone: "warning", live: true },
   cancelling: { tone: "caution", live: true },
   cancelled: { tone: "caution", live: false },
   editing: { tone: "accent", live: true },
@@ -27,6 +30,7 @@ const STATUS_LABELS: Record<string, () => string> = {
   failed: m.status_failed,
   running: m.status_running,
   starting: m.status_starting,
+  queued: m.status_queued,
   cancelling: m.status_cancelling,
   cancelled: m.status_cancelled,
   editing: m.status_editing,

@@ -16,6 +16,7 @@ import { Ellipsis, FolderTree, Terminal } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { memo, useMemo, useRef } from "react";
 import {
+  backendJobLabel,
   githubBranchUrl,
   fmtNumber,
   runDisplayStatus,
@@ -178,7 +179,7 @@ function subtreeWidth(node: DisplayNode): number {
 function runSquareClass(status: string): string {
   if (status === "done") return "pass";
   if (status === "failed") return "fail";
-  if (status === "running" || status === "starting" || status === "cancelling") return "live";
+  if (status === "running" || status === "starting" || status === "queued" || status === "cancelling") return "live";
   return "other";
 }
 
@@ -186,7 +187,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
   useLocale();
   const { exp, latestRun, runs, isBaseline, parentSlug, githubOwner, githubRepo, onOpenView, onOpenCode } = data;
   const status = latestRun ? runDisplayStatus(latestRun) : undefined;
-  const live = status === "running" || status === "starting" || status === "cancelling";
+  const live = status === "running" || status === "starting" || status === "queued" || status === "cancelling";
   const kind = isBaseline ? m.tree_baseline() : live ? m.tree_running() : m.tree_experiment();
   const squares = runs.slice(-MAX_SQUARES);
 
@@ -209,6 +210,7 @@ const ExpNode = memo(function ExpNode({ data }: NodeProps<ExpFlowNode>) {
         role="button"
         tabIndex={0}
         className="node-overview-link nodrag"
+        title={latestRun ? backendJobLabel(latestRun.backend) || undefined : undefined}
         {...tabOpenGestureHandlers<HTMLDivElement>((intent) =>
           onOpenView(exp.id, "overview", intent),
         )}

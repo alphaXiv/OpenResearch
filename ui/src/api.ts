@@ -83,7 +83,7 @@ export interface Experiment {
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
-export type RunDisplayStatus = RunStatus | "cancelling";
+export type RunDisplayStatus = RunStatus | "cancelling" | "queued";
 
 export interface Run {
   id: string;
@@ -101,9 +101,18 @@ export interface Run {
   cancelRequested: boolean;
 }
 
-export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
+/** SGE has no separate "queued" run status — a job sitting in the grid
+ *  engine's queue (`qw`/`hqw`, or freshly submitted and not yet polled)
+ *  stores the same generic `"starting"` every backend uses. That's correct
+ *  as stored state (still not live/running), but reads as misleading on the
+ *  SCC where "starting" implies progress a queued job hasn't made yet — so
+ *  this relabels it for display only; nothing downstream that keys off the
+ *  stored `status` (liveness checks, SSE diffing, the CLI) changes. */
+export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested" | "backend">): RunDisplayStatus {
   const live = run.status === "running" || run.status === "starting";
-  return live && run.cancelRequested ? "cancelling" : run.status;
+  if (live && run.cancelRequested) return "cancelling";
+  if (run.status === "starting" && backendKind(run.backend) === "sge_job") return "queued";
+  return run.status;
 }
 
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
@@ -2202,6 +2211,14 @@ export function backendJobLabel(backend: Run["backend"]): string {
     default:
       return "";
   }
+}
+
+/** The absolute remote run directory recorded on a run's backend descriptor
+ *  (`sge_job` today — pinned at submit so a later `workDir` edit can't strand
+ *  a live run's supervisor). Empty when the backend doesn't record one. */
+export function backendRunDir(backend: Run["backend"]): string {
+  if (!backend) return "";
+  return typeof backend.runDir === "string" ? backend.runDir : "";
 }
 
 export interface LocalModelConnection {
