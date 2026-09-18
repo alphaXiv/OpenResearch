@@ -1044,6 +1044,7 @@
   "chat_toggle_plan_failed": "تغییر حالت طرح ممکن نشد. دوباره تلاش کنید.",
   "chat_asked_about_selection": "دربارهٔ متن انتخاب‌شده پرسیده شد",
   "chat_message_not_sent": "پیام ارسال نشد: {error}",
+  "chat_nothing_to_copy": "هنوز چیزی برای کپی کردن وجود ندارد",
   "chat_panel_bash": "Bash",
   "chat_panel_exit_bash_mode": "خروج از حالت Bash",
   "chat_bash_busy": "پیش از اجرای فرمان، صبر کنید تا نوبت تمام شود.",

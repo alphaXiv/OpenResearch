@@ -102,6 +102,26 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
 }
 
+/** Plain text of the most recent assistant turn's answer, or null when there
+ * isn't one yet — what `/copy` puts on the clipboard. `busy` mirrors the
+ * `streaming` flag `AssistantTurn` passes into `splitTurnParts` for the live
+ * tail message, so a still-generating reply copies whatever is visible now
+ * rather than misreading it as having no final answer yet. */
+export function lastAssistantAnswerText(messages: ChatMessage[], busy: boolean): string | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    const { answer } = splitTurnParts(message.parts, busy && index === messages.length - 1);
+    const text = answer
+      .filter((part): part is ChatPart & { text: string } => part.type === "text" && Boolean(part.text))
+      .map((part) => part.text)
+      .join("\n\n")
+      .trim();
+    return text || null;
+  }
+  return null;
+}
+
 export function isModelAccessLimitPart(part: ChatPart): boolean {
   return part.type === "tool" && part.tool === "error"
     && /^(?:ActionRequiredError:\s*)?Named models unavailable\b/i.test(part.state?.error?.trim() ?? "");

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   commandsForHarness,
   effectiveCommandPlanMode,
+  isCopyCommand,
   parsePlanCommand,
   insertSlashCommand,
   removeSlashCommand,
@@ -172,4 +173,13 @@ test("a requested toggle overrides pending Plan state for an immediate send", ()
   assert.equal(effectiveCommandPlanMode("command", false, true), false);
   assert.equal(effectiveCommandPlanMode("permission", true, true), undefined);
   assert.equal(effectiveCommandPlanMode("command", undefined, null), undefined);
+});
+
+test("/copy is recognized only as the composer's entire message", () => {
+  assert.equal(isCopyCommand("/copy"), true);
+  assert.equal(isCopyCommand("  /COPY  "), true);
+  assert.equal(isCopyCommand("/copy this instead"), false);
+  assert.equal(isCopyCommand("please /copy that"), false);
+  assert.equal(isCopyCommand("/copyright notice"), false);
+  assert.equal(isCopyCommand(""), false);
 });

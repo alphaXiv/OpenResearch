@@ -121,6 +121,7 @@ import {
   isModelAccessLimitPart,
   unreadAfterBusyChange,
   isTurnStatusPart,
+  lastAssistantAnswerText,
   partIsVisible,
   pendingQuestionId,
   partsTailToolId,
@@ -165,6 +166,7 @@ import {
   commandsForHarness,
   effectiveCommandPlanMode,
   insertSlashCommand,
+  isCopyCommand,
   parsePlanCommand,
   removeSlashCommand,
   slashCommandContext,
@@ -5192,6 +5194,26 @@ export function ChatPanel({
     const text = planCommand ? planCommand.prompt : originalText;
     const pending = attachments;
     const pendingAnnotations = annotations;
+    // A bare `/copy` never reaches the harness: it's a local-only shortcut for
+    // the copy button already on each turn (`ForkControls`), for users who
+    // reach for the standalone CLI's slash command out of habit (see the
+    // OpenResearch issue about Claude Code harness commands not working).
+    if (!pendingQuestion && isCopyCommand(originalText) && pending.length === 0 && pendingAnnotations.length === 0) {
+      setDraft("");
+      const answer = lastAssistantAnswerText(messages, busy);
+      if (!answer) {
+        showAlert(m.chat_nothing_to_copy(), "error");
+        return;
+      }
+      try {
+        if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+        await navigator.clipboard.writeText(answer);
+        showAlert(m.common_copied(), "success");
+      } catch (error) {
+        showAlert(error instanceof Error ? error.message : String(error), "error");
+      }
+      return;
+    }
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
       text: annotation.text,
     }));

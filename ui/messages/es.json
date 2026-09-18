@@ -1050,6 +1050,7 @@
   "chat_toggle_plan_failed": "No se pudo cambiar el modo Plan. Inténtalo de nuevo.",
   "chat_asked_about_selection": "Preguntó sobre el texto seleccionado",
   "chat_message_not_sent": "Mensaje no enviado: {error}",
+  "chat_nothing_to_copy": "Aún no hay nada que copiar",
   "chat_panel_bash": "Bash",
   "chat_panel_exit_bash_mode": "Salir del modo Bash",
   "chat_bash_busy": "Espera a que termine el turno antes de ejecutar un comando.",

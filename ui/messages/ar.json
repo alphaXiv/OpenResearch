@@ -1049,6 +1049,7 @@
   "chat_toggle_plan_failed": "تعذّر تبديل وضع التخطيط. حاول مجددًا.",
   "chat_asked_about_selection": "سأل عن النص المحدد",
   "chat_message_not_sent": "لم تُرسل الرسالة: {error}",
+  "chat_nothing_to_copy": "لا يوجد شيء لنسخه بعد",
   "chat_panel_bash": "Bash",
   "chat_panel_exit_bash_mode": "الخروج من وضع Bash",
   "chat_bash_busy": "انتظر انتهاء الجولة قبل تنفيذ أمر.",

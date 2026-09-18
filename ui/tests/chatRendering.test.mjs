@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  lastAssistantAnswerText,
   unreadAfterBusyChange,
   partIsVisible,
   pendingQuestionId,
@@ -10,6 +11,7 @@ import {
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
+const userMessage = (...parts) => ({ id: "user", role: "user", parts, createdAt: 0 });
 
 test("invisible transcript parts do not displace a visible tool tail", () => {
   const tool = { id: "tool", type: "tool", state: { status: "completed" } };
@@ -144,4 +146,41 @@ test("live OpenCode questions route composer text to the existing prompt", () =>
   }
   assert.equal(pendingQuestionId([message({ ...question, prompt: { ...question.prompt, resolved: true } })], "opencode", true), null);
   assert.equal(pendingQuestionId([message(question)], "cursor", true), null);
+});
+
+test("lastAssistantAnswerText returns the final answer, not tool or reasoning parts", () => {
+  const turn = message(
+    { id: "r1", type: "reasoning", text: "thinking" },
+    { id: "t1", type: "tool", tool: "Bash", state: { status: "completed" } },
+    { id: "a1", type: "text", phase: "final_answer", text: "Here is the answer." },
+  );
+  assert.equal(lastAssistantAnswerText([turn], false), "Here is the answer.");
+});
+
+test("lastAssistantAnswerText finds the most recent assistant turn and joins multi-part answers", () => {
+  const earlier = message({ id: "a1", type: "text", phase: "final_answer", text: "old reply" });
+  const latest = message(
+    { id: "a2", type: "text", phase: "final_answer", text: "first part" },
+    { id: "a3", type: "text", phase: "final_answer", text: "second part" },
+  );
+  const trailingUser = userMessage({ id: "u1", type: "text", text: "thanks, one more thing" });
+  assert.equal(
+    lastAssistantAnswerText([earlier, latest, trailingUser], false),
+    "first part\n\nsecond part",
+  );
+});
+
+test("lastAssistantAnswerText returns null before any assistant reply exists", () => {
+  assert.equal(lastAssistantAnswerText([userMessage({ id: "u1", type: "text", text: "hi" })], false), null);
+  assert.equal(lastAssistantAnswerText([], false), null);
+});
+
+test("lastAssistantAnswerText copies a still-streaming reply's visible partial text", () => {
+  const streamingTurn = message({ id: "a1", type: "text", text: "partial resul" });
+  assert.equal(lastAssistantAnswerText([streamingTurn], true), "partial resul");
+});
+
+test("lastAssistantAnswerText returns null while the live turn has no text yet", () => {
+  const toolOnly = message({ id: "t1", type: "tool", tool: "Bash", state: { status: "running" } });
+  assert.equal(lastAssistantAnswerText([toolOnly], true), null);
 });

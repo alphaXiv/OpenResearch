@@ -132,6 +132,14 @@ export function parsePlanCommand(
   return { prompt: text.replace(token, "").trim() };
 }
 
+/** Whole-message `/copy` (any letter case, extra surrounding whitespace) —
+ * copies the last assistant answer to the clipboard instead of being sent as
+ * a chat message. Matches how the standalone Claude Code CLI treats this
+ * token; unlike `/plan` it never mixes with the rest of a prompt. */
+export function isCopyCommand(text: string): boolean {
+  return /^\/copy$/i.test(text.trim());
+}
+
 export function effectiveCommandPlanMode(
   planActivation: "permission" | "command" | null | undefined,
   toggledMode: boolean | undefined,

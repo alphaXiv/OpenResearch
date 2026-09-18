@@ -1050,6 +1050,7 @@
   "chat_toggle_plan_failed": "प्लान मोड टॉगल नहीं हो सका। फिर से कोशिश करें।",
   "chat_asked_about_selection": "चयनित टेक्स्ट के बारे में पूछा",
   "chat_message_not_sent": "संदेश नहीं भेजा गया: {error}",
+  "chat_nothing_to_copy": "अभी कॉपी करने के लिए कुछ नहीं है",
   "chat_panel_bash": "Bash",
   "chat_panel_exit_bash_mode": "Bash मोड से बाहर निकलें",
   "chat_bash_busy": "कमांड चलाने से पहले टर्न खत्म होने का इंतज़ार करें।",

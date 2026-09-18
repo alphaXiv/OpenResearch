@@ -1044,6 +1044,7 @@
   "chat_toggle_plan_failed": "无法切换计划模式。请重试。",
   "chat_asked_about_selection": "已询问所选文本",
   "chat_message_not_sent": "消息未发送：{error}",
+  "chat_nothing_to_copy": "暂无可复制的内容",
   "chat_panel_bash": "Bash",
   "chat_panel_exit_bash_mode": "退出 Bash 模式",
   "chat_bash_busy": "请等待本轮结束后再运行命令。",
