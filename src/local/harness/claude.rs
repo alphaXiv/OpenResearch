@@ -25,6 +25,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use jiff::tz::TimeZone;
+use jiff::Timestamp;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -1054,6 +1056,206 @@ pub(crate) fn question_prompt(name: &str, input: Option<&Value>) -> Option<WireP
     })
 }
 
+/// A Claude usage/session/rate-limit failure, classified and — when the
+/// wording gives up a concrete time — resolved to an absolute resume instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsageLimitVerdict {
+    /// Not a usage-limit message — leave the original error kind alone.
+    NotALimit,
+    /// A limit message with a resume time parsed out of it (unix millis).
+    ResetAt(i64),
+    /// A limit message whose wording didn't yield a parseable time — the
+    /// caller applies a fixed fallback delay.
+    UnknownReset,
+}
+
+/// Recognizes a Claude usage/session/rate-limit failure and extracts when to
+/// retry, from the harness's own error text. Matches loosely: Claude Code's
+/// wording for this has already changed once — a structured `rate_limit`
+/// signal vs. the CLI's own "You've hit your session limit · resets 7:40pm
+/// (America/New_York)" text — and will again.
+///
+/// `now` is injected for testability; production calls use [`Timestamp::now`].
+pub fn parse_usage_limit(text: &str, now: Timestamp) -> UsageLimitVerdict {
+    let lower = text.to_ascii_lowercase();
+    let is_limit_message = lower.contains("usage limit")
+        || lower.contains("session limit")
+        || lower.contains("rate limit")
+        || (lower.contains("hit your") && lower.contains("limit"));
+    if !is_limit_message {
+        return UsageLimitVerdict::NotALimit;
+    }
+    if let Some(ms) = parse_reset_clock(text, now)
+        .or_else(|| parse_reset_relative(text, now))
+        .or_else(|| parse_reset_epoch(text))
+    {
+        return UsageLimitVerdict::ResetAt(ms);
+    }
+    UsageLimitVerdict::UnknownReset
+}
+
+/// `resets 7:40pm (America/New_York)` / `resets at 7:40 PM` — a wall-clock
+/// time, optionally with an IANA zone; falls back to the local system zone
+/// when none is given. Rolls to the next day when that wall-clock has
+/// already passed today, since the CLI never means yesterday.
+fn parse_reset_clock(text: &str, now: Timestamp) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    let idx = lower.find("resets")?;
+    let after = text.get(idx + "resets".len()..)?;
+    let after = after.trim_start();
+    let after = after.strip_prefix("at ").unwrap_or(after);
+
+    let (hour_str, after) = take_digits(after, 1, 2)?;
+    let after = after.strip_prefix(':')?;
+    let (minute_str, after) = take_digits(after, 2, 2)?;
+    let hour: i8 = hour_str.parse().ok()?;
+    let minute: i8 = minute_str.parse().ok()?;
+
+    let after = after.trim_start();
+    let after_lower = after.to_ascii_lowercase();
+    // "am"/"pm" are always 2 ASCII bytes, so a fixed skip is safe here.
+    let is_pm = if after_lower.starts_with("pm") {
+        true
+    } else if after_lower.starts_with("am") {
+        false
+    } else {
+        return None;
+    };
+    let after = &after[2..];
+    if !(1..=12).contains(&hour) || !(0..=59).contains(&minute) {
+        return None;
+    }
+    let hour24 = match (hour, is_pm) {
+        (12, true) => 12,
+        (12, false) => 0,
+        (h, true) => h + 12,
+        (h, false) => h,
+    };
+
+    // Optional "(America/New_York)" right after the meridiem.
+    let tz_name = after
+        .trim_start()
+        .strip_prefix('(')
+        .and_then(|s| s.split(')').next());
+    let tz = match tz_name {
+        Some(name) => TimeZone::get(name).ok()?,
+        None => TimeZone::system(),
+    };
+
+    let today = now.to_zoned(tz.clone()).date();
+    let mut candidate = today.at(hour24, minute, 0, 0).to_zoned(tz.clone()).ok()?;
+    if candidate.timestamp() <= now {
+        candidate = candidate
+            .date()
+            .tomorrow()
+            .ok()?
+            .at(hour24, minute, 0, 0)
+            .to_zoned(tz)
+            .ok()?;
+    }
+    Some(candidate.timestamp().as_millisecond())
+}
+
+/// `resets in 5 minutes` / `resets in 2 hours` — a delay relative to now.
+fn parse_reset_relative(text: &str, now: Timestamp) -> Option<i64> {
+    let lower = text.to_ascii_lowercase();
+    let idx = lower.find("resets in ")?;
+    let rest = &lower[idx + "resets in ".len()..];
+    let (digits, rest) = take_digits(rest, 1, 6)?;
+    let n: i64 = digits.parse().ok()?;
+    let rest = rest.trim_start();
+    let minutes = if rest.starts_with("hour") {
+        n * 60
+    } else if rest.starts_with("min") {
+        n
+    } else {
+        return None;
+    };
+    Some(now.as_millisecond() + minutes * 60_000)
+}
+
+/// A trailing `|<epoch>` — a machine-readable form some harness versions may
+/// append; 10 digits means seconds, 13 means milliseconds.
+fn parse_reset_epoch(text: &str) -> Option<i64> {
+    let idx = text.rfind('|')?;
+    let rest = text.get(idx + 1..)?.trim_start();
+    let (digits, _) = take_digits(rest, 10, 13)?;
+    let raw: i64 = digits.parse().ok()?;
+    match digits.len() {
+        10 => Some(raw * 1000),
+        13 => Some(raw),
+        _ => None,
+    }
+}
+
+/// Consumes `min..=max` leading ASCII digits, returning the digit run and the
+/// remainder. `None` if fewer than `min` digits are present.
+fn take_digits(s: &str, min: usize, max: usize) -> Option<(&str, &str)> {
+    let end = s
+        .char_indices()
+        .take(max)
+        .take_while(|(_, c)| c.is_ascii_digit())
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    if end == 0 || s[..end].chars().count() < min {
+        return None;
+    }
+    Some((&s[..end], &s[end..]))
+}
+
+/// Applies [`parse_usage_limit`] to a Claude failure's text: when it
+/// recognizes a usage/session/rate-limit message, reclassifies the terminal
+/// error under one unified `"claude_limit_terminal"` kind (regardless of
+/// which of the two detection paths reached here) and schedules an automatic
+/// resume; otherwise leaves the original `fallback_kind` untouched.
+///
+/// A message with a concrete reset time is always honored — Claude's own
+/// stated time won't repeat artificially. A message that matched but gave up
+/// no parseable time falls back to a fixed 5-minute retry, capped at 3 within
+/// a 2-hour window per session, so a session stuck repeating the same
+/// unparseable limit message doesn't auto-retry forever.
+fn apply_usage_limit_failure(
+    ctx: &mut TurnCtx,
+    session_id: &str,
+    detail: String,
+    fallback_kind: &str,
+) {
+    const UNIFIED_KIND: &str = "claude_limit_terminal";
+    const FALLBACK_DELAY_MS: i64 = 5 * 60 * 1000;
+    const FALLBACK_CAP: i64 = 3;
+    const FALLBACK_WINDOW_MS: i64 = 2 * 60 * 60 * 1000;
+
+    match parse_usage_limit(&detail, Timestamp::now()) {
+        UsageLimitVerdict::NotALimit => {
+            ctx.mark_terminal_failure(fallback_kind, detail);
+        }
+        UsageLimitVerdict::ResetAt(resume_at_ms) => {
+            ctx.mark_terminal_failure(UNIFIED_KIND, detail);
+            ctx.set_resume_at(resume_at_ms);
+        }
+        UsageLimitVerdict::UnknownReset => {
+            ctx.mark_terminal_failure(UNIFIED_KIND, detail);
+            let now = crate::store::now_ms();
+            let under_cap = crate::store::Store::open()
+                .and_then(|store| {
+                    store.count_recent_turn_failures(
+                        session_id,
+                        UNIFIED_KIND,
+                        now - FALLBACK_WINDOW_MS,
+                    )
+                })
+                .map(|count| count < FALLBACK_CAP)
+                // A store error shouldn't block the schedule — the worst
+                // case is one extra retry, not a stuck session.
+                .unwrap_or(true);
+            if under_cap {
+                ctx.set_resume_at(now + FALLBACK_DELAY_MS);
+            }
+        }
+    }
+}
+
 /// Claude's tool inputs are snake_case; the UI summarizes via `filePath`.
 fn normalize_input(input: &Value) -> Value {
     let mut input = input.clone();
@@ -1447,7 +1649,8 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) -> bool 
                     .unwrap_or_else(|| "Claude Code usage limit reached".into());
                 state.usage_limited = true;
                 state.turn_errored = true;
-                ctx.mark_terminal_failure("claude_usage_limit", detail);
+                let session_id = ctx.session_id.clone();
+                apply_usage_limit_failure(ctx, &session_id, detail, "claude_usage_limit");
                 return false;
             }
             let mid = event
@@ -2148,7 +2351,13 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             .rev()
             .find_map(|part| part.state.as_ref()?.error.clone())
             .unwrap_or_else(|| "Claude Code reported a terminal turn error".into());
-        ctx.mark_terminal_failure("claude_terminal", message);
+        // A usage/session limit hit doesn't always surface through the
+        // structured `rate_limit` signal above — it can also arrive as a
+        // plain `result.is_error` whose text just happens to describe one
+        // (e.g. "You've hit your session limit · resets 7:40pm …"), which
+        // lands here instead. Recognize it the same way either path does.
+        let session_id = ctx.session_id.clone();
+        apply_usage_limit_failure(ctx, &session_id, message, "claude_terminal");
     }
     let _ = ctx.flush();
     Ok(())
@@ -2158,6 +2367,73 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    // A fixed instant used across the usage-limit parsing tests: 2024-06-01
+    // 12:00:00 UTC, which is 2024-06-01 08:00:00 in America/New_York (EDT,
+    // UTC-4) — safely before 7:40pm so the "today" branch is exercised.
+    fn fixed_now() -> Timestamp {
+        "2024-06-01T12:00:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn usage_limit_parses_the_real_claude_message_with_a_clock_and_timezone() {
+        let text = "claude: You've hit your session limit · resets 7:40pm (America/New_York)";
+        let UsageLimitVerdict::ResetAt(ms) = parse_usage_limit(text, fixed_now()) else {
+            panic!("expected a parsed reset time");
+        };
+        let got: Timestamp = Timestamp::from_millisecond(ms).unwrap();
+        let want: Timestamp = "2024-06-01T23:40:00Z".parse().unwrap(); // 7:40pm EDT = 23:40 UTC
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn usage_limit_clock_rolls_to_tomorrow_once_the_time_has_passed_today() {
+        // fixed_now() is 08:00 America/New_York; a 7:40am reset already
+        // happened today, so this must resolve to tomorrow's 7:40am.
+        let text = "usage limit reached, resets 7:40am (America/New_York)";
+        let UsageLimitVerdict::ResetAt(ms) = parse_usage_limit(text, fixed_now()) else {
+            panic!("expected a parsed reset time");
+        };
+        let got: Timestamp = Timestamp::from_millisecond(ms).unwrap();
+        let want: Timestamp = "2024-06-02T11:40:00Z".parse().unwrap(); // next day 7:40am EDT
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn usage_limit_parses_a_relative_reset() {
+        let text = "You've hit your usage limit — resets in 45 minutes";
+        let UsageLimitVerdict::ResetAt(ms) = parse_usage_limit(text, fixed_now()) else {
+            panic!("expected a parsed reset time");
+        };
+        assert_eq!(ms, fixed_now().as_millisecond() + 45 * 60_000);
+    }
+
+    #[test]
+    fn usage_limit_parses_a_trailing_epoch() {
+        let text = "rate limit exceeded|1717243200";
+        let UsageLimitVerdict::ResetAt(ms) = parse_usage_limit(text, fixed_now()) else {
+            panic!("expected a parsed reset time");
+        };
+        assert_eq!(ms, 1717243200 * 1000);
+    }
+
+    #[test]
+    fn usage_limit_message_with_no_parseable_time_is_unknown_reset() {
+        let text = "claude: You've hit your usage limit for today.";
+        assert_eq!(
+            parse_usage_limit(text, fixed_now()),
+            UsageLimitVerdict::UnknownReset
+        );
+    }
+
+    #[test]
+    fn ordinary_errors_are_not_usage_limits() {
+        let text = "claude: network error talking to the API";
+        assert_eq!(
+            parse_usage_limit(text, fixed_now()),
+            UsageLimitVerdict::NotALimit
+        );
+    }
 
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {

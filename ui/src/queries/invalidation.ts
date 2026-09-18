@@ -75,6 +75,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],
   telemetry: ["getTelemetry"],
+  "auto-continue-on-limit": ["getAutoContinueOnLimit"],
 };
 
 export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceScope>) {

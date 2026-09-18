@@ -8,6 +8,7 @@ import {
 import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 
 import {
+  getAutoContinueOnLimitQuery,
   getHarnessesQuery,
   refreshHarnesses,
   getK8sSettingsQuery,
@@ -106,6 +107,7 @@ import {
   applyUpdate,
   harnessModelLabel,
   installCli,
+  setAutoContinueOnLimit as setAutoContinueOnLimitApi,
   setAutoUpdate as setAutoUpdateApi,
   type InstallChannel,
   type InstalledCli,
@@ -308,6 +310,13 @@ function HarnessesTab() {
   const { data: harnesses = null } = useQuery(harnessesOptions);
   const [active, setActive] = useState<HarnessId>("claude-code");
   const [refreshing, setRefreshing] = useState(false);
+  const { data: autoContinueOnLimit } = useQuery({
+    ...getAutoContinueOnLimitQuery(),
+    enabled: active === "claude-code",
+  });
+  const setAutoContinueOnLimitMutation = useMutation({
+    mutationFn: (enabled: boolean) => setAutoContinueOnLimitApi(enabled),
+  });
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -382,6 +391,21 @@ function HarnessesTab() {
           </div>
           {h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{renderNote(h.agentNote)}</p>}
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
+          {h.id === "claude-code" && autoContinueOnLimit && (
+            <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+              <div>
+                <div className="project-default-title text-base font-medium">{m.settings_page_auto_continue_on_limit()}</div>
+                <p>{m.settings_page_auto_continue_on_limit_hint()}</p>
+              </div>
+              <Switch
+                type="button"
+                checked={autoContinueOnLimit.enabled}
+                aria-label={m.settings_page_auto_continue_on_limit()}
+                disabled={setAutoContinueOnLimitMutation.isPending}
+                onClick={() => setAutoContinueOnLimitMutation.mutate(!autoContinueOnLimit.enabled)}
+              />
+            </div>
+          )}
         </div>
       )}
     </>

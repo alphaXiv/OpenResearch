@@ -117,6 +117,12 @@ export const getProfileQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getAutoContinueOnLimitQuery = () => queryOptions({
+  queryKey: workspaceKey("getAutoContinueOnLimit"),
+  queryFn: ({ signal }) => api.getAutoContinueOnLimit(signal),
+  staleTime: 30_000,
+});
+
 export const getLitSourcesQuery = () => queryOptions({
   queryKey: workspaceKey("getLitSources"),
   queryFn: ({ signal }) => api.getLitSources(signal),
