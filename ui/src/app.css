@@ -322,3 +322,62 @@
 .openresearch-diff .diff-code {
   @apply whitespace-pre-wrap break-normal break-words;
 }
+
+/* On phones, one workspace pane owns the screen; navigation stays within reach. */
+@media (max-width: 767px) {
+  html, body, #root { height: 100dvh; }
+  .app { padding-top: env(safe-area-inset-top); }
+  .workspace-body { padding-inline: 0; padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  .workspace-body .chat-pane { margin-top: 0; padding-inline-end: 0; }
+  .workspace-body .chat-header { padding-inline: 8px; height: 52px; }
+  .workspace-body .chat-header::after { height: 8px; }
+  .chat-heading-row { grid-template-columns: 44px minmax(0, 1fr) 44px; }
+  .chat-heading-row > .icon-btn, .rail-brand .icon-btn { width: 44px; height: 44px; }
+  .workspace-tools { display: none; }
+  .workspace-mobile-nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 65;
+    min-height: 64px;
+    padding: 4px 8px calc(4px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--border);
+    background: var(--base);
+  }
+  .workspace-mobile-nav button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-height: 56px; border-radius: var(--radius-md); color: var(--subtext); font-size: 12px; }
+  .workspace-mobile-nav button[aria-pressed="true"] { background: var(--surface); color: var(--text); font-weight: 600; }
+  .session-rail { position: fixed; inset-block: max(8px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-bottom)); inset-inline-start: 8px; width: min(320px, calc(100vw - 40px)); margin: 0; z-index: 80; }
+  .session-rail .rail-nav-item { min-height: 44px; }
+  .rail-brand { padding-block: 12px; }
+  .rail-brand > .project-switcher > div { height: 44px; }
+  .workspace-body .right-pane, .workspace-body .right-pane.max { position: fixed; inset: env(safe-area-inset-top) 0 calc(64px + env(safe-area-inset-bottom)); width: 100% !important; margin: 0; border: 0; border-radius: 0; z-index: 60; box-shadow: none; }
+  .right-pane .panel-resizer, .right-pane .panel-controls > :first-child { display: none; }
+  .right-pane > .tabs { height: 52px; padding-inline: 8px; }
+  .right-pane .tab { height: 44px; }
+  .right-pane .tab-close { width: 28px; height: 36px; }
+  .right-pane .panel-controls { padding-inline: 0; }
+  .right-pane .panel-controls > button { width: 44px; height: 44px; }
+  .chat-empty { padding: 20px 16px; overflow-y: auto; justify-content: flex-start; }
+  .chat-empty h2 { font-size: 28px; line-height: 1.2; }
+  .chat-empty-mark { width: 32px; height: 32px; margin-block: 16px; }
+  .chat-empty-project { max-width: 100%; font-size: 14px; }
+  .chat-empty-project svg { flex-shrink: 0; }
+  .chat-empty-project span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chat-thread { scrollbar-gutter: auto; }
+  .chat-thread-inner { padding-inline: 12px; }
+  .composer { padding-inline: 10px; padding-bottom: 10px; }
+  .composer textarea, input, select { font-size: 16px; }
+  .composer-actions { flex-wrap: wrap; gap: 4px; }
+  .experiment-table-group { padding: 16px; }
+  .experiment-table-title { white-space: normal; overflow-wrap: anywhere; }
+  .experiment-table-actions button { min-height: 44px; padding-inline: 12px; }
+  .experiments-toolbar-controls button { min-height: 40px; min-width: 40px; }
+  .experiment-overview-inner { padding: 20px 16px 32px; }
+  .experiment-overview-heading { overflow-wrap: anywhere; }
+  .experiment-overview-actions button { min-height: 44px; }
+  .experiment-run-history button { gap: 8px; }
+  .settings-view-scroll { scrollbar-gutter: auto; }
+  .home { scrollbar-gutter: auto; }
+}

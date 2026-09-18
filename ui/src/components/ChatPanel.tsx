@@ -4222,6 +4222,7 @@ export function ChatPanel({
   projectName,
   railHeader,
   railOpen,
+  contentInert = false,
   onShowRail,
   mainView,
   onSelectMainView,
@@ -4248,6 +4249,8 @@ export function ChatPanel({
   railHeader?: React.ReactNode;
   /** Whether the agents rail is showing (collapsed via its own header icon). */
   railOpen: boolean;
+  /** Disable content behind a mobile drawer or workspace pane. */
+  contentInert?: boolean;
   /** Reopen the rail (from the chat header's sidebar icon). */
   onShowRail: () => void;
   /** Settings sections replace chat; Artifacts remains a right-panel tool. */
@@ -5944,7 +5947,7 @@ export function ChatPanel({
     return (
       <>
         {railOpen && rail}
-        <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
+        <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0">
           {!railOpen && <div className="flex h-12 shrink-0 items-center">{railReopen}</div>}
           <div className="settings-view-scroll flex-1 min-h-0 overflow-y-auto [scrollbar-gutter:stable_both-edges]">{children}</div>
         </section>
@@ -5955,10 +5958,10 @@ export function ChatPanel({
   return (
     <>
       {railOpen && rail}
-      <section className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 mt-5">
+      <section inert={contentInert} className="chat-pane flex-1 min-w-0 flex flex-col bg-background min-h-0 mt-5">
         {/* Header — session title on the left, end-pane view switchers on the
           right, fading into the chat below (sessions live in the rail). */}
-        <div className={railOpen ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] items-center"}>
+        <div className={`chat-heading-row ${railOpen ? "contents" : "grid shrink-0 grid-cols-[2rem_minmax(0,1fr)_2rem] items-center"}`}>
           {railReopen}
           <div className={headerClass}>
           <PaperTitle variant="header"
