@@ -120,7 +120,7 @@ impl Harness for Antigravity {
                     "Allow commands and skip tool confirmation prompts",
                 ),
             ],
-            "default",
+            "bypass",
             PlanActivation::Command,
         )
     }
@@ -285,7 +285,9 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .host
         .up_port()
         .ok_or_else(|| anyhow!("Antigravity requires the OpenResearch approval bridge"))?;
-    write_approval_hook(&repo)?;
+    let bypass = ctx.permission_mode.unwrap_or(PermissionMode::Bypass) == PermissionMode::Bypass;
+    let hook_enabled = !bypass || ctx.plan_mode;
+    write_approval_hook(&repo, hook_enabled)?;
     let resume = ctx.native_session_id.clone();
     let mut prompt = ctx.text.clone();
     if resume.is_none() {
@@ -330,11 +332,12 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     cmd.env("ORX_SESSION_ID", &ctx.session_id);
     cmd.env(
         "ORX_GATE_TOKEN",
-        ctx.host.mint_gate_token(&ctx.session_id, ctx.plan_mode),
+        ctx.host
+            .mint_gate_token(&ctx.session_id, ctx.plan_mode, bypass),
     );
     cmd.env(
         "ORX_AGY_GATE",
-        if ctx.permission_mode == Some(PermissionMode::Bypass) && !ctx.plan_mode {
+        if bypass && !ctx.plan_mode {
             "bypass"
         } else {
             "ask"
@@ -505,7 +508,8 @@ Stop-TurnProcess ([uint32] $env:ORX_STOP_PID)
     }
 }
 
-fn write_approval_hook(repo: &Path) -> Result<()> {
+fn write_approval_hook(repo: &Path, enabled: bool) -> Result<()> {
+    std::fs::create_dir_all(repo)?;
     let tracked = std::process::Command::new("git")
         .args(["ls-files", "--error-unmatch", ".agents/hooks.json"])
         .current_dir(repo)
@@ -533,16 +537,22 @@ fn write_approval_hook(repo: &Path) -> Result<()> {
     #[cfg(windows)]
     let command = {
         anyhow::ensure!(
-            exe.file_name()
-                .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("orx.exe")),
+            cfg!(test)
+                || exe
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("orx.exe")),
             "The Antigravity approval bridge requires the executable name orx.exe"
         );
         // prepare_env puts this executable's directory first on PATH.
         "orx antigravity-gate".to_string()
     };
-    object.insert("openresearch-approval".into(), serde_json::json!({
-        "PreToolUse": [{"matcher":"*","hooks":[{"type":"command","command":command,"timeout":3600}]}]
-    }));
+    object.insert(
+        "openresearch-approval".into(),
+        serde_json::json!({
+            "enabled": enabled,
+            "PreToolUse": [{"matcher":"*","hooks":[{"type":"command","command":command,"timeout":3600}]}]
+        }),
+    );
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(path, serde_json::to_vec_pretty(&hooks)?)?;
     Ok(())
@@ -1064,11 +1074,28 @@ mod tests {
             .status()
             .unwrap()
             .success());
-        assert!(write_approval_hook(&repo)
+        assert!(write_approval_hook(&repo, true)
             .unwrap_err()
             .to_string()
             .contains("tracks .agents/hooks.json"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "{}");
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn approval_hook_respects_enabled_flag() {
+        let repo =
+            std::env::temp_dir().join(format!("orx-agy-hooks-flag-{}", uuid::Uuid::new_v4()));
+        write_approval_hook(&repo, false).unwrap();
+        let path = repo.join(".agents/hooks.json");
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["openresearch-approval"]["enabled"], false);
+
+        write_approval_hook(&repo, true).unwrap();
+        let content: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(content["openresearch-approval"]["enabled"], true);
         std::fs::remove_dir_all(repo).unwrap();
     }
 

@@ -816,7 +816,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(antigravity.default_permission_mode, Some("default"));
+        assert_eq!(antigravity.default_permission_mode, Some("bypass"));
         assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
         assert!(reasoning_ids(&antigravity).is_empty());
         assert!(antigravity.default_reasoning_level.is_none());

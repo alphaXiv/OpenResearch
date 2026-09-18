@@ -195,6 +195,9 @@ pub async fn run_antigravity() -> Result<()> {
 }
 
 async fn antigravity_decision(input: &str) -> Result<Value> {
+    if std::env::var("ORX_AGY_GATE").as_deref() == Ok("bypass") {
+        return Ok(json!({"decision": "allow"}));
+    }
     let payload: Value = serde_json::from_str(input)?;
     let name = payload
         .pointer("/toolCall/name")
@@ -205,9 +208,6 @@ async fn antigravity_decision(input: &str) -> Result<Value> {
         .pointer("/toolCall/args")
         .ok_or_else(|| anyhow!("missing tool arguments"))?;
     let env = GateEnv::from_env()?;
-    if std::env::var("ORX_AGY_GATE").as_deref() == Ok("bypass") {
-        return Ok(json!({"decision": "allow"}));
-    }
     if workspace_read(name, args, &payload) {
         return Ok(json!({"decision": "allow"}));
     }
@@ -280,5 +280,13 @@ mod antigravity_tests {
             &payload
         ));
         assert!(!workspace_read("view_file", &json!({}), &payload));
+    }
+
+    #[tokio::test]
+    async fn bypass_env_var_allows_immediately() {
+        std::env::set_var("ORX_AGY_GATE", "bypass");
+        let res = antigravity_decision("invalid-json").await.unwrap();
+        assert_eq!(res["decision"], "allow");
+        std::env::remove_var("ORX_AGY_GATE");
     }
 }
