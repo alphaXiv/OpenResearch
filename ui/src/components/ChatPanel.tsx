@@ -126,6 +126,10 @@ import {
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
+  lastResponseText,
+  responseText,
+  transcriptFileName,
+  transcriptMarkdown,
 } from "../chatRendering";
 import { onChatEvent } from "../events";
 import {
@@ -162,14 +166,19 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import {
+  commandMatchesQuery,
   commandsForHarness,
   effectiveCommandPlanMode,
   insertSlashCommand,
-  parsePlanCommand,
+  isComposerCommand,
+  parseComposerCommand,
   removeSlashCommand,
+  resolveComposerCommand,
   slashCommandContext,
+  type ComposerCommandName,
   type SlashCommandContext,
-} from "../planCommand";
+} from "../composerCommands";
+import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -2807,6 +2816,28 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   return { src, isPdf, name };
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+    await navigator.clipboard.writeText(text);
+    showAlert(m.common_copied(), "success");
+  } catch (error) {
+    showAlert(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function downloadMarkdown(fileName: string, markdown: string) {
+  const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  // Safari ignores a detached anchor and cancels a download whose blob is revoked too early.
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
@@ -2834,15 +2865,7 @@ function ForkControls({
 }) {
   const many = count > 1;
   const sentAt = new Date(createdAt);
-  const copy = async () => {
-    try {
-      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-      await navigator.clipboard.writeText(text);
-      showAlert(m.common_copied(), "success");
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
+  const copy = () => copyToClipboard(text);
   return (
     <div
       className={`fork-controls flex items-center gap-0.5 transition-opacity duration-80 ease-standard ${
@@ -3070,6 +3093,7 @@ const Message = memo(function Message({
   const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
   const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
   const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const copyText = predictTextTail && !message.completedAt ? "" : responseText(message);
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       <AssistantTurn message={message} parts={regularParts} options={{
@@ -3094,6 +3118,18 @@ const Message = memo(function Message({
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
         />
+      )}
+      {copyText && (
+        <div className="flex opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
+          <IconButton
+            size="small"
+            title={m.chat_copy_response()}
+            aria-label={m.chat_copy_response()}
+            onClick={() => void copyToClipboard(copyText)}
+          >
+            <Copy size={13} />
+          </IconButton>
+        </div>
       )}
     </div>
   );
@@ -4296,7 +4332,7 @@ export function ChatPanel({
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   demoRunningRunId?: string | null;
   activeSessionId: string | null;
-  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean }) => void;
+  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
@@ -4396,6 +4432,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
     annotationId.current += 1;
@@ -4410,6 +4447,7 @@ export function ChatPanel({
 
   useEffect(() => {
     setAnnotations([]);
+    setResumeOpen(false);
     transcriptSelection.dismiss();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
@@ -4419,6 +4457,7 @@ export function ChatPanel({
 
   const [skillIdx, setSkillIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
@@ -4426,13 +4465,14 @@ export function ChatPanel({
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
-    if (skill.source === "command" && skill.name === "plan") {
-      activatePlanCommand(draft, slashContext);
+    if (!pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)) {
+      activateComposerCommand(skill.name, draft, slashContext);
       return;
     }
     // The command replaces the `/query` token in place, so the chip lands where
-    // it was typed and the rest of the message stays untouched.
-    const marginSpaces = skillMarginSpaces(skill.name, composerRef.current);
+    // it was typed and the rest of the message stays untouched. Only a skill
+    // chip is painted wider than its token, so only it reserves a margin.
+    const marginSpaces = skill.source === "command" ? 1 : skillMarginSpaces(skill.name, composerRef.current);
     const next = insertSlashCommand(draft, slashContext, skill.name, marginSpaces);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
@@ -4551,11 +4591,7 @@ export function ChatPanel({
   const completions =
     slashToken === null
       ? []
-      : commands.filter(
-          (command) =>
-            command.name.startsWith(slashToken) ||
-            (command.plugin && `${command.plugin}:${command.name}`.toLowerCase().startsWith(slashToken)),
-        );
+      : commands.filter((command) => commandMatchesQuery(command, slashToken));
   const typingCommand =
     !bashMode &&
     slashToken !== null &&
@@ -4753,11 +4789,49 @@ export function ChatPanel({
     }
   }
 
-  function activatePlanCommand(text: string, context: SlashCommandContext) {
+  /** Returns whether the command took focus for itself (a picker or dialog). */
+  function runComposerCommand(name: ComposerCommandName): boolean {
+    switch (name) {
+      case "plan":
+        void togglePlanMode();
+        return false;
+      case "new":
+        startNewTask();
+        return false;
+      case "resume":
+        setResumeOpen(true);
+        return true;
+      case "model":
+        setModelPickerRequest((request) => request + 1);
+        return true;
+      case "copy": {
+        const tail = messages.at(-1);
+        const streamingTail = busy && tail?.role === "assistant" && !tail.completedAt;
+        const text = lastResponseText(streamingTail ? messages.slice(0, -1) : messages);
+        if (text) void copyToClipboard(text);
+        else showAlert(m.chat_nothing_to_copy(), "info");
+        return false;
+      }
+      case "export": {
+        const title = openSession?.title?.trim() || m.chat_untitled();
+        const markdown = openSession
+          ? transcriptMarkdown(title, messages, {
+            user: m.chat_export_you(),
+            assistant: HARNESS_LABELS[openSession.harness],
+          })
+          : null;
+        if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
+        else showAlert(m.chat_nothing_to_export(), "info");
+        return false;
+      }
+    }
+  }
+
+  function activateComposerCommand(name: ComposerCommandName, text: string, context: SlashCommandContext) {
     const next = removeSlashCommand(text, context);
     setDraft(next.text);
     setSkillMenuDismissed(true);
-    void togglePlanMode();
+    if (runComposerCommand(name)) return;
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
       composerRef.current?.setSelectionRange(next.cursor, next.cursor);
@@ -4990,8 +5064,20 @@ export function ChatPanel({
 
   // A pending question card owns the composer's text as a plain answer — no
   // command in it is ever expanded, so none of it is chipped either.
-  const knownCommand = (name: string) =>
-    !pendingQuestion && !bashMode && commands.some((command) => command.name === name);
+  const knownCommand = (name: string) => {
+    if (pendingQuestion || bashMode) return false;
+    const resolved = resolveComposerCommand(name);
+    const command = commands.find((candidate) => candidate.name === (resolved ?? name));
+    if (!command || command.source !== "command") return !!command;
+    // Chip a command only where it would run: plan composes with a prompt, the
+    // rest are whole-message commands and are otherwise ordinary prose.
+    return resolved === "plan" || draft.trim().toLowerCase() === `/${name}`;
+  };
+  /** Sent messages keep any command token as prose — it was never intercepted. */
+  const transcriptSkills = useMemo(
+    () => commands.filter((command) => command.source !== "command"),
+    [commands],
+  );
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -5167,19 +5253,25 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
+    // Slash tokens stay in the wire form: the server resolves every selected
+    // skill and supplies this exact message as their shared request context.
+    const originalText = draft.trim();
+    const composerCommand = !pendingQuestion
+      ? parseComposerCommand(originalText, opts?.planActivation)
+      : null;
+    if (composerCommand && composerCommand.name !== "plan") {
+      setDraft(composerCommand.prompt);
+      setSkillMenuDismissed(false);
+      runComposerCommand(composerCommand.name);
+      return;
+    }
     captureUiEvent({
       name: "first_action",
       surface: telemetrySurface,
       action: "typed_prompt",
     });
     if (preparingSend.current) return;
-    // Slash tokens stay in the wire form: the server resolves every selected
-    // skill and supplies this exact message as their shared request context.
-    const originalText = draft.trim();
-    const planCommand = !pendingQuestion
-      ? parsePlanCommand(originalText, opts?.planActivation)
-      : null;
-    const planRequested = !!planCommand;
+    const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
       opts?.planActivation,
@@ -5189,7 +5281,7 @@ export function ChatPanel({
     const planPermissionMode = planRequested && activeHarness?.id === "claude-code"
       ? toggledPlanMode ? "plan" : "auto"
       : undefined;
-    const text = planCommand ? planCommand.prompt : originalText;
+    const text = composerCommand ? composerCommand.prompt : originalText;
     const pending = attachments;
     const pendingAnnotations = annotations;
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
@@ -6095,7 +6187,7 @@ export function ChatPanel({
                 onOpenSubagent={openSubagent}
                 recoveringTurnId={recoveringTurnId}
                 onRecover={recoverFailedTurn}
-                skills={commands}
+                skills={transcriptSkills}
               />
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
@@ -6306,6 +6398,17 @@ export function ChatPanel({
                 onHover={setSkillIdx}
               />
             )}
+            {resumeOpen && (
+              <ResumeDialog
+                activeSessionId={activeId}
+                onClose={() => setResumeOpen(false)}
+                onResume={(session) => {
+                  setResumeOpen(false);
+                  setSessionFilter("all");
+                  onActiveSessionChange(session.id, { projectId: session.projectId });
+                }}
+              />
+            )}
             {annotations.length > 0 && (
               <ComposerAnnotations
                 annotations={annotations}
@@ -6395,17 +6498,24 @@ export function ChatPanel({
                   const v = e.target.value;
                   const cursor = e.target.selectionStart;
                   setComposerCursor(cursor);
-                  // `/plan` is the one command the composer consumes rather than
-                  // sends: it toggles the mode the moment the space lands. Not
-                  // while a question card is pending (its answer is a note, never
-                  // a command) and not mid-IME-composition, where the text can
-                  // transiently look complete.
+                  // Composer commands run rather than send: each fires the moment
+                  // its space lands. Not while a question card is pending (its
+                  // answer is a note, never a command) and not mid-IME-composition,
+                  // where the text can transiently look complete.
                   const completedCommand =
                     cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
                       ? slashCommandContext(v, cursor - 1)
                       : null;
-                  if (completedCommand?.query === "plan" && opts?.planActivation) {
-                    activatePlanCommand(v, completedCommand);
+                  const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
+                  const restOfDraft = completedCommand
+                    ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
+                    : "";
+                  if (
+                    completedCommand && completedName
+                    && (completedName === "plan" || !restOfDraft)
+                    && commands.some((command) => command.name === completedName)
+                  ) {
+                    activateComposerCommand(completedName, v, completedCommand);
                     return;
                   }
                   setDraft(v);
@@ -6557,6 +6667,7 @@ export function ChatPanel({
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
                   lockHarness={!!openSession}
+                  openRequest={modelPickerRequest}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>

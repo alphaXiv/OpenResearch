@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ListChecks, WandSparkles } from "lucide-react";
+import { Copy, Cpu, Download, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -16,7 +16,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { type SkillInfo } from "../api";
-import { commandDisplayName, splitCommandTokens } from "../planCommand";
+import { commandDisplayName, isComposerCommand, splitCommandTokens, type ComposerCommandName } from "../composerCommands";
 import { Md } from "./Md";
 import { Badge } from "./ui";
 
@@ -58,11 +58,25 @@ export function skillMarginSpaces(name: string, textarea: HTMLTextAreaElement | 
   return Math.max(2, Math.ceil((extraWidth + 6) / measurement.measureText(" ").width));
 }
 
+const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
+  plan: ListChecks,
+  new: SquarePen,
+  resume: History,
+  model: Cpu,
+  copy: Copy,
+  export: Download,
+};
+
+/** Skills never share a command's name (see `commandsForHarness`), so the name alone picks the icon. */
+export function CommandIcon({ name, className }: { name: string; className?: string }) {
+  const Icon = isComposerCommand(name) ? COMMAND_ICONS[name] : WandSparkles;
+  return <Icon size={16} strokeWidth={1.5} className={className} aria-hidden="true" />;
+}
+
 function SkillLabel({ name }: { name: string }) {
-  const Icon = name === "plan" ? ListChecks : WandSparkles;
   return (
     <>
-      <Icon size={16} strokeWidth={1.5} className="me-1 inline-block align-middle" aria-hidden="true" />
+      <CommandIcon name={name} className="me-1 inline-block align-middle" />
       {commandDisplayName(name)}
     </>
   );

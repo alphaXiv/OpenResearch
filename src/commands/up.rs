@@ -7080,14 +7080,22 @@ async fn list_harnesses(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionsQuery {
-    project_id: String,
+    project_id: Option<String>,
+    /// `all` is the composer's `/resume` picker, which spans every project.
+    /// Spelled out so a dropped `projectId` cannot silently widen the scope.
+    scope: Option<String>,
 }
 
 async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult {
-    let sessions = Store::open()?.list_chat_sessions_by_project(&q.project_id)?;
+    let store = Store::open()?;
+    let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
+        (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
+        (None, Some("all")) => store.list_all_chat_sessions()?,
+        (None, _) => return Err(bad_request("projectId or scope=all is required")),
+    };
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()

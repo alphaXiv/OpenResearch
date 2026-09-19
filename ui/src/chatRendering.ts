@@ -102,6 +102,53 @@ export function splitTurnParts(parts: ChatPart[], streaming: boolean): { work: C
     : { work: parts.slice(0, finalIndex), answer: parts.slice(finalIndex) };
 }
 
+function textPartsText(parts: ChatPart[]): string {
+  return parts
+    .flatMap((part) => {
+      const text = part.type === "text" ? part.text?.trim() : undefined;
+      return text ? [text] : [];
+    })
+    .join("\n\n");
+}
+
+/** The answer an assistant turn gave, without its commentary or tool work. */
+export function responseText(message: ChatMessage): string {
+  return textPartsText(splitTurnParts(message.parts, false).answer);
+}
+
+export function lastResponseText(messages: ChatMessage[]): string {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role !== "assistant") continue;
+    const text = responseText(messages[index]);
+    if (text) return text;
+  }
+  return "";
+}
+
+/** `null` when the chat has no text to export yet. */
+export function transcriptMarkdown(
+  title: string,
+  messages: ChatMessage[],
+  labels: { user: string; assistant: string },
+): string | null {
+  const sections = messages.flatMap((message) => {
+    const text = textPartsText(message.parts);
+    if (!text) return [];
+    return [`## ${message.role === "user" ? labels.user : labels.assistant}\n\n${text}`];
+  });
+  if (sections.length === 0) return null;
+  return [`# ${title}`, ...sections].join("\n\n") + "\n";
+}
+
+export function transcriptFileName(title: string): string {
+  const slug = title
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .slice(0, 80)
+    .replace(/^-+|-+$/g, "");
+  return `${slug || "chat"}.md`;
+}
+
 export function isModelAccessLimitPart(part: ChatPart): boolean {
   return part.type === "tool" && part.tool === "error"
     && /^(?:ActionRequiredError:\s*)?Named models unavailable\b/i.test(part.state?.error?.trim() ?? "");
