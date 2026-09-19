@@ -619,6 +619,7 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
@@ -1973,6 +1974,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_chat_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET goal = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, goal, now_ms()],
+        )?;
+        Ok(())
+    }
+
     /// Cleared after a compaction: the pre-compaction total would otherwise be
     /// inherited by the next turn and keep the meter pinned high.
     pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
@@ -2878,6 +2887,9 @@ pub struct StoredChatSession {
     /// Hidden context prepended only when a seeded transcript starts its first
     /// real native harness session. Never serialized to the UI.
     pub bootstrap_context: Option<String>,
+    /// What the user asked the agent to keep working toward (`/goal`), carried
+    /// into every turn until they clear it.
+    pub goal: Option<String>,
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
@@ -3031,7 +3043,8 @@ fn row_to_chat_turn(
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
-     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id";
+     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id, \
+     goal";
 
 fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
     Ok(ChatSpawn {
@@ -3067,6 +3080,7 @@ fn row_to_chat_session(
         bootstrap_context: row.get(16)?,
         active_leaf_id: row.get(17)?,
         parent_session_id: row.get(18)?,
+        goal: row.get(19)?,
     })
 }
 
@@ -4081,6 +4095,7 @@ mod tests {
             archived: false,
             context_usage_json: None,
             bootstrap_context: None,
+            goal: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,

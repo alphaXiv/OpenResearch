@@ -1846,6 +1846,8 @@ export interface ChatSession {
   permissionMode: string | null;
   /** Independent Plan axis for Codex/OpenCode/Cursor. */
   planMode: boolean;
+  /** What `/goal` asked the agent to keep working toward; null when unset. */
+  goal?: string | null;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
@@ -1907,6 +1909,12 @@ export const renameChatSession = (sessionId: string, title: string) =>
 /** Enter/leave the session-specific Plan axis used by Codex/OpenCode/Cursor. */
 export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
+    (r) => r.session,
+  );
+
+/** `null` clears the goal. */
+export const setChatSessionGoal = (sessionId: string, goal: string | null) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(
     (r) => r.session,
   );
 
