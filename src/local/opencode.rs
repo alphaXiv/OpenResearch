@@ -462,6 +462,13 @@ async fn spawn_agent(
     })
 }
 
+/// Why a summarize attempt did or did not compact in place.
+pub(crate) enum SummarizeOutcome {
+    Compacted,
+    NoServer,
+    NoModel,
+}
+
 /// The `orx up` opencode host: one serve child per chat session, keyed by the
 /// orx session id, each running in that session's worktree. Share as
 /// `Arc<AgentHost>` in axum state.
@@ -542,6 +549,37 @@ impl AgentHost {
             .await?
             .error_for_status()?;
         Ok(())
+    }
+
+    /// Ask opencode to summarize (compact) a session in place.
+    pub(crate) async fn summarize(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        model: Option<&str>,
+    ) -> Result<SummarizeOutcome> {
+        let Some(endpoint) = self.endpoint_for(session_id).await else {
+            return Ok(SummarizeOutcome::NoServer);
+        };
+        // Summarize needs a named model. A session can legitimately have none
+        // (a custom provider advertises no models), and there is no way to call
+        // this endpoint without one — so the caller knowingly trades this
+        // resumable session for a summary rather than leaving `/compact` broken.
+        let Some((provider, model_id)) = model.and_then(|model| model.split_once('/')) else {
+            return Ok(SummarizeOutcome::NoModel);
+        };
+        let path = match endpoint.protocol {
+            Protocol::V1 => format!("/session/{native_id}/summarize"),
+            Protocol::V2 => format!("/api/session/{native_id}/summarize"),
+        };
+        endpoint
+            .client
+            .post(format!("{}{path}", endpoint.base_url))
+            .json(&json!({ "providerID": provider, "modelID": model_id }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(SummarizeOutcome::Compacted)
     }
 
     /// Spawn (or reuse) the opencode server for this session. Idempotent when

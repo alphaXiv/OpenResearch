@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Cpu, Download, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
+import { Copy, Cpu, Download, FoldVertical, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -63,6 +63,7 @@ const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
   new: SquarePen,
   resume: History,
   model: Cpu,
+  compact: FoldVertical,
   copy: Copy,
   export: Download,
 };

@@ -10,7 +10,7 @@ export function commandLabel(skill: SkillInfo): string {
 }
 
 /** Built-in commands the dashboard runs instead of sending, same on every harness. */
-export const COMPOSER_COMMANDS = ["plan", "new", "resume", "model", "copy", "export"] as const;
+export const COMPOSER_COMMANDS = ["plan", "new", "resume", "model", "compact", "copy", "export"] as const;
 
 export type ComposerCommandName = (typeof COMPOSER_COMMANDS)[number];
 
@@ -19,6 +19,7 @@ const COMMAND_DESCRIPTIONS: Record<ComposerCommandName, () => string> = {
   new: () => m.new_command_description(),
   resume: () => m.resume_command_description(),
   model: () => m.model_command_description(),
+  compact: () => m.compact_command_description(),
   copy: () => m.copy_command_description(),
   export: () => m.export_command_description(),
 };
@@ -38,7 +39,7 @@ export function isComposerCommand(name: string): name is ComposerCommandName {
 }
 
 /** Alternate spellings the agents' own CLIs use, accepted but not listed. */
-const COMMAND_ALIASES: Record<string, ComposerCommandName> = { clear: "new" };
+const COMMAND_ALIASES: Record<string, ComposerCommandName> = { clear: "new", summarize: "compact" };
 
 export function resolveComposerCommand(name: string): ComposerCommandName | null {
   const lower = name.toLowerCase();

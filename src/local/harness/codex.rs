@@ -46,8 +46,9 @@ use super::options::{
     REASONING_DEFAULT_ID,
 };
 use super::{
-    should_synthesize_plan, synthesize_resume, Harness, OneShot, OneShotQuality, ResumeAction,
-    TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
+    should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
+    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -486,6 +487,9 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
+/// Compaction re-reads a whole thread; a long one is not quick.
+const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
+
 #[async_trait]
 impl Harness for Codex {
     fn id(&self) -> &'static str {
@@ -498,6 +502,110 @@ impl Harness for Codex {
 
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    /// The app server compacts a thread in place. The legacy `codex exec` path
+    /// spawns a fresh child per turn with no session-scoped RPC, so it — and a
+    /// session whose app-server child is gone — take the shared fallback.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(thread_id) = ctx.native_session_id.as_deref() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        if !runs_app_server().await {
+            return Ok(CompactOutcome::Fallback);
+        }
+        let Some(client) = ctx.host.codex.client_for(&ctx.session_id).await else {
+            // The thread is still resumable; summarizing would throw it away.
+            return Err(anyhow!(
+                "Codex is not running for this chat — send a message first, then compact"
+            ));
+        };
+        // A fresh child must `thread/resume` a thread before it can act on it.
+        if client.resumed_thread().as_deref() != Some(thread_id) {
+            return Err(anyhow!(
+                "Codex is not running this chat's thread — send a message first, then compact"
+            ));
+        }
+        // `thread/compact/start` only starts a turn: codex compacts in the
+        // background and reports through the same stream a prompt would, so the
+        // request returning is not the compaction being done.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _route = client.register_turn(tx);
+        client
+            .request(
+                "thread/compact/start",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+            .await?;
+        // The response carries no turn id, so it comes from this thread's own
+        // `turn/started`. Another turn's tail can still be streaming into the
+        // shared channel, and its `turn/completed` must not settle this one.
+        let mut compaction_turn: Option<String> = None;
+        let settle = async {
+            loop {
+                let Some(event) = rx.recv().await else {
+                    return Err(anyhow!("codex stopped reporting during compaction"));
+                };
+                let (method, params) = match event {
+                    TurnEvent::Notification { method, params } => (method, params),
+                    // Leaving an approval unanswered blocks the child.
+                    TurnEvent::Request { id, .. } => {
+                        let _ = client.respond_decline(&id).await;
+                        continue;
+                    }
+                    TurnEvent::Closed => return Err(anyhow!("codex closed during compaction")),
+                };
+                if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+                    continue;
+                }
+                let event_turn = event_turn_id(&params);
+                match method.as_str() {
+                    "turn/started" if compaction_turn.is_none() => {
+                        compaction_turn = event_turn.map(str::to_string);
+                    }
+                    "turn/completed"
+                        if compaction_turn.is_some()
+                            && event_turn == compaction_turn.as_deref() =>
+                    {
+                        let turn = params.get("turn").cloned().unwrap_or(Value::Null);
+                        match turn.get("status").and_then(Value::as_str).unwrap_or("") {
+                            "completed" => return Ok(()),
+                            // Not final: codex would be regressing, but a
+                            // non-final status must not end the wait.
+                            "inProgress" => {}
+                            "failed" => {
+                                return Err(anyhow!(
+                                    "codex compaction failed: {}",
+                                    error_message(turn.get("error"))
+                                ))
+                            }
+                            other => {
+                                return Err(anyhow!("codex compaction ended as `{other}`"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        match tokio::time::timeout(COMPACT_TURN_TIMEOUT, settle).await {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(turn_id) = compaction_turn {
+                    let _ = client
+                        .request(
+                            "turn/interrupt",
+                            serde_json::json!({ "threadId": thread_id, "turnId": turn_id }),
+                        )
+                        .await;
+                }
+                return Err(anyhow!(
+                    "codex did not finish compacting within {}s",
+                    COMPACT_TURN_TIMEOUT.as_secs()
+                ));
+            }
+        }
+        Ok(CompactOutcome::Native)
     }
 
     /// The app-server takes `turn/steer` against the active turn; `detect`
@@ -2716,13 +2824,17 @@ fn event_turn_mismatch(expected: Option<&str>, params: &Value) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    let event_turn = params.get("turnId").and_then(Value::as_str).or_else(|| {
+    event_turn_id(params).is_some_and(|t| t != expected)
+}
+
+/// `item/*` events carry the turn id at the top level; `turn/*` nest it.
+fn event_turn_id(params: &Value) -> Option<&str> {
+    params.get("turnId").and_then(Value::as_str).or_else(|| {
         params
             .get("turn")
             .and_then(|t| t.get("id"))
             .and_then(Value::as_str)
-    });
-    event_turn.is_some_and(|t| t != expected)
+    })
 }
 
 /// PromptAnswer.approve → the codex decision string. Per-command `accept`

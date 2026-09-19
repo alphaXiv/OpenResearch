@@ -1197,6 +1197,31 @@ fn with_selected_chat_context(text: String, annotations: &[TextAnnotation]) -> S
 /// Harness user messages never carry tool parts, so this alone marks one.
 const USER_SHELL_TOOL: &str = "bash";
 
+/// The synthetic tool part that marks a compaction in the transcript.
+const COMPACTED_TOOL: &str = "compacted";
+
+/// A cancelled compaction's row would otherwise sit at `running` forever, where
+/// it reads as one that succeeded.
+fn fail_running_compaction(parts: &mut [WirePart]) {
+    for part in parts {
+        if part.tool.as_deref() != Some(COMPACTED_TOOL) {
+            continue;
+        }
+        if let Some(state) = part.state.as_mut() {
+            if state.status == "running" {
+                state.status = "error".into();
+            }
+        }
+    }
+}
+
+/// A compaction summary is a whole transcript, not a title — it needs room.
+const COMPACT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(180);
+
+const COMPACT_SYSTEM_PROMPT: &str = "You are compacting a coding chat so it can continue in a fresh session. \
+Summarize the transcript below: what the user is trying to do, the decisions taken and why, the files and commands that matter, \
+what is done, and what is still open. Keep specifics — paths, ids, names, numbers. Write the summary only.";
+
 const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a killed group's pipes get to drain; a `setsid` grandchild that
 /// inherited them could otherwise hold the request open forever.
@@ -1387,6 +1412,239 @@ const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
 const BASH_HINT: &str = "";
 
 impl ChatHost {
+    /// Compact a session's context: the harness does it natively where it can,
+    /// and where it cannot (Cursor, legacy `codex exec`) we summarize the
+    /// transcript ourselves and reseed a fresh native session with it.
+    ///
+    /// Runs as a turn — it rewrites the state a turn would be reading, takes as
+    /// long as one, and Stop must be able to cancel it. Returns as soon as the
+    /// progress row is on the transcript; the work reports itself over events.
+    pub async fn compact_session(self: &Arc<Self>, session_id: &str) -> Result<WireMessage> {
+        let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
+            return Err(anyhow!("session is busy — interrupt it first"));
+        };
+        let session = {
+            let store = Store::open()?;
+            store
+                .get_chat_session(session_id)?
+                .ok_or_else(|| anyhow!("chat session is gone"))?
+        };
+        if crate::local::harness::chat_harness(&session.harness).is_none() {
+            return Err(anyhow!("unknown harness `{}`", session.harness));
+        }
+        // Taken before the progress row exists, so the summary never describes
+        // its own compaction.
+        let snapshot = crate::local::harness::compaction_snapshot(session_id);
+        if snapshot.trim().is_empty() {
+            return Err(anyhow!("this chat has nothing to compact yet"));
+        }
+        let marker = {
+            let store = Store::open()?;
+            self.publish_compaction_marker(&store, session_id, None, "running", None)?
+        };
+
+        let host = self.clone();
+        let owned_session = session_id.to_string();
+        let owned_marker = marker.clone();
+        let mut turns = self.turns.lock().await;
+        let handle = tokio::spawn(async move {
+            host.run_compaction(owned_session, session, snapshot, owned_marker)
+                .await;
+        });
+        turns.insert(
+            session_id.to_string(),
+            TurnState::Active(ActiveTurn {
+                handle,
+                message_id: marker.id.clone(),
+                // No `chat_turns` row backs a compaction, so the id only has to
+                // be unique: `interrupt`'s lookup by it is a no-op by design.
+                turn_id: format!("compact_{}", marker.id),
+            }),
+        );
+        self.emit(
+            "chat.busy",
+            json!({ "sessionId": session_id, "busy": true }),
+        );
+        drop(turns);
+        guard.defuse();
+        Ok(marker)
+    }
+
+    /// The compaction itself, off the request that asked for it. Every write is
+    /// gated on still owning the turn slot: Stop frees it for a real turn, and
+    /// a late compaction must not rewrite that turn's session out from under it.
+    async fn run_compaction(
+        self: Arc<Self>,
+        session_id: String,
+        session: StoredChatSession,
+        snapshot: String,
+        marker: WireMessage,
+    ) {
+        let outcome = self
+            .compaction_outcome(&session_id, &session, &snapshot)
+            .await;
+        if self.owns_compaction(&session_id, &marker.id).await {
+            // Best-effort: whatever the harness did already happened, and a
+            // failed row update must not be reported as a failed compaction.
+            if let Ok(store) = Store::open() {
+                let settled = match outcome {
+                    Ok(reseed) => self.apply_compaction(&store, &session_id, reseed).err(),
+                    Err(error) => Some(error),
+                };
+                let (status, detail) = match &settled {
+                    Some(error) => ("error", Some(error.to_string())),
+                    None => ("completed", None),
+                };
+                // Stop can land mid-write; its `error` row is the truthful one.
+                if self.owns_compaction(&session_id, &marker.id).await {
+                    let _ = self.publish_compaction_marker(
+                        &store,
+                        &session_id,
+                        Some(&marker),
+                        status,
+                        detail,
+                    );
+                }
+            }
+        }
+        self.finish_turn(&session_id, Some(&marker.id)).await;
+        self.drain_queue(&session_id).await;
+    }
+
+    /// `Some(summary)` when the harness could not compact natively and the next
+    /// turn has to be reseeded with a summary instead.
+    async fn compaction_outcome(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: &StoredChatSession,
+        snapshot: &str,
+    ) -> Result<Option<String>> {
+        let harness = crate::local::harness::chat_harness(&session.harness)
+            .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+        let ctx = crate::local::harness::CompactCtx {
+            host: self.clone(),
+            session_id: session_id.to_string(),
+            native_session_id: session.native_session_id.clone(),
+            model: session.model.clone(),
+        };
+        match harness.compact(&ctx).await? {
+            crate::local::harness::CompactOutcome::Native => Ok(None),
+            crate::local::harness::CompactOutcome::Fallback => Ok(Some(
+                self.compaction_summary(session, harness.as_ref(), snapshot)
+                    .await?,
+            )),
+        }
+    }
+
+    fn apply_compaction(
+        &self,
+        store: &Store,
+        session_id: &str,
+        reseed: Option<String>,
+    ) -> Result<()> {
+        // Native id last: a crash before it lands leaves the summary unused
+        // rather than a session with no context at all.
+        if let Some(summary) = reseed {
+            // `bootstrap_context` is injected exactly while no native session
+            // exists, which is the state clearing the id leaves behind.
+            store.set_chat_session_bootstrap_context(session_id, Some(&summary))?;
+            store.set_chat_session_native_id(session_id, None)?;
+        }
+        store.clear_chat_session_context_usage(session_id)?;
+        // Compacting is activity, and activity unarchives as sending does.
+        store.set_chat_session_archived(session_id, false)?;
+        Ok(())
+    }
+
+    async fn owns_compaction(&self, session_id: &str, message_id: &str) -> bool {
+        matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Active(active)) if active.message_id == message_id
+        )
+    }
+
+    /// Summarize the transcript through a throwaway child, for the caller to
+    /// reseed the next turn with. Any `bootstrap_context` already on the session
+    /// (an earlier compaction, a demo seed) is summarized along with it rather
+    /// than dropped.
+    async fn compaction_summary(
+        &self,
+        session: &StoredChatSession,
+        harness: &dyn crate::local::harness::Harness,
+        snapshot: &str,
+    ) -> Result<String> {
+        let prior = session.bootstrap_context.as_deref().unwrap_or("");
+        let prompt = format!(
+            "<orx-transcript>\n{prior}{}{snapshot}\n</orx-transcript>",
+            if prior.is_empty() { "" } else { "\n\n" }
+        );
+        let summary = harness
+            .one_shot(crate::local::harness::OneShot {
+                system: COMPACT_SYSTEM_PROMPT,
+                prompt: &prompt,
+                quality: crate::local::harness::OneShotQuality::Standard,
+                model: session.model.as_deref(),
+                timeout: COMPACT_SUMMARY_TIMEOUT,
+            })
+            .await
+            .filter(|summary| !summary.trim().is_empty())
+            .ok_or_else(|| anyhow!("{} could not summarize this chat", session.harness))?;
+        Ok(format!(
+            "<orx-compacted-context>\nThis chat was compacted. Use this summary of the conversation so far as prior context; do not repeat completed tool actions.\n\n{}\n</orx-compacted-context>",
+            summary.trim()
+        ))
+    }
+
+    /// Write the compaction row and broadcast it. `previous` updates the row in
+    /// place; without it the row is appended to the active branch. Never
+    /// broadcasts a row that failed to persist — with no parent a live client
+    /// reads it as a new branch root and blanks the transcript.
+    fn publish_compaction_marker(
+        &self,
+        store: &Store,
+        session_id: &str,
+        previous: Option<&WireMessage>,
+        status: &str,
+        error: Option<String>,
+    ) -> Result<WireMessage> {
+        let mut message = match previous {
+            Some(previous) => previous.clone(),
+            None => WireMessage {
+                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                role: "assistant".into(),
+                parts: Vec::new(),
+                created_at: now_ms(),
+                completed_at: None,
+                parent_id: None,
+            },
+        };
+        message.parts = vec![WirePart::tool(
+            COMPACTED_TOOL,
+            COMPACTED_TOOL,
+            status,
+            error,
+        )];
+        message.completed_at = (status != "running").then(now_ms);
+        let stored = StoredChatMessage {
+            id: message.id.clone(),
+            session_id: session_id.to_string(),
+            role: "assistant".into(),
+            parts_json: serde_json::to_string(&message.parts)?,
+            created_at: message.created_at,
+            completed_at: message.completed_at,
+            parent_id: message.parent_id.clone(),
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        if previous.is_some() {
+            store.upsert_chat_message(&stored)?;
+        } else {
+            message.parent_id = store.upsert_chat_message_on_branch(&stored)?;
+        }
+        self.emit("chat.message", message_json(&message, session_id));
+        Ok(message)
+    }
+
     /// Run a composer `!` command in `cwd` and record the exchange on the
     /// session's branch, where the next turn picks it up as context.
     pub async fn run_shell_command(
@@ -5355,6 +5613,7 @@ impl ChatHost {
                     let mut assistant = stored_to_wire(&stored);
                     assistant.completed_at = Some(now_ms());
                     assistant.parts.retain(|part| part.id != "turn-retry");
+                    fail_running_compaction(&mut assistant.parts);
                     let _ = store.upsert_chat_message(&StoredChatMessage {
                         id: assistant.id.clone(),
                         session_id: session_id.to_string(),
@@ -8252,6 +8511,157 @@ mod cap_tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn the_compaction_row_updates_in_place_rather_than_branching() {
+        let dir = std::env::temp_dir().join(format!("orx-compact-row-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&StoredChatSession {
+                id: "session".into(),
+                project_id: "proj_1".into(),
+                harness: "claude-code".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                active_leaf_id: None,
+                parent_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+
+        let running = host
+            .publish_compaction_marker(&store, "session", None, "running", None)
+            .unwrap();
+        assert_eq!(running.parts[0].state.as_ref().unwrap().status, "running");
+        assert!(running.completed_at.is_none());
+
+        let done = host
+            .publish_compaction_marker(&store, "session", Some(&running), "completed", None)
+            .unwrap();
+        assert_eq!(done.id, running.id, "the row is updated, not replaced");
+        assert_eq!(done.parent_id, running.parent_id);
+        assert!(done.completed_at.is_some());
+        assert_eq!(done.parts[0].state.as_ref().unwrap().status, "completed");
+        // One row on the branch: a second would read as a new branch root.
+        assert_eq!(store.list_chat_messages("session").unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_compaction_row_is_failed_rather_than_left_running() {
+        let mut parts = vec![
+            WirePart::tool("compacted", COMPACTED_TOOL, "running", None),
+            WirePart::tool("other", "bash", "running", None),
+        ];
+        fail_running_compaction(&mut parts);
+        assert_eq!(parts[0].state.as_ref().unwrap().status, "error");
+        assert_eq!(parts[1].state.as_ref().unwrap().status, "running");
+
+        // A row that already settled keeps the status it settled with.
+        let mut done = vec![WirePart::tool(
+            "compacted",
+            COMPACTED_TOOL,
+            "completed",
+            None,
+        )];
+        fail_running_compaction(&mut done);
+        assert_eq!(done[0].state.as_ref().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn the_reseed_hands_the_next_turn_a_summary_and_no_native_session() {
+        let dir = std::env::temp_dir().join(format!("orx-compact-reseed-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut session = StoredChatSession {
+            id: "session".into(),
+            project_id: "proj_1".into(),
+            harness: "cursor".into(),
+            native_session_id: Some("native-1".into()),
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: true,
+            context_usage_json: Some("{\"usedTokens\":9000}".into()),
+            bootstrap_context: None,
+            active_leaf_id: None,
+            parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+
+        host.apply_compaction(&store, "session", Some("the summary".into()))
+            .unwrap();
+
+        session = store.get_chat_session("session").unwrap().unwrap();
+        assert_eq!(session.bootstrap_context.as_deref(), Some("the summary"));
+        // Without clearing the native id the summary is never injected.
+        assert_eq!(session.native_session_id, None);
+        assert_eq!(session.context_usage_json, None);
+        assert!(
+            !session.archived,
+            "compacting is activity, which unarchives"
+        );
+        assert!(with_turn_context(
+            session.native_session_id.as_deref(),
+            session.bootstrap_context.as_deref(),
+            None,
+            None,
+            "next".into(),
+        )
+        .contains("the summary"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_to_run_during_a_turn() {
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+        host.turns
+            .lock()
+            .await
+            .insert("session".into(), TurnState::Reserved { turn_id: None });
+
+        let error = host
+            .compact_session("session")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("busy"), "unexpected error: {error}");
+        // The live turn's slot survives the refusal.
+        assert!(host.turns.lock().await.contains_key("session"));
     }
 
     #[test]
