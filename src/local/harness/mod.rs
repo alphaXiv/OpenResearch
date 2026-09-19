@@ -29,6 +29,7 @@ pub(crate) mod title;
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -285,6 +286,13 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// Compact this session's context in the harness's own store. Returning
+    /// `Fallback` asks the caller for the shared summarize-and-reseed path,
+    /// which every harness can take.
+    async fn compact(&self, _ctx: &CompactCtx) -> Result<CompactOutcome> {
+        Ok(CompactOutcome::Fallback)
+    }
+
     /// The permission-mode / reasoning-level vocabulary this harness supports,
     /// for the composer toggles. Default is neither control (the UI hides both).
     fn options(&self) -> HarnessOptions {
@@ -514,6 +522,32 @@ pub struct OneShot<'a> {
 pub enum OneShotQuality {
     Cheap,
     Standard,
+}
+
+/// The transcript a compaction summarizes: the same snapshot a lost native
+/// session is reseeded with, but for a session with no turn in flight — and so
+/// the same newest-`RECOVERY_SNAPSHOT_BYTES` cap, which on the reseed path is
+/// all the agent keeps of a long chat, and the same every-branch scope rather
+/// than the active path alone.
+pub(crate) fn compaction_snapshot(session_id: &str) -> String {
+    native_recovery_snapshot(session_id, "")
+}
+
+/// What a session needs to compact, without the machinery of a live turn.
+pub struct CompactCtx {
+    pub host: Arc<crate::local::chat::ChatHost>,
+    pub session_id: String,
+    pub native_session_id: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompactOutcome {
+    /// The harness compacted its own context; the session id still resolves.
+    Native,
+    /// The harness has no compaction of its own to offer for this session —
+    /// summarize and reseed instead.
+    Fallback,
 }
 
 /// The chat-capable harness with this id, if any (used by chat dispatch).
