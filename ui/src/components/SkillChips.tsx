@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Copy, Cpu, Download, FoldVertical, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
+import { Copy, Cpu, Download, FoldVertical, Goal, History, ListChecks, SquarePen, WandSparkles, type LucideIcon } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -60,6 +60,7 @@ export function skillMarginSpaces(name: string, textarea: HTMLTextAreaElement | 
 
 const COMMAND_ICONS: Record<ComposerCommandName, LucideIcon> = {
   plan: ListChecks,
+  goal: Goal,
   new: SquarePen,
   resume: History,
   model: Cpu,

@@ -1120,6 +1120,7 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "contextUsage": context_usage,
         "activeLeafId": s.active_leaf_id,
         "parentSessionId": s.parent_session_id,
+        "goal": s.goal,
     })
 }
 
@@ -1147,6 +1148,7 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 fn with_turn_context(
     native_session_id: Option<&str>,
     bootstrap_context: Option<&str>,
+    goal: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
     text: String,
@@ -1156,6 +1158,14 @@ fn with_turn_context(
         if let Some(context) = bootstrap_context {
             contexts.push(context);
         }
+    }
+    // The goal rides every turn: the agent has to be told it again each time,
+    // and it outlives compaction and a lost native session.
+    let goal = goal.map(|goal| {
+        format!("<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n{goal}\n</orx-goal>")
+    });
+    if let Some(goal) = goal.as_deref() {
+        contexts.push(goal);
     }
     if let Some(context) = demo_evidence_context {
         contexts.push(context);
@@ -1871,7 +1881,14 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(Some("native"), None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(
+            Some("native"),
+            None,
+            None,
+            None,
+            Some(&context),
+            "why?".into(),
+        );
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -1896,7 +1913,14 @@ mod initial_message_tests {
 
     #[test]
     fn bootstrap_context_is_injected_only_before_a_native_session_exists() {
-        let seeded = with_turn_context(None, Some("prior demo"), None, None, "continue".into());
+        let seeded = with_turn_context(
+            None,
+            Some("prior demo"),
+            None,
+            None,
+            None,
+            "continue".into(),
+        );
         assert!(seeded.contains("prior demo"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
@@ -1905,12 +1929,34 @@ mod initial_message_tests {
                 Some("prior demo"),
                 None,
                 None,
+                None,
                 "continue".into()
             ),
             "continue"
         );
         assert_eq!(
-            with_turn_context(None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, None, None, "continue".into()),
+            "continue"
+        );
+    }
+
+    #[test]
+    fn the_goal_rides_every_turn_including_one_with_a_native_session() {
+        let seeded = with_turn_context(
+            Some("native"),
+            Some("prior demo"),
+            Some("ship the sweep"),
+            None,
+            None,
+            "continue".into(),
+        );
+        assert!(seeded.contains("ship the sweep"));
+        // Unlike bootstrap context, a goal is not dropped once the harness has
+        // a session of its own — it has to be restated every turn.
+        assert!(!seeded.contains("prior demo"));
+        assert!(seeded.contains("<current-user-message>\ncontinue"));
+        assert_eq!(
+            with_turn_context(Some("native"), None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -1920,6 +1966,7 @@ mod initial_message_tests {
         let first = with_turn_context(
             None,
             Some("prior demo"),
+            None,
             Some("demo evidence"),
             None,
             "first".into(),
@@ -1927,6 +1974,7 @@ mod initial_message_tests {
         let follow_up = with_turn_context(
             Some("native"),
             Some("prior demo"),
+            None,
             Some("demo evidence"),
             None,
             "follow up".into(),
@@ -1938,7 +1986,7 @@ mod initial_message_tests {
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(Some("native"), None, None, None, "ordinary".into()),
+            with_turn_context(Some("native"), None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -5213,6 +5261,7 @@ impl ChatHost {
             with_turn_context(
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
+                session.goal.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -5976,6 +6025,17 @@ impl ChatHost {
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
         store.set_chat_session_archived(session_id, archived)?;
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
+    }
+
+    /// Set (or, with `None`, clear) the goal every turn is reminded of.
+    pub async fn set_goal(
+        &self,
+        session_id: &str,
+        goal: Option<&str>,
+    ) -> Result<Option<StoredChatSession>> {
+        let store = Store::open()?;
+        store.set_chat_session_goal(session_id, goal)?;
         Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
@@ -8534,6 +8594,7 @@ mod cap_tests {
                 archived: false,
                 context_usage_json: None,
                 bootstrap_context: None,
+                goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
                 created_at: 1,
@@ -8606,6 +8667,7 @@ mod cap_tests {
             archived: true,
             context_usage_json: Some("{\"usedTokens\":9000}".into()),
             bootstrap_context: None,
+            goal: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,
@@ -8633,6 +8695,7 @@ mod cap_tests {
         assert!(with_turn_context(
             session.native_session_id.as_deref(),
             session.bootstrap_context.as_deref(),
+            None,
             None,
             None,
             "next".into(),
@@ -9332,6 +9395,7 @@ mod bridge_tests {
             archived: false,
             context_usage_json: None,
             bootstrap_context: None,
+            goal: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,
@@ -9471,6 +9535,7 @@ mod run_wakeup_tests {
                 archived: false,
                 context_usage_json: None,
                 bootstrap_context: None,
+                goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
                 created_at: 1,
@@ -10234,6 +10299,7 @@ mod steering_tests {
                 archived: false,
                 context_usage_json: None,
                 bootstrap_context: None,
+                goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
                 created_at: 1,

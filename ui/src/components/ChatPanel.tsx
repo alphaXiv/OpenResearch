@@ -41,6 +41,7 @@ import {
   Globe,
   Gauge,
   HelpCircle,
+  Goal,
   Lightbulb,
   MessageSquareQuote,
   MoreHorizontal,
@@ -100,6 +101,7 @@ import {
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
+  setChatSessionGoal,
   setChatSessionPlanMode,
   type FirstActionSurface,
   type ChatImageAttachment,
@@ -176,6 +178,7 @@ import {
   removeSlashCommand,
   resolveComposerCommand,
   slashCommandContext,
+  takesArgument,
   type ComposerCommandName,
   type SlashCommandContext,
 } from "../composerCommands";
@@ -4349,6 +4352,7 @@ export function ChatPanel({
 }) {
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
+  const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
@@ -4473,7 +4477,12 @@ export function ChatPanel({
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
-    if (!pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)) {
+    // Goal is the one command picked from the menu that inserts its token
+    // instead of running: the goal itself is typed after it.
+    if (
+      !pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)
+      && skill.name !== "goal"
+    ) {
       activateComposerCommand(skill.name, draft, slashContext);
       return;
     }
@@ -4731,6 +4740,7 @@ export function ChatPanel({
       });
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
+  const sessionGoal = openSession?.goal?.trim() || "";
   const planActive = composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
     : opts?.planActivation === "command"
@@ -4798,7 +4808,7 @@ export function ChatPanel({
   }
 
   /** Returns whether the command took focus for itself (a picker or dialog). */
-  function runComposerCommand(name: ComposerCommandName): boolean {
+  function runComposerCommand(name: ComposerCommandName, argument = ""): boolean {
     switch (name) {
       case "plan":
         void togglePlanMode();
@@ -4814,6 +4824,9 @@ export function ChatPanel({
         return true;
       case "compact":
         void compactSession();
+        return false;
+      case "goal":
+        void setGoal(argument);
         return false;
       case "copy": {
         const tail = messages.at(-1);
@@ -4835,6 +4848,49 @@ export function ChatPanel({
         else showAlert(m.chat_nothing_to_export(), "info");
         return false;
       }
+    }
+  }
+
+  /** `/goal <text>` sets, `/goal clear` clears, and a bare `/goal` reports what
+   * the agent is currently working toward. */
+  async function setGoal(argument: string) {
+    const wanted = argument.trim();
+    if (!wanted) {
+      const goal = openSession?.goal?.trim();
+      showAlert(goal ? m.chat_goal_current({ goal: autoDir(goal) }) : m.chat_goal_none(), "info");
+      return;
+    }
+    const sourceScope = composerScopeRef.current;
+    const inSourceScope = () => composerScopeRef.current.activeId === sourceScope.activeId;
+    setSettingsError(null);
+    let sessionId = activeId;
+    // Declaring the goal before the first message is the natural moment for it,
+    // so an empty composer gets a session rather than losing the goal.
+    if (!sessionId) {
+      if (!activeHarness?.agentReady || !composerSelection) {
+        setSettingsError(m.chat_selected_harness_unavailable());
+        return;
+      }
+      try {
+        sessionId = (await openNewSession(
+          composerSelection,
+          effectiveCommandPlanMode(opts?.planActivation, undefined, planModeOverrideRef.current),
+        )).id;
+      } catch (err) {
+        setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+        return;
+      }
+    }
+    const clearing = /^(clear|none|off)$/i.test(wanted);
+    try {
+      const session = await queueSessionMutation(() =>
+        setChatSessionGoalMutation.mutateAsync([sessionId, clearing ? null : wanted]),
+      );
+      setSessions((current) => current.map((candidate) => (candidate.id === session.id ? session : candidate)));
+      showAlert(clearing ? m.chat_goal_cleared() : m.chat_goal_set(), "success");
+    } catch (err) {
+      if (!inSourceScope()) return;
+      setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
     }
   }
 
@@ -5109,7 +5165,10 @@ export function ChatPanel({
     if (!command || command.source !== "command") return !!command;
     // Chip a command only where it would run: plan composes with a prompt, the
     // rest are whole-message commands and are otherwise ordinary prose.
-    return resolved === "plan" || draft.trim().toLowerCase() === `/${name}`;
+    if (resolved && takesArgument(resolved)) {
+      return resolved === "plan" || draft.trim().toLowerCase().startsWith(`/${name}`);
+    }
+    return draft.trim().toLowerCase() === `/${name}`;
   };
   /** Sent messages keep any command token as prose — it was never intercepted. */
   const transcriptSkills = useMemo(
@@ -5298,9 +5357,9 @@ export function ChatPanel({
       ? parseComposerCommand(originalText, opts?.planActivation)
       : null;
     if (composerCommand && composerCommand.name !== "plan") {
-      setDraft(composerCommand.prompt);
+      setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
       setSkillMenuDismissed(false);
-      runComposerCommand(composerCommand.name);
+      runComposerCommand(composerCommand.name, composerCommand.prompt);
       return;
     }
     captureUiEvent({
@@ -6550,7 +6609,7 @@ export function ChatPanel({
                     : "";
                   if (
                     completedCommand && completedName
-                    && (completedName === "plan" || !restOfDraft)
+                    && (completedName === "plan" || (!takesArgument(completedName) && !restOfDraft))
                     && commands.some((command) => command.name === completedName)
                   ) {
                     activateComposerCommand(completedName, v, completedCommand);
@@ -6655,6 +6714,23 @@ export function ChatPanel({
               >
                 <Paperclip size={16} />
               </IconButton>
+              {sessionGoal && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  active
+                  className="group max-w-60"
+                  title={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  aria-label={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  onClick={() => void setGoal("clear")}
+                >
+                  <span className="relative size-4" aria-hidden="true">
+                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
+                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                  </span>
+                  <span className="truncate">{m.chat_panel_goal()}</span>
+                </Button>
+              )}
               {planActive && (
                 <Button
                   type="button"
