@@ -269,13 +269,34 @@ fn biorxiv_doi(doi: &str) -> String {
 /// Handles `arxiv.org/abs/<id>`, `arxiv.org/pdf/<id>[.pdf]`,
 /// `alphaxiv.org/overview/<id>`, `alphaxiv.org/abs/<id>`, and bare ids — by
 /// taking the last path segment and stripping any `?`/`#` and `.pdf`/`.md` suffix.
+/// An old-style id (`hep-th/9711200`) keeps its archive segment, since the
+/// number alone is not an id.
 pub(crate) fn parse_paper_id(input: &str) -> String {
     let s = input.trim();
     let s = s.split(['?', '#']).next().unwrap_or(s);
-    let last = s.rsplit('/').next().unwrap_or(s);
-    last.trim_end_matches(".pdf")
-        .trim_end_matches(".md")
-        .to_string()
+    let mut segments = s.rsplit('/');
+    let last = segments.next().unwrap_or(s);
+    let id = last.trim_end_matches(".pdf").trim_end_matches(".md");
+    match segments.next() {
+        Some(archive) if is_old_style_number(id) && is_archive(archive) => {
+            format!("{archive}/{id}")
+        }
+        _ => id.to_string(),
+    }
+}
+
+/// The `YYMMNNN[vN]` half of an old-style arXiv id.
+fn is_old_style_number(s: &str) -> bool {
+    let number = versionless_id(s);
+    number.len() == 7 && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// An old-style arXiv archive, optionally with a subject class: `hep-th`,
+/// `math`, `math.GT`.
+fn is_archive(s: &str) -> bool {
+    s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
 }
 
 fn alphaxiv_paper_url(id: &str) -> String {
@@ -309,6 +330,30 @@ mod tests {
             ("https://www.alphaxiv.org/overview/2401.12345", "2401.12345"),
             ("https://alphaxiv.org/abs/2401.12345v2", "2401.12345v2"),
             ("https://arxiv.org/abs/2401.12345?foo=bar", "2401.12345"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(parse_paper_id(input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_archive_of_old_style_ids() {
+        let cases = [
+            // The id `orx discover` returns for a pre-2007 paper.
+            ("hep-th/9711200", "hep-th/9711200"),
+            ("hep-th/9711200v3", "hep-th/9711200v3"),
+            ("math.GT/0309136", "math.GT/0309136"),
+            ("https://arxiv.org/abs/hep-th/9711200", "hep-th/9711200"),
+            (
+                "https://arxiv.org/pdf/hep-th/9711200v3.pdf",
+                "hep-th/9711200v3",
+            ),
+            (
+                "https://www.alphaxiv.org/overview/math/0211159",
+                "math/0211159",
+            ),
+            // No archive to keep.
+            ("9711200", "9711200"),
         ];
         for (input, want) in cases {
             assert_eq!(parse_paper_id(input), want, "input: {input}");
