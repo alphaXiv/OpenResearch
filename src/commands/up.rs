@@ -446,6 +446,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_project),
         )
         .route("/api/projects/{id}/open", post(open_project))
+        .route("/api/projects/{id}/export", get(export_project))
         .route("/api/projects/{id}/git", get(project_git_status))
         .route(
             "/api/projects/{id}/starter-prompts",
@@ -1912,6 +1913,50 @@ async fn list_project_runs(Path(id): Path<String>) -> ApiResult {
         .map(ApiRun::from)
         .collect();
     Ok(Json(json!({ "runs": runs })))
+}
+
+/// Bundle a project's full state — metadata, every chat session with its
+/// complete transcript, and every run — into a single JSON document so a
+/// project (including the experiment provenance in the chat logs) can be
+/// archived or moved off the machine. Read-only; the mirror of `import`.
+async fn export_project(Path(id): Path<String>) -> ApiResult {
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+
+    let sessions = store.list_chat_sessions_by_project(&id)?;
+    let runs: Vec<ApiRun> = store
+        .list_runs_by_project(&id)?
+        .iter()
+        .map(ApiRun::from)
+        .collect();
+
+    let exported_sessions: Vec<Value> = sessions
+        .iter()
+        .map(|s| {
+            let messages = local::chat::list_messages(&s.id).unwrap_or_default();
+            json!({
+                "id": s.id,
+                "projectId": s.project_id,
+                "harness": s.harness,
+                "title": s.title,
+                "model": s.model,
+                "createdAt": s.created_at,
+                "updatedAt": s.updated_at,
+                "messageCount": messages.len(),
+                "messages": messages,
+            })
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "version": 1,
+        "exportedAt": crate::store::now_ms(),
+        "project": project,
+        "sessions": exported_sessions,
+        "runs": runs,
+    })))
 }
 
 async fn compute_backends() -> Json<Value> {
