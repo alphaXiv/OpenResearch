@@ -122,6 +122,7 @@ import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
@@ -382,7 +383,7 @@ function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undefined, c
 function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null } = useQuery(harnessesOptions);
-  const [active, setActive] = useState<HarnessId>("claude-code");
+  const [active, setActive] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const setupRun = useCommandRun();
   const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
@@ -395,7 +396,10 @@ function HarnessesTab({ remote }: { remote: boolean }) {
       .finally(() => setRefreshing(false));
   };
 
-  const h = harnesses?.find((x) => x.id === active);
+  const orderedHarnesses = [...(harnesses ?? [])].sort(
+    (a, b) => Number(b.agentReady) - Number(a.agentReady),
+  );
+  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
 
   return (
     <>
@@ -407,17 +411,37 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           onClose={() => setSetupHarness(null)}
         />
       )}
-      <div className="harness-tabs mt-3 flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
-        {(harnesses ?? []).map((x) => (
-          <button
-            key={x.id}
-            className={x.id === active ? "active" : ""}
-            onClick={() => setActive(x.id)}
-          >
-            {x.name}
-            <span className={`w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
-          </button>
-        ))}
+      <div className="mt-3 mb-3.5 w-fit max-w-full [&_.option-menu]:w-max">
+        <OptionPicker
+          variant="field"
+          dropDown
+          title={m.settings_page_harnesses()}
+          choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
+          value={h?.id ?? null}
+          onSelect={(id) => {
+            const selected = orderedHarnesses.find((harness) => harness.id === id);
+            if (selected) setActive(selected.id);
+          }}
+          renderIcon={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            return harness && <HarnessLogo harness={harness.id} />;
+          }}
+          renderLabel={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            const status = harness && harnessStatus(harness);
+            return (
+              <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                {choice.label}
+                {status && (
+                  <>
+                    <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
+                    <span className="sr-only">{status.label}</span>
+                  </>
+                )}
+              </span>
+            );
+          }}
+        />
       </div>
       {!harnesses ? (
         <LoadingRow>

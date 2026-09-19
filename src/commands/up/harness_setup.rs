@@ -19,6 +19,10 @@ fn install_command(harness: &str, windows: bool) -> Option<&'static str> {
         ("codex", true) => Some("irm https://chatgpt.com/codex/install.ps1 | iex"),
         ("opencode", false) => Some("curl -fsSL https://opencode.ai/install | bash"),
         ("opencode", true) => Some(include_str!("install_opencode.ps1")),
+        ("antigravity", false) => {
+            Some("curl -fsSL https://antigravity.google/cli/install.sh | bash")
+        }
+        ("antigravity", true) => Some("irm https://antigravity.google/cli/install.ps1 | iex"),
         ("cursor", false) => Some("curl https://cursor.com/install -fsS | bash"),
         ("cursor", true) => Some("irm 'https://cursor.com/install?win32=true' | iex"),
         _ => None,
@@ -30,6 +34,7 @@ fn login_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
         "claude-code" => Some(("claude auth login", vec!["auth".into(), "login".into()])),
         "codex" => Some(("codex login", vec!["login".into()])),
         "opencode" => Some(("opencode auth login", vec!["auth".into(), "login".into()])),
+        "antigravity" => Some(("agy", vec![])),
         "cursor" => Some(("agent login", vec!["login".into()])),
         _ => None,
     }
@@ -40,6 +45,7 @@ fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
         "claude-code" => Some(("claude update", vec!["update".into()])),
         "codex" => Some(("codex update", vec!["update".into()])),
         "opencode" => Some(("opencode upgrade", vec!["upgrade".into()])),
+        "antigravity" => Some(("agy update", vec!["update".into()])),
         "cursor" => Some(("agent update", vec!["update".into()])),
         _ => None,
     }
@@ -275,7 +281,13 @@ async fn run(
         };
         *follow_up = Some(shell_env);
         let mut output = String::new();
-        match super::relay_pty(socket, session, Some(&mut output), size).await {
+        let completed =
+            if request.harness == "antigravity" && matches!(request.action, Action::Login) {
+                Some(antigravity_prompt_ready as fn(&str) -> bool)
+            } else {
+                None
+            };
+        match super::relay_pty(socket, session, Some(&mut output), size, completed).await {
             Some(Ok(status)) if status.success() => attempt.record(
                 "command_completed",
                 "command",
@@ -362,6 +374,11 @@ fn setup_verified(
     }
 }
 
+// The interactive CLI stays open after login; verify auth after its chat prompt appears.
+fn antigravity_prompt_ready(output: &str) -> bool {
+    output.contains("Antigravity CLI") && output.contains("for shortcuts")
+}
+
 pub(super) fn append_output(output: &mut String, bytes: &[u8]) {
     output.push_str(&String::from_utf8_lossy(bytes));
     if output.len() > 65536 {
@@ -375,6 +392,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antigravity_login_waits_for_chat_prompt() {
+        assert!(!antigravity_prompt_ready(
+            "Welcome to Antigravity CLI! Choose your color scheme:"
+        ));
+        assert!(!antigravity_prompt_ready(
+            "Antigravity CLI Terms of Service & Data Use [Done]"
+        ));
+        assert!(antigravity_prompt_ready(
+            "Antigravity CLI 1.2.5\naccount@example.com\n? for shortcuts"
+        ));
+    }
+
+    #[test]
     fn automatic_setup_reinstalls_broken_opencode_and_rechecks_healthy_installs() {
         let mut payload = json!({"harnesses": crate::telemetry::harness::IDS.map(|id| json!({"id": id, "installed": false, "installBroken": false}))});
         assert_eq!(automatic_install_needed(&payload), Some(true));
@@ -385,6 +415,8 @@ mod tests {
         payload["harnesses"][0]["installed"] = json!(true);
         assert_eq!(automatic_install_needed(&payload), None);
         assert_eq!(automatic_install_needed(&json!({})), None);
+        let payload = json!({"harnesses": crate::telemetry::harness::IDS.map(|id| json!({"id": id, "installed": id == "antigravity", "installBroken": false}))});
+        assert_eq!(automatic_install_needed(&payload), None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::Value;
 
-pub(crate) const IDS: [&str; 4] = ["claude-code", "codex", "opencode", "cursor"];
+pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor", "antigravity"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InitialSnapshot {
@@ -33,7 +33,7 @@ fn state(id: &str, h: &Value) -> Value {
         "installation": if broken { "broken" } else { match installed { Some(true) => "installed", Some(false) => "not_installed", None => "unknown" } },
         "auth": auth_state,
         "authEvidence": if !checked || auth_state == "unverifiable" { "none" }
-            else if matches!(id, "claude-code" | "cursor") && h["authMethod"] != "apiKey" { "cli_status" } else { "configuration" },
+            else if matches!(id, "claude-code" | "cursor" | "antigravity") && h["authMethod"] != "apiKey" { "cli_status" } else { "configuration" },
         "compatibility": if auth == Some("unsupported") { "update_required" } else if checked && h["version"].is_string() { "no_known_requirement" } else { "unknown" },
         "usability": if h["agentReady"] == true { "usable" } else if auth_state == "unverifiable" || installed.is_none() { "unknown" } else { "unavailable" },
         "localConfigured": h["authMethod"] == "local",
@@ -213,7 +213,7 @@ mod tests {
             &json!({"harnesses":[{"id":"opencode","installed":true}]}),
         );
         assert_eq!(first, restarted.harness_snapshot.unwrap().payload);
-        assert_eq!(first["events"].as_array().unwrap().len(), 4);
+        assert_eq!(first["events"].as_array().unwrap().len(), IDS.len());
     }
     #[test]
     fn distinguishes_free_auth_unknown_and_unsupported() {

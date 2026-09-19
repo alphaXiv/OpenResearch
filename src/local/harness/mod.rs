@@ -1,5 +1,5 @@
 //! The harness compatibility layer: one `Harness` trait that every coding-agent
-//! integration (Claude Code, Codex, OpenCode, Cursor) implements, plus the
+//! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity) implements, plus the
 //! single `registry()` that every consumer iterates.
 //!
 //! A harness can offer up to three capabilities, and no harness is required to
@@ -17,6 +17,7 @@
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
 pub(crate) mod cursor;
@@ -486,6 +487,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
+        Box::new(antigravity::Antigravity),
     ]
 }
 
@@ -797,6 +799,27 @@ mod tests {
         assert_eq!(cursor.default_permission_mode, Some("auto"));
         assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
         assert!(cursor.reasoning_levels.is_empty());
+
+        let antigravity = options_for("antigravity");
+        assert_eq!(
+            permission_contract(&antigravity),
+            [
+                (
+                    "default",
+                    "Ask for approval",
+                    "Ask before changes; allow read-only planning"
+                ),
+                (
+                    "bypass",
+                    "Bypass permissions",
+                    "Allow commands and skip tool confirmation prompts"
+                ),
+            ]
+        );
+        assert_eq!(antigravity.default_permission_mode, Some("default"));
+        assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
+        assert!(reasoning_ids(&antigravity).is_empty());
+        assert!(antigravity.default_reasoning_level.is_none());
     }
 
     /// Every advertised permission-mode id must round-trip through

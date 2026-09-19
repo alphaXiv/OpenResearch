@@ -1,5 +1,5 @@
-//! Unified chat layer for `orx up` — one session/message model over four
-//! harness adapters (Claude Code, Codex, OpenCode, Cursor), each a local child
+//! Unified chat layer for `orx up` — one session/message model over
+//! harness adapters (Claude Code, Codex, OpenCode, Cursor, Antigravity), each a local child
 //! process using the user's own login. orx's SQLite is the system of record
 //! for transcripts; each harness keeps its native session for context/resume.
 //!

@@ -41,6 +41,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       if (current?.agentReady && (action !== "login" || current.authenticated)) {
         onReady?.(current);
         setPhase("success");
+        if (harness.id === "antigravity" && action === "login") onClose();
       } else if (action !== "login" && current?.installed && !current.installBroken && current.authState === "needsLogin") {
         setAction("login");
         setPhase("running");
@@ -101,7 +102,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         path={`/api/harnesses/setup?${new URLSearchParams({ harness: harness.id, action })}`}
         label={m.harness_setup_title({ agent: harness.name })}
         command={command}
-        heightClass="h-80"
+        heightClass="h-96"
         active={phase === "running"}
         awaitingApproval={phase === "preview"}
         onComplete={(value) => {

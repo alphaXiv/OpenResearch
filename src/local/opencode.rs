@@ -257,6 +257,7 @@ fn exclude_agent_files(hub: &Path) {
         ".claude/skills/",
         ".opencode/skills/",
         ".agents/skills/",
+        ".agents/hooks.json",
         ".cursor/skills/",
         ".orx/latex-templates/",
     ]

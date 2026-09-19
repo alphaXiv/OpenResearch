@@ -284,7 +284,7 @@ export function Onboarding({
   };
 
   useEffect(() => {
-    if (remote || automaticSetupStarted.current || harnesses?.length !== 4 || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
+    if (remote || automaticSetupStarted.current || !harnesses?.length || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
     void startAutomaticSetup();
   }, [harnesses, remote]);
 

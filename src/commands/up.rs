@@ -4288,7 +4288,7 @@ fn spawn_agent_preflight() {
         eprintln!("orx up: agents: {}", line.join(" · "));
         if !harnesses.iter().any(|h| h.agent_ready) {
             eprintln!(
-                "orx up: warning: no coding agent ready — install Claude Code, Codex, OpenCode or Cursor, then connect a local model or sign in."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex, OpenCode, Cursor or Antigravity, then connect a local model or sign in."
             );
         }
     });
@@ -5521,17 +5521,14 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
-    if std::env::var_os("TERM").is_none() {
-        command.env("TERM", "xterm-256color");
-    }
+    command.env("TERM", "xterm-256color");
+    command.env_remove("NO_COLOR");
+    command.env_remove("FORCE_COLOR");
     if let Some(cwd) = cwd {
         command.cwd(cwd);
     }
     for (key, value) in env {
         command.env(key, value);
-    }
-    if let Some(cwd) = cwd {
-        command.cwd(cwd);
     }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
@@ -5636,7 +5633,7 @@ async fn ssh_connect_socket(
         }
     };
     let mut size = DEFAULT_PTY_SIZE;
-    let Some(status) = relay_pty(&mut socket, session, None, &mut size).await else {
+    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
         return;
     };
 
@@ -5703,6 +5700,7 @@ async fn relay_pty(
     session: PtySession,
     mut output: Option<&mut String>,
     size: &mut PtySize,
+    completed: Option<fn(&str) -> bool>,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
         master,
@@ -5722,6 +5720,11 @@ async fn relay_pty(
                     if let Some(output) = output.as_deref_mut() { harness_setup::append_output(output, &bytes); }
                     if socket.send(Message::Binary(bytes.into())).await.is_err() {
                         return None;
+                    }
+                    if let (Some(completed), Some(output)) = (completed, output.as_deref()) {
+                        if completed(output) {
+                            return Some(Ok(portable_pty::ExitStatus::with_exit_code(0)));
+                        }
                     }
                 }
                 Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
@@ -5800,7 +5803,7 @@ async fn project_terminal(
                 return;
             }
         };
-        let Some(status) = relay_pty(&mut socket, session, None, &mut size).await else {
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
             return;
         };
         match status {
@@ -5951,7 +5954,7 @@ async fn command_terminal(
                 return;
             }
         };
-        let Some(status) = relay_pty(&mut socket, session, None, &mut size).await else {
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
             return;
         };
         let result = async {
@@ -5991,7 +5994,7 @@ async fn continue_in_shell(
     let (shell, args) = interactive_shell();
     match spawn_pty(shell, args, env, *size).await {
         Ok(session) => {
-            relay_pty(socket, session, None, size).await;
+            relay_pty(socket, session, None, size, None).await;
         }
         Err(error) => send_terminal_error(socket, error).await,
     }
