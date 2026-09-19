@@ -24,6 +24,8 @@ import {
 } from "../api";
 import { Button } from "./ui";
 import { PaperTitle } from "./PaperTitle";
+import { useRuntimeSafe, isRemoteRuntime } from "../RemoteRuntime";
+import { RemoteFolderBrowser } from "./RemoteFolderBrowser";
 
 function useDebouncedValue(value: string, delay: number) {
   const [debounced, setDebounced] = useState(value);
@@ -80,6 +82,11 @@ export function NewProjectForm({
   onCancel?: () => void;
   remote?: boolean;
 }) {
+  const runtime = useRuntimeSafe();
+  const isRemote = remote || isRemoteRuntime(runtime);
+  const canPick = runtime ? runtime.canPickFolder !== false : !isRemote;
+  const [manualFolderInput, setManualFolderInput] = useState(false);
+  const [showBrowser, setShowBrowser] = useState(true);
   const [mode, setMode] = useState<Mode>("blank");
   const [name, setName] = useState("");
   const [nameTouched, setNameTouched] = useState(false);
@@ -222,11 +229,19 @@ export function NewProjectForm({
     } catch (err) {
       if (request === folderPickSeq.current) {
         setError(err instanceof Error ? err.message : String(err));
+        setManualFolderInput(true);
       }
     } finally {
       if (request === folderPickSeq.current) setPickingFolder(false);
     }
   }
+
+  useEffect(() => {
+    if (mode === "folder" && !nameTouched && pathStatus?.resolvedPath) {
+      const folderName = pathStatus.resolvedPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+      if (folderName) setName(folderName);
+    }
+  }, [mode, nameTouched, pathStatus?.resolvedPath]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -483,38 +498,98 @@ export function NewProjectForm({
                 </span>
               )}
             </label>
-          ) : mode === "folder" && !remote ? (
-            <button
-              data-initial-focus
-              type="button"
-              className="folder-picker-control"
-              aria-label={path ? m.new_project_change_folder({ path: ltr(path) }) : m.new_project_choose_existing_folder()}
-              disabled={pickingFolder}
-              title={path || undefined}
-              onClick={() => void chooseLocalFolder()}
-            >
-              <FolderOpen className={path ? "folder-picker-icon" : "folder-picker-icon placeholder"} size={16} />
-              <span className={path ? "text-sm" : "placeholder"}>
-                {pickingFolder ? m.new_project_choosing() : path || m.new_project_choose_existing_folder()}
-              </span>
-              <ChevronRight className="folder-picker-chevron" size={15} />
-            </button>
+          ) : mode === "folder" && (!isRemote && canPick && !manualFolderInput) ? (
+            <div className="flex flex-col gap-1.5">
+              <button
+                data-initial-focus
+                type="button"
+                className="folder-picker-control"
+                aria-label={path ? m.new_project_change_folder({ path: ltr(path) }) : m.new_project_choose_existing_folder()}
+                disabled={pickingFolder}
+                title={path || undefined}
+                onClick={() => void chooseLocalFolder()}
+              >
+                <FolderOpen className={path ? "folder-picker-icon" : "folder-picker-icon placeholder"} size={16} />
+                <span className={path ? "text-sm" : "placeholder"}>
+                  {pickingFolder ? m.new_project_choosing() : path || m.new_project_choose_existing_folder()}
+                </span>
+                <ChevronRight className="folder-picker-chevron" size={15} />
+              </button>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  className="text-xs text-subtext hover:text-text underline cursor-pointer bg-transparent border-0 p-0"
+                  onClick={() => setManualFolderInput(true)}
+                >
+                  {m.new_project_enter_path_manually()}
+                </button>
+              </div>
+            </div>
           ) : mode === "folder" ? (
-            <label className="project-location-field">
-              <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>
+            <div className="project-location-field flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    className="text-xs text-subtext hover:text-text underline cursor-pointer bg-transparent border-0 p-0"
+                    onClick={() => setShowBrowser(!showBrowser)}
+                  >
+                    {showBrowser ? m.new_project_hide_browser() : m.new_project_browse_folders()}
+                  </button>
+                  {!isRemote && canPick && (
+                    <button
+                      type="button"
+                      className="text-xs text-subtext hover:text-text underline cursor-pointer bg-transparent border-0 p-0"
+                      onClick={() => setManualFolderInput(false)}
+                    >
+                      {m.new_project_browse_folder()}
+                    </button>
+                  )}
+                </div>
+              </div>
               <input
                 data-initial-focus
                 className="text-sm font-normal"
                 value={path}
                 onChange={(event) => {
                   setPathTouched(true);
-                  setPath(event.target.value);
+                  const val = event.target.value;
+                  setPath(val);
+                  if (!nameTouched) {
+                    const trimmed = val.trim();
+                    if (!trimmed) {
+                      setName("");
+                    } else {
+                      const folderName = trimmed.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+                      if (folderName && folderName !== "." && folderName !== ".." && folderName !== "~") {
+                        setName(folderName);
+                      }
+                    }
+                  }
                 }}
                 placeholder="/home/user/project"
                 spellCheck={false}
                 dir="ltr"
               />
-            </label>
+              {checkingPath && (
+                <span className="sr-only" role="status" aria-live="polite">{m.new_project_form_checking_project_location()}</span>
+              )}
+              {showBrowser && (
+                <RemoteFolderBrowser
+                  selectedPath={path}
+                  onSelectPath={(selected) => {
+                    setPathTouched(true);
+                    setPath(selected);
+                    void queryClient.invalidateQueries(getProjectPathStatusQuery(selected));
+                    if (!nameTouched) {
+                      const folderName = selected.replace(/[\\/]+$/, "").split(/[\\/]/).pop();
+                      if (folderName) setName(folderName);
+                    }
+                  }}
+                />
+              )}
+            </div>
           ) : name.trim() ? (
             <label className="project-location-field">
               <span className="project-location-label !font-medium">{m.new_project_form_project_location()}</span>

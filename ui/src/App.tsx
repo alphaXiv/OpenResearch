@@ -29,6 +29,7 @@ import {
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
 import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth } from "./panelLayout";
+import { isRemoteRuntime } from "./RemoteRuntime";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -2089,7 +2090,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       </div>
       {newProjectOpen && (
         <NewProjectDialog
-          remote={runtime.kind === "ssh"}
+          remote={isRemoteRuntime(runtime)}
           onClose={() => setNewProjectOpen(false)}
           onCreated={(project, publicationError) => {
             setNewProjectOpen(false);

@@ -12,6 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -432,6 +433,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/health", get(health))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
+        .route("/api/project-path/browse", get(browse_project_path))
         .route("/api/project-path/pick", post(pick_project_folder))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -1279,6 +1281,11 @@ async fn project_path_status(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
 }
 
 async fn pick_project_folder() -> ApiResult {
+    if !crate::folder_picker::can_pick_folder() {
+        return Err(bad_request(anyhow!(
+            "No native folder picker is available. Running in a remote or headless environment."
+        )));
+    }
     let path = tokio::task::spawn_blocking(crate::folder_picker::pick_folder)
         .await
         .map_err(|error| ApiError::from(anyhow!("folder picker task failed: {error}")))?
@@ -1286,6 +1293,117 @@ async fn pick_project_folder() -> ApiResult {
     Ok(Json(json!({
         "path": path.map(|path| path.to_string_lossy().into_owned()),
     })))
+}
+
+#[derive(Deserialize)]
+struct BrowseProjectPathQ {
+    path: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowseEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_git: bool,
+    empty: bool,
+    hidden: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowseResult {
+    current_path: String,
+    parent_path: Option<String>,
+    home_path: Option<String>,
+    entries: Vec<BrowseEntry>,
+}
+
+async fn browse_project_path(Query(q): Query<BrowseProjectPathQ>) -> ApiResult {
+    let result = tokio::task::spawn_blocking(move || -> Result<BrowseResult> {
+        let requested = q.path.as_deref().unwrap_or("").trim();
+        let home = dirs::home_dir();
+        let target_dir = if requested.is_empty() {
+            home.clone().unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            let mut resolved = local::projects::expand_path(requested)
+                .unwrap_or_else(|_| home.clone().unwrap_or_else(|| PathBuf::from(".")));
+            if !resolved.is_dir() {
+                if let Some(parent) = resolved.parent() {
+                    if parent.is_dir() {
+                        resolved = parent.to_path_buf();
+                    } else if let Some(ref h) = home {
+                        resolved = h.clone();
+                    }
+                } else if let Some(ref h) = home {
+                    resolved = h.clone();
+                }
+            }
+            resolved
+        };
+
+        let current_path = std::fs::canonicalize(&target_dir)
+            .unwrap_or(target_dir.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        let parent_path = target_dir
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned());
+
+        let home_path = home.map(|h| h.to_string_lossy().into_owned());
+
+        let mut entries = Vec::new();
+        if let Ok(read_dir) = std::fs::read_dir(&target_dir) {
+            for entry in read_dir.flatten() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                let is_dir = file_type.is_dir();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let hidden = name.starts_with('.');
+                let entry_path = entry.path();
+                let is_git = is_dir
+                    && (entry_path.join(".git").exists() || entry_path.join("HEAD").exists());
+                let empty = if is_dir {
+                    std::fs::read_dir(&entry_path)
+                        .map(|mut r| r.next().is_none())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                entries.push(BrowseEntry {
+                    name,
+                    path: entry_path.to_string_lossy().into_owned(),
+                    is_dir,
+                    is_git,
+                    empty,
+                    hidden,
+                });
+            }
+        }
+
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.hidden.cmp(&b.hidden))
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        entries.truncate(500);
+
+        Ok(BrowseResult {
+            current_path,
+            parent_path,
+            home_path,
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("browse path task failed: {e}")))?
+    .map_err(bad_request)?;
+
+    Ok(Json(json!(result)))
 }
 
 // --- papers (new-project "from a paper" flow; proxies alphaXiv) ------------
@@ -6274,8 +6392,15 @@ async fn disconnect_remote_session(
     Ok(Json(json!(state.remote_sessions.disconnect(&id).await?)))
 }
 
-async fn local_runtime() -> Json<Value> {
-    Json(json!({ "kind": "local", "version": env!("CARGO_PKG_VERSION") }))
+async fn local_runtime(State(state): State<AppState>) -> Json<Value> {
+    let remote =
+        crate::remote::detect_ssh_session().is_some() || state.remote_instance_id.is_some();
+    Json(json!({
+        "kind": "local",
+        "version": env!("CARGO_PKG_VERSION"),
+        "remote": remote,
+        "canPickFolder": crate::folder_picker::can_pick_folder(),
+    }))
 }
 
 async fn run_ssh_host_preflight(host: String) -> SshHostTest {

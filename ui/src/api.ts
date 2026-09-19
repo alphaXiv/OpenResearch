@@ -249,6 +249,27 @@ export const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
   return get<ProjectPathStatus>(`/api/project-path/status${query}`, signal);
 };
 
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  isDir: boolean;
+  isGit: boolean;
+  empty: boolean;
+  hidden: boolean;
+}
+
+export interface BrowseResult {
+  currentPath: string;
+  parentPath: string | null;
+  homePath: string | null;
+  entries: BrowseEntry[];
+}
+
+export const browseProjectPath = (path = "", signal?: AbortSignal) => {
+  const query = path ? `?path=${encodeURIComponent(path)}` : "";
+  return get<BrowseResult>(`/api/project-path/browse${query}`, signal);
+};
+
 export const pickProjectFolder = () =>
   post<{ path: string | null }>("/api/project-path/pick").then((result) => result.path);
 
@@ -1008,8 +1029,15 @@ export interface RemoteSessionInfo {
 }
 
 export type RuntimeInfo =
-  | { kind: "local"; version: string }
-  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+  | { kind: "local"; version: string; remote?: boolean; canPickFolder?: boolean }
+  | {
+      kind: "ssh";
+      version: string;
+      dashboardProtocol: number;
+      session: RemoteSessionInfo;
+      remote?: boolean;
+      canPickFolder?: boolean;
+    };
 
 export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
 
