@@ -56,6 +56,23 @@ export function useRuntime(): RuntimeInfo {
   return runtime;
 }
 
+export function useRuntimeSafe(): RuntimeInfo | null {
+  return useContext(RuntimeContext);
+}
+
+export function isRemoteRuntime(runtime?: RuntimeInfo | null): boolean {
+  if (runtime?.kind === "ssh") return true;
+  if (runtime?.remote) return true;
+  if (runtime?.canPickFolder === false) return true;
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host && host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function setFavicon(remote: boolean) {
   const link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
   if (link) link.href = remote ? REMOTE_FAVICON : "/favicon.svg";

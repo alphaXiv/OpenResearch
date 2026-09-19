@@ -4,7 +4,7 @@ import { listProjectsQuery, getUiStateQuery } from "./queries/projects";
 import { useRouteContext, Link, useNavigate, type ErrorComponentProps } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { useRuntime } from "./RemoteRuntime";
+import { useRuntime, isRemoteRuntime } from "./RemoteRuntime";
 
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
@@ -93,7 +93,7 @@ export function ProjectsPage() {
         : !projects || !state ? <RoutePending />
           : projects.length === 0 && !state.onboardingCompleted ? (
             <Onboarding
-              remote={runtime.kind === "ssh"}
+              remote={isRemoteRuntime(runtime)}
               preferredAgent={state.preferredAgent}
               onDone={(project) => {
                 clearReadDemoSessions();
@@ -102,7 +102,7 @@ export function ProjectsPage() {
             />
           ) : (
             <ProjectsHome
-              remote={runtime.kind === "ssh"}
+              remote={isRemoteRuntime(runtime)}
               projects={projects}
               onOpen={openProject}
               onCreated={(project, publicationError) => {

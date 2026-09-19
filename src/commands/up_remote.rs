@@ -1250,6 +1250,8 @@ async fn gateway_runtime(State(session): State<Arc<RemoteSession>>) -> Json<serd
         "version": env!("CARGO_PKG_VERSION"),
         "dashboardProtocol": DASHBOARD_PROTOCOL,
         "session": session.info.read().await.clone(),
+        "remote": true,
+        "canPickFolder": false,
     }))
 }
 

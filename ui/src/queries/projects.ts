@@ -33,6 +33,12 @@ export const getProjectPathStatusQuery = (path = "") => queryOptions({
   staleTime: 30_000,
 });
 
+export const browseProjectPathQuery = (path = "") => queryOptions({
+  queryKey: workspaceKey("browseProjectPath", path),
+  queryFn: ({ signal }) => api.browseProjectPath(path, signal),
+  staleTime: 30_000,
+});
+
 export const searchPapersQuery = (q: string) => queryOptions({
   queryKey: workspaceKey("searchPapers", q),
   queryFn: ({ signal }) => api.searchPapers(q, signal),
