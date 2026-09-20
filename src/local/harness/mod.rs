@@ -41,6 +41,7 @@ use crate::local::chat::{
 use crate::store::Store;
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use detect::unique as unique_bins;
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;

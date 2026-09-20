@@ -4,6 +4,7 @@ import { m } from "../paraglide/messages.js";
 import { refreshHarnesses } from "../queries/settings";
 import { HarnessLogo } from "./HarnessLogo";
 import { CommandTerminal } from "./SshConnectTerminal";
+import { initialPhase, recheckedAction, setupAction, terminalMounted, type SetupAction, type SetupPhase } from "./harnessSetupState";
 import { renderNote } from "./agentNote";
 import { Button, Spinner } from "./ui";
 
@@ -15,10 +16,15 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const cancelled = useRef(false);
-  const [action, setAction] = useState<"install" | "update" | "login">(!harness.installed || harness.installBroken ? "install" : harness.authState === "unsupported" ? "update" : "login");
+  const [action, setAction] = useState<SetupAction>(() => setupAction(harness));
   const [attempt, setAttempt] = useState(0);
-  const [phase, setPhase] = useState<"preview" | "running" | "checking" | "success" | "error">(action === "login" ? "running" : "preview");
-  const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<SetupPhase>(() => initialPhase(harness, setupAction(harness)));
+  // A command was approved and its terminal may connect; see `terminalMounted`.
+  const [started, setStarted] = useState(phase === "running");
+  // Tracked, not the mount-time prop: a re-check that clears the repair must
+  // bring Retry back without reopening the dialog.
+  const [needsRepair, setNeedsRepair] = useState(harness.needsConfigRepair);
+  const [error, setError] = useState<string | null>(harness.needsConfigRepair ? harness.agentNote ?? null : null);
   const busy = phase === "running" || phase === "checking";
   const command = commands[action].includes("\n") ? undefined : commands[action];
 
@@ -34,18 +40,29 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
 
   const verify = async () => {
     setPhase("checking");
+    // Drop the previous attempt's message; this re-check replaces it.
+    setError(null);
     try {
       const harnesses = await refreshHarnesses(true, true);
       if (cancelled.current) return;
       const current = harnesses.find((item) => item.id === harness.id);
+      setNeedsRepair(current?.needsConfigRepair ?? false);
       if (current?.agentReady && (action !== "login" || current.authenticated)) {
         onReady?.(current);
         setPhase("success");
         if (harness.id === "antigravity" && action === "login") onClose();
-      } else if (action !== "login" && current?.installed && !current.installBroken && current.authState === "needsLogin") {
+      } else if (action !== "login" && current?.installed && !current.installBroken && !current.needsConfigRepair && current.authState === "needsLogin") {
         setAction("login");
+        setStarted(true);
         setPhase("running");
       } else {
+        // A cleared repair frees Retry; re-point it, and drop the old action's
+        // approval so nothing runs until Retry.
+        const next = recheckedAction(current, action);
+        if (next) {
+          setAction(next);
+          setStarted(false);
+        }
         setError(current?.agentNote ?? m.harness_setup_not_ready());
         setPhase("error");
       }
@@ -79,7 +96,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
         <p className="my-4 text-sm text-subtext">
           {action === "install" ? m.harness_setup_install_preview({ agent: harness.name }) : m.harness_setup_update_preview({ agent: harness.name })}
         </p>
-      ) : command ? (
+      ) : command && terminalMounted(phase, started) ? (
         <p className="my-4 text-sm text-subtext [&_.cmd-inline]:mx-2 [&_.cmd-inline]:gap-2">
           {renderNote(m.harness_setup_started_command({ command }))}
         </p>
@@ -97,7 +114,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
       {action === "install" && commands.requiresNpm && (
         <p className="text-sm text-subtext">{m.harness_setup_requires_npm()}</p>
       )}
-      <CommandTerminal
+      {terminalMounted(phase, started) && <CommandTerminal
         key={`${action}-${attempt}`}
         path={`/api/harnesses/setup?${new URLSearchParams({ harness: harness.id, action })}`}
         label={m.harness_setup_title({ agent: harness.name })}
@@ -114,12 +131,13 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
           setError(message);
           setPhase("error");
         }}
-      />
+      />}
       {error && <p role="alert" className="text-sm text-accent-red">{renderNote(error)}</p>}
       <div className="mt-5 flex justify-end gap-2">
         {phase === "error" && <Button variant="ghost" onClick={() => { setError(null); void verify(); }}>{m.onboarding_re_check()}</Button>}
-        {phase === "error" && <Button onClick={() => {
+        {phase === "error" && !needsRepair && <Button onClick={() => {
           setError(null);
+          setStarted(true);
           setPhase("running");
           setAttempt((current) => current + 1);
         }}>{m.app_retry()}</Button>}
@@ -127,7 +145,7 @@ export function HarnessSetupDialog({ harness, commands, onReady, onClose }: {
           {phase === "success" ? m.status_done() : busy ? m.harness_setup_cancel() : m.app_close_panel()}
         </Button>
         {phase === "preview" && (
-          <Button variant="primary" onClick={() => setPhase("running")}>
+          <Button variant="primary" onClick={() => { setStarted(true); setPhase("running"); }}>
             {m.harness_setup_approve_run()}
           </Button>
         )}

@@ -21,7 +21,7 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
-use super::detect::{probe_bin, resolve_symlinks, HarnessAuthState, HarnessInfo, ModelInfo};
+use super::detect::{resolve_symlinks, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
@@ -56,8 +56,8 @@ impl Harness for Antigravity {
 
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(bin) = find_agy() {
-            info.record_bin(&bin, probe_bin(&bin).await);
+        if let Some((bin, probe)) = find_agy_working().await {
+            info.record_bin(&bin, probe);
         }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
@@ -189,20 +189,36 @@ impl Harness for Antigravity {
     }
 }
 
-/// `agy` on PATH, else search common install locations under `~/.local/bin`
-/// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`.
-pub(crate) fn find_agy() -> Option<PathBuf> {
+/// `agy` on PATH, then common install locations under `~/.local/bin`,
+/// `~/.gemini/bin`, or `~/.gemini/antigravity-cli/bin`, in preference order.
+fn agy_candidates() -> Vec<PathBuf> {
+    let home_dirs = dirs::home_dir().into_iter().flat_map(|home| {
+        let gemini = home.join(".gemini");
+        [
+            home.join(".local").join("bin"),
+            gemini.join("bin"),
+            gemini.join("antigravity-cli").join("bin"),
+        ]
+    });
+    let drops = home_dirs
+        .chain(dirs::data_local_dir().map(|dir| dir.join("agy").join("bin")))
+        .filter_map(|dir| find_in_dir(&dir, "agy"));
     find_on_path("agy")
-        .or_else(|| {
-            let home = dirs::home_dir()?;
-            let local = home.join(".local").join("bin");
-            let gemini = home.join(".gemini");
-            find_in_dir(&local, "agy")
-                .or_else(|| find_in_dir(&gemini.join("bin"), "agy"))
-                .or_else(|| find_in_dir(&gemini.join("antigravity-cli").join("bin"), "agy"))
-        })
-        .or_else(|| find_in_dir(&dirs::data_local_dir()?.join("agy").join("bin"), "agy"))
+        .into_iter()
+        .chain(drops)
         .map(resolve_symlinks)
+        .collect()
+}
+
+/// The executable detection selected, else the first candidate — sync callers
+/// cannot probe, and must not spawn a launcher detection already skipped.
+pub(crate) fn find_agy() -> Option<PathBuf> {
+    super::detect::selected_bin("antigravity", agy_candidates())
+}
+
+/// The first candidate that actually runs, with its version probe.
+pub(super) async fn find_agy_working() -> Option<(PathBuf, super::detect::BinProbe)> {
+    super::detect::select_working("antigravity", agy_candidates(), None).await
 }
 
 async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {

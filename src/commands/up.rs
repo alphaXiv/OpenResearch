@@ -6874,6 +6874,13 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
     if entry_install_broken(claude) {
         return;
     }
+    // The snapshot only carries a state, so its generic note would overwrite the
+    // credential-conflict diagnosis with "run `claude auth status`" — advice for
+    // a state the conflict already explains, and the repair the user needs.
+    let needs_config_repair = claude
+        .get("needsConfigRepair")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     claude["authState"] = json!(snapshot.state);
     if snapshot.state == local::harness::HarnessAuthState::Ready {
         return;
@@ -6886,6 +6893,9 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
         object.remove("account");
         object.remove("org");
         object.remove("plan");
+    }
+    if needs_config_repair {
+        return;
     }
     claude["agentNote"] = json!(if snapshot.runtime_rejected {
         local::harness::claude::auth_recovery_note()

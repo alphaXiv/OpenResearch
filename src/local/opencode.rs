@@ -25,9 +25,10 @@ use crate::store;
 
 #[path = "opencode_runtime.rs"]
 mod runtime;
+#[cfg(all(test, unix))]
+pub(crate) use runtime::resolve_binary_at;
 pub(crate) use runtime::{
-    prepare_database, resolve_binary, resolve_binary_at, start_server, AgentEndpoint, Protocol,
-    ResolvedBinary,
+    prepare_database, resolve_binary, start_server, AgentEndpoint, Protocol, ResolvedBinary,
 };
 
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
@@ -42,21 +43,37 @@ pub(crate) struct ResolvedRuntime {
     pub store: NativeStore,
 }
 
-/// `opencode` on PATH, else the installer's default drop location.
-pub fn find_opencode() -> Result<PathBuf> {
-    if let Some(found) = crate::local::shell_env::find_on_path("opencode") {
-        return Ok(found);
-    }
-    if let Some(home) = dirs::home_dir() {
-        let dir = home.join(".opencode").join("bin");
-        if let Some(found) = crate::local::shell_env::find_in_dir(&dir, "opencode") {
-            return Ok(found);
-        }
-    }
-    Err(anyhow!(
+/// `opencode` on PATH, then the installer's default drop location, in
+/// preference order. The native installer writes `~/.opencode/bin`, which a
+/// stale npm-style `opencode` shim earlier on PATH otherwise hides.
+pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
+    let drop = dirs::home_dir()
+        .map(|home| home.join(".opencode").join("bin"))
+        .and_then(|dir| crate::local::shell_env::find_in_dir(&dir, "opencode"));
+    // Resolved and de-duplicated: the native install is both on PATH and in its
+    // drop directory, and probing that one binary twice costs a 15s timeout.
+    crate::local::harness::unique_bins(
+        crate::local::shell_env::find_on_path("opencode")
+            .into_iter()
+            .chain(drop)
+            .map(|path| crate::paths::canonicalize(&path).unwrap_or(path))
+            .collect(),
+    )
+}
+
+pub(crate) fn not_found() -> crate::error::Error {
+    anyhow!(
         "opencode not found (checked PATH and ~/.opencode/bin/opencode).\n\
          Install it with: curl -fsSL https://opencode.ai/install | bash"
-    ))
+    )
+}
+
+/// `opencode` on PATH, else the installer's default drop location.
+pub fn find_opencode() -> Result<PathBuf> {
+    opencode_candidates()
+        .into_iter()
+        .next()
+        .ok_or_else(not_found)
 }
 
 /// Ask the OS for a free loopback port (bind :0, read it back, release).

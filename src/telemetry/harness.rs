@@ -138,6 +138,14 @@ impl SetupAttempt {
         exit_code: Option<u32>,
         output: Option<&str>,
     ) {
+        // Ingestion rejects the whole event on a value outside the companion
+        // schema, so a new call site fails here in any debug run that hits it.
+        debug_assert!(contract::OUTCOMES.contains(&outcome), "{outcome}");
+        debug_assert!(contract::STAGES.contains(&stage), "{stage}");
+        debug_assert!(
+            reason.is_none_or(|reason| contract::REASONS.contains(&reason)),
+            "{reason:?}"
+        );
         capture(
             "harness_setup",
             json!({
@@ -150,51 +158,127 @@ impl SetupAttempt {
     }
 }
 
-// Fail closed: only fixed diagnostic phrases from output can leave the machine, never arbitrary tokens.
-fn safe_error_excerpt(output: &str) -> Option<String> {
-    const PHRASES: &[&str] = &[
-        "Could not resolve host",
-        "Could not resolve proxy",
-        "Failed to connect",
-        "Connection refused",
-        "Connection timed out",
-        "Operation timed out",
-        "SSL certificate problem",
-        "certificate verify failed",
-        "Permission denied",
-        "Access is denied",
-        "No space left on device",
-        "Read-only file system",
-        "No such file or directory",
-        "command not found",
-        "is not recognized as the name of a cmdlet",
-        "running scripts is disabled on this system",
-        "Unsupported platform",
-        "Unsupported architecture",
-        "The requested URL returned error: 403",
-        "The requested URL returned error: 404",
-        "The requested URL returned error: 429",
-        "The requested URL returned error: 500",
-        "The requested URL returned error: 502",
-        "The requested URL returned error: 503",
-        "Authentication failed",
-        "Invalid API key",
-        "Unauthorized",
-        "EACCES",
-        "ENOSPC",
-        "ECONNRESET",
+#[cfg(test)]
+pub(crate) fn excerpt_for_test(output: &str) -> Option<String> {
+    safe_error_excerpt(output)
+}
+
+/// `zHarnessSetup` in openresearch.sh's `cli-analytics-contract.ts`. Ingestion
+/// rejects the whole event on anything outside these, so every `record` call
+/// has to stay inside them until the companion schema widens.
+pub(crate) mod contract {
+    pub(crate) const OUTCOMES: &[&str] = &[
+        "started",
+        "command_started",
+        "command_completed",
+        "succeeded",
+        "failed",
+        "interrupted",
     ];
+    pub(crate) const STAGES: &[&str] = &["detect", "command", "verify"];
+    pub(crate) const REASONS: &[&str] = &[
+        "not_eligible",
+        "not_installed",
+        "spawn_failed",
+        "exit_nonzero",
+        "terminal_error",
+        "disconnected",
+        "not_ready",
+    ];
+    pub(crate) const MAX_ERROR_EXCERPT: usize = 1024;
+}
+
+// Fail closed: only fixed diagnostic phrases from output can leave the machine, never arbitrary tokens.
+const PHRASES: &[&str] = &[
+    "Could not resolve host",
+    "Could not resolve proxy",
+    "Failed to connect",
+    "Connection refused",
+    "Connection timed out",
+    "Operation timed out",
+    "SSL certificate problem",
+    "certificate verify failed",
+    "Permission denied",
+    "Access is denied",
+    "No space left on device",
+    "Read-only file system",
+    "No such file or directory",
+    "command not found",
+    "is not recognized as the name of a cmdlet",
+    "running scripts is disabled on this system",
+    "Unsupported platform",
+    "Unsupported architecture",
+    // Real failures the previous list discarded, leaving a NULL excerpt on
+    // an exit that had a perfectly specific cause.
+    "stdin is not a terminal",
+    "Recv failure",
+    "Send failure",
+    "Connection reset by peer",
+    "Connection was aborted",
+    "SSL connection timeout",
+    "OpenSSL SSL_connect",
+    "Empty reply from server",
+    "Unable to connect to the remote server",
+    "The system cannot find the file specified",
+    "The system cannot find the path specified",
+    "Cannot create a file when that file already exists",
+    "The process cannot access the file",
+    "being used by another process",
+    "Failed to fetch version information",
+    "Failed to install native update",
+    "file is not a database",
+    "database disk image is malformed",
+    "Login failed or timed out",
+    "Request failed with status code 400",
+    "ECONNREFUSED",
+    "ETIMEDOUT",
+    "ENOENT",
+    "The requested URL returned error: 403",
+    "The requested URL returned error: 404",
+    "The requested URL returned error: 429",
+    "The requested URL returned error: 500",
+    "The requested URL returned error: 502",
+    "The requested URL returned error: 503",
+    "Authentication failed",
+    "Invalid API key",
+    "Unauthorized",
+    "EACCES",
+    "ENOSPC",
+    "ECONNRESET",
+    // Fixed classifications `verify_reason` passes in; the ingested
+    // `reason` allowlist has no vocabulary for which predicate failed.
+    "agent is not installed",
+    "agent is installed but failed to run",
+    "agent is not signed in",
+    "agent sign-in could not be verified",
+    "agent version is unsupported",
+    "agent configuration needs repair",
+    "agent has no usable model",
+    "agent reported no usable state",
+];
+
+fn safe_error_excerpt(output: &str) -> Option<String> {
     let output = output
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_ascii_lowercase();
-    let phrases: Vec<_> = PHRASES
+    // Ingestion caps `errorExcerpt` and rejects the whole event over it, so
+    // stop joining before the limit rather than lose the attempt.
+    const MAX: usize = contract::MAX_ERROR_EXCERPT;
+    let mut excerpt = String::new();
+    for phrase in PHRASES
         .iter()
         .filter(|phrase| output.contains(&phrase.to_ascii_lowercase()))
-        .copied()
-        .collect();
-    (!phrases.is_empty()).then(|| phrases.join("; "))
+    {
+        let separator = if excerpt.is_empty() { "" } else { "; " };
+        if excerpt.len() + separator.len() + phrase.len() > MAX {
+            break;
+        }
+        excerpt.push_str(separator);
+        excerpt.push_str(phrase);
+    }
+    (!excerpt.is_empty()).then_some(excerpt)
 }
 
 #[cfg(test)]
@@ -239,6 +323,76 @@ mod tests {
         assert_eq!(
             safe_error_excerpt("curl: (22) The requested URL returned error: 403 secret"),
             Some("The requested URL returned error: 403".into())
+        );
+    }
+
+    #[test]
+    fn real_setup_failures_are_no_longer_dropped_to_null() {
+        // Each of these reached the setup UI as a useful message and was
+        // uploaded as NULL, leaving the failure unattributable.
+        for (output, expected) in [
+            ("Error: stdin is not a terminal", "stdin is not a terminal"),
+            (
+                "curl: (35) Recv failure: Connection reset by peer",
+                "Recv failure; Connection reset by peer",
+            ),
+            (
+                "CreateProcessW ... failed: The system cannot find the file specified. (os error 2)",
+                "The system cannot find the file specified",
+            ),
+            (
+                "Move-Item : Cannot create a file when that file already exists",
+                "Cannot create a file when that file already exists",
+            ),
+            (
+                "Invoke-RestMethod : Unable to connect to the remote server",
+                "Unable to connect to the remote server",
+            ),
+            (
+                "Failed to fetch version information",
+                "Failed to fetch version information",
+            ),
+            ("Error: file is not a database", "file is not a database"),
+            (
+                "Failed to fetch version: connect ECONNREFUSED 127.0.0.1:9",
+                "ECONNREFUSED",
+            ),
+        ] {
+            assert_eq!(safe_error_excerpt(output).as_deref(), Some(expected), "{output}");
+        }
+        // Still fail-closed: paths, tokens and addresses never leave.
+        assert_eq!(
+            safe_error_excerpt(
+                "stdin is not a terminal /Users/person/.codex/auth.json sk-ant-secret"
+            )
+            .as_deref(),
+            Some("stdin is not a terminal")
+        );
+    }
+
+    #[test]
+    fn excerpt_stays_within_the_ingested_maximum() {
+        // The worst case: output containing every allowlisted phrase at once.
+        // Over 1024 the ingestion rejects the event and the attempt is lost.
+        let everything = PHRASES.join(" ");
+        assert!(
+            everything.len() > contract::MAX_ERROR_EXCERPT,
+            "test no longer exercises the cap"
+        );
+        let excerpt = safe_error_excerpt(&everything).unwrap();
+        assert!(
+            excerpt.len() <= contract::MAX_ERROR_EXCERPT,
+            "{}",
+            excerpt.len()
+        );
+        // Truncation is by whole phrase, so nothing partial ever leaves.
+        for phrase in excerpt.split("; ") {
+            assert!(PHRASES.contains(&phrase), "{phrase}");
+        }
+        // A single phrase is unaffected by the cap.
+        assert_eq!(
+            safe_error_excerpt("Connection refused").as_deref(),
+            Some("Connection refused")
         );
     }
 

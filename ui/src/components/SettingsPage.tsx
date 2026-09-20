@@ -357,7 +357,9 @@ function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label:
   if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
   if (h.installBroken) return { cls: "warn", variant: "warning", label: m.settings_page_install_broken() };
   if (h.authMethod === "local") return { cls: "warn", variant: "warning", label: m.onboarding_server_unavailable() };
-  if (h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  // A config fault reports `unsupported`, but no update repairs it; the note
+  // carries the actual repair, so the badge must not promise an update.
+  if (h.needsConfigRepair || h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.authState === "unsupported") return { cls: "warn", variant: "warning", label: m.settings_page_update_required() };
   return { cls: "warn", variant: "warning", label: m.settings_page_not_signed_in() };
 }
@@ -374,7 +376,11 @@ function AuthLabel({ h }: { h: Harness }) {
  * isolated store, verification); `shell` keeps the terminal open afterwards. */
 function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undefined, command: string) {
   if (!setup) return undefined;
-  const action = command === setup.login ? "login" : command === setup.install ? "install" : command === setup.update ? "update" : null;
+  // Install notes quote the vendor one-liner (`curl … | bash`) while the shown
+  // setup command fetches to a temp file first, so exact equality would drop the
+  // play button from every install note. The shared bootstrap URL identifies it.
+  const installsSameSource = setup.installUrl !== undefined && command.includes(setup.installUrl);
+  const action = command === setup.login ? "login" : command === setup.install ? "install" : command === setup.update ? "update" : installsSameSource ? "install" : null;
   if (!action) return undefined;
   if (action !== "install" && (!h.installed || h.installBroken)) return undefined;
   return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
@@ -452,7 +458,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && h.installed && !h.installBroken && !h.authenticated && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+            {!remote && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
               <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>

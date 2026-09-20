@@ -24,8 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    api_key, nonempty_str, probe_bin, read_json, resolve_symlinks, title_case, HarnessAuthState,
-    HarnessInfo, ModelInfo,
+    api_key, nonempty_str, read_json, resolve_symlinks, title_case, HarnessAuthState, HarnessInfo,
+    ModelInfo,
 };
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
@@ -65,8 +65,8 @@ impl Harness for Cursor {
 
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(bin) = find_cursor() {
-            info.record_bin(&bin, probe_bin(&bin).await);
+        if let Some((bin, probe)) = find_cursor_working().await {
+            info.record_bin(&bin, probe);
         }
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
@@ -177,30 +177,46 @@ impl Harness for Cursor {
     }
 }
 
-/// `cursor-agent` on PATH, else an `agent` binary that is actually Cursor, else
-/// the platform's installer drop location. `agent` is a generic name, so a
-/// hit is only accepted when the path (or the symlink it resolves to) names
-/// Cursor.
-pub(crate) fn find_cursor() -> Option<PathBuf> {
-    find_on_path("cursor-agent")
-        .or_else(|| find_on_path("agent").filter(|path| looks_like_cursor(path)))
-        .or_else(|| {
-            let home = dirs::home_dir()?;
-            let local = home.join(".local").join("bin");
-            let windows = cfg!(windows)
+/// `cursor-agent` on PATH, then an `agent` binary that is actually Cursor, then
+/// the platform's installer drop locations, in preference order. `agent` is a
+/// generic name, so a hit is only accepted when the path (or the symlink it
+/// resolves to) names Cursor.
+fn cursor_candidates() -> Vec<PathBuf> {
+    let drops = dirs::home_dir()
+        .map(|home| home.join(".local").join("bin"))
+        .into_iter()
+        .chain(
+            cfg!(windows)
                 .then(dirs::data_local_dir)
                 .flatten()
-                .map(|dir| dir.join("cursor-agent"));
-            [Some(local), windows]
-                .into_iter()
-                .flatten()
-                .find_map(|dir| {
-                    find_in_dir(&dir, "cursor-agent").or_else(|| {
-                        find_in_dir(&dir, "agent").filter(|path| looks_like_cursor(path))
-                    })
-                })
+                .map(|dir| dir.join("cursor-agent")),
+        )
+        .flat_map(|dir| {
+            [
+                find_in_dir(&dir, "cursor-agent"),
+                find_in_dir(&dir, "agent").filter(|path| looks_like_cursor(path)),
+            ]
         })
+        .flatten();
+    find_on_path("cursor-agent")
+        .into_iter()
+        .chain(find_on_path("agent").filter(|path| looks_like_cursor(path)))
+        .chain(drops)
         .map(resolve_symlinks)
+        .collect()
+}
+
+/// The executable detection selected, else the first candidate — sync callers
+/// cannot probe, and must not spawn a launcher detection already skipped.
+pub(crate) fn find_cursor() -> Option<PathBuf> {
+    super::detect::selected_bin("cursor", cursor_candidates())
+}
+
+/// The first candidate that actually runs. The official installer leaves an
+/// earlier launcher on PATH whose versions directory it removed; that stale
+/// copy must not hide the install that just succeeded.
+pub(super) async fn find_cursor_working() -> Option<(PathBuf, super::detect::BinProbe)> {
+    super::detect::select_working("cursor", cursor_candidates(), None).await
 }
 
 fn looks_like_cursor(path: &Path) -> bool {

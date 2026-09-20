@@ -38,8 +38,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, jwt_payload, nonempty_str, parse_version, probe_bin, read_json, resolve_symlinks,
-    title_case, HarnessInfo, ModelInfo,
+    bin_version, jwt_payload, nonempty_str, parse_version, read_json, resolve_symlinks, title_case,
+    HarnessInfo, ModelInfo,
 };
 use super::options::{
     resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
@@ -376,19 +376,38 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
     })
 }
 
-/// `codex` on PATH or in installer locations, symlinks resolved — codex needs to
-/// find its `codex-code-mode-host` helper next to the real binary.
-pub fn find_codex() -> Option<PathBuf> {
+/// `codex` on PATH then in installer locations, in preference order, symlinks
+/// resolved — codex needs to find its `codex-code-mode-host` helper next to the
+/// real binary.
+fn codex_candidates() -> Vec<PathBuf> {
+    let drops = dirs::home_dir()
+        .map(|home| home.join(".local").join("bin"))
+        .into_iter()
+        .chain(
+            cfg!(windows)
+                .then(dirs::data_local_dir)
+                .flatten()
+                .map(|dir| dir.join("Programs/OpenAI/Codex/bin")),
+        )
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "codex"));
     find_on_path("codex")
-        .or_else(|| {
-            let dir = dirs::home_dir()?.join(".local").join("bin");
-            crate::local::shell_env::find_in_dir(&dir, "codex")
-        })
-        .or_else(|| {
-            let dir = cfg!(windows).then(dirs::data_local_dir).flatten()?;
-            crate::local::shell_env::find_in_dir(&dir.join("Programs/OpenAI/Codex/bin"), "codex")
-        })
+        .into_iter()
+        .chain(drops)
         .map(resolve_symlinks)
+        .collect()
+}
+
+/// The executable detection selected, else the first candidate. Sync callers
+/// (chat, one-shot) cannot probe, so reading detection's choice keeps them off a
+/// stale launcher it already skipped.
+pub fn find_codex() -> Option<PathBuf> {
+    super::detect::selected_bin("codex", codex_candidates())
+}
+
+/// The first candidate that actually runs — a stale launcher first on PATH must
+/// not hide a working install.
+pub(super) async fn find_codex_working() -> Option<(PathBuf, super::detect::BinProbe)> {
+    super::detect::select_working("codex", codex_candidates(), None).await
 }
 
 /// `find_codex` with the install hint baked in (the `find_opencode` precedent)
@@ -508,8 +527,8 @@ impl Harness for Codex {
 
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(bin) = find_codex() {
-            info.record_bin(&bin, probe_bin(&bin).await);
+        if let Some((bin, probe)) = find_codex_working().await {
+            info.record_bin(&bin, probe);
         }
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();

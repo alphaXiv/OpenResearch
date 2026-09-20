@@ -1637,6 +1637,10 @@ export interface Harness {
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** Setup is blocked by something no install/update/login command repairs —
+   * an environment credential overriding the saved login, a database the CLI
+   * will not open. `agentNote` carries the repair; offer no setup button. */
+  needsConfigRepair?: boolean;
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
@@ -1646,6 +1650,9 @@ export interface Harness {
 
 export interface HarnessSetupCommands {
   install: string;
+  /** The vendor bootstrap URL an install note quotes; `install` runs the
+   * platform's own installer, which on Windows is a PowerShell script. */
+  installUrl?: string;
   login: string;
   update: string;
   requiresNpm: boolean;
