@@ -1185,6 +1185,11 @@ async fn loopback_guard_inner(
             "Invalid Host header.".into(),
         ));
     };
+    let expected_origin = format!("http://{}", request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or(""));
     let websocket = request
         .headers()
         .get(header::UPGRADE)
@@ -1211,7 +1216,7 @@ async fn loopback_guard_inner(
             .headers()
             .get(header::ORIGIN)
             .and_then(|value| value.to_str().ok());
-        let expected = format!("http://{host}");
+        let expected = expected_origin.clone();
         let allowed_dev = allow_dev_origin.then(validated_dev_origin).flatten();
         let valid = origin.is_none() && !websocket
             || origin
