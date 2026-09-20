@@ -1982,6 +1982,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     openSubagentTab(subagentTab.sessionId, pid, label, intent),
                   )
                 }
+                sessionModel={sessionsQuery.data?.find((session) => session.id === subagentTab.sessionId)?.model}
               />
             ) : codeTab ? (
               <TabBody>

@@ -30,6 +30,7 @@ export function SubagentTab({
   onOpenExperiment,
   experimentName,
   onOpenSubagent,
+  sessionModel,
 }: {
   sessionId: string;
   spawnPartId: string;
@@ -49,6 +50,9 @@ export function SubagentTab({
     label: string | undefined,
     intent: TabOpenIntent,
   ) => void;
+  /** The spawning session's own current model — the Task row's fallback
+   * when Claude's input omitted one. */
+  sessionModel?: string | null;
 }) {
   const query = useQuery(getChatMessagesQuery(sessionId));
   const messages = query.data?.messages ?? (query.isError ? [] : null);
@@ -120,6 +124,7 @@ export function SubagentTab({
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
               onOpenSubagent={onOpenSubagent}
+              sessionModel={sessionModel}
             />
           ) : (
             <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>

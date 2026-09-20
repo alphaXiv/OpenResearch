@@ -121,6 +121,8 @@ import {
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
+  isSpawnTool,
+  countOpenSubagents,
 } from "../chatRendering";
 import { onChatEvent } from "../events";
 import {
@@ -787,6 +789,12 @@ interface ToolActivity {
   experimentIds?: string[];
   /** Chat sessions `orx agent spawn` created in this tool call. */
   spawnedSessionIds?: string[];
+  /** Task tool metadata (Claude sub-agent spawn): which kind of sub-agent,
+   * its model (absent when Claude's input omitted one), and whether it runs
+   * detached. */
+  subagentType?: string;
+  subagentModel?: string;
+  subagentBackground?: boolean;
 }
 
 type OpenTranscriptFile = (
@@ -1742,10 +1750,26 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       const url = inputString(normalizedInput, "url");
       return { kind: "web", label: url ? m.activity_read_target({ target: ltr(url) }) : description ?? m.activity_read_web_page() };
     }
-    case "task":
+    case "task": {
       // Always the task description — the row is the sub-agent's identity;
-      // liveness is the shimmer, and the current step lives in its tab.
-      return { kind: "agent", label: description ?? m.activity_ran_subagent() };
+      // liveness is the shimmer, and the current step lives in its tab. The
+      // subagent_type/model suffix rides along as separate fields (not baked
+      // into the label) so a row can still append a session-model fallback
+      // when Claude's own input omits one — see SubagentBlock.
+      const subagentType = inputString(normalizedInput, "subagent_type");
+      const subagentModel = inputString(normalizedInput, "model");
+      const baseLabel = description ?? m.activity_ran_subagent();
+      // "·" is a locale-neutral metadata separator elsewhere in this file too
+      // (see the session-row title's harness/model tooltip) — not translated copy.
+      const label = subagentType ? `${baseLabel} · ${ltr(subagentType)}` : baseLabel;
+      return {
+        kind: "agent",
+        label,
+        subagentType: subagentType ?? undefined,
+        subagentModel: subagentModel ?? undefined,
+        subagentBackground: normalizedInput.run_in_background === true,
+      };
+    }
     case "subagent":
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
@@ -1912,6 +1936,7 @@ function ToolActivityLabel({
   runExperimentName,
   onOpenExperiment,
   experimentName,
+  sessionBusy,
 }: {
   activity: ToolActivity;
   onOpenFile?: OpenTranscriptFile;
@@ -1920,6 +1945,9 @@ function ToolActivityLabel({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
+  /** Live `busy` lookup for `orx agent spawn` sessions, from the sidebar's
+   * session-list query. */
+  sessionBusy?: (sessionId: string) => boolean;
 }) {
   if (activity.searchPattern) {
     return activity.label;
@@ -1967,7 +1995,7 @@ function ToolActivityLabel({
             {index > 0 && ", "}
             <button
               className="tool-target"
-              title={m.chat_panel_open_the_session_this_agent_spawned()}
+              title={sessionBusy?.(sessionId) ? m.chat_panel_spawned_session_working() : m.chat_panel_open_the_session_this_agent_spawned()}
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -1975,6 +2003,9 @@ function ToolActivityLabel({
               }}
             >
               {m.chat_agent_number({ number: fmtNumber(index + 1) })}
+              {sessionBusy?.(sessionId) && (
+                <span className="ms-1 inline-block h-1.5 w-1.5 rounded-full bg-primary align-middle animate-pulse" aria-hidden="true" />
+              )}
             </button>
           </span>
         ))}
@@ -2173,6 +2204,32 @@ function useDelayedToolShimmer(active: boolean): boolean {
   return active && visible;
 }
 
+/** Milliseconds since `active` first went true, ticking once a second while
+ * it stays true. Parts carry no timestamp of their own (only messages do —
+ * see `ChatPart`), so this is measured from when the row first rendered
+ * active, not a server-recorded start: accurate for a row watched live,
+ * approximate for one that was already running on page load. */
+function useElapsedSince(active: boolean): number | null {
+  const startRef = useRef<number | null>(null);
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      startRef.current = null;
+      return;
+    }
+    if (startRef.current === null) startRef.current = Date.now();
+    const timer = window.setInterval(() => tick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  return active && startRef.current !== null ? Date.now() - startRef.current : null;
+}
+
+function formatElapsed(ms: number): string {
+  return ms < 60_000 || ms >= 3_600_000
+    ? fmtDuration(ms)
+    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(ms / 60_000)), seconds: fmtNumber(Math.floor(ms / 1000) % 60) });
+}
+
 function groupIconActivity(activities: ToolActivity[]): ToolActivity {
   const priority: ToolActivityKind[] = ["skill", "read", "search", "edit", "project", "web", "command", "agent"];
   for (const kind of priority) {
@@ -2299,6 +2356,7 @@ function ToolRow({
   runExperimentName,
   onOpenExperiment,
   experimentName,
+  sessionBusy,
 }: {
   part: ChatPart;
   activity: ToolActivity;
@@ -2309,6 +2367,7 @@ function ToolRow({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
+  sessionBusy?: (sessionId: string) => boolean;
 }) {
   const state = part.state;
   const failed = state?.status === "error";
@@ -2338,6 +2397,7 @@ function ToolRow({
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
+          sessionBusy={sessionBusy}
         />
         {repeatCount > 1 && (
           <span className="tool-repeat-count ms-1 text-muted font-normal" title={m.a11y_identical_calls({ count: fmtNumber(repeatCount) })}>
@@ -2389,6 +2449,7 @@ function ToolGroup({
   runExperimentName,
   onOpenExperiment,
   experimentName,
+  sessionBusy,
 }: {
   parts: ChatPart[];
   pendingTail?: boolean;
@@ -2398,6 +2459,7 @@ function ToolGroup({
   runExperimentName?: (runId: string) => string;
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
+  sessionBusy?: (sessionId: string) => boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [hasOpened, setHasOpened] = useState(false);
@@ -2442,6 +2504,7 @@ function ToolGroup({
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
+                sessionBusy={sessionBusy}
               />
             </span>
           </div>
@@ -2459,6 +2522,7 @@ function ToolGroup({
           runExperimentName={runExperimentName}
           onOpenExperiment={onOpenExperiment}
           experimentName={experimentName}
+          sessionBusy={sessionBusy}
         />
       </div>
     );
@@ -2481,6 +2545,7 @@ function ToolGroup({
               runExperimentName={runExperimentName}
               onOpenExperiment={onOpenExperiment}
               experimentName={experimentName}
+              sessionBusy={sessionBusy}
             />
           </span>
         ) : (
@@ -2522,6 +2587,7 @@ function ToolGroup({
                 runExperimentName={runExperimentName}
                 onOpenExperiment={onOpenExperiment}
                 experimentName={experimentName}
+                sessionBusy={sessionBusy}
               />
             ))}
           </div>
@@ -2900,6 +2966,8 @@ const Message = memo(function Message({
   onRespond,
   onOpenPlan,
   onOpenSubagent,
+  sessionModel,
+  sessionBusy,
   busy = false,
   recoveringTurnId,
   onRecover,
@@ -2928,6 +2996,11 @@ const Message = memo(function Message({
   onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
   /** Open a sub-agent's transcript in the right pane (spawn-row "view"). */
   onOpenSubagent?: OpenSubagent;
+  /** This session's own current model — a Task row's fallback when Claude's
+   * input omitted one. */
+  sessionModel?: string | null;
+  /** Live `busy` lookup for `orx agent spawn` sessions. */
+  sessionBusy?: (sessionId: string) => boolean;
   busy?: boolean;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
@@ -3080,6 +3153,8 @@ const Message = memo(function Message({
         onOpenPlan,
         onOpenSubagent,
         predictTextTail,
+        sessionModel,
+        sessionBusy,
       }} />
       {turnStatus && (
         <TurnStatusRow
@@ -3111,9 +3186,7 @@ function AssistantTurn({ message, parts, options }: {
   if (work.length === 0) return <>{renderParts(answer, options)}</>;
   const end = message.completedAt ?? (streaming ? Date.now() : null);
   const elapsed = end === null ? null : end - message.createdAt;
-  const duration = elapsed === null ? null : elapsed < 60_000 || elapsed >= 3_600_000
-    ? fmtDuration(elapsed)
-    : m.chat_work_duration({ minutes: fmtNumber(Math.floor(elapsed / 60_000)), seconds: fmtNumber(Math.floor(elapsed / 1000) % 60) });
+  const duration = elapsed === null ? null : formatElapsed(elapsed);
   return (
     <>
       <div className="turn-work mb-4">
@@ -3204,6 +3277,12 @@ function renderParts(
     onOpenPlan?: (plan: string, promptId: string, intent: TabOpenIntent) => void;
     onOpenSubagent?: OpenSubagent;
     predictTextTail?: boolean;
+    /** Session's own current model — the Task row's fallback when Claude's
+     * input omits one. */
+    sessionModel?: string | null;
+    /** Live `busy` lookup for `orx agent spawn` sessions, from the sidebar's
+     * session-list query. */
+    sessionBusy?: (sessionId: string) => boolean;
   },
 ): React.ReactNode[] {
   const {
@@ -3219,6 +3298,8 @@ function renderParts(
     onOpenPlan,
     onOpenSubagent,
     predictTextTail = false,
+    sessionModel,
+    sessionBusy,
   } = opts;
   // A steer never becomes the tail — the streaming caret belongs on the
   // assistant text it interrupted.
@@ -3240,6 +3321,7 @@ function renderParts(
         runExperimentName={runExperimentName}
         onOpenExperiment={onOpenExperiment}
         experimentName={experimentName}
+        sessionBusy={sessionBusy}
       />,
     );
     toolRun = [];
@@ -3271,6 +3353,7 @@ function renderParts(
           // tail-tool id only ever points at one row and would freeze the rest.
           pendingTail={(predictTextTail && part.state?.status === "running") || part.id === pendingTailToolId}
           onOpenSubagent={onOpenSubagent}
+          sessionModel={sessionModel}
         />,
       );
       continue;
@@ -3326,13 +3409,6 @@ export function spawnRowTitle(part: ChatPart): string {
   return toolActivity(part).label;
 }
 
-/** Whether a tool name is a sub-agent spawn: codex tags rows `subagent`,
- * Claude spawns via `Task`/`Agent`, OpenCode via `task`. */
-function isSpawnTool(tool: string | undefined): boolean {
-  const name = (tool ?? "").toLowerCase();
-  return name === "subagent" || name === "task" || name === "agent";
-}
-
 /** The spawn tool result that stands in for a prose-less sub-agent transcript
  * (a sync Claude agent's final report is delivered as the tool output). The
  * async-launch acknowledgement is internal metadata, not a report — newly
@@ -3364,6 +3440,7 @@ export function SubagentTranscript({
   onOpenExperiment,
   experimentName,
   onOpenSubagent,
+  sessionModel,
 }: {
   spawn: ChatPart;
   onOpenFile?: OpenTranscriptFile;
@@ -3372,6 +3449,9 @@ export function SubagentTranscript({
   onOpenExperiment?: OpenTranscriptTarget;
   experimentName?: (experimentId: string) => string;
   onOpenSubagent?: OpenSubagent;
+  /** Session's own current model, for a nested sub-agent row whose own Task
+   * input omitted one. */
+  sessionModel?: string | null;
 }) {
   const parts = spawn.children ?? [];
   const running = spawn.state?.status === "running";
@@ -3392,6 +3472,7 @@ export function SubagentTranscript({
     // Same contract as the main transcript's streamTailTool: while the
     // sub-agent runs, its tail tool (completed or not) keeps the group lit.
     pendingTailToolId: running ? partsTailToolId(parts) : null,
+    sessionModel,
   });
   // Claude Code forwards a sub-agent's tool activity but never its text/thinking
   // blocks — the final report only exists as the spawn tool's result. When the
@@ -3427,10 +3508,14 @@ function SubagentBlock({
   part,
   pendingTail,
   onOpenSubagent,
+  sessionModel,
 }: {
   part: ChatPart;
   pendingTail?: boolean;
   onOpenSubagent?: OpenSubagent;
+  /** Session's own current model — the fallback when Claude's Task input
+   * omitted one; never invented when neither is available. */
+  sessionModel?: string | null;
 }) {
   const errored = part.state?.status === "error";
   const errorMessage = cleanToolError(part.state?.error || part.state?.output || "");
@@ -3438,6 +3523,11 @@ function SubagentBlock({
     ? activityInProgress(toolActivity(part))
     : toolActivity(part);
   const shimmering = useDelayedToolShimmer(Boolean(pendingTail && !errored));
+  const running = part.state?.status === "running";
+  const elapsed = useElapsedSince(running);
+  const childCount = part.children?.length ?? 0;
+  const resolvedModel = activity.subagentModel ?? (activity.subagentType ? sessionModel ?? undefined : undefined);
+  const displayLabel = resolvedModel ? `${activity.label} · ${ltr(resolvedModel)}` : activity.label;
   // Openable when there is anything to show in the tab: streamed children, a
   // final report standing in for them, or an error. Only a pure interaction
   // marker (codex's "reported back" rows) is inert.
@@ -3454,7 +3544,23 @@ function SubagentBlock({
       )}
       {/* Spawn rows read as activity, not prose — gray like the tool rows
           around them. */}
-      <span className={`${TOOL_LINE_CLASS_NAME} ${shimmering ? "tool-running-shimmer" : errored ? "text-accent-red" : "text-subtext"}`}>{activity.label}</span>
+      <span className={`${TOOL_LINE_CLASS_NAME} ${shimmering ? "tool-running-shimmer" : errored ? "text-accent-red" : "text-subtext"}`}>{displayLabel}</span>
+      {running && (
+        <span className="subagent-running-pill inline-flex shrink-0 items-center gap-1 text-muted">
+          <Spinner className="h-2.5 w-2.5 border-[1.5px]" />
+          {elapsed !== null && <span className="text-xs tabular-nums">{formatElapsed(elapsed)}</span>}
+        </span>
+      )}
+      {activity.subagentBackground && (
+        <span className="subagent-background-tag shrink-0 rounded border border-border-variant px-1 text-xs leading-4 text-muted">
+          {m.chat_panel_subagent_background()}
+        </span>
+      )}
+      {childCount > 0 && (
+        <span className="subagent-tool-count shrink-0 text-xs text-muted">
+          {m.chat_panel_subagent_tool_calls({ count: fmtNumber(childCount) })}
+        </span>
+      )}
     </>
   );
   // Only a row that actually owns a transcript is click-to-open. Codex's
@@ -3472,7 +3578,7 @@ function SubagentBlock({
       className="subagent-row flex items-start gap-2 w-full my-3.5 mx-0 py-[3px] px-1 cursor-pointer text-text text-base text-start rounded-sm [&:hover:not(:disabled)]:bg-surface [&:disabled]:cursor-default"
       title={errored && errorMessage ? errorMessage : m.chat_open_subagent_transcript()}
       {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
-        onOpenSubagent?.(part.id, activity.label, intent),
+        onOpenSubagent?.(part.id, displayLabel, intent),
       )}
       disabled={!onOpenSubagent}
     >
@@ -3644,6 +3750,8 @@ const Transcript = memo(function Transcript({
   recoveringTurnId,
   onRecover,
   skills,
+  sessionModel,
+  sessionBusy,
 }: {
   /** The branch on screen, oldest first. */
   messages: ChatMessage[];
@@ -3670,6 +3778,11 @@ const Transcript = memo(function Transcript({
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
   skills?: SkillInfo[];
+  /** This session's own current model — a Task row's fallback when Claude's
+   * input omitted one. */
+  sessionModel?: string | null;
+  /** Live `busy` lookup for `orx agent spawn` sessions. */
+  sessionBusy?: (sessionId: string) => boolean;
 }) {
   useLocale();
   const activePermissionId = firstPendingPermission(messages)?.id ?? null;
@@ -3789,6 +3902,8 @@ const Transcript = memo(function Transcript({
             onRecover={onRecover}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
+            sessionModel={sessionModel}
+            sessionBusy={sessionBusy}
           />
           </div>
         );
@@ -3907,6 +4022,7 @@ function SessionRow({
   unread,
   busy,
   waiting,
+  helperCount = 0,
   revealTitle,
   onOpen,
   onRename,
@@ -3919,6 +4035,8 @@ function SessionRow({
   busy: boolean;
   /** Turn held on an unanswered card: steady dot, not the working pulse. */
   waiting: boolean;
+  /** Currently-open sub-agents in this session's streaming message. */
+  helperCount?: number;
   /** Nonce set while this row's freshly auto-generated title should play its
    * reveal; it doubles as the remount key so a second retitle replays it.
    * Undefined the rest of the time (static title). */
@@ -3960,7 +4078,7 @@ function SessionRow({
       ref={ref}
       role="button"
       tabIndex={0}
-      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
+      className={`session-row relative flex items-center gap-2 w-full text-start py-[7px] px-2.5 rounded-md text-sm text-text cursor-pointer select-none [&:hover:not(.active)]:bg-surface [&.active]:bg-panel [&.active]:font-medium [&_.session-dot:empty]:hidden [&_.session-dot]:w-4 [&_.session-dot]:inline-flex [&_.session-dot]:items-center [&_.session-dot]:justify-center [&_.session-dot]:shrink-0 [&_.session-title]:flex-1 [&_.session-title]:min-w-0 [&_.session-title]:overflow-hidden [&_.session-title]:[mask-image:linear-gradient(to_right,black_calc(100%_-_16px),transparent)] [&_.session-title]:whitespace-nowrap [&_.session-menu-btn]:hidden [&_.session-menu-btn]:items-center [&_.session-menu-btn]:justify-center [&_.session-menu-btn]:w-4 [&_.session-menu-btn]:h-4 [&_.session-menu-btn]:-my-0.5 [&_.session-menu-btn]:mx-0 [&_.session-menu-btn]:rounded-sm [&_.session-menu-btn]:text-muted [&_.session-menu-btn]:shrink-0 [&_.session-menu-btn:hover]:text-text [&_.session-menu-btn:hover]:bg-panel [&:hover_.session-menu-btn]:inline-flex [&:focus-visible_.session-menu-btn]:inline-flex [&_.session-menu-btn:focus-visible]:inline-flex [&.menu-open_.session-menu-btn]:inline-flex [&:hover_.session-dot]:hidden [&:focus-visible_.session-dot]:hidden [&:has(.session-menu-btn:focus-visible)_.session-dot]:hidden [&.menu-open_.session-dot]:hidden [&_.busy-dot]:w-[7px] [&_.busy-dot]:h-[7px] [&_.busy-dot]:rounded-full [&_.busy-dot]:bg-primary [&_.busy-dot]:animate-[or-pulse_1.2s_infinite] [&_.busy-dot]:shrink-0 [&_.unread-dot]:w-[7px] [&_.unread-dot]:h-[7px] [&_.unread-dot]:rounded-full [&_.unread-dot]:bg-primary [&_.unread-dot]:shrink-0 [&_.busy-dot.waiting]:animate-none [&_.session-helper-badge]:shrink-0 [&_.session-helper-badge]:text-xs [&_.session-helper-badge]:leading-none [&_.session-helper-badge]:text-muted [&_.session-helper-badge]:tabular-nums [&:hover_.session-helper-badge]:hidden [&:focus-visible_.session-helper-badge]:hidden [&:has(.session-menu-btn:focus-visible)_.session-helper-badge]:hidden [&.menu-open_.session-helper-badge]:hidden [&.editing_.session-helper-badge]:hidden [&_.session-title-input]:flex-1 [&_.session-title-input]:min-w-0 [&_.session-title-input]:py-px [&_.session-title-input]:px-[5px] [&_.session-title-input]:-my-0.5 [&_.session-title-input]:mx-0 [&_.session-title-input]:[font:inherit] [&_.session-title-input]:text-text [&_.session-title-input]:bg-background [&_.session-title-input]:border [&_.session-title-input]:border-primary [&_.session-title-input]:rounded-sm [&_.session-title-input]:outline-none [&.editing]:bg-surface [&.editing]:cursor-default [&.editing_.session-menu-btn]:hidden [&.editing_.session-dot]:hidden ${active ? "active" : ""}  ${unread ? "unread" : ""}  ${open ? "menu-open" : ""}  ${
         editing ? "editing" : ""
         }`}
       title={`${HARNESS_LABELS[session.harness]}${session.model ? ` · ${session.model}` : ""}${
@@ -4027,6 +4145,11 @@ function SessionRow({
           unread && <span className="unread-dot" />
         )}
       </span>
+      {busy && helperCount > 1 && (
+        <span className="session-helper-badge" title={m.chat_panel_working_with_helpers({ count: fmtNumber(helperCount) })}>
+          ×{fmtNumber(helperCount)}
+        </span>
+      )}
       <button
         className="session-menu-btn"
         title={m.chat_panel_session_options()}
@@ -4938,6 +5061,24 @@ export function ChatPanel({
     return waiting;
   }, [state.busySessions, state.messagesBySession]);
   const awaitingInput = activeId ? waitingSessions.has(activeId) : false;
+  // Currently-open (not-yet-completed) spawn/task parts per busy session —
+  // same scan shape as waitingSessions above, off the same loaded transcripts.
+  // Drives the rail's "×N" badge and the header's "Working (N helpers)" text.
+  const openHelperCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const id of state.busySessions) {
+      const count = countOpenSubagents(state.messagesBySession[id] ?? []);
+      if (count > 0) counts.set(id, count);
+    }
+    return counts;
+  }, [state.busySessions, state.messagesBySession]);
+  const sessionBusyById = useMemo(() => {
+    const busyById = new Map<string, boolean>();
+    for (const session of sessions) busyById.set(session.id, session.busy);
+    return busyById;
+  }, [sessions]);
+  const lookupSessionBusy = useCallback((sessionId: string) => sessionBusyById.get(sessionId) ?? false, [sessionBusyById]);
+  const activeHelperCount = activeId ? openHelperCounts.get(activeId) ?? 0 : 0;
   const activeSession = openSession;
   // Nonce while the open session's title is mid-reveal; undefined = static.
   const activeTitleReveal = activeSession ? titleReveals.get(activeSession.id) : undefined;
@@ -5834,6 +5975,7 @@ export function ChatPanel({
             unread={unreadSessionIds.has(s.id)}
             busy={state.busySessions.has(s.id)}
             waiting={waitingSessions.has(s.id)}
+            helperCount={openHelperCounts.get(s.id) ?? 0}
             revealTitle={titleReveals.get(s.id)}
             onOpen={() => {
               onActiveSessionChange(s.id);
@@ -5949,6 +6091,11 @@ export function ChatPanel({
               m.chat_new_session()
             )}
           </PaperTitle>
+          {busy && activeHelperCount > 0 && (
+            <span className="chat-header-helpers shrink-0 text-sm text-subtext">
+              {m.chat_panel_working_with_helpers({ count: fmtNumber(activeHelperCount) })}
+            </span>
+          )}
           {onOpenDemoWelcome && (
             <IconButton
               data-tip={m.chat_panel_about_this_demo()}
@@ -6071,6 +6218,8 @@ export function ChatPanel({
                 recoveringTurnId={recoveringTurnId}
                 onRecover={recoverFailedTurn}
                 skills={commands}
+                sessionModel={activeSession?.model}
+                sessionBusy={lookupSessionBusy}
               />
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
