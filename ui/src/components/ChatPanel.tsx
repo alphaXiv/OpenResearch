@@ -143,7 +143,15 @@ import { Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
+import { MentionMenu } from "./MentionMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
+import { getCodeTreeQuery } from "../queries/files";
+import {
+  insertMention,
+  mentionContext,
+  rankMentionMatches,
+  type MentionContext,
+} from "../mentionCommand";
 import { SshConfigDialog } from "./SshConfigDialog";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStatus } from "./RemoteStatus";
@@ -4405,6 +4413,12 @@ export function ChatPanel({
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
 
+  // @-mentions: same derivation as the slash-skill menu above, but over a
+  // `@path` token (which may itself contain `/`) filtered against the
+  // project's file listing rather than the skill catalog.
+  const [mentionIdx, setMentionIdx] = useState(0);
+  const [mentionMenuDismissed, setMentionMenuDismissed] = useState(false);
+
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
@@ -4416,6 +4430,18 @@ export function ChatPanel({
     // it was typed and the rest of the message stays untouched.
     const marginSpaces = skillMarginSpaces(skill.name, composerRef.current);
     const next = insertSlashCommand(draft, slashContext, skill.name, marginSpaces);
+    setDraft(next.text);
+    window.requestAnimationFrame(() => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(next.cursor, next.cursor);
+      setComposerCursor(next.cursor);
+    });
+  }
+
+  // Only reachable while the menu is open, which needs a live mention context.
+  function pickMention(path: string) {
+    if (!mentionCtx) return;
+    const next = insertMention(draft, mentionCtx, path);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
@@ -4548,6 +4574,25 @@ export function ChatPanel({
   const skillMenuOpen = skillMatches.length > 0;
   const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
   useEffect(() => setSkillIdx(0), [slashToken]);
+  // @-mentions: a read-only file listing (the session's worktree, else the
+  // hub clone — never provisions one) filtered the same way `/`-completions
+  // are, just over paths instead of skill names.
+  const mentionCtx: MentionContext | null = bashMode ? null : mentionContext(draft, composerCursor);
+  const mentionQuery = mentionCtx?.query ?? null;
+  const { data: codeTree } = useQuery({
+    ...getCodeTreeQuery(projectId, { sessionId: openSession?.id }),
+    enabled: mentionCtx !== null,
+    subscribed: mentionCtx !== null,
+  });
+  const mentionCandidates = useMemo(
+    () => (mentionQuery === null ? [] : rankMentionMatches(codeTree?.entries ?? [], mentionQuery)),
+    [codeTree, mentionQuery],
+  );
+  const typingMention = !bashMode && mentionCtx !== null && mentionCtx.end === composerCursor;
+  const mentionMenuOpen = typingMention && !mentionMenuDismissed;
+  const mentionMatches = mentionMenuOpen ? mentionCandidates : [];
+  const activeMentionIdx = Math.min(mentionIdx, Math.max(0, mentionMatches.length - 1));
+  useEffect(() => setMentionIdx(0), [mentionQuery]);
   // Reconcile the reasoning level against the *currently selected model* here
   // rather than only in the picker's `pick`. Two paths reach the composer with
   // a level nobody chose for this model: a session row stored by an older build
@@ -5094,6 +5139,7 @@ export function ChatPanel({
   const applyStarterPrompt = (prompt: string) => {
     setDraft(prompt);
     setSkillMenuDismissed(false);
+    setMentionMenuDismissed(false);
     window.requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
@@ -5108,6 +5154,7 @@ export function ChatPanel({
     if (!composerPrefill) return;
     setDraft(composerPrefill);
     setSkillMenuDismissed(false);
+    setMentionMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
@@ -5188,6 +5235,7 @@ export function ChatPanel({
     if (planRequested && !text && pending.length === 0 && pendingAnnotations.length === 0) {
       setDraft("");
       setSkillMenuDismissed(false);
+      setMentionMenuDismissed(false);
       try {
         if (activeHarness?.id === "claude-code") {
           setPermissionMode(toggledPlanMode ? "plan" : "auto");
@@ -5498,6 +5546,7 @@ export function ChatPanel({
     };
     setDraft("");
     setSkillMenuDismissed(false);
+    setMentionMenuDismissed(false);
     let sid = activeId;
     if (!sid) {
       if (!activeHarness?.agentReady || !composerSelection) {
@@ -6228,6 +6277,14 @@ export function ChatPanel({
                 onHover={setSkillIdx}
               />
             )}
+            {!skillMenuOpen && mentionMenuOpen && (
+              <MentionMenu
+                paths={mentionMatches}
+                activeIndex={activeMentionIdx}
+                onPick={pickMention}
+                onHover={setMentionIdx}
+              />
+            )}
             {annotations.length > 0 && (
               <ComposerAnnotations
                 annotations={annotations}
@@ -6331,6 +6388,7 @@ export function ChatPanel({
                   }
                   setDraft(v);
                   setSkillMenuDismissed(false);
+                  setMentionMenuDismissed(false);
                 }}
                 onSelect={(e) => setComposerCursor(e.currentTarget.selectionStart)}
                 onCompositionStart={() => {
@@ -6359,6 +6417,32 @@ export function ChatPanel({
                       setSkillMenuDismissed(true);
                       return;
                     }
+                  } else if (mentionMenuOpen) {
+                    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                      if (mentionMatches.length > 0) {
+                        e.preventDefault();
+                        const delta = e.key === "ArrowDown" ? 1 : -1;
+                        setMentionIdx(
+                          (activeMentionIdx + delta + mentionMatches.length) % mentionMatches.length,
+                        );
+                      }
+                      return;
+                    }
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      if (mentionMatches.length > 0) pickMention(mentionMatches[activeMentionIdx]);
+                      return;
+                    }
+                    if (e.key === "Enter" && mentionMatches.length > 0) {
+                      e.preventDefault();
+                      pickMention(mentionMatches[activeMentionIdx]);
+                      return;
+                    }
+                    if (e.key === "Escape") {
+                      e.preventDefault();
+                      setMentionMenuDismissed(true);
+                      return;
+                    }
                   }
                   // Backspace just behind a chip deletes the whole command.
                   // (Escape deliberately doesn't touch it — that's the
@@ -6381,7 +6465,7 @@ export function ChatPanel({
               * measures it. */}
               <ComposerSkillChips
                 text={draft}
-                editingTokenEnd={slashContext?.end}
+                editingTokenEnd={slashContext?.end ?? mentionCtx?.end}
                 isCommand={knownCommand}
                 skills={commands}
                 projectId={projectId}

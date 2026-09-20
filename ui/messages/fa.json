@@ -1150,6 +1150,7 @@
   "local_models_custom_endpoint": "نقطهٔ اتصال سفارشی",
   "local_models_compatible_api": "(سازگار با OpenAI)",
   "skill_menu_personal": "شخصی",
+  "mention_menu_no_matches": "فایل مطابقی پیدا نشد",
   "skills_agent_alternative": "یا از عامل خود بخواهید یک مهارت قابل استفادهٔ مجدد برایتان ذخیره کند.",
   "templates_agent_alternative": "یا از عامل خود بخواهید یک قالب LaTeX برایتان اضافه کند.",
   "skills_remove_imported": "حذف از OpenResearch",
