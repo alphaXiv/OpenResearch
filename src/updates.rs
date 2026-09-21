@@ -32,8 +32,9 @@ pub mod macos_app;
 #[cfg(windows)]
 pub(crate) mod windows;
 
-/// GitHub repo the released binaries come from.
-pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
+/// GitHub repo the released binaries come from: the repository whose Actions
+/// built this binary (see build.rs), or upstream for local development builds.
+pub const REPO_URL: &str = env!("ORX_RELEASE_REPO");
 
 /// The cargo-dist app name (the *package* name, not the `orx` bin name) — used
 /// in release asset names and the receipt path.
@@ -456,13 +457,19 @@ pub fn auto_update_eligible() -> bool {
 }
 
 /// The one-liner that reinstalls orx through the release installer.
-const INSTALL_HINT: &str = if cfg!(windows) {
-    "powershell -ExecutionPolicy Bypass -c \"irm \
-https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.ps1 | iex\""
-} else {
-    "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh"
-};
+fn install_hint() -> String {
+    if cfg!(windows) {
+        format!(
+            "powershell -ExecutionPolicy Bypass -c \"irm \
+{REPO_URL}/releases/latest/download/{APP_NAME}-installer.ps1 | iex\""
+        )
+    } else {
+        format!(
+            "curl --proto '=https' --tlsv1.2 -LsSf \
+{REPO_URL}/releases/latest/download/{APP_NAME}-installer.sh | sh"
+        )
+    }
+}
 
 /// Confirm a directory can be written before an update commits to it — root-owned
 /// installs and read-only filesystems fail here rather than after a download.
@@ -523,7 +530,7 @@ pub fn preflight(force: bool) -> Result<UpdateTarget> {
                  - cargo: cargo install --path . (or your original cargo install invocation)\n\
                  - or reinstall with the installer: {}",
                 receipt_path().display(),
-                INSTALL_HINT
+                install_hint()
             ))
         }
         InstallChannel::Installer { receipt, prefix } => (receipt, prefix),
@@ -1396,6 +1403,13 @@ mod tests {
         assert!(attempt_due(Some(&cache(long_ago, 0))));
         // ...but not past the doubled window after two failures.
         assert!(!attempt_due(Some(&cache(long_ago, 2))));
+    }
+
+    #[test]
+    fn install_hint_points_at_the_build_repo() {
+        let hint = super::install_hint();
+        assert!(hint.contains(super::REPO_URL), "{hint}");
+        assert!(hint.contains("openresearch-cli-installer"), "{hint}");
     }
 
     #[test]
