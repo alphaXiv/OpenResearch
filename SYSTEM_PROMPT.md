@@ -121,6 +121,3 @@ Use the available OpenResearch skills whenever their descriptions match the user
 task; the skills provide instructions on how to use relevant CLI commands and
 execute important user flows. **Load the relevant skill before acting in its
 area.**
-
-Load `orx-lit-review` for literature reviews, research claims, and scientific or
-technical explanations, even when no specific paper is named.

@@ -1,6 +1,6 @@
 ---
 name: orx-lit-review
-description: "Search and read research papers for grounded results and explanations. Use for literature reviews, related work, research claims, and scientific or technical explanations, even without a named paper. The main agent searches relevant alphaXiv, OpenAlex, and bioRxiv connectors and selects sources for follow-ups. Scale retrieval to the question; conceptual explanations need no exhaustive review."
+description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, and bioRxiv connectors; scale retrieval to the question."
 ---
 
 # Literature retrieval
@@ -16,30 +16,18 @@ PDF to extract evidence is source access; opening its abstract first is unnecess
 
 ## Explain with visual evidence
 
-1. Select original visual evidence for the points being explained. For comparisons,
-   find an original comparison figure or complementary visuals covering the
-   alternatives. A diagram of one approach does not illustrate the others;
-   inspect the relevant figure pages before deciding the visual coverage is complete.
-   Download PDFs, inspect figures, and save useful crops; extracted text or a
-   page-open call alone does not complete this step.
-2. Answer as a guided reading of those visuals. Start with a short takeaway,
-   then the figure component, not a generated comparison table or overview list.
-   Follow each visual with a compact reading guide:
-   which arrows, panels, axes, or rows matter, what they mean, and the caveat.
-   Let the figures carry the explanation. Omit standalone background tutorials,
-   repeated summaries, and equations unless the question needs them. Ground
-   author reasoning in contextual direct quotations.
+- Prefer explaining through original figures, tables, and diagrams. For
+  comparisons, choose visuals that cover the relevant alternatives; let the
+  reader see the architecture, relationship, or result being explained.
+- Answer as a guided reading of those visuals, presenting them early. Keep
+  prose brief: what to notice, why it matters, and the caveats, grounded in
+  contextual author quotations.
 
-**Default to showing, not describing.** Supporting prose should be brief and
-refer to what the reader can see. If a paragraph could be replaced by an
-original diagram, graph, or table, retrieve and show that instead. Text is the
-fallback only when the relevant sources contain no useful visual or extraction
-remains blocked; explain that gap. Do not turn one unavailable figure into a
-text-only answer when other relevant visuals are accessible.
-
-Choose visuals for their explanatory value, without a fixed image count. Before
-sending, remove prose and generated tables that repeat the visuals or supply a
-second explanation.
+Visual evidence should replace standalone tutorials, generated comparison
+tables, and recitations of data or structure. Choose visuals for explanatory
+value, without a fixed image count. Text is the fallback when relevant sources
+contain no useful visual or extraction remains blocked; explain that gap.
+One unavailable figure is not a reason to omit other accessible visuals.
 
 Each command performs exactly one public endpoint request and emits its
 structured JSON result. No login is required:
@@ -205,8 +193,11 @@ from snippets alone.
 ## Original visuals
 
 Crop directly from the verified original PDF, using alphaXiv's linked PDF for
-alphaXiv papers. Preserve panel titles, axes, legends, and table headings;
-exclude the printed caption and surrounding prose. Render legibly and inspect
+alphaXiv papers. For a verified arXiv ID, download the source PDF from
+`https://arxiv.org/pdf/<id>`. The alphaXiv `/pdf/` URL serves a viewer page,
+not the PDF asset; keep user-facing citations pointed at that viewer.
+Preserve panel titles, axes, legends, and table headings; exclude the printed
+caption and surrounding prose. Render legibly and inspect
 the crop. Do not substitute thumbnails, redraw results, or generate lookalikes.
 If extraction fails, inspect the error and try available PDF tooling; report
 an unresolved obstacle rather than silently omitting the figure.

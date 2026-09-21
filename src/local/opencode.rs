@@ -239,7 +239,7 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
     let project_state = project_state_md(project, state);
     let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
         .iter()
-        .map(|skill| format!("- `{}`", skill.name))
+        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
         .collect::<Vec<_>>()
         .join("\n");
     let template = SYSTEM_PROMPT
@@ -793,14 +793,12 @@ mod tests {
             "template comment not stripped"
         );
         assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        // Sanity: skill routing names every installed native skill without
-        // duplicating the descriptions already surfaced by the harness.
         assert!(md.contains("Use the available OpenResearch skills"));
         assert!(md.contains("execute important user flows"));
         assert!(!md.contains("orx skill <name>"));
+        // Native catalogs may abbreviate descriptions; preserve routing context here.
         for skill in agent_skills::skills(SkillSet::Local) {
-            assert!(md.contains(&format!("- `{}`", skill.name)));
-            assert!(!md.contains(skill.description));
+            assert!(md.contains(&format!("- `{}`: {}", skill.name, skill.description)));
         }
         assert!(md.contains("orx-compute"));
         assert!(md.contains("helping the user across the research process"));
