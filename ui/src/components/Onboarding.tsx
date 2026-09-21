@@ -126,8 +126,10 @@ export function Onboarding({
   const [gitError, setGitError] = useState(false);
 
   // Step 1 requires one genuinely usable harness and local Git. Failed or
-  // inconclusive detection never bypasses either gate.
-  const anyAgentReady = harnesses?.some((h) => h.agentReady) ?? false;
+  // inconclusive detection never bypasses either gate — and a harness whose
+  // snapshot is still being filled in is inconclusive, not ready.
+  const anyAgentReady = harnesses?.some((h) => h.agentReady && !h.catalogPending) ?? false;
+  const anyPending = harnesses?.some((h) => h.catalogPending) ?? false;
   const gitReady = gitVersion != null;
 
   // Drops a slow probe whose answer a newer load has already superseded.
@@ -156,7 +158,7 @@ export function Onboarding({
   useEffect(() => load(false), []);
   useEffect(() => {
     if (harnesses === null) return;
-    const ready = harnesses.filter((h) => h.agentReady);
+    const ready = harnesses.filter((h) => h.agentReady && !h.catalogPending);
     setPreferredHarness((current) => {
       if (current && ready.some((h) => h.id === current)) return current;
       const saved = preferredAgent && ready.find((h) => h.id === preferredAgent.harness);
@@ -284,7 +286,9 @@ export function Onboarding({
   };
 
   useEffect(() => {
-    if (remote || automaticSetupStarted.current || !harnesses?.length || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
+    // Wait out a pending snapshot: an install detection still in flight must
+    // not read as "nothing installed" and trigger an unattended setup.
+    if (remote || automaticSetupStarted.current || !harnesses?.length || harnesses.some((h) => h.catalogPending) || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
     void startAutomaticSetup();
   }, [harnesses, remote]);
 
@@ -304,7 +308,7 @@ export function Onboarding({
     try {
       const harness = automaticSetup
         ? await startAutomaticSetup()
-        : harnesses?.find((item) => item.id === preferredHarness && item.agentReady);
+        : harnesses?.find((item) => item.id === preferredHarness && item.agentReady && !item.catalogPending);
       if (!harness) throw new Error(m.harness_setup_not_ready());
       if (mode === "setup") return;
       const selection = selectionFor(harness, harness.models[0]?.id ?? null);
@@ -415,7 +419,7 @@ export function Onboarding({
             </div>
             <h2 className="onb-title mt-0 mx-0 mb-1.5 text-3xl tracking-[-0.01em]">{m.onboarding_choose_a_coding_agent()}</h2>
             <p className="onb-sub text-text text-base leading-[1.55] mt-0 mx-0 mb-5.5 max-w-120">{m.onboarding_open_research_uses_a_coding_agent_already_installed()}</p>
-            {harnesses !== null && !anyAgentReady && (
+            {harnesses !== null && !anyAgentReady && !anyPending && (
               <p className={ONB_GATE_HINT_CLASS_NAME}>
                 {m.onboarding_sign_in_to_at_least_one_agent_to()}
               </p>
@@ -474,7 +478,7 @@ export function Onboarding({
                 onClick={() => setStep(2)}
                 disabled={checking || !anyAgentReady || preferredHarness === null || !gitReady}
                 title={
-                  checking
+                  checking || (!anyAgentReady && anyPending)
                     ? m.onboarding_waiting_tool_checks()
                     : !anyAgentReady
                       ? m.onboarding_sign_in_agent_to_continue()
@@ -670,6 +674,9 @@ function cleanPaperTitle(title: string): string {
 /** Agent notes carry the command to run in backticks (`claude auth login`) —
  * render those spans as code so they read as something to type, not prose. */
 function agentBadge(h: Harness): { tone: StatusTone; label: string } {
+  // A snapshot answer still being filled in — "checking" rather than a badge
+  // the background pass may revoke.
+  if (h.catalogPending) return { tone: "warning", label: m.onboarding_checking() };
   if (h.agentReady) return { tone: "success", label: h.authMethod === "local" || !h.authenticated ? m.onboarding_ready() : m.onboarding_signed_in() };
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
@@ -714,7 +721,7 @@ function AgentCard({
   // (an environment credential overriding the saved login, a database the CLI
   // will not open). Offering one sends the user through a command that
   // provably cannot help; the agentNote below carries the actual repair.
-  const canSetup = !remote && !h.needsConfigRepair && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
+  const canSetup = !remote && !h.needsConfigRepair && !h.catalogPending && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
   const showSetupAction = !h.agentReady && canSetup;
   const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);

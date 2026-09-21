@@ -5,6 +5,7 @@
 //! Detection is read-only and best-effort: missing files or unparseable JSON
 //! just mean "not detected", never an error.
 
+use std::future::Future;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -151,6 +152,12 @@ pub struct HarnessInfo {
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
+    /// Set when a snapshot detection answered from file/discovery evidence
+    /// and deferred the expensive probes — model catalog, live auth,
+    /// capability checks — to a background full pass that replaces the
+    /// entry. Everything on the card is provisional until the flag clears.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub catalog_pending: bool,
     pub models: Vec<ModelInfo>,
     /// Composer toggle vocabulary (permission modes, reasoning levels).
     pub options: super::HarnessOptions,
@@ -175,6 +182,7 @@ impl HarnessInfo {
             agent_note: None,
             needs_config_repair: false,
             supports_steering: false,
+            catalog_pending: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
         }
@@ -271,9 +279,14 @@ async fn select_working_from(
     candidates: Vec<PathBuf>,
     minimum: Option<(u64, u64, u64)>,
 ) -> Option<(PathBuf, BinProbe)> {
+    // Probe candidates in parallel: a node CLI's `--version` can take seconds
+    // (cold start, AV scan). The pick still walks results in discovery order;
+    // this trades extra spawns (the old short-circuit probed one binary in
+    // the common case) for bounded wall-clock.
+    let candidates = unique(candidates);
+    let probes = futures::future::join_all(candidates.iter().map(|c| probe_bin(c))).await;
     let mut fallback: Option<(PathBuf, BinProbe)> = None;
-    for candidate in unique(candidates) {
-        let probe = probe_bin(&candidate).await;
+    for (candidate, probe) in candidates.into_iter().zip(probes) {
         let version = match &probe {
             BinProbe::Answered(version) => version.as_deref().and_then(parse_version),
             // Not a working install: hold the first one only until something answers.
@@ -300,6 +313,26 @@ pub(crate) fn unique(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|path| seen.insert(path.clone()));
     candidates
+}
+
+/// Binary selection shared by every `detect_at`: the snapshot pass answers
+/// install from discovery alone — the remembered or first existing candidate —
+/// with no `--version` child; the full pass supplies the version and any
+/// `Broken` verdict.
+pub(super) async fn record_selected(
+    info: &mut HarnessInfo,
+    snapshot: bool,
+    discover: impl FnOnce() -> Option<PathBuf>,
+    working: impl Future<Output = Option<(PathBuf, BinProbe)>>,
+) {
+    let selected = if snapshot {
+        discover().map(|bin| (bin, BinProbe::Unknown))
+    } else {
+        working.await
+    };
+    if let Some((bin, probe)) = selected {
+        info.record_bin(&bin, probe);
+    }
 }
 
 /// What `<bin> --version` said about an install found on PATH.

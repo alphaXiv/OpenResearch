@@ -373,13 +373,13 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> {m.model_picker_unavailable()}
+                          {harness.catalogPending ? m.onboarding_checking() : <><Lock size={10} /> {m.model_picker_unavailable()}</>}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
+                        {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>

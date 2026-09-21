@@ -57,29 +57,14 @@ mod v2;
 
 pub struct OpenCode;
 
-#[async_trait]
-impl Harness for OpenCode {
-    fn id(&self) -> &'static str {
-        "opencode"
-    }
-
-    fn name(&self) -> &'static str {
-        "OpenCode"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
-        opencode_one_shot(
-            &crate::local::opencode::resolve_binary().await.ok()?,
-            request,
-        )
-        .await
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl OpenCode {
+    /// `snapshot` skips every catalog probe — `models`/`debug config` children,
+    /// the V2 server bring-up, local-server and dead-key checks — and answers
+    /// install/auth only; readiness is deferred entirely and the entry is
+    /// marked `catalog_pending` until a full pass replaces it. The one
+    /// non-free check kept is the isolated DB lease preflight (file I/O, no
+    /// child process), which surfaces `needs_config_repair` early.
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
         let mut models = Vec::new();
         let mut public_models = HashSet::new();
@@ -89,18 +74,27 @@ impl Harness for OpenCode {
         if let Some(discovered) = &bin {
             // Resolves across every discovery candidate, so a stale launcher
             // first on PATH does not hide the install that actually works.
-            let resolved = crate::local::opencode::resolve_binary().await;
-            let (bin, probe) = match &resolved {
-                Ok(binary) => (
+            // The snapshot skips the resolution spawns entirely — discovery
+            // already proves the file is there, and a V2 install's real auth
+            // only answers through the served API anyway — so the optimistic
+            // readiness below is its answer and the fill supplies the truth.
+            let resolved = if snapshot {
+                None
+            } else {
+                Some(crate::local::opencode::resolve_binary().await)
+            };
+            let (bin, probe) = match resolved.as_ref() {
+                Some(Ok(binary)) => (
                     binary.path.clone(),
                     BinProbe::Answered(Some(binary.version.clone())),
                 ),
                 // Nothing resolved: report what discovery first named, so the
                 // UI shows a broken install rather than "not detected".
-                Err(error) => (discovered.clone(), BinProbe::Broken(error.to_string())),
+                Some(Err(error)) => (discovered.clone(), BinProbe::Broken(error.to_string())),
+                None => (discovered.clone(), BinProbe::Unknown),
             };
             info.record_bin(&bin, probe);
-            if let Ok(binary) = resolved {
+            if let Some(Ok(binary)) = resolved {
                 if binary.protocol == crate::local::opencode::Protocol::V2 {
                     return Some(v2::detect(binary, info).await);
                 }
@@ -140,7 +134,7 @@ impl Harness for OpenCode {
                 }
             }
             // A binary that failed `--version` has no catalog to give either.
-            if let Some(binary) = &resolved_binary {
+            if let Some(binary) = resolved_binary.as_ref().filter(|_| !snapshot) {
                 let (catalog, resolved) = tokio::join!(
                     opencode_models(binary),
                     run_models(binary, &["debug", "config", "--pure"])
@@ -150,6 +144,10 @@ impl Harness for OpenCode {
                     Some(config) => config,
                     None => Value::Null,
                 };
+            } else if snapshot {
+                // `debug config` resolves project/plugin layers but costs a
+                // child process; the snapshot reads the config file directly.
+                config = snapshot_config();
             }
         }
         apply_configured_labels(&mut models, &config);
@@ -188,7 +186,12 @@ impl Harness for OpenCode {
         }
 
         let local = local_providers(&config);
-        let available = available_local_models(&local).await;
+        // Snapshot defers the local-server liveness probes with the catalog.
+        let available = if snapshot {
+            HashSet::new()
+        } else {
+            available_local_models(&local).await
+        };
         let is_local =
             |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
         let missing_local = models
@@ -215,7 +218,12 @@ impl Harness for OpenCode {
         if !info.authenticated && !local.is_empty() {
             info.auth_method = Some("local");
         }
-        info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
+        if !snapshot {
+            // Readiness needs the catalog — `models` proves a credential
+            // resolves to something runnable. The snapshot leaves it false;
+            // `detect_one` marks the answer pending until the fill lands.
+            info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
+        }
         if info.agent_ready {
             // Hide the models of providers whose stored key a live request rejects.
             let cloud_providers: Vec<_> = providers
@@ -259,29 +267,38 @@ impl Harness for OpenCode {
             info.models = models;
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
-        } else if info.installed && !local.is_empty() {
-            info.agent_note = Some(if available.is_empty() {
-                "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
-            } else {
-                "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
-            }.to_string());
-        } else if info.installed && info.authenticated {
-            info.agent_note = Some(
-                "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
-                    .to_string(),
-            );
-        } else if info.installed {
-            info.agent_note = Some(
-                "Configure a local model in OpenCode, or sign in with `opencode auth login`."
-                    .to_string(),
-            );
-        } else {
+        } else if !info.installed {
             info.agent_note = Some(
                 "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
                     .to_string(),
             );
+        } else if !snapshot {
+            // Installed but not ready — the snapshot leaves the diagnosis to
+            // the fill, whose catalog decides which of these actually applies.
+            if !local.is_empty() {
+                info.agent_note = Some(if available.is_empty() {
+                    "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
+                } else {
+                    "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
+                }.to_string());
+            } else if info.authenticated {
+                info.agent_note = Some(
+                    "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
+                        .to_string(),
+                );
+            } else {
+                info.agent_note = Some(
+                    "Configure a local model in OpenCode, or sign in with `opencode auth login`."
+                        .to_string(),
+                );
+            }
         }
-        if info.installed && !info.install_broken && !info.agent_ready && config.is_null() {
+        if info.installed
+            && !info.install_broken
+            && !info.agent_ready
+            && !snapshot
+            && config.is_null()
+        {
             info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
         }
         if info.auth_state == HarnessAuthState::Unknown && !config.is_null() {
@@ -295,6 +312,37 @@ impl Harness for OpenCode {
             info.agent_note = Some(error.to_string());
         }
         Some(info)
+    }
+}
+
+#[async_trait]
+impl Harness for OpenCode {
+    fn id(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn name(&self) -> &'static str {
+        "OpenCode"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
+        opencode_one_shot(
+            &crate::local::opencode::resolve_binary().await.ok()?,
+            request,
+        )
+        .await
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -386,6 +434,46 @@ fn opencode_auth_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
     Some(base.join("opencode").join("auth.json"))
+}
+
+/// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
+/// the file `OPENCODE_CONFIG` points at, else the stock
+/// `~/.config/opencode/opencode.json`. `debug config --pure` additionally
+/// merges project and plugin layers, but it costs a child process — the
+/// snapshot settles for the file and the full pass re-reads it properly.
+///
+/// One merge the file read must not skip: orx's own connected local models,
+/// which `local_models::prepare_env` folds into `OPENCODE_CONFIG_CONTENT` for
+/// every spawned CLI — and inline content shadows the file entirely, so a
+/// connections-only user sees exactly those providers and nothing else.
+fn snapshot_config() -> Value {
+    let connections = crate::local::local_models::read().unwrap_or_default();
+    let mut config = if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
+    {
+        // The env var overrides the file entirely — present-but-unparseable
+        // means "no usable config", not "fall through to the file".
+        serde_json::from_str::<Value>(&content.to_string_lossy()).unwrap_or(Value::Null)
+    } else if !connections.is_empty() {
+        // The spawned CLI would get inline content built from the connections
+        // alone; the file never enters the picture.
+        json!({})
+    } else {
+        let path = crate::local::shell_env::var("OPENCODE_CONFIG")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                super::xdg_config_home()
+                    .join("opencode")
+                    .join("opencode.json")
+            });
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or(Value::Null)
+    };
+    if !connections.is_empty() && config.is_object() {
+        let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
+    }
+    config
 }
 
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).

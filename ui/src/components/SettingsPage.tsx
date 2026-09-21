@@ -350,6 +350,7 @@ function CommandRunTerminal({ run, onComplete, onClose }: {
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
+  if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
   if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
@@ -458,7 +459,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
-            {!remote && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
               <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
                 <SquareTerminal size={14} /> {m.harness_setup_login()}
               </Button>
@@ -496,7 +497,9 @@ function HarnessesTab({ remote }: { remote: boolean }) {
             )}
             <span className="k">{m.settings_page_agent_models()}</span>
             <span className="v">
-              {h.models.length > 0
+              {h.catalogPending
+                ? m.onboarding_checking()
+                : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
                 : m.settings_none()}
             </span>

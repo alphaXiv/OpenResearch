@@ -40,24 +40,18 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Antigravity;
 
-#[async_trait]
-impl Harness for Antigravity {
-    fn id(&self) -> &'static str {
-        "antigravity"
-    }
-
-    fn name(&self) -> &'static str {
-        "Google Antigravity"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Antigravity {
+    /// `snapshot` reports discovery only: `agy`'s auth *is* the model list,
+    /// so a child-free pass marks the install pending and leaves readiness to
+    /// the background full pass.
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_agy_working().await {
-            info.record_bin(&bin, probe);
+        super::detect::record_selected(&mut info, snapshot, find_agy, find_agy_working()).await;
+        // Nothing else about an installed agy is cheap to verify — `detect_one`
+        // marks the snapshot answer pending. A missing install still falls
+        // through to pick up its note.
+        if snapshot && info.installed {
+            return Some(info);
         }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
@@ -97,6 +91,29 @@ impl Harness for Antigravity {
             );
         }
         Some(info)
+    }
+}
+
+#[async_trait]
+impl Harness for Antigravity {
+    fn id(&self) -> &'static str {
+        "antigravity"
+    }
+
+    fn name(&self) -> &'static str {
+        "Google Antigravity"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {

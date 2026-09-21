@@ -49,37 +49,37 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Cursor;
 
-#[async_trait]
-impl Harness for Cursor {
-    fn id(&self) -> &'static str {
-        "cursor"
-    }
-
-    fn name(&self) -> &'static str {
-        "Cursor"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Cursor {
+    /// `snapshot` skips `cursor_model_list` and reports the static fallback
+    /// table as pending; the account-details lookup stays deferred either way.
+    /// It also skips the `--version` and `agent status` spawns — install is
+    /// discovery alone, and auth reads `CURSOR_API_KEY` instead of asking the
+    /// CLI (`authInfo` feeds `account` only; it survives `agent logout`).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_cursor_working().await {
-            info.record_bin(&bin, probe);
-        }
+        super::detect::record_selected(&mut info, snapshot, find_cursor, find_cursor_working())
+            .await;
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
-            let status = match bin {
+            let status = match bin.filter(|_| !snapshot) {
                 Some(bin) => cursor_command_json(bin, &["status", "--format", "json"]).await,
                 None => None,
             };
             apply_auth(&mut info, status.as_ref());
         }
 
+        // A recorded `authInfo` email is deliberately not promoted to
+        // `authenticated` — `agent logout` leaves it behind; it feeds
+        // `account` only.
         info.agent_ready = info.ready();
         if info.agent_ready {
-            let models = match info.bin_path.as_deref().map(Path::new) {
+            // Only the Full pass may spawn the catalog probe.
+            let bin = info
+                .bin_path
+                .as_deref()
+                .map(Path::new)
+                .filter(|_| !snapshot);
+            let models = match bin {
                 Some(bin) => cursor_model_list(bin).await,
                 None => None,
             };
@@ -96,6 +96,29 @@ impl Harness for Cursor {
             );
         }
         Some(info)
+    }
+}
+
+#[async_trait]
+impl Harness for Cursor {
+    fn id(&self) -> &'static str {
+        "cursor"
+    }
+
+    fn name(&self) -> &'static str {
+        "Cursor"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {

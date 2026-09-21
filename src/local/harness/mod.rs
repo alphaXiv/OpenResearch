@@ -269,6 +269,21 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// The fast first pass of [`Harness::detect`]: install, auth, and
+    /// `agent_ready` only — no model-catalog or capability probes, which are
+    /// the subprocesses that stall cold `/api/harnesses` calls for seconds.
+    /// Install/auth come from filesystem and env evidence alone; one
+    /// conditional exception is a single auth child where the login may live
+    /// in an OS credential store the filesystem cannot see (Claude's
+    /// `ProbeCli`). An installed harness's answer is provisional — `detect_one`
+    /// marks it `catalog_pending` and clamps readiness — so the caller can
+    /// complete it in the background.
+    /// Default is the full detect, for harnesses whose auth *is* the catalog
+    /// probe (Antigravity) or that have nothing expensive to defer.
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect().await
+    }
+
     /// Run one chat turn: spawn the CLI, parse its event stream, push wire
     /// parts onto `ctx`. Default is "not a chat harness".
     async fn run_turn(&self, _ctx: &mut TurnCtx) -> TurnResult {
@@ -529,8 +544,26 @@ pub fn is_chat_harness(id: &str) -> bool {
     registry().iter().any(|h| h.id() == id && h.supports_chat())
 }
 
-async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
-    harness.detect().await.map(|mut info| {
+async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo> {
+    let detected = if snapshot {
+        harness.detect_snapshot().await
+    } else {
+        harness.detect().await
+    };
+    detected.map(|mut info| {
+        // A snapshot answer for an installed harness is provisional by
+        // definition: its install/auth evidence is file-based and the model
+        // catalog is a placeholder until the Full pass lands. Consumers
+        // outside onboarding (ModelPicker, ChatPanel, SettingsPage) read
+        // `agent_ready` without checking `catalog_pending`, so the
+        // pending ⇒ not-ready invariant lives here rather than at every call
+        // site — and `supports_steering` goes with it, since a steering claim
+        // is only meaningful once the CLI's readiness is verified.
+        if snapshot && (info.installed || info.catalog_pending) {
+            info.catalog_pending = true;
+            info.agent_ready = false;
+            info.supports_steering = false;
+        }
         if info.auth_state == HarnessAuthState::Unknown && info.agent_ready {
             info.auth_state = HarnessAuthState::Ready;
         }
@@ -547,17 +580,29 @@ pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
     let harness = registry()
         .into_iter()
         .find(|h| h.id() == id && h.supports_chat())?;
-    detect_one(harness.as_ref()).await
+    detect_one(harness.as_ref(), false).await
 }
 
 /// Detect every chat-capable harness, in registry order. This is what the
 /// `orx up` dashboard renders in its harness picker.
 pub async fn detect_harnesses() -> Vec<HarnessInfo> {
+    detect_all(false).await
+}
+
+/// The snapshot pass of [`detect_harnesses`]: readiness without the model
+/// catalogs, so a cold `/api/harnesses` answers in the time the *fastest*
+/// probes take instead of the slowest catalog. Entries that still owe a
+/// catalog carry `catalog_pending`.
+pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
+    detect_all(true).await
+}
+
+async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
     let harnesses: Vec<Box<dyn Harness>> = registry()
         .into_iter()
         .filter(|h| h.supports_chat())
         .collect();
-    let futures = harnesses.iter().map(|h| detect_one(h.as_ref()));
+    let futures = harnesses.iter().map(|h| detect_one(h.as_ref(), snapshot));
     futures::future::join_all(futures)
         .await
         .into_iter()

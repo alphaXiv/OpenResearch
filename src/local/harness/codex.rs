@@ -505,31 +505,15 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
-#[async_trait]
-impl Harness for Codex {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-
-    fn name(&self) -> &'static str {
-        "Codex"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The app-server takes `turn/steer` against the active turn; `detect`
-    /// withholds it from installations that fall back to the exec path.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Codex {
+    /// `snapshot` skips the `model/list` handshake and reports the static
+    /// table (or the custom provider's configured model) as pending; a
+    /// background full pass replaces it. It also skips the `--version` and
+    /// app-server capability spawns — install is decided by discovery alone
+    /// and auth is already a file read (`auth.json` / `config.toml`).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_codex_working().await {
-            info.record_bin(&bin, probe);
-        }
+        super::detect::record_selected(&mut info, snapshot, find_codex, find_codex_working()).await;
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
@@ -580,12 +564,15 @@ impl Harness for Codex {
         }
         info.agent_ready = info.ready();
         if info.agent_ready {
+            // Only the Full pass may spawn the catalog probes.
+            let probe_bin = info
+                .bin_path
+                .as_deref()
+                .map(Path::new)
+                .filter(|_| !snapshot);
             // A custom provider's bundled first-party catalog is meaningless,
             // so probe only when its config declares an explicit catalog.
-            let custom_catalog = match (
-                custom_provider.as_ref(),
-                info.bin_path.as_deref().map(Path::new),
-            ) {
+            let custom_catalog = match (custom_provider.as_ref(), probe_bin) {
                 (Some(provider), Some(bin)) if provider.has_model_catalog => {
                     codex_model_list(bin, configured_effort.as_deref()).await
                 }
@@ -604,8 +591,7 @@ impl Harness for Codex {
                     // catalog (models + per-model efforts, the data codex's TUI
                     // picker renders). The static table only covers a codex too
                     // old to answer `model/list`.
-                    let bin = info.bin_path.as_deref().map(Path::new);
-                    let models = match bin {
+                    let models = match probe_bin {
                         Some(bin) => codex_model_list(bin, configured_effort.as_deref()).await,
                         None => None,
                     };
@@ -621,8 +607,9 @@ impl Harness for Codex {
             // app-server wins (permission prompts on sandbox escalations;
             // thread resume).
             // `turn/steer` is an app-server method, so this must follow the
-            // dispatch predicate rather than the version alone.
-            info.supports_steering = runs_app_server().await;
+            // dispatch predicate rather than the version alone. The snapshot
+            // leaves it off — the capability spawn is deferred to the fill.
+            info.supports_steering = !snapshot && runs_app_server().await;
             let too_old = info
                 .version
                 .as_deref()
@@ -649,6 +636,35 @@ impl Harness for Codex {
             );
         }
         Some(info)
+    }
+}
+
+#[async_trait]
+impl Harness for Codex {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    /// The app-server takes `turn/steer` against the active turn; `detect`
+    /// withholds it from installations that fall back to the exec path.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {

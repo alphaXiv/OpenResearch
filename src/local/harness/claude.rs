@@ -161,6 +161,77 @@ async fn effective_auth_probe(bin: &Path) -> AuthProbe {
     probe
 }
 
+/// What the snapshot pass's auth read concludes from evidence alone — the
+/// `auth status` child only runs where a login could live in a credential
+/// store the filesystem cannot see (macOS Keychain, Windows).
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotAuth {
+    /// An environment credential overrides any saved login — the same
+    /// precedence `effective_auth_probe` encodes. Presence is knowable from
+    /// the environment; validity is not, so this reports `Unknown` and leaves
+    /// verification to the fill's live probe.
+    UnverifiedApiKey,
+    /// `.credentials.json` holds a `claudeAiOauth` login. It counts even past
+    /// its `expiresAt`: that is the access token's expiry, and the CLI
+    /// refreshes it from the same file.
+    SavedOauth,
+    /// The file is the whole credential store and holds no login.
+    SignedOut,
+    /// No file evidence either way — a login could be in the OS store, so the
+    /// CLI itself must answer.
+    ProbeCli,
+}
+
+fn snapshot_auth_choice(
+    has_api_credential: bool,
+    has_oauth_file: bool,
+    file_is_store: bool,
+) -> SnapshotAuth {
+    if has_api_credential {
+        SnapshotAuth::UnverifiedApiKey
+    } else if has_oauth_file {
+        SnapshotAuth::SavedOauth
+    } else if file_is_store {
+        SnapshotAuth::SignedOut
+    } else {
+        SnapshotAuth::ProbeCli
+    }
+}
+
+async fn snapshot_auth_probe(bin: &Path) -> AuthProbe {
+    let choice = snapshot_auth_choice(
+        has_api_credential(),
+        has_oauth_credentials(),
+        cfg!(target_os = "linux"),
+    );
+    match choice {
+        SnapshotAuth::UnverifiedApiKey => AuthProbe {
+            state: HarnessAuthState::Unknown,
+            method: Some("apiKey"),
+            credential_conflict: false,
+        },
+        SnapshotAuth::SavedOauth => AuthProbe {
+            state: HarnessAuthState::Ready,
+            method: Some("oauth"),
+            credential_conflict: false,
+        },
+        SnapshotAuth::SignedOut => AuthProbe {
+            state: HarnessAuthState::NeedsLogin,
+            method: None,
+            credential_conflict: false,
+        },
+        SnapshotAuth::ProbeCli => effective_auth_probe(bin).await,
+    }
+}
+
+/// `.credentials.json` holds a saved OAuth login. Absence is not proof of a
+/// sign-out on platforms with an OS credential store — only Linux treats the
+/// file itself as the store.
+fn has_oauth_credentials() -> bool {
+    let path = native_store::claude_home(NativeStore::Legacy).join(".credentials.json");
+    read_json(path).is_some_and(|creds| creds.get("claudeAiOauth").is_some())
+}
+
 fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe {
     if probe.state == HarnessAuthState::Ready && probe.method == Some("oauth") {
         probe.state = match version.and_then(parse_version) {
@@ -475,40 +546,29 @@ pub(super) async fn find_claude_working() -> Option<(PathBuf, super::detect::Bin
         .await
 }
 
-#[async_trait]
-impl Harness for ClaudeCode {
-    fn id(&self) -> &'static str {
-        "claude-code"
-    }
-
-    fn name(&self) -> &'static str {
-        "Claude Code"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The resident child holds stdin open, so a second stream-json user
-    /// message reaches the turn already running.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl ClaudeCode {
+    /// `snapshot` skips the catalog probes (`ultracode`, `list_models`) and
+    /// reports the static model table as pending; a background full pass
+    /// replaces it. It also skips the `--version` spawn — install is decided
+    /// by discovery alone — and answers auth from files/env first, falling
+    /// back to `auth status` only where a login could live in a credential
+    /// store the filesystem cannot see (macOS Keychain, Windows).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_claude_working().await {
-            info.record_bin(&bin, probe);
-        }
+        super::detect::record_selected(&mut info, snapshot, find_claude, find_claude_working())
+            .await;
         // The CLI owns OAuth and Keychain refresh. Its live status decides
         // whether this harness can run; a broken binary would only fail it too.
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
-            let probe = match bin {
-                Some(bin) => {
+            let probe = match (bin, snapshot) {
+                (Some(bin), false) => {
                     gate_oauth_version(effective_auth_probe(bin).await, info.version.as_deref())
                 }
-                None => AuthProbe {
+                // The snapshot has no probed version, so the OAuth minimum-
+                // version gate cannot run here — the Full pass re-checks it.
+                (Some(bin), true) => snapshot_auth_probe(bin).await,
+                (None, _) => AuthProbe {
                     state: HarnessAuthState::Unknown,
                     method: None,
                     credential_conflict: false,
@@ -543,16 +603,17 @@ impl Harness for ClaudeCode {
             // Ask the installed CLI for its own catalog: `list_models` for the
             // models and their per-model effort tiers, and the parser probe for
             // `ultracode` (a session mode the catalog never advertises — see
-            // `claude_accepts_ultracode`). The static table only covers a CLI
-            // too old to answer.
+            // `claude_accepts_ultracode`). The static table covers a CLI too
+            // old to answer — and the snapshot pass, which skips both probes.
             let bin = info.bin_path.as_deref().map(Path::new);
-            let (ultracode, models) = match bin {
+            let probed = match bin.filter(|_| !snapshot) {
                 Some(bin) => {
                     let ultracode = claude_accepts_ultracode(bin).await;
-                    (ultracode, claude_list_models(bin, ultracode).await)
+                    Some((ultracode, claude_list_models(bin, ultracode).await))
                 }
-                None => (false, None),
+                None => None,
             };
+            let (ultracode, models) = probed.unwrap_or((false, None));
             info = info.with_models(models.unwrap_or_else(|| {
                 let ids = claude_effort_ids(ultracode);
                 CLAUDE_MODELS
@@ -585,6 +646,35 @@ impl Harness for ClaudeCode {
             );
         }
         Some(info)
+    }
+}
+
+#[async_trait]
+impl Harness for ClaudeCode {
+    fn id(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    /// The resident child holds stdin open, so a second stream-json user
+    /// message reaches the turn already running.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -2195,6 +2285,42 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    #[test]
+    fn snapshot_auth_choice_prefers_env_then_file_then_store() {
+        // The env credential overrides a saved login — the same precedence
+        // `effective_auth_probe` encodes — but its validity is unverified, so
+        // the choice is not a `Ready` answer.
+        assert_eq!(
+            snapshot_auth_choice(true, true, true),
+            SnapshotAuth::UnverifiedApiKey
+        );
+        assert_eq!(
+            snapshot_auth_choice(true, false, false),
+            SnapshotAuth::UnverifiedApiKey
+        );
+        // A saved OAuth login answers on every platform — an expired access
+        // token still refreshes from the same file.
+        assert_eq!(
+            snapshot_auth_choice(false, true, true),
+            SnapshotAuth::SavedOauth
+        );
+        assert_eq!(
+            snapshot_auth_choice(false, true, false),
+            SnapshotAuth::SavedOauth
+        );
+        // Where the file *is* the store (Linux), absent means signed out;
+        // elsewhere Keychain/the credential store could hold a login, so the
+        // CLI must answer.
+        assert_eq!(
+            snapshot_auth_choice(false, false, true),
+            SnapshotAuth::SignedOut
+        );
+        assert_eq!(
+            snapshot_auth_choice(false, false, false),
+            SnapshotAuth::ProbeCli
+        );
+    }
 
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {

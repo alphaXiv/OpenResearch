@@ -84,10 +84,14 @@ impl ProbeEnvironment {
 
 /// First opencode that resolves, in discovery order — picking the highest
 /// version instead would move a pinned 1.x install onto the 2.x protocol.
+/// The `--version` probes run in parallel (a cold node start can take
+/// seconds); only the pick stays discovery-ordered.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
+    let candidates = super::opencode_candidates();
+    let results = futures::future::join_all(candidates.into_iter().map(resolve_binary_at)).await;
     let mut first_error = None;
-    for candidate in super::opencode_candidates() {
-        match resolve_binary_at(candidate).await {
+    for result in results {
+        match result {
             Ok(binary) => return Ok(binary),
             Err(error) => {
                 first_error.get_or_insert(error);
