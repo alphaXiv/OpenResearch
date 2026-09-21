@@ -291,10 +291,12 @@ fn is_old_style_number(s: &str) -> bool {
     number.len() == 7 && number.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// An old-style arXiv archive, optionally with a subject class: `hep-th`,
-/// `math`, `math.GT`.
+/// Plausibly an old-style archive segment, optionally with a subject class:
+/// `hep-th`, `math`, `math.GT`. Route words (`abs`, `pdf`, `overview`) pass
+/// too — a 7-digit number after one only appears on URLs that are already
+/// invalid.
 fn is_archive(s: &str) -> bool {
-    s.starts_with(|c: char| c.is_ascii_alphabetic())
+    s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
         && s.bytes()
             .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
 }
@@ -352,8 +354,15 @@ mod tests {
                 "https://www.alphaxiv.org/overview/math/0211159",
                 "math/0211159",
             ),
+            ("https://arxiv.org/abs/math.GT/0309136", "math.GT/0309136"),
             // No archive to keep.
             ("9711200", "9711200"),
+            // A non-archive prefix — digits, or an empty segment — is dropped.
+            ("10.1234/9711200", "9711200"),
+            ("foo1/9711200", "9711200"),
+            ("x//9711200", "9711200"),
+            // Route words count as archives; pins the lenient behavior above.
+            ("https://arxiv.org/abs/9711200", "abs/9711200"),
         ];
         for (input, want) in cases {
             assert_eq!(parse_paper_id(input), want, "input: {input}");
