@@ -101,7 +101,6 @@ import {
   type ChatPart,
   type ChatPrompt,
   type ChatSession,
-  type ChatTextAnnotation,
   type Harness,
   type PromptAnswer,
   type RuntimeInfo,
@@ -129,6 +128,13 @@ import {
   recoveryTurnOptions,
   retryStatusLabel,
 } from "../chatRecovery";
+import {
+  composerStashContent,
+  EMPTY_COMPOSER_STASH,
+  type ComposerAnnotation,
+  type ComposerAttachment,
+  type ComposerStash,
+} from "../composerStash";
 import {
   containsShellGlob,
   orxArgsMatch,
@@ -187,11 +193,6 @@ const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
-
-interface ComposerAnnotation extends ChatTextAnnotation {
-  id: string;
-  range?: Range;
-}
 
 interface SelectionAction {
   text: string;
@@ -4218,10 +4219,45 @@ export function ChatPanel({
     composerScopeRef.current = { projectId, activeId, mainView };
   }
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
-  const [attachments, setAttachments] = useState<
-    { dataUrl: string; mediaType: string; name?: string; size: number }[]
-  >([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // Unsent composer content belongs to the scope it was typed in — stash on
+  // the way out, restore on return, so a draft can't bleed into another chat.
+  const stashKey = activeId ?? "new";
+  const composerStashRef = useRef(new Map<string, ComposerStash>());
+  const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
+  composerLiveRef.current = { draft, attachments, annotations };
+  // On offer until the user has sent anything in the demo: a send either adds
+  // a session or moves a recorded session's leaf off its seeded message. The
+  // nudge anchors to the first scope that had it — seeding it in every scope
+  // would read as the draft bleeding across chats.
+  const composerPrefillOffer =
+    projectId === DEMO_PROJECT_ID &&
+      sessions.length > 0 &&
+      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      ? DEMO_RUN_EXPERIMENT_PROMPT
+      : null;
+  const prefillScopeRef = useRef<string | null>(null);
+  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
+    prefillScopeRef.current = stashKey;
+  }
+  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  // Layout effect: the restore must land before paint or the outgoing chat's
+  // draft flashes for a frame inside the incoming one.
+  useLayoutEffect(() => {
+    const restored = composerStashRef.current.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    // StrictMode double-invokes: the cleanup must see the restored value, not
+    // the pre-restore render's.
+    composerLiveRef.current = restored;
+    setDraft(restored.draft);
+    setAttachments(restored.attachments);
+    setAnnotations(restored.annotations);
+    return () => {
+      const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
+      if (stashed) composerStashRef.current.set(stashKey, stashed);
+      else composerStashRef.current.delete(stashKey);
+    };
+  }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
@@ -4281,7 +4317,6 @@ export function ChatPanel({
   useAnnotationHighlights(annotations);
 
   useEffect(() => {
-    setAnnotations([]);
     transcriptSelection.dismiss();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
@@ -4355,13 +4390,26 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
+      const scope = activeId;
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setAttachments((cur) => [
-          ...cur,
-          { dataUrl, mediaType: file.type, name: file.name, size: file.size },
-        ]);
+        const attachment = {
+          dataUrl: reader.result as string,
+          mediaType: file.type,
+          name: file.name,
+          size: file.size,
+        };
+        // The decode is async — if the composer moved on, the file belongs to
+        // the scope it was pasted into, not whatever chat is now showing.
+        if (composerScopeRef.current.activeId === scope) {
+          setAttachments((cur) => [...cur, attachment]);
+          return;
+        }
+        const stash = composerStashRef.current.get(scope ?? "new") ?? EMPTY_COMPOSER_STASH;
+        composerStashRef.current.set(scope ?? "new", {
+          ...stash,
+          attachments: [...stash.attachments, attachment],
+        });
       };
       reader.readAsDataURL(file);
     }
@@ -4682,10 +4730,8 @@ export function ChatPanel({
         )
         : new Set(),
     );
-    setDraft("");
     setDemoHintDismissed(false);
     setDemoRunHintDismissed(false);
-    setAttachments([]);
     setTitleReveals(new Map());
     seenTitles.current = new Map();
     void syncSessionList();
@@ -4977,15 +5023,9 @@ export function ChatPanel({
       setComposerCursor(prompt.length);
     });
   };
-  // On offer until the user has sent anything in the demo: a send either adds
-  // a session or moves a recorded session's leaf off its seeded message.
-  const composerPrefill =
-    projectId === DEMO_PROJECT_ID &&
-      sessions.length > 0 &&
-      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
-      ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
   // Seeds without taking focus; focus may still belong to the welcome dialog.
+  // Declared after the stash-restore effect so `current` below is the scope's
+  // just-restored draft.
   useEffect(() => {
     if (!composerPrefill) return;
     setDraft((current) => current || composerPrefill);
@@ -5235,6 +5275,13 @@ export function ChatPanel({
     }
     let sid = activeId;
     try {
+      // Clear before the first await — once the scope can move, a stash
+      // cleanup must never see the sent text still in the composer. Failure
+      // paths below restore it via restoreComposer().
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === pending ? [] : current);
+      setAnnotations((current) => (current === pendingAnnotations ? [] : current));
+      setAttachError(null);
       preparingSend.current = true;
       try {
         if (!sid) {
@@ -5253,12 +5300,6 @@ export function ChatPanel({
         preparingSend.current = false;
       }
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      if (inSourceScope()) {
-        setDraft((current) => current === draft ? "" : current);
-        setAttachments((current) => current === pending ? [] : current);
-        setAnnotations((current) => current === pendingAnnotations ? [] : current);
-        setAttachError(null);
-      }
       dispatch({
         type: "optimisticUser",
         sessionId: sid,
@@ -5567,9 +5608,16 @@ export function ChatPanel({
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
+    composerStashRef.current.delete(sessionId);
+    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
+      // The session is gone — its composer dies with it. Cleared in the same
+      // batch as the navigation so the stash cleanup can't resurrect the key.
+      setDraft("");
+      setAttachments([]);
+      setAnnotations([]);
       onActiveSessionChangeRef.current(null, { replace: true });
     }
     setUnreadSessionIds((current) => {
