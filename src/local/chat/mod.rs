@@ -2393,6 +2393,26 @@ pub(crate) fn builtin_slash_skill_names(project: &LocalProject, text: &str) -> V
         .collect()
 }
 
+/// The checkout `@file` mentions resolve against: the session's worktree
+/// when one exists, falling back to the project's hub clone. Read-only —
+/// never provisions a worktree, so a mention to a file in a worktree that
+/// doesn't exist yet just falls through to the clone (or, if that also
+/// fails to canonicalize, mentions are left unexpanded). `session_id` is
+/// already this project's own session by the time `send_message_showing`
+/// calls this, so there's no separate ownership check to make (unlike
+/// `resolve_checkout_root` in `commands::up`, which takes an arbitrary
+/// caller-supplied id and must verify `session.project_id == project.id`
+/// via the store). Duplicated locally rather than shared with that
+/// function because it's private to `up.rs`, returns `up.rs`'s local
+/// `ApiError`, and has ten other call sites whose signature isn't this
+/// track's to change.
+fn mention_checkout_root(project: &LocalProject, session_id: &str) -> Option<PathBuf> {
+    let worktree = crate::local::git::existing_session_worktree_path(project, session_id);
+    crate::paths::canonicalize(&worktree)
+        .ok()
+        .or_else(|| crate::paths::canonicalize(&project.repo_path).ok())
+}
+
 /// Slash tokens select supplementary instructions. The transcript keeps the
 /// exact message, while every recognized selection shares that complete request.
 fn expand_slash_skills(project: &LocalProject, text: &str, harness: Option<&str>) -> String {
@@ -4948,11 +4968,16 @@ impl ChatHost {
             &store,
             session.active_leaf_id.as_deref(),
         )?);
-        // Slash-skills: the transcript keeps the `/name` the user typed; the
-        // harness gets the expanded prompt.
+        // Slash-skills and @-mentions: the transcript keeps what the user
+        // typed (`/name`, `@path`); the harness gets the expanded prompt.
+        let mention_root = mention_checkout_root(&project, &session.id);
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
-                expand_slash_skills(&project, text, Some(&session.harness))
+                let text = expand_slash_skills(&project, text, Some(&session.harness));
+                match &mention_root {
+                    Some(root) => mentions::expand_mentions(&text, root),
+                    None => text,
+                }
             });
             with_turn_context(
                 session.native_session_id.as_deref(),

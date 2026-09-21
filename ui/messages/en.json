@@ -469,6 +469,7 @@
   "skill_chips_loading_skill": "Loading skill…",
   "skill_chips_badge": "Skill",
   "skill_menu_personal": "Personal",
+  "mention_menu_no_matches": "No matching files",
   "skills_tab_could_not_load_templates": "Could not load templates:",
   "skills_tab_could_not_load_skills": "Could not load skills:",
   "skills_tab_customize": "Customize",

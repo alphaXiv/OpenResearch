@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ListChecks, WandSparkles } from "lucide-react";
+import { FileCode, ListChecks, WandSparkles } from "lucide-react";
 
 import { getSkillContentQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
@@ -17,6 +17,7 @@ import {
 import { createPortal } from "react-dom";
 import { type SkillInfo } from "../api";
 import { commandDisplayName, splitCommandTokens } from "../planCommand";
+import { mentionBasename, splitMentionTokens } from "../mentionCommand";
 import { Md } from "./Md";
 import { Badge } from "./ui";
 
@@ -68,6 +69,46 @@ function SkillLabel({ name }: { name: string }) {
   );
 }
 
+/** Same evidence-tag look `Md.tsx`'s `FileChip` uses for an agent's own file
+ * citations, applied to a user-typed `@path` — but a plain chip (no click to
+ * open), since the composer overlay and the sent bubble aren't `.md`
+ * content, so `.file-chip`'s markdown-scoped styling doesn't reach them. */
+const MENTION_CHIP_CLASS =
+  "mention-chip inline-flex items-center gap-1 max-w-full my-0 mx-px py-0 px-1.5 align-baseline font-mono text-sm font-medium text-text bg-panel border border-border-variant rounded-xs";
+
+function MentionLabel({ path }: { path: string }) {
+  return (
+    <>
+      <FileCode size={12} strokeWidth={1.5} className="shrink-0 opacity-60" aria-hidden="true" />
+      <span className="max-w-65 overflow-hidden text-ellipsis whitespace-nowrap">
+        {mentionBasename(path)}
+      </span>
+    </>
+  );
+}
+
+type ChipSegment = { text: string; kind: "command" | "mention" | "plain" };
+
+/** `splitCommandTokens` splits on `/name` tokens; each plain run left over is
+ * then split again for `@path` tokens — the two grammars can't collide
+ * (different leading characters), so nesting the passes is lossless. */
+function chipSplit(text: string, isCommand: (name: string) => boolean): ChipSegment[] {
+  const segments: ChipSegment[] = [];
+  for (const segment of splitCommandTokens(text, isCommand)) {
+    if (segment.command) {
+      segments.push({ text: segment.text, kind: "command" });
+      continue;
+    }
+    for (const mentionSegment of splitMentionTokens(segment.text)) {
+      segments.push({
+        text: mentionSegment.text,
+        kind: mentionSegment.mention ? "mention" : "plain",
+      });
+    }
+  }
+  return segments;
+}
+
 function chipSegments(
   text: string,
   isCommand: (name: string) => boolean,
@@ -83,36 +124,51 @@ function chipSegments(
     key: number,
   ) => ReactNode,
   wrapPlainText = false,
+  renderMention?: (
+    label: string,
+    path: string,
+    end: number,
+    key: number,
+  ) => ReactNode,
 ): ReactNode[] {
   let offset = 0;
-  return splitCommandTokens(text, isCommand).map((segment, i, segments) => {
+  const segments = chipSplit(text, isCommand);
+  return segments.map((segment, i) => {
     const end = offset + segment.text.length;
     offset = end;
-    const name = segment.text.slice(1).toLowerCase();
-    if (segment.command && renderCommand) {
-      return renderCommand(segment.text, name, end, i);
+    if (segment.kind === "command") {
+      const name = segment.text.slice(1).toLowerCase();
+      if (renderCommand) return renderCommand(segment.text, name, end, i);
+      return (
+        <span
+          key={i}
+          className={chipClassName}
+          onMouseDown={
+            onCommandMouseDown ? (event) => onCommandMouseDown(event, end) : undefined
+          }
+        >
+          <SkillLabel name={name} />
+        </span>
+      );
+    }
+    if (segment.kind === "mention") {
+      const path = segment.text.slice(1);
+      if (renderMention) return renderMention(segment.text, path, end, i);
+      return (
+        <span key={i} className={MENTION_CHIP_CLASS} title={path}>
+          <MentionLabel path={path} />
+        </span>
+      );
     }
     let plainText = segment.text;
     if (!wrapPlainText) {
-      if (segments[i - 1]?.command) plainText = plainText.replace(/^[ \t]+/, " ");
-      if (segments[i + 1]?.command) plainText = plainText.replace(/[ \t]+$/, " ");
+      if (segments[i - 1]?.kind !== "plain") plainText = plainText.replace(/^[ \t]+/, " ");
+      if (segments[i + 1]?.kind !== "plain") plainText = plainText.replace(/[ \t]+$/, " ");
     }
-    return segment.command ? (
-      <span
-        key={i}
-        className={chipClassName}
-        onMouseDown={
-          onCommandMouseDown ? (event) => onCommandMouseDown(event, end) : undefined
-        }
-      >
-        <SkillLabel name={name} />
-      </span>
+    return wrapPlainText ? (
+      <span key={i} aria-hidden="true">{segment.text}</span>
     ) : (
-      wrapPlainText ? (
-        <span key={i} aria-hidden="true">{segment.text}</span>
-      ) : (
-        <Fragment key={i}>{plainText}</Fragment>
-      )
+      <Fragment key={i}>{plainText}</Fragment>
     );
   });
 }
@@ -390,6 +446,18 @@ export function ComposerSkillChips({
           );
         },
         true,
+        (label, path, end) => {
+          const trailing = text.slice(end);
+          const spaceCount = /^[ \t]+/.exec(trailing)?.[0].length ?? 0;
+          if (end === editingTokenEnd || (trailing && !trailing.startsWith("\n") && spaceCount < 1)) {
+            return <span key={`m${end}`} aria-hidden="true">{label}</span>;
+          }
+          return (
+            <span key={`m${end}`} aria-hidden="true" className="inline-flex items-center gap-1 bg-background font-mono text-sm text-text">
+              <MentionLabel path={path} />
+            </span>
+          );
+        },
       )}
       {/* A trailing newline drops its line box here but not in the textarea,
         * which would clamp the mirror's scrollTop a line short. */}

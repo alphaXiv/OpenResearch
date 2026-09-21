@@ -1164,6 +1164,7 @@
   "local_models_custom_endpoint": "自定义端点",
   "local_models_compatible_api": "（兼容 OpenAI）",
   "skill_menu_personal": "个人",
+  "mention_menu_no_matches": "没有匹配的文件",
   "skills_agent_alternative": "或者，请你的智能体为你保存可重复使用的技能。",
   "templates_agent_alternative": "或者，请你的智能体为你添加 LaTeX 模板。",
   "skills_remove_imported": "从 OpenResearch 移除",
