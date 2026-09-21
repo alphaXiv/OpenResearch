@@ -7,8 +7,9 @@ import { useLocale } from "../locale";
 // `<run id="..."/>` tags render as chips that open a run's logs — so the agent
 // can cite the code and the run behind a claim.
 
-import { Check, Copy, FileCode, PanelRight, ScrollText } from "lucide-react";
-import { createContext, memo, useContext, useMemo, useState, type ImgHTMLAttributes, type ReactNode } from "react";
+import { Check, Copy, FileCode, PanelRight, ScrollText, X, Download, Minus, Plus } from "lucide-react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -19,9 +20,10 @@ import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
+import { remarkFigures } from "../remarkFigures";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { IconButton } from "./ui";
+import { Button, IconButton, IconButtonLink } from "./ui";
 import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
 import { chatImageTarget, isWindowsDrivePath } from "../markdownTarget";
 
@@ -44,10 +46,74 @@ export function ChatImageScope({ projectId, sessionId, children }: {
   return <ImageResolverContext value={resolver}>{children}</ImageResolverContext>;
 }
 
-function MarkdownImage({ src, fallbackSrc, ...props }: ImgHTMLAttributes<HTMLImageElement> & { fallbackSrc?: string | null }) {
+function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [bounds, setBounds] = useState({ width: 0, height: 0 });
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    dialog?.focus();
+    const area = viewport.current;
+    const observer = new ResizeObserver(([entry]) => {
+      setBounds({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    if (area) observer.observe(area);
+    return () => { observer.disconnect(); dialog?.close(); };
+  }, []);
+  const fit = size.width && bounds.width
+    ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
+    : 1;
+  return createPortal(
+    <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
+      onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}>
+      <div ref={viewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
+        onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+        <div className="flex min-h-full min-w-full w-max pointer-events-none">
+          <img src={src} alt={alt} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+            style={size.width ? { width: size.width * fit * zoom, height: size.height * fit * zoom } : undefined}
+            className={`pointer-events-auto block m-auto shrink-0 max-w-none rounded-lg shadow-modal ${size.width && bounds.width ? "visible" : "invisible"}`} />
+        </div>
+      </div>
+      <div className="absolute top-5 right-5 flex gap-2">
+        <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()} title={m.media_preview_download()}
+          className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
+        <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()} title={m.tour_close()}
+          className="bg-background shadow-popover"><X size={16} /></IconButton>
+      </div>
+      <div className="absolute bottom-6 inset-x-6 flex flex-col items-center gap-3 pointer-events-none">
+        {alt && <div className="max-w-xl line-clamp-2 rounded-xl bg-background px-4 py-2 text-center text-sm leading-snug shadow-popover">{alt}</div>}
+        <div className="pointer-events-auto flex items-center gap-1 rounded-full bg-background p-1.5 shadow-popover">
+          <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
+            aria-label={m.image_zoom_out()} title={m.image_zoom_out()}><Minus size={16} /></IconButton>
+          <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} title={m.image_zoom_reset()} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
+          <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
+            aria-label={m.image_zoom_in()} title={m.image_zoom_in()}><Plus size={16} /></IconButton>
+        </div>
+      </div>
+    </dialog>, document.body,
+  );
+}
+
+function MarkdownImage({ src, fallbackSrc, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { fallbackSrc?: string | null; downloadName?: string }) {
   const [failed, setFailed] = useState(false);
-  return <img {...props} src={failed && fallbackSrc ? fallbackSrc : src}
-    onError={!failed && fallbackSrc && fallbackSrc !== src ? () => setFailed(true) : undefined} />;
+  const [expanded, setExpanded] = useState(false);
+  const displayedSrc = failed && fallbackSrc ? fallbackSrc : src;
+  return <>
+    <img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
+      onClick={(event) => { event.preventDefault(); event.stopPropagation(); setExpanded(true); }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault(); event.stopPropagation(); setExpanded(true);
+        }
+      }}
+      onError={!failed && fallbackSrc && fallbackSrc !== src ? () => setFailed(true) : undefined} />
+    {expanded && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => setExpanded(false)} />}
+  </>;
 }
 
 // Chat blocks are short; cap tokenizing well below the file viewer's limit.
@@ -293,6 +359,7 @@ const markdownProcessor = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath, remarkMathOptions)
+  .use(remarkFigures)
   .use(remarkMentions)
   .use(remarkRehype)
   .use(rehypeSafeUrls)
@@ -327,6 +394,10 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   },
   pre: ({ children }: any) => <>{children}</>,
 };
+
+function PaperFigure({ children }: { children: ReactNode }) {
+  return <figure className="my-6 mx-auto max-w-full text-left [&_img]:mx-auto [&_img]:my-0 [&_img]:w-auto [&_img]:h-auto [&_img]:max-h-[min(480px,60vh)] [&_img]:object-contain [&_img]:border-0 [&_img]:rounded-none">{children}</figure>;
+}
 
 /** Memoized: markdown + KaTeX parsing is the expensive part of a chat render,
  * and during streaming only the growing part's text actually changes — every
@@ -363,7 +434,16 @@ export const Md = memo(function Md({
     "run-mention": (props) => (
       <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
     ),
-    a: ({ node: _node, href, children, ...rest }) => {
+    a: ({ node: _node, href, children, "data-figure-src": figureSrc, ...rest }) => {
+      const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
+      if (figure && onOpenFile) {
+        const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
+        const path = resolveFilePath ? resolveFilePath(localPath) : localPath;
+        if (path) return <button type="button" className="text-primary underline cursor-pointer text-start"
+          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile(path, undefined, undefined, undefined, intent))}>
+          {children}
+        </button>;
+      }
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
       if (href && isFileHref(href) && onOpenFile) {
@@ -382,33 +462,24 @@ export const Md = memo(function Md({
         </a>
       );
     },
+    figure: ({ children }) => <PaperFigure>{children}</PaperFigure>,
+    figcaption: ({ children }) => <figcaption className="mt-3 text-sm italic leading-relaxed text-text">{children}</figcaption>,
     th: ({ node: _node, ...rest }) => <th dir="auto" {...rest} />,
     td: ({ node: _node, ...rest }) => <td dir="auto" {...rest} />,
     img: ({ node: _node, src, alt, className, ...rest }) => {
       if (!src || typeof src !== "string") return null;
       const resolved = imageSrc ? imageSrc(src) : src;
       if (!resolved) return null;
-      const target = chatImageSrc && !resolveImageSrc ? chatImageTarget(src) : null;
-      const path = target && (target.source === "artifact" ? `artifacts/${target.path}` : target.path);
-      const open = path && onOpenFile
-        ? (intent: TabOpenIntent) => onOpenFile(path, undefined, undefined, undefined, intent)
-        : null;
-      const gestures = open ? tabOpenGestureHandlers<HTMLImageElement>(open, { stopPropagation: true }) : undefined;
       return (
         <MarkdownImage
           {...rest}
           key={resolved}
+          downloadName={src.split(/[\\/]/).pop()?.split(/[?#]/)[0]}
           src={resolved}
           fallbackSrc={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
           alt={alt ?? ""}
-          role={open ? "button" : undefined}
-          tabIndex={open ? 0 : undefined}
-          aria-label={open && path ? m.a11y_open_file_in_panel({ path: ltr(alt || path) }) : undefined}
-          {...gestures}
-          // Open the viewer even when Markdown wraps the image in an external link.
-          onClick={gestures ? (event) => { event.preventDefault(); gestures.onClick(event); } : undefined}
           loading="lazy"
-          className={`block max-w-full h-auto my-3 rounded-sm border border-border ${open ? "cursor-pointer focus-visible:outline-2 focus-visible:outline-primary" : ""} ${className ?? ""}`}
+          className={`block max-w-full h-auto my-3 rounded-sm border border-border cursor-zoom-in focus-visible:outline-2 focus-visible:outline-primary ${className ?? ""}`}
        />
       );
     },

@@ -1184,5 +1184,8 @@
   "harness_setup_install_preview": "批准以下命令以在您的电脑上下载并安装 {agent}。",
   "harness_setup_update_preview": "批准以下命令以在您的电脑上更新 {agent}。",
   "harness_setup_approve_run": "批准并运行",
-  "onboarding_choose_another_agent": "选择其他编程智能体"
+  "onboarding_choose_another_agent": "选择其他编程智能体",
+  "image_zoom_out": "缩小",
+  "image_zoom_in": "放大",
+  "image_zoom_reset": "重置为适合窗口"
 }

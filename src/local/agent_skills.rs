@@ -174,7 +174,7 @@ const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
 };
 const S_LIT: AgentSkill = AgentSkill {
     name: "orx-lit-review",
-    description: "Search and read research papers. The main agent calls alphaXiv, OpenAlex, and bioRxiv discovery primitives, ranks the combined candidates, and chooses sources for focused follow-ups. Use for literature reviews, related work, prior art, papers, authors, methods, benchmarks, or research claims; never delegate the retrieval loop to a sub-agent.",
+    description: "Search and read research papers for grounded results and explanations. Use for literature reviews, related work, research claims, and scientific or technical explanations, even without a named paper. The main agent searches relevant alphaXiv, OpenAlex, and bioRxiv connectors and selects sources for follow-ups. Scale retrieval to the question; conceptual explanations need no exhaustive review.",
     content: LIT,
     resources: &[],
 };

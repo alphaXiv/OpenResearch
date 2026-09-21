@@ -1184,5 +1184,8 @@
   "harness_setup_install_preview": "برای دانلود و نصب {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_update_preview": "برای به‌روزرسانی {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_approve_run": "تأیید و اجرا",
-  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر"
+  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر",
+  "image_zoom_out": "کوچک‌نمایی",
+  "image_zoom_in": "بزرگ‌نمایی",
+  "image_zoom_reset": "بازنشانی بزرگ‌نمایی برای جا شدن"
 }

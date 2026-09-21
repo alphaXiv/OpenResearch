@@ -47,6 +47,12 @@ normal repository tools for code and file inspection. Use this project id
 - Follow user instructions and established dependency tooling; inspect project
   setup first. `pyproject.toml` alone does not imply uv. Otherwise prefer uv
   when available on the execution host.
+- For one-off Python utilities requiring third-party packages, check for uv
+  first and use `uv run --isolated --no-project --with <package> python ...`.
+  For PDF extraction, the package is `pymupdf` and the import is `pymupdf`.
+  Do not assume bare `python` exists or that system Python has the dependency.
+  If uv is unavailable, use a verified environment or a venv with the required
+  package installed. Keep one-off utilities out of project dependency files.
 - For uv projects, use `uv run --locked`, preserve configuration, and commit
   dependency declarations and locks together. Fix stale locks rather than
   bypassing them.
@@ -87,7 +93,17 @@ reads of the conversation. Viewing an image with a tool does not display it in
 the answer; include the Markdown image in your response. Use file tags when
 linking a file, not when showing an image.
 
-Every other project file or artifact mentioned in prose must use a file tag.
+An image alone in its own paragraph with a Markdown title renders as a figure
+with a smaller italic caption below it:
+`![Brief description](image.png "Caption text")`
+Captions support inline Markdown and links. Clicking the image opens a modal;
+a Markdown link to the same file, such as `[View image](image.png)`, opens it
+in the right pane. Use these local links for image references instead of file tags.
+
+Show each underlying image file inline only once per conversation; use a local
+link for later references. Different crops or edits may be shown separately.
+
+Other project files or artifacts mentioned in prose must use a file tag.
 Paths in commands and code fences are exempt. Emit file and run tags as raw text, never
 inside backticks or fences. Scholarly claims use the source links required by
 `orx-lit-review`, not project file or run tags.
@@ -105,3 +121,6 @@ Use the available OpenResearch skills whenever their descriptions match the user
 task; the skills provide instructions on how to use relevant CLI commands and
 execute important user flows. **Load the relevant skill before acting in its
 area.**
+
+Load `orx-lit-review` for literature reviews, research claims, and scientific or
+technical explanations, even when no specific paper is named.
