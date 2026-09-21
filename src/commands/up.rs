@@ -592,7 +592,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
         )
-        .route("/api/settings/ssh", get(ssh_settings))
+        .route(
+            "/api/settings/ssh",
+            get(ssh_settings).post(save_ssh_settings),
+        )
+        .route("/api/settings/ssh/default", post(save_ssh_default))
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
@@ -1927,6 +1931,9 @@ struct CreateRunReq {
     backend: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
+    container: Option<String>,
+    #[serde(default)]
+    no_container: bool,
     manifest: Option<String>,
     image: Option<String>,
     timeout: Option<String>,
@@ -2004,6 +2011,8 @@ pub(crate) async fn submit_run_via_up(
         backend: args.backend.clone(),
         flavor: args.flavor.clone(),
         host: args.host.clone(),
+        container: args.container.clone(),
+        no_container: args.no_container,
         manifest: args.manifest.clone(),
         image: args.image.clone(),
         timeout: args.timeout.clone(),
@@ -2068,6 +2077,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         flavor,
         org: req.org,
         host: req.host,
+        container: req.container,
+        no_container: req.no_container,
         manifest: req.manifest,
         image: req.image,
         timeout: req.timeout,
@@ -6072,6 +6083,17 @@ fn list_ssh_hosts() -> Vec<Value> {
 async fn ssh_settings() -> ApiResult {
     tokio::task::spawn_blocking(|| {
         let mut hosts = list_ssh_hosts();
+        let settings = crate::config::ssh_settings()?;
+        for host in &mut hosts {
+            let options = host
+                .get("host")
+                .and_then(Value::as_str)
+                .and_then(|host| settings.hosts.get(host))
+                .cloned()
+                .unwrap_or_default();
+            host["container"] = json!(options.container);
+            host["setupCommand"] = json!(options.setup_command);
+        }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
         let tests: HashMap<String, SshHostTest> = Store::open()
@@ -6093,10 +6115,54 @@ async fn ssh_settings() -> ApiResult {
             };
             h["lastTest"] = json!(t);
         }
-        Ok(Json(json!({ "hosts": hosts })))
+        Ok(Json(
+            json!({ "hosts": hosts, "defaultHost": settings.default_host }),
+        ))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveSshSettingsReq {
+    host: String,
+    container: Option<String>,
+    setup_command: Option<String>,
+}
+
+async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
+    let host = req.host.trim().to_string();
+    require_configured_ssh_host(&host)?;
+    let options = crate::config::SshHostSettings {
+        container: req.container,
+        setup_command: req
+            .setup_command
+            .filter(|command| !command.trim().is_empty()),
+    };
+    crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
+    blocking_api(move || {
+        crate::config::set_ssh_host(host, options)?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SaveSshDefaultReq {
+    host: Option<String>,
+}
+
+async fn save_ssh_default(Json(req): Json<SaveSshDefaultReq>) -> ApiResult {
+    let host = req.host.map(|host| host.trim().to_string());
+    if let Some(host) = &host {
+        require_configured_ssh_host(host)?;
+    }
+    blocking_api(move || {
+        crate::config::set_ssh_default(host)?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
 }
 
 fn ssh_config_path() -> Result<std::path::PathBuf> {
@@ -6177,6 +6243,7 @@ async fn save_ssh_config(Json(req): Json<SaveSshConfigReq>) -> ApiResult {
 #[derive(Deserialize)]
 struct SshPreflightReq {
     host: String,
+    container: Option<String>,
 }
 
 async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
@@ -6201,7 +6268,27 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    Ok(Json(json!(run_ssh_host_preflight(host).await)))
+    require_configured_ssh_host(&host)?;
+    if let Some(reference) = &req.container {
+        crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
+    }
+    let test = run_ssh_host_preflight(host.clone()).await;
+    let container = if let Some(reference) = req.container {
+        let result = crate::jobs::ssh::resolve_container(
+            &crate::jobs::ssh::SshTarget::alias(&host),
+            &reference,
+        )
+        .await;
+        Some(
+            json!({"reference": reference, "ready": result.is_ok(), "error": result.err().map(|error| error.to_string())}),
+        )
+    } else {
+        None
+    };
+    let mut result =
+        serde_json::to_value(test).map_err(|error| ApiError::from(anyhow!("{error}")))?;
+    result["container"] = json!(container);
+    Ok(Json(result))
 }
 
 fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
@@ -8184,6 +8271,7 @@ mod tests {
     async fn windows_ssh_master_status_is_not_a_disconnection() {
         let response = ssh_master_status(Query(SshPreflightReq {
             host: "unused-host".into(),
+            container: None,
         }))
         .await
         .unwrap_or_else(|error| panic!("{}", error.1));
@@ -8438,6 +8526,8 @@ mod tests {
             backend: Some("local".into()),
             flavor: None,
             host: None,
+            container: None,
+            no_container: false,
             manifest: None,
             image: None,
             timeout: None,

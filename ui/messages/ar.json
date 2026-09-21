@@ -1187,5 +1187,15 @@
   "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر",
   "image_zoom_out": "تصغير",
   "image_zoom_in": "تكبير",
-  "image_zoom_reset": "إعادة ضبط التكبير للملاءمة"
+  "image_zoom_reset": "إعادة ضبط التكبير للملاءمة",
+  "ssh_default_host": "مضيف SSH الافتراضي",
+  "ssh_run_in": "التشغيل في",
+  "ssh_direct_host": "المضيف مباشرة",
+  "ssh_existing_container": "حاوية موجودة",
+  "ssh_container_reference": "اسم الحاوية أو معرّفها",
+  "ssh_setup_command": "أمر الإعداد (اختياري)",
+  "ssh_setup_help": "يُنفّذ مرة واحدة قبل كل تجربة. يفحص الاختبار الاتصال والأدوات المطلوبة ولا ينفّذ هذا الأمر.",
+  "ssh_execution_saved": "تم حفظ إعدادات تنفيذ SSH.",
+  "ssh_execution_ready": "الاتصال والأدوات المطلوبة جاهزة.",
+  "ssh_test_execution": "اختبار الاتصال"
 }

@@ -1187,5 +1187,15 @@
   "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر",
   "image_zoom_out": "کوچک‌نمایی",
   "image_zoom_in": "بزرگ‌نمایی",
-  "image_zoom_reset": "بازنشانی بزرگ‌نمایی برای جا شدن"
+  "image_zoom_reset": "بازنشانی بزرگ‌نمایی برای جا شدن",
+  "ssh_default_host": "میزبان پیش‌فرض SSH",
+  "ssh_run_in": "اجرا در",
+  "ssh_direct_host": "مستقیماً روی میزبان",
+  "ssh_existing_container": "کانتینر موجود",
+  "ssh_container_reference": "نام یا شناسهٔ کانتینر",
+  "ssh_setup_command": "دستور آماده‌سازی (اختیاری)",
+  "ssh_setup_help": "یک بار پیش از هر آزمایش اجرا می‌شود. آزمون فقط اتصال و ابزارهای لازم را بررسی می‌کند و این دستور را اجرا نمی‌کند.",
+  "ssh_execution_saved": "تنظیمات اجرای SSH ذخیره شد.",
+  "ssh_execution_ready": "اتصال و ابزارهای لازم آماده‌اند.",
+  "ssh_test_execution": "آزمایش اتصال"
 }

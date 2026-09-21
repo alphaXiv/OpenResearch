@@ -431,3 +431,33 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostSettings {
+    pub container: Option<String>,
+    pub setup_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshSettings {
+    pub default_host: Option<String>,
+    #[serde(default)]
+    pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
+}
+
+pub fn ssh_settings() -> Result<SshSettings> {
+    crate::telemetry::ssh_settings()
+}
+
+pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
+    crate::jobs::ssh::validate_host_options(&options)?;
+    crate::telemetry::set_ssh_host(host, options)?;
+    Ok(())
+}
+
+pub fn set_ssh_default(host: Option<String>) -> Result<()> {
+    crate::telemetry::set_ssh_default(host)?;
+    Ok(())
+}

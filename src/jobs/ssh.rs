@@ -14,6 +14,11 @@
 //!   exit_code   written when the payload finishes
 //! A restarted `orx supervise` reattaches purely from that directory.
 
+mod container;
+pub use container::{
+    resolve as resolve_container, validate_reference as validate_container_reference, ContainerRun,
+};
+
 use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::PathBuf;
@@ -63,6 +68,95 @@ fn prepare_control_dir() -> Result<()> {
 #[cfg(not(unix))]
 fn prepare_control_dir() -> Result<()> {
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedLaunch {
+    pub target: SshTarget,
+    pub setup_command: Option<String>,
+    pub container: Option<ContainerRun>,
+}
+
+pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
+    if let Some(reference) = &options.container {
+        validate_container_reference(reference)?;
+    }
+    if options
+        .setup_command
+        .as_ref()
+        .is_some_and(|command| command.contains('\0'))
+    {
+        return Err(anyhow!("Setup command cannot contain NUL."));
+    }
+    Ok(())
+}
+
+pub fn resolve_options(
+    args: &crate::ExpRunArgs,
+    settings: &crate::config::SshSettings,
+) -> Result<(String, crate::config::SshHostSettings)> {
+    let host = args
+        .host
+        .as_ref()
+        .or(settings.default_host.as_ref())
+        .filter(|host| !host.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("SSH requires --host <alias> or a default host saved in SSH compute settings.")
+        })?
+        .clone();
+    let saved = settings.hosts.get(&host).cloned().unwrap_or_default();
+    let container = if args.no_container {
+        None
+    } else {
+        args.container.clone().or_else(|| saved.container.clone())
+    };
+    let setup_command = (container == saved.container)
+        .then_some(saved.setup_command)
+        .flatten();
+    let options = crate::config::SshHostSettings {
+        container,
+        setup_command,
+    };
+    validate_host_options(&options)?;
+    Ok((host, options))
+}
+
+pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
+    if args.flavor.is_some() || args.image.is_some() {
+        return Err(anyhow!(
+            "SSH does not support --flavor or --image; use --host and optionally --container."
+        ));
+    }
+    let settings = crate::config::ssh_settings()?;
+    let (host, mut options) = resolve_options(args, &settings)?;
+    let target = SshTarget::alias(&host);
+    let host_check = preflight(&target).await;
+    if !host_check.reachable || !host_check.tools_found {
+        return Err(anyhow!(
+            "{}",
+            host_check
+                .error
+                .unwrap_or_else(|| "SSH host needs bash and tar.".into())
+        ));
+    }
+    let container = match options.container {
+        Some(reference) => Some(container::resolve(&target, &reference).await?),
+        None => None,
+    };
+    if options.setup_command.is_none() {
+        if let (Some(container), Some(saved)) = (&container, settings.hosts.get(&host)) {
+            if let (Some(reference), Some(setup)) = (&saved.container, &saved.setup_command) {
+                if container::same_target(&target, reference, container).await? {
+                    options.setup_command = Some(setup.clone());
+                }
+            }
+        }
+    }
+    Ok(ResolvedLaunch {
+        target,
+        container,
+        setup_command: options.setup_command,
+    })
 }
 
 /// An ssh endpoint. The classic ssh backend connects by `~/.ssh/config` alias
@@ -366,6 +460,7 @@ pub async fn stage_source(
     run_id: &str,
     archive: &std::path::Path,
     digest: &str,
+    container: Option<&ContainerRun>,
 ) -> Result<String> {
     let dir = format!(".orx/runs/{run_id}");
     let cache = format!(".orx/source/{digest}.tar");
@@ -382,16 +477,24 @@ pub async fn stage_source(
         );
         ssh_run_file(target, &upload, archive).await?;
     }
-    ssh_run(
-        target,
-        &format!(
-            "umask 077; mkdir -p \"$HOME/.orx/runs\" \"$HOME/{dir}/repo\"; \
+    if let Some(container) = container {
+        container.require_running(target).await?;
+        let path = sh_quote(&container.run_dir);
+        let extract = container.exec(&format!("set -e; umask 077; mkdir -p {path}/repo; chmod 700 {path} {path}/repo; tar -xf - -C {path}/repo"));
+        // Start the bound here too: submission may fail before detached launch.
+        ssh_run(target, &format!("umask 077; mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && {extract} < \"$HOME/{cache}\" && date +%s > \"$HOME/{dir}/launch_time.tmp\" && mv \"$HOME/{dir}/launch_time.tmp\" \"$HOME/{dir}/launch_time\""), None).await?;
+    } else {
+        ssh_run(
+            target,
+            &format!(
+                "umask 077; mkdir -p \"$HOME/.orx/runs\" \"$HOME/{dir}/repo\"; \
              chmod 700 \"$HOME/.orx/runs\" \"$HOME/{dir}\" \"$HOME/{dir}/repo\"; \
              tar -xf \"$HOME/{cache}\" -C \"$HOME/{dir}/repo\""
-        ),
-        None,
-    )
-    .await?;
+            ),
+            None,
+        )
+        .await?;
+    }
     Ok(dir)
 }
 
@@ -409,6 +512,8 @@ pub struct SshJobSpec {
     pub script: String,
     /// Exported inside run.sh on the remote (tokens, synced env).
     pub env: HashMap<String, String>,
+    pub container: Option<ContainerRun>,
+    pub setup_command: Option<String>,
 }
 
 /// Submit the job: write run.sh, launch it detached, record its pid. Returns
@@ -421,30 +526,40 @@ pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
         .map(|(k, v)| format!("export {}={}", k, sh_quote(v)))
         .collect::<Vec<_>>()
         .join("\n");
-    // run.sh: set up env, run the payload capturing all output to `log`, then
-    // record the exit status. The payload runs in a SUBSHELL `( … )` — not a
-    // `{ … }` group — so an `exit`/`set -e` failure inside it ends the subshell,
-    // not run.sh, and we still reach `echo $? > exit_code`.
-    let run_sh = format!(
-        "#!/usr/bin/env bash\n{exports}\ncd \"$HOME/{dir}\" || exit 97\n(\n{script}\n) > log 2>&1\necho $? > exit_code\n",
-        script = spec.script,
-    );
+    let run_sh = if let Some(container) = &spec.container {
+        container.require_running(&spec.target).await?;
+        let inner = container::inner_script(
+            container,
+            &exports,
+            spec.setup_command.as_deref(),
+            &spec.script,
+        );
+        container::upload_script(&spec.target, container, &inner).await?;
+        container::host_script(&dir, container)
+    } else {
+        let script = match &spec.setup_command {
+            Some(setup) => format!(
+                "set -eo pipefail; cd repo;\n{setup}\ncd \"$orx_run_dir\"; {}",
+                spec.script
+            ),
+            None => spec.script.clone(),
+        };
+        // A payload exit must leave the outer shell alive to record its status.
+        format!("#!/usr/bin/env bash\ncd \"$HOME/{dir}\" || exit 97\nreadonly orx_run_dir=\"$PWD\"\n(\n{exports}\n{script}\n) > log 2>&1\necho $? > exit_code\n")
+    };
 
     // Create the dir (owner-only) and write run.sh from stdin.
     let setup = format!(
-        "mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && cat > \"$HOME/{dir}/run.sh\"",
+        "umask 077; mkdir -p \"$HOME/{dir}\" && chmod 700 \"$HOME/{dir}\" && cat > \"$HOME/{dir}/run.sh\"",
     );
     ssh_run(&spec.target, &setup, Some(&run_sh)).await?;
 
-    // Launch detached so it survives the ssh channel closing. Prefer `setsid`
-    // (new session → pid == pgid, so cancel can TERM the whole group); fall back
-    // to `nohup` where setsid is absent (e.g. a macOS host). Record the pid.
-    let launch = format!(
-        "cd \"$HOME/{dir}\" && \
-         if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & \
-         else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; \
-         echo $! > pid",
-    );
+    // The container host wrapper records its own PID; direct runs retain the existing launcher.
+    let launch = if spec.container.is_some() {
+        format!("cd \"$HOME/{dir}\" && date +%s > launch_time.tmp && mv launch_time.tmp launch_time && {{ if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; }}")
+    } else {
+        format!("cd \"$HOME/{dir}\" && if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; echo $! > pid")
+    };
     ssh_run(&spec.target, &launch, None).await?;
     Ok(dir)
 }
@@ -456,7 +571,18 @@ pub struct JobState {
     pub message: Option<String>,
 }
 
-pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
+pub async fn inspect_job(
+    target: &SshTarget,
+    dir: &str,
+    container: Option<&ContainerRun>,
+) -> Result<JobState> {
+    match container {
+        Some(container) => container::inspect(target, dir, container).await,
+        None => inspect_host_job(target, dir).await,
+    }
+}
+
+async fn inspect_host_job(target: &SshTarget, dir: &str) -> Result<JobState> {
     // exit_code present -> finished; pid alive -> running; pid dead & no
     // exit_code -> killed/crashed; no pid yet -> just starting.
     let cmd = format!(
@@ -466,10 +592,13 @@ pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
     );
     let out = ssh_run(target, &cmd, None).await?;
-    let out = out.trim();
+    Ok(parse_job_state(out.trim()))
+}
+
+fn parse_job_state(out: &str) -> JobState {
     if let Some(code) = out.strip_prefix("EXIT ") {
         let code: i32 = code.trim().parse().unwrap_or(-1);
-        return Ok(if code == 0 {
+        return if code == 0 {
             JobState {
                 stage: "COMPLETED".into(),
                 message: None,
@@ -479,9 +608,9 @@ pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
                 stage: "ERROR".into(),
                 message: Some(format!("exited with code {code}")),
             }
-        });
+        };
     }
-    Ok(match out {
+    match out {
         "RUNNING" | "PENDING" => JobState {
             stage: "RUNNING".into(),
             message: None,
@@ -494,7 +623,7 @@ pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
             stage: "RUNNING".into(),
             message: Some(format!("unexpected inspect output: {other}")),
         },
-    })
+    }
 }
 
 /// One poll of the remote log past `skip` lines. Unlike the streaming backends
@@ -524,7 +653,15 @@ pub async fn stream_logs(
 
 /// Cancel = TERM the process group if we have one (setsid case), else the pid
 /// (nohup fallback). The negative-pid form targets the whole group.
-pub async fn cancel_job(target: &SshTarget, dir: &str) -> Result<()> {
+pub async fn cancel_job(
+    target: &SshTarget,
+    dir: &str,
+    container: Option<&ContainerRun>,
+) -> Result<()> {
+    if let Some(container) = container {
+        container::cancel(target, container).await?;
+    }
+
     let cmd = format!(
         "p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
          [ -n \"$p\" ] && {{ kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; }}; true",

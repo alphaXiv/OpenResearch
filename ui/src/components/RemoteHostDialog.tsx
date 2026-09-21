@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { createRemoteSession } from "../api";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
-import { getSshHostsQuery, listRemoteSessionsQuery } from "../queries/settings";
+import { getSshSettingsQuery, listRemoteSessionsQuery } from "../queries/settings";
 import { getThemePreference } from "../theme";
 import { useDialogFocus } from "./useDialogFocus";
 import { Button, IconButton, Input, showAlert, Spinner } from "./ui";
@@ -19,9 +19,9 @@ export function RemoteHostDialog({
 }) {
   const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) });
 
-  const hostsQuery = useQuery(getSshHostsQuery());
+  const hostsQuery = useQuery(getSshSettingsQuery());
   const sessionsQuery = useQuery(listRemoteSessionsQuery());
-  const hosts = hostsQuery.data ?? null;
+  const hosts = hostsQuery.data?.hosts ?? null;
   const sessions = sessionsQuery.data ?? [];
   const [query, setQuery] = useState("");
   const loadError = !hosts ? hostsQuery.error?.message ?? sessionsQuery.error?.message ?? null : null;

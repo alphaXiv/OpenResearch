@@ -69,10 +69,10 @@ export const getDataDirQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
-export const getSshHostsQuery = () => queryOptions({
-  queryKey: workspaceKey("getSshHosts"),
-  queryFn: ({ signal }) => api.getSshHosts(signal),
-  staleTime: 300_000,
+export const getSshSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSshSettings"),
+  queryFn: ({ signal }) => api.getSshSettings(signal),
+  staleTime: 30_000,
 });
 
 export const getSshConfigQuery = () => queryOptions({

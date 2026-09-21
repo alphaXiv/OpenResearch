@@ -584,7 +584,15 @@ async fn run_ssh(
     eprintln!("supervise {run_id}: watching ssh job {host}:{dir}");
     let target = ssh::SshTarget::alias(host);
     let dir = dir.to_string();
-    watch_ssh_job(&store, status_of(&stored)?, target, dir, &run_id).await?;
+    watch_ssh_job(
+        &store,
+        status_of(&stored)?,
+        target,
+        dir,
+        descriptor.ssh_container,
+        &run_id,
+    )
+    .await?;
     Ok(())
 }
 
@@ -596,6 +604,7 @@ async fn watch_ssh_job(
     initial_status: RunStatus,
     target: ssh::SshTarget,
     dir: String,
+    container: Option<ssh::ContainerRun>,
     run_id: &str,
 ) -> Result<RunStatus> {
     let path = log_path(run_id);
@@ -610,9 +619,10 @@ async fn watch_ssh_job(
 
     let mut last_status = initial_status;
     let mut cancel_sent = false;
+    let mut last_message = None;
 
     loop {
-        let job = match ssh::inspect_job(&target, &dir).await {
+        let job = match ssh::inspect_job(&target, &dir, container.as_ref()).await {
             Ok(j) => j,
             Err(err) => {
                 eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
@@ -645,15 +655,32 @@ async fn watch_ssh_job(
             return Ok(status);
         }
 
+        if container.is_some() && job.message != last_message {
+            let message = format!(
+                "[orx] {}",
+                job.message.as_deref().unwrap_or("Container running.")
+            );
+            let command = format!(
+                "printf '%s\\n' {} >> \"$HOME/{dir}/log\"",
+                ssh::sh_quote(&message)
+            );
+            match ssh::ssh_run(&target, &command, None).await {
+                Ok(_) => last_message = job.message,
+                Err(error) => {
+                    eprintln!("supervise {run_id}: could not log container status: {error}")
+                }
+            }
+        }
+
         if status != last_status && store.update_status(run_id, status, None, None)? {
             let cancel_requested = local_cancel_requested(store, run_id);
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status;
             if cancel_requested && !cancel_sent {
-                cancel_ssh(&target, &dir, run_id, &mut cancel_sent).await;
+                cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
             }
         } else if !cancel_sent && local_cancel_requested(store, run_id) {
-            cancel_ssh(&target, &dir, run_id, &mut cancel_sent).await;
+            cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;
@@ -701,9 +728,15 @@ async fn tail_logs_ssh(
     }
 }
 
-async fn cancel_ssh(target: &ssh::SshTarget, dir: &str, run_id: &str, cancel_sent: &mut bool) {
+async fn cancel_ssh(
+    target: &ssh::SshTarget,
+    dir: &str,
+    container: Option<&ssh::ContainerRun>,
+    run_id: &str,
+    cancel_sent: &mut bool,
+) {
     eprintln!("supervise {run_id}: cancel requested — killing remote process group");
-    match ssh::cancel_job(target, dir).await {
+    match ssh::cancel_job(target, dir, container).await {
         Ok(()) => *cancel_sent = true,
         Err(err) => eprintln!("supervise {run_id}: ssh cancel failed (will retry): {err}"),
     }
@@ -839,13 +872,16 @@ async fn run_openresearch(
                 teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
                 return Ok(());
             }
-            let staged = ssh::stage_source(&target, &run_id, &source.path, &source.digest).await;
+            let staged =
+                ssh::stage_source(&target, &run_id, &source.path, &source.digest, None).await;
             if let Err(err) = staged {
                 eprintln!("supervise {run_id}: source staging failed (will retry): {err}");
                 launch_err = Some(err);
                 continue;
             }
             match ssh::run_job(&ssh::SshJobSpec {
+                container: None,
+                setup_command: None,
                 target: target.clone(),
                 run_id: run_id.clone(),
                 script: script.clone(),
@@ -885,7 +921,7 @@ async fn run_openresearch(
     // The shared ssh loop owns status and logs; the box is deleted after
     // it returns (logs are drained from the box BEFORE teardown), and even
     // when it errors.
-    let watch = watch_ssh_job(&store, status_of(&stored)?, target, dir, &run_id).await;
+    let watch = watch_ssh_job(&store, status_of(&stored)?, target, dir, None, &run_id).await;
     teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
     watch?;
     Ok(())

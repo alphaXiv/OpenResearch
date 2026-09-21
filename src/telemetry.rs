@@ -107,6 +107,8 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
@@ -317,6 +319,33 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
 
 fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
+}
+
+pub(crate) fn ssh_settings() -> crate::error::Result<crate::config::SshSettings> {
+    let raw = match std::fs::read_to_string(settings_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: Settings = serde_json::from_str(&raw)
+        .map_err(|error| crate::error::anyhow!("Cannot read SSH settings: {error}"))?;
+    for options in settings.ssh.hosts.values() {
+        crate::jobs::ssh::validate_host_options(options)?;
+    }
+    Ok(settings.ssh)
+}
+
+pub(crate) fn set_ssh_host(
+    host: String,
+    options: crate::config::SshHostSettings,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        settings.ssh.hosts.insert(host, options);
+    })
+}
+
+pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.ssh.default_host = host)
 }
 
 fn outbox_dir() -> PathBuf {
@@ -1435,6 +1464,43 @@ mod tests {
         assert!(disabled_lit_sources().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ssh_settings_preserve_siblings_and_reject_corrupt_config() {
+        use crate::config::SshHostSettings;
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-ssh-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert!(ssh_settings().unwrap().hosts.is_empty());
+        set_persisted_disabled(true).unwrap();
+        let options = SshHostSettings {
+            container: Some("research".into()),
+            setup_command: Some("source activate\nconda activate research".into()),
+        };
+        set_ssh_host("lab".into(), options.clone()).unwrap();
+        set_ssh_default(Some("lab".into())).unwrap();
+        set_compute_default(Some("ssh".into()), None).unwrap();
+        let settings = ssh_settings().unwrap();
+        assert_eq!(settings.default_host.as_deref(), Some("lab"));
+        assert_eq!(settings.hosts["lab"], options);
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        set_ssh_host("lab".into(), SshHostSettings::default()).unwrap();
+        set_ssh_default(None).unwrap();
+        assert_eq!(
+            ssh_settings().unwrap().hosts["lab"],
+            SshHostSettings::default()
+        );
+        for raw in [
+            r#"{"ssh":null}"#,
+            r#"{"ssh":{"hosts":{"lab":{"container":""}}}}"#,
+            r#"{"ssh":{"hosts":[]}}"#,
+            "{",
+        ] {
+            std::fs::write(settings_path(), raw).unwrap();
+            assert!(ssh_settings().is_err(), "{raw}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

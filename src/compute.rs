@@ -523,35 +523,52 @@ backend_adapter!(
     run_id | crate::local::k8s::submit_local_k8s_with_source(args, source, run_id).await
 );
 
-backend_adapter!(
-    SshCompute,
-    "ssh",
-    "SSH",
-    true,
-    false,
-    false,
-    "SSH tar stream",
-    false,
-    preflight | args | {
-        let host = args
-            .host
-            .as_deref()
-            .ok_or_else(|| anyhow!("SSH requires --host <alias>."))?;
-        let check = crate::jobs::ssh::preflight(&crate::jobs::ssh::SshTarget::alias(host)).await;
-        if !check.reachable || !check.tools_found {
-            return Ok(not_ready(
-                check
-                    .error
-                    .as_deref()
-                    .unwrap_or("The SSH host needs bash and tar."),
-            ));
+#[derive(Default)]
+pub struct SshCompute {
+    launch: tokio::sync::OnceCell<crate::jobs::ssh::ResolvedLaunch>,
+}
+
+#[async_trait]
+impl ComputeBackend for SshCompute {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            id: "ssh",
+            label: "SSH",
+            remote: true,
+            flavors: false,
+            requires_flavor: false,
+            source_transport: "SSH tar stream",
         }
+    }
+
+    async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight> {
+        self.launch
+            .get_or_try_init(|| crate::jobs::ssh::resolve_launch(args))
+            .await?;
         ready()
-    },
-    submit | args,
-    source,
-    run_id | crate::local::ssh::submit_local_ssh_with_source(args, source, run_id).await
-);
+    }
+
+    async fn stage_source(
+        &self,
+        project: &LocalProject,
+        experiment: &LocalExperiment,
+    ) -> Result<StagedSource> {
+        stage_snapshot(project, experiment, false).await
+    }
+
+    async fn submit(
+        &self,
+        args: &crate::ExpRunArgs,
+        source: StagedSource,
+        run_id: String,
+    ) -> Result<StoredRun> {
+        let launch = self
+            .launch
+            .get()
+            .ok_or_else(|| anyhow!("SSH launch was not prepared."))?;
+        crate::local::ssh::submit_local_ssh_with_source(args, source.0, run_id, launch).await
+    }
+}
 
 backend_adapter!(
     SlurmCompute,
@@ -633,7 +650,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
-        "ssh" => Ok(Box::new(SshCompute)),
+        "ssh" => Ok(Box::new(SshCompute::default())),
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
@@ -650,6 +667,20 @@ pub fn capabilities() -> Vec<Capabilities> {
 }
 
 pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
+    if (args.container.is_some() || args.no_container) && args.backend.as_deref() != Some("ssh") {
+        return Err(anyhow!(
+            "--container and --no-container only apply with --backend ssh."
+        ));
+    }
+    if args.container.is_some() && args.no_container {
+        return Err(anyhow!("--container conflicts with --no-container."));
+    }
+    if let Some(reference) = &args.container {
+        crate::jobs::ssh::validate_container_reference(reference)?;
+    }
+    if args.backend.as_deref() == Some("ssh") && (args.image.is_some() || args.flavor.is_some()) {
+        return Err(anyhow!("SSH does not support --flavor or --image."));
+    }
     if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
         return Err(anyhow!("--manifest only applies with --backend k8s."));
     }
@@ -724,6 +755,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         })
         .unwrap_or_default();
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,
@@ -891,12 +923,95 @@ mod tests {
             flavor: None,
             org: None,
             host: None,
+            container: None,
+            no_container: false,
             manifest: None,
             image: None,
             timeout: None,
             force: false,
             chat_session_id: None,
         }
+    }
+
+    #[test]
+    fn ssh_selectors_and_saved_target_precedence() {
+        use crate::config::{SshHostSettings, SshSettings};
+        let settings = SshSettings {
+            default_host: Some("lab".into()),
+            hosts: std::collections::BTreeMap::from([
+                (
+                    "lab".into(),
+                    SshHostSettings {
+                        container: Some("research".into()),
+                        setup_command: Some("activate".into()),
+                    },
+                ),
+                (
+                    "direct".into(),
+                    SshHostSettings {
+                        container: None,
+                        setup_command: Some("host-setup".into()),
+                    },
+                ),
+            ]),
+        };
+        let mut args = tinker_args();
+        args.backend = Some("ssh".into());
+        for (host, container, no_container, expected_host, expected_container, setup) in [
+            (None, None, false, "lab", Some("research"), Some("activate")),
+            (
+                Some("lab"),
+                Some("research"),
+                false,
+                "lab",
+                Some("research"),
+                Some("activate"),
+            ),
+            (None, Some("other"), false, "lab", Some("other"), None),
+            (None, Some("none"), false, "lab", Some("none"), None),
+            (None, None, true, "lab", None, None),
+            (
+                Some("direct"),
+                None,
+                true,
+                "direct",
+                None,
+                Some("host-setup"),
+            ),
+            (Some("unknown"), None, false, "unknown", None, None),
+        ] {
+            args.host = host.map(str::to_string);
+            args.container = container.map(str::to_string);
+            args.no_container = no_container;
+            validate_run_args(&args).unwrap();
+            let (host, options) = crate::jobs::ssh::resolve_options(&args, &settings).unwrap();
+            assert_eq!(host, expected_host);
+            assert_eq!(options.container.as_deref(), expected_container);
+            assert_eq!(options.setup_command.as_deref(), setup);
+        }
+        args.host = None;
+        assert!(crate::jobs::ssh::resolve_options(&args, &SshSettings::default()).is_err());
+        args.container = Some(String::new());
+        assert!(validate_run_args(&args).is_err());
+        args.container = Some("research".into());
+        args.no_container = true;
+        assert!(validate_run_args(&args).is_err());
+        args.no_container = false;
+        for backend in ["local", "slurm", "openresearch"] {
+            args.backend = Some(backend.into());
+            assert!(validate_run_args(&args).is_err());
+        }
+        use clap::Parser;
+        assert!(crate::Cli::try_parse_from([
+            "orx",
+            "exp",
+            "run",
+            "exp",
+            "--container",
+            "research",
+            "--no-container"
+        ])
+        .is_err());
     }
 
     #[test]

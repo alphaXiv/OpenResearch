@@ -16,7 +16,7 @@ import {
   getK8sSettingsQuery,
   getModalSettingsQuery,
   getSshMasterStatusQuery,
-  getSshHostsQuery,
+  getSshSettingsQuery,
   getSlurmSettingsQuery,
   getRaySettingsQuery,
   getOpenResearchSettingsQuery,
@@ -126,6 +126,7 @@ import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
 import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
 import { SshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
@@ -822,9 +823,9 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
 }
 
 function SshSection({ remote = false }: { remote?: boolean }) {
-  const hostsOptions = getSshHostsQuery();
+  const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
-  const hosts = hostsQuery.data ?? (hostsQuery.isError ? [] : null);
+  const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
   const [configOpen, setConfigOpen] = useState(false);
   const [tests, setTests] = useState<Record<string, SshPreflight>>({});
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
@@ -857,6 +858,8 @@ function SshSection({ remote = false }: { remote?: boolean }) {
 
   return (
     <>
+      {!remote && hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
+      {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex justify-end">
         <Button variant="ghost" onClick={() => setConfigOpen(true)}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
@@ -934,6 +937,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                     </Button>
                   </div>}
                 </div>
+                {!remote && <SshExecutionSettings host={h} connecting={connecting} />}
                 {hasTerminal && (open || connecting) && (
                   <div className={`border-t border-t-border-variant py-3 pe-2 ps-10${open ? "" : " hidden"}`}>
                     {!connecting && hostTest?.error && (
