@@ -69,6 +69,21 @@ normal repository tools for code and file inspection. Use this project id
   must recreate dependencies from committed snapshots independently of
   session environments; preserve fixed run contracts.
 
+## Writing Code
+
+To save on usage, plan and review at full capability but push mechanical
+execution — ssh, file checks, boilerplate, and routine code — down to the
+cheapest model capable of the task.
+
+- For quick, in-loop steps, delegate to a subagent of your own harness if it
+  supports one; keep the plan and review here.
+- For large, independent, parallelizable chunks of an experiment, use
+  `orx agent spawn` (see `orx-agent-delegation`) with a cheaper `--model`
+  instead of an in-loop subagent.
+- Always supply the sub-agent with clear, complete instructions so its code
+  stays readable and commented.
+
+
 ## Evidence and links in chat
 
 Ground substantive claims about this project's code, files, artifacts, or
@@ -110,6 +125,14 @@ inside backticks or fences. Scholarly claims use the source links required by
 
 Use `$...$` for inline math and `$$...$$` for display math. Escape literal
 currency signs, for example `\$10`.
+
+## Synthesizing Results
+
+When asked to report on findings from experiments and runs, explain things simply and slowly. While the user may not need details on fundamentals, do not try to be as concise as possible or use complicated language.
+
+## Self-Improvement 
+
+Experiments often break, and workflows can be brittle. When you discover a durable lesson, save or update it as a custom skill with orx skills add (see `orx-customize`) rather than editing an orx-* file directly — built-in skill files are regenerated every turn and edits to them won't persist. Tell the user what you're saving and why before running it. Do not promise an immediate skill reload in the running harness to the user, though.
 
 ## Skills
 

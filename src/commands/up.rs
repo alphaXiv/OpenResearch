@@ -38,6 +38,7 @@ use crate::local;
 use crate::local::chat::ChatHost;
 use crate::local::is_terminal;
 use crate::local::opencode::AgentHost;
+use crate::notify::NotificationProvider;
 use crate::store::{
     log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
@@ -85,6 +86,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
     };
     let actual_port = listener.local_addr()?.port();
+    // So `notify_events`'s deep links can name this dashboard from any
+    // launcher or chat-turn call site without the port being threaded
+    // through each one — see that module's `set_up_port` doc comment.
+    crate::notify_events::set_up_port(actual_port);
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
@@ -147,6 +152,23 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         });
     }
+    {
+        let moving = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SUPERVISOR_SWEEP_INTERVAL).await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                let _gate = gate.lock().await;
+                if moving.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
+                sweep_stale_supervisors().await;
+            }
+        });
+    }
 
     spawn_agent_preflight();
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
@@ -155,6 +177,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    // Only start the drain loop when a webhook is actually configured —
+    // otherwise every drain pass would just poll an empty-or-doomed-to-fail
+    // outbox. This means changing the webhook in Settings while `orx up` is
+    // already running takes effect on the next restart, not live: a
+    // live-reload path (watching config for changes, swapping the provider
+    // under the loop) is more machinery than two events warrant for T6.
+    if let Some(webhook_url) = crate::config::slack_webhook_url() {
+        crate::notify::spawn_notifier_loop(std::sync::Arc::new(
+            crate::notify::SlackWebhookProvider::new(webhook_url),
+        ));
+    }
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
     spawn_background_tasks(remote_auth.is_none());
     let live_events = state.chat.clone();
@@ -473,6 +506,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/runs/{id}", get(get_run))
         .route("/api/instances", get(list_instances))
         .route("/api/runs/{id}/cancel", post(cancel_run))
+        .route("/api/runs/{id}/resync", post(resync_run))
         .route("/api/runs/{id}/log", get(run_log))
         .route("/api/runs/{id}/logs", get(run_logs))
         .route("/api/runs/{id}/diff", get(run_diff))
@@ -582,6 +616,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
+        .route(
+            "/api/settings/auto-continue-on-limit",
+            get(auto_continue_on_limit_settings).post(set_auto_continue_on_limit),
+        )
         .route("/api/update", get(update_status))
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
@@ -616,10 +654,23 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/settings/slurm/preflight", post(slurm_preflight))
         .route(
+            "/api/settings/sge",
+            get(sge_settings).post(set_sge_settings),
+        )
+        .route("/api/settings/sge/preflight", post(sge_preflight))
+        .route(
             "/api/settings/ray",
             get(ray_settings).post(set_ray_settings),
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
+        .route(
+            "/api/settings/slack",
+            get(slack_settings)
+                .post(set_slack_webhook)
+                .delete(delete_slack_webhook),
+        )
+        .route("/api/settings/slack/events", post(set_slack_events))
+        .route("/api/settings/slack/preflight", post(slack_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -679,6 +730,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
+        )
+        .route(
+            "/api/chat/sessions/{id}/turns/{turnId}/resume",
+            axum::routing::delete(cancel_turn_resume),
         )
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
@@ -835,6 +890,14 @@ struct ApiRun {
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i64>,
     cancel_requested: bool,
+    /// The supervisor's last heartbeat — absent for a backend that doesn't
+    /// write one (anything but SGE today), or before its first poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_seen_at: Option<i64>,
+    /// `polling | stalled | inspect-error | blocked-wait | gone-wait |
+    /// unknown-state` — see `run_sge`'s heartbeat sites in supervise.rs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supervisor_state: Option<String>,
 }
 
 impl From<&StoredRun> for ApiRun {
@@ -853,7 +916,23 @@ impl From<&StoredRun> for ApiRun {
             ended_at: run.ended_at,
             exit_code: run.exit_code,
             cancel_requested: run.cancel_requested,
+            supervisor_seen_at: None,
+            supervisor_state: None,
         }
+    }
+}
+
+impl ApiRun {
+    /// Fills in the supervisor heartbeat fields — separate from `From`
+    /// because the heartbeat lives in its own table (`run_supervisors`), not
+    /// on `StoredRun`, so building one needs a `Store` a plain conversion
+    /// doesn't have.
+    fn with_heartbeat(mut self, heartbeat: Option<(i64, String)>) -> Self {
+        if let Some((seen_at, state)) = heartbeat {
+            self.supervisor_seen_at = Some(seen_at);
+            self.supervisor_state = Some(state);
+        }
+        self
     }
 }
 
@@ -2093,15 +2172,17 @@ fn backend_for_run(
 }
 
 async fn get_run(Path(id): Path<String>) -> ApiResult {
-    let run = Store::open()?
-        .get_run(&id)?
-        .ok_or_else(|| not_found("run"))?;
+    let store = Store::open()?;
+    let run = store.get_run(&id)?.ok_or_else(|| not_found("run"))?;
     let backend = backend_for_run(&run)?;
     let run = backend.status(&run).await.map_err(bad_request)?;
     if is_terminal(&run.status) {
         backend.cleanup(&run).await.map_err(bad_request)?;
     }
-    Ok(Json(json!({ "run": ApiRun::from(&run) })))
+    let heartbeat = store.get_supervisor_heartbeat(&run.id).unwrap_or(None);
+    Ok(Json(
+        json!({ "run": ApiRun::from(&run).with_heartbeat(heartbeat) }),
+    ))
 }
 
 /// Newest-first cap for the cross-project instances list. Generous: the store
@@ -2121,9 +2202,10 @@ async fn list_instances() -> ApiResult {
         .collect();
     let mut instances: Vec<Value> = Vec::new();
     for run in store.list_runs(INSTANCES_LIMIT)? {
+        let heartbeat = store.get_supervisor_heartbeat(&run.id).unwrap_or(None);
         // ApiRun is a plain serializable struct, so this can't realistically
         // fail; propagate rather than emit a malformed row if it ever does.
-        let mut value = serde_json::to_value(ApiRun::from(&run))
+        let mut value = serde_json::to_value(ApiRun::from(&run).with_heartbeat(heartbeat))
             .map_err(|e| anyhow!("serialize run {}: {e}", run.id))?;
         if let (Some(obj), Some(name)) = (value.as_object_mut(), names.get(&run.project_id)) {
             obj.insert("projectName".into(), json!(name));
@@ -2144,6 +2226,82 @@ async fn cancel_run(State(state): State<AppState>, Path(id): Path<String>) -> Ap
     let backend = backend_for_run(&run)?;
     backend.cancel(&run).await.map_err(bad_request)?;
     Ok(Json(json!({ "ok": true })))
+}
+
+const SUPERVISOR_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// A supervisor's heartbeat (or, for a backend that doesn't write one, its
+/// run's own `updated_at`) older than this is stale enough to resync
+/// automatically — comfortably past the ~5s SGE poll cadence, so it only
+/// fires on a supervisor that is actually gone or wedged, not a slow poll.
+const SUPERVISOR_STALE_AFTER_MS: i64 = 3 * 60 * 1000;
+
+/// Automatic counterpart to the manual Resync button: every
+/// [`SUPERVISOR_SWEEP_INTERVAL`], resync any active run whose supervisor has
+/// gone quiet — the "shows running but the process died or the SSH master
+/// wedged" gap the manual button exists for, closed without a person having
+/// to notice and click it.
+///
+/// Safe by the same reasoning `resync` itself documents: replacing a
+/// *healthy* supervisor is harmless (restart-idempotent, remirrors from byte
+/// zero), so a false positive here costs nothing but one extra respawn. A
+/// backend that never calls `touch_supervisor` (anything but SGE today) has
+/// no heartbeat row, so this falls back to the run's own `updated_at` — a
+/// coarser signal, but the same safe-to-resync guarantee applies.
+async fn sweep_stale_supervisors() {
+    let Ok(store) = Store::open() else { return };
+    let Ok(runs) = store.list_active_runs() else {
+        return;
+    };
+    for run in runs {
+        match store.get_local_experiment(&run.experiment_id) {
+            Ok(Some(_)) => {}
+            // Matches the startup sweep's own guard (up.rs, near the top of
+            // `run`): an orphaned run with no experiment left isn't ours to
+            // touch.
+            _ => continue,
+        }
+        let stale = match store.get_supervisor_heartbeat(&run.id) {
+            Ok(Some((seen_at, _state))) => now_ms() - seen_at > SUPERVISOR_STALE_AFTER_MS,
+            Ok(None) => now_ms() - run.updated_at > SUPERVISOR_STALE_AFTER_MS,
+            Err(_) => false,
+        };
+        if !stale {
+            continue;
+        }
+        match crate::commands::supervise::resync(&run.id).await {
+            Ok(report) if report.replaced || report.spawned => {
+                eprintln!(
+                    "orx up: supervisor sweep resynced run {}: {}",
+                    run.id,
+                    report.describe(&run.id)
+                );
+            }
+            Ok(_) => {}
+            Err(err) => eprintln!(
+                "orx up: supervisor sweep resync failed for run {}: {err}",
+                run.id
+            ),
+        }
+    }
+}
+
+/// Manual fallback for a supervisor that is alive but no longer advancing the
+/// run's local log: retire it and start a fresh one. Deliberately not gated on
+/// the run looking stuck — the dashboard cannot tell a slow poll from a wedged
+/// one, and `supervise` is restart-idempotent either way.
+async fn resync_run(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    local::local_run(&store, &id)?.ok_or_else(|| not_found("run"))?;
+    let report = crate::commands::supervise::resync(&id)
+        .await
+        .map_err(bad_request)?;
+    Ok(Json(json!({
+        "ok": true,
+        "report": report,
+        "message": report.describe(&id),
+    })))
 }
 
 #[derive(Deserialize)]
@@ -5093,6 +5251,138 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
 }
 
+/// Whether a Claude turn that failed on a usage/session limit auto-resumes at
+/// its parsed reset time. Settings → harness.
+async fn auto_continue_on_limit_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| {
+        Ok(Json(
+            json!({ "enabled": crate::config::auto_continue_on_limit_enabled() }),
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetAutoContinueOnLimitReq {
+    enabled: bool,
+}
+
+async fn set_auto_continue_on_limit(Json(req): Json<SetAutoContinueOnLimitReq>) -> ApiResult {
+    let enabled = req.enabled;
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_auto_continue_on_limit_enabled(enabled).map_err(|e| {
+            ApiError::from(anyhow!("could not save the auto-continue setting: {e}"))
+        })?;
+        Ok(Json(json!({ "enabled": enabled })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))?
+}
+
+// --- slack --------------------------------------------------------------------
+
+fn slack_settings_json() -> Value {
+    let events = crate::telemetry::slack_event_settings();
+    json!({
+        "hasWebhook": crate::config::slack_webhook_url().is_some(),
+        "events": {
+            "jobSubmitted": events.job_submitted,
+            "runSynthesized": events.run_synthesized,
+        },
+    })
+}
+
+async fn slack_settings() -> ApiResult {
+    blocking_api(move || Ok(Json(slack_settings_json()))).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSlackWebhookReq {
+    webhook_url: String,
+}
+
+/// The one prefix every Slack Incoming Webhook URL has — checked here so a
+/// pasted API token or a copy-pasted unrelated URL fails fast with a message
+/// that says what's wrong, rather than surfacing as an opaque delivery
+/// failure the first time the drain loop tries it.
+fn looks_like_slack_webhook(url: &str) -> bool {
+    url.starts_with("https://hooks.slack.com/services/")
+}
+
+async fn set_slack_webhook(Json(req): Json<SetSlackWebhookReq>) -> ApiResult {
+    blocking_api(move || {
+        let url = req.webhook_url.trim().to_string();
+        if !looks_like_slack_webhook(&url) {
+            return Err(bad_request(
+                "That does not look like a Slack incoming webhook URL — it should start with \
+                 https://hooks.slack.com/services/. Create one from a Slack app's Incoming \
+                 Webhooks page.",
+            ));
+        }
+        crate::config::set_slack_webhook_url(&url)?;
+        Ok(Json(json!({ "hasWebhook": true })))
+    })
+    .await
+}
+
+async fn delete_slack_webhook() -> ApiResult {
+    blocking_api(move || {
+        crate::config::clear_slack_webhook_url()?;
+        Ok(Json(json!({ "hasWebhook": false })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSlackEventsReq {
+    job_submitted: bool,
+    run_synthesized: bool,
+}
+
+async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
+    blocking_api(move || {
+        crate::telemetry::set_slack_event_settings(crate::telemetry::SlackEventSettings {
+            job_submitted: req.job_submitted,
+            run_synthesized: req.run_synthesized,
+        })
+        .map_err(|e| ApiError::from(anyhow!("could not save slack event settings: {e}")))?;
+        Ok(Json(json!({
+            "jobSubmitted": req.job_submitted,
+            "runSynthesized": req.run_synthesized,
+        })))
+    })
+    .await
+}
+
+/// Synchronous "test now" probe, matching `sge_preflight`'s shape: sends a
+/// real message straight through a one-off provider rather than the outbox,
+/// so the result is a Slack answer, not "enqueued".
+async fn slack_preflight() -> ApiResult {
+    let Some(webhook_url) = crate::config::slack_webhook_url() else {
+        return Ok(Json(
+            json!({ "ok": false, "error": "No Slack webhook is saved yet." }),
+        ));
+    };
+    let provider = crate::notify::SlackWebhookProvider::new(webhook_url);
+    let outcome = provider
+        .send("preflight", &json!({ "text": "orx connected \u{2713}" }))
+        .await;
+    Ok(Json(match outcome {
+        crate::notify::DeliveryOutcome::Sent => json!({ "ok": true, "error": Value::Null }),
+        crate::notify::DeliveryOutcome::Rejected => json!({
+            "ok": false,
+            "error": "Slack rejected the message — the webhook may be revoked or malformed.",
+        }),
+        crate::notify::DeliveryOutcome::Retryable => json!({
+            "ok": false,
+            "error": "Could not reach Slack. Check the webhook URL and try again.",
+        }),
+    }))
+}
+
 // --- updates -----------------------------------------------------------------
 
 async fn update_status() -> ApiResult {
@@ -5381,6 +5671,7 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
 pub(crate) enum SshConnectBackend {
     Ssh,
     Slurm,
+    Sge,
 }
 
 #[derive(Deserialize)]
@@ -5664,6 +5955,10 @@ async fn ssh_connect_socket(
         SshConnectBackend::Slurm => {
             let result = crate::jobs::slurm::preflight(&host).await;
             ("slurm", slurm_preflight_value(&result), None)
+        }
+        SshConnectBackend::Sge => {
+            let result = crate::jobs::sge::preflight(&host).await;
+            ("sge", sge_preflight_value(&result), None)
         }
     };
     if socket
@@ -6400,6 +6695,165 @@ fn slurm_preflight_value(p: &slurm::SlurmPreflight) -> Value {
     })
 }
 
+// --- sge ----------------------------------------------------------------------
+
+use crate::jobs::sge;
+
+/// One payload powers the whole settings card: stored cluster defaults plus the
+/// ssh hosts to pick a login node from. Every value is the RESOLVED default
+/// rather than the raw `Option`, so the card shows what a launch will actually
+/// do instead of a row of blanks.
+fn sge_settings_json() -> Value {
+    let settings = sge::load_settings().ok().flatten().unwrap_or_default();
+    json!({
+        "host": settings.host,
+        "workDir": settings.work_dir.clone().unwrap_or_else(|| sge::DEFAULT_WORK_DIR.to_string()),
+        "sccProject": settings.scc_project_or_default(),
+        "pe": settings.pe_or_default(),
+        "slots": settings.slots_or_default(),
+        "timeLimit": settings.time_limit_or_default(),
+        "gpus": settings.gpus_or_default(),
+        "gpuType": settings.gpu_type_or_default(),
+        "hosts": list_ssh_hosts(),
+    })
+}
+
+async fn sge_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| Ok(Json(sge_settings_json())))
+        .await
+        .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSgeSettingsReq {
+    /// `None` leaves the field alone; `Some("")` clears it back to the default.
+    host: Option<String>,
+    work_dir: Option<String>,
+    scc_project: Option<String>,
+    pe: Option<String>,
+    /// The counts are numbers, not strings, so an absent field and an explicit
+    /// `null` have to be told apart — see [`deserialize_present`]. `None`
+    /// leaves the field alone; `Some(None)` clears it back to the default.
+    #[serde(default, deserialize_with = "deserialize_present")]
+    slots: Option<Option<u32>>,
+    time_limit: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_present")]
+    gpus: Option<Option<u32>>,
+    gpu_type: Option<String>,
+}
+
+/// Distinguish "field absent" from "field present and null".
+///
+/// A plain `Option<T>` collapses both to `None`, which for these settings would
+/// make "leave this alone" and "reset this to the default" indistinguishable.
+/// The custom deserializer only runs when the key is actually present, so
+/// `#[serde(default)]` supplies `None` for an absent field while an explicit
+/// `null` arrives as `Some(None)`.
+fn deserialize_present<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+async fn set_sge_settings(Json(req): Json<SetSgeSettingsReq>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let mut settings = sge::load_settings()?.unwrap_or_default();
+        let norm = |v: String| Some(v.trim().to_string()).filter(|s| !s.is_empty());
+        if let Some(h) = req.host {
+            settings.host = norm(h);
+        }
+        if let Some(w) = req.work_dir {
+            // Reject a path that would fail every later launch — or, worse,
+            // silently land the run in a quota'd home directory.
+            let w = norm(w);
+            if let Some(w) = &w {
+                sge::validate_work_dir(w).map_err(bad_request)?;
+            }
+            settings.work_dir = w;
+        }
+        if let Some(p) = req.scc_project {
+            settings.scc_project = norm(p);
+        }
+        if let Some(p) = req.pe {
+            settings.pe = norm(p);
+        }
+        if let Some(slots) = req.slots {
+            if let Some(n) = slots {
+                if n == 0 || n > 64 {
+                    return Err(bad_request("slots must be between 1 and 64"));
+                }
+            }
+            settings.slots = slots;
+        }
+        if let Some(t) = req.time_limit {
+            let t = norm(t);
+            if let Some(t) = &t {
+                crate::jobs::huggingface::parse_timeout(t).map_err(bad_request)?;
+            }
+            settings.time_limit = t;
+        }
+        if let Some(gpus) = req.gpus {
+            // 0 is meaningful — it is how a CPU-only default is expressed, so
+            // only the upper bound is checked.
+            if let Some(n) = gpus {
+                if n > 16 {
+                    return Err(bad_request("gpus must be 16 or fewer"));
+                }
+            }
+            settings.gpus = gpus;
+        }
+        if let Some(t) = req.gpu_type {
+            let t = norm(t);
+            if let Some(t) = &t {
+                // The complex uses the `==` relop, so an unknown or miscased
+                // value is unschedulable rather than merely wrong.
+                if sge::canonical_gpu_type(t).is_none() {
+                    return Err(bad_request(format!(
+                        "Unknown gpu_type {t:?}. Valid types: {}.",
+                        sge::SCC_GPU_TYPES.join(", ")
+                    )));
+                }
+            }
+            settings.gpu_type = t.and_then(|t| sge::canonical_gpu_type(&t).map(str::to_string));
+        }
+        sge::save_settings(&settings)?;
+        Ok(Json(sge_settings_json()))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("sge task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SgePreflightReq {
+    host: String,
+}
+
+/// Live check for one login node: reachable, Grid Engine CLI + snapshot tools,
+/// the ControlMaster prerequisite, and the user's valid `-P` projects.
+async fn sge_preflight(Json(req): Json<SgePreflightReq>) -> ApiResult {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Err(bad_request("host is required"));
+    }
+    let p = sge::preflight(&host).await;
+    Ok(Json(sge_preflight_value(&p)))
+}
+
+fn sge_preflight_value(p: &sge::SgePreflight) -> Value {
+    json!({
+        "reachable": p.reachable,
+        "sgeFound": p.sge_found,
+        "toolsFound": p.tools_found,
+        "authBlocked": p.auth_blocked,
+        "masterRunning": p.master_running,
+        "projects": p.projects,
+        "error": p.error,
+    })
+}
+
 // --- ray --------------------------------------------------------------------
 
 use crate::jobs::ray;
@@ -6560,6 +7014,8 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
     let ssh_hosts = list_ssh_hosts().len();
     let slurm_settings = crate::jobs::slurm::load_settings().ok().flatten();
     let slurm_host = slurm_settings.as_ref().and_then(|s| s.host.clone());
+    let sge_settings = crate::jobs::sge::load_settings().ok().flatten();
+    let sge_host = sge_settings.as_ref().and_then(|s| s.host.clone());
     let (ray_resolved, ray_source) = crate::jobs::ray::resolve_address_with_source();
     let ray_configured = !matches!(ray_source, crate::jobs::ray::AddressSource::Default);
     let ray_source_label = match ray_source {
@@ -6646,6 +7102,20 @@ fn compute_settings_json(ssh: SshReadiness) -> Value {
                     Some(partition) => format!("Login node {h} / partition {partition}"),
                     None => format!("Login node {h}"),
                 },
+            ),
+        },
+        {
+            "id": "sge",
+            "configured": sge_host.is_some(),
+            "summary": sge_host.as_ref().map_or_else(
+                || "No login node configured".to_string(),
+                |h| format!(
+                    "Login node {h} / project {}",
+                    sge_settings
+                        .as_ref()
+                        .map(|s| s.scc_project_or_default())
+                        .unwrap_or_else(|| crate::jobs::sge::DEFAULT_SCC_PROJECT.to_string())
+                ),
             ),
         },
         {
@@ -7469,6 +7939,19 @@ async fn recover_chat_turn(
     Ok(Json(json!({ "ok": true, "turn": result })))
 }
 
+/// The "Don't" button on a turn's usage-limit auto-continue countdown —
+/// clears `resume_at` without touching the failure itself, so the turn falls
+/// back to a manual Continue click.
+async fn cancel_turn_resume(Path((id, turn_id)): Path<(String, String)>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let store = crate::store::Store::open()?;
+        store.clear_turn_resume_at(&id, &turn_id)?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("turn resume task failed: {e}")))?
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ForkChatReq {
@@ -7774,13 +8257,17 @@ impl Drop for DashboardClientGuard {
     }
 }
 
+/// status, updated_at, minute-bucketed supervisor heartbeat (seen_at bucket,
+/// state) — the last-seen shape of one run, for `EventCursor::runs`.
+type RunCursorEntry = (String, i64, Option<(i64, String)>);
+
 /// Diff state for one SSE subscriber.
 #[derive(Default)]
 struct EventCursor {
     projects: HashMap<String, i64>,
     experiments: HashMap<String, i64>,
     files: HashMap<String, u64>,
-    runs: HashMap<String, (String, i64)>,
+    runs: HashMap<String, RunCursorEntry>,
     log_offsets: HashMap<String, u64>,
     /// Last update status sent. Unlike the rest of the cursor this isn't store
     /// state — the updater is a separate process, so its progress reaches the UI
@@ -7878,17 +8365,35 @@ fn collect_events(cursor: &mut EventCursor, first: bool) -> Result<Vec<Event>> {
     }
 
     for run in store.list_runs(200)? {
+        // A terminal run's supervisor is gone for good, so its heartbeat is
+        // moot — skip the extra query for the common case (most runs in this
+        // 200-row window are history, not live).
+        let heartbeat = if is_terminal(&run.status) {
+            None
+        } else {
+            store.get_supervisor_heartbeat(&run.id).unwrap_or(None)
+        };
+        // Bucketed to the minute: the heartbeat's `seen_at` itself moves on
+        // every ~5s poll, which would otherwise re-emit every active run on
+        // every tick. A state change (e.g. polling -> stalled) still lands
+        // within one bucket's width at worst.
+        let heartbeat_cursor = heartbeat
+            .as_ref()
+            .map(|(seen_at, state)| (seen_at / 60_000, state.clone()));
         let changed = match cursor.runs.get(&run.id) {
             None => true,
-            Some((status, updated)) => *status != run.status || *updated != run.updated_at,
+            Some((status, updated, hb)) => {
+                *status != run.status || *updated != run.updated_at || *hb != heartbeat_cursor
+            }
         };
         if changed {
-            cursor
-                .runs
-                .insert(run.id.clone(), (run.status.clone(), run.updated_at));
+            cursor.runs.insert(
+                run.id.clone(),
+                (run.status.clone(), run.updated_at, heartbeat_cursor),
+            );
             out.push(json_event(
                 "run.updated",
-                &json!({ "run": ApiRun::from(&run) }),
+                &json!({ "run": ApiRun::from(&run).with_heartbeat(heartbeat) }),
             ));
         }
         if first {
@@ -8042,6 +8547,24 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn slack_webhook_url_shape_is_checked_before_saving() {
+        assert!(looks_like_slack_webhook(
+            "https://hooks.slack.com/services/T000/B000/xxxxxxxxxxxxxxxxxxxxxxxx"
+        ));
+        assert!(!looks_like_slack_webhook(""));
+        assert!(!looks_like_slack_webhook(
+            "hooks.slack.com/services/T000/B000/xxx"
+        ));
+        assert!(!looks_like_slack_webhook("https://example.com/webhook"));
+        assert!(!looks_like_slack_webhook(
+            "http://hooks.slack.com/services/T000/B000/xxx"
+        ));
+        assert!(!looks_like_slack_webhook(
+            "https://slack.com/api/chat.postMessage"
+        ));
+    }
+
     #[tokio::test]
     async fn closed_dashboard_releases_idle_chat_receiver() {
         let (sender, receiver) = tokio::sync::broadcast::channel(1);
@@ -8114,6 +8637,35 @@ mod tests {
         .unwrap();
         let result = set_project_ui_state(Path("project".into()), Json(unsupported)).await;
         assert_eq!(result.err().unwrap().0, StatusCode::BAD_REQUEST);
+    }
+
+    /// The counts are numbers on the wire, and the request has to tell three
+    /// cases apart: absent (leave alone), null (reset to the default), and a
+    /// value. A plain `Option<u32>` collapses the first two, and a string would
+    /// not deserialize at all — which is what the dashboard used to send.
+    #[test]
+    fn sge_counts_distinguish_absent_from_null_from_a_value() {
+        let parse = |body: &str| serde_json::from_str::<SetSgeSettingsReq>(body).unwrap();
+
+        let absent = parse(r#"{"host":"scc1"}"#);
+        assert_eq!(absent.slots, None, "an absent field must leave slots alone");
+        assert_eq!(absent.gpus, None);
+
+        let cleared = parse(r#"{"slots":null,"gpus":null}"#);
+        assert_eq!(
+            cleared.slots,
+            Some(None),
+            "an explicit null must clear slots back to the default"
+        );
+        assert_eq!(cleared.gpus, Some(None));
+
+        let set = parse(r#"{"slots":16,"gpus":2}"#);
+        assert_eq!(set.slots, Some(Some(16)));
+        assert_eq!(set.gpus, Some(Some(2)));
+
+        // The regression this replaced: the dashboard sent "16" and axum
+        // rejected the whole body with a deserialization error.
+        assert!(serde_json::from_str::<SetSgeSettingsReq>(r#"{"slots":"16"}"#).is_err());
     }
 
     #[test]

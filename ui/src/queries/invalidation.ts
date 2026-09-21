@@ -64,8 +64,10 @@ const settingsFamilies: Record<string, readonly string[]> = {
   k8s: ["getK8sSettings", "getComputeSettings"],
   modal: ["getModalSettings", "getComputeSettings", "getEnvVars"],
   slurm: ["getSlurmSettings", "getComputeSettings"],
+  sge: ["getSgeSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
-  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
+  slack: ["getSlackSettings"],
+  env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getSgeSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
   "data-dir": ["getDataDir"],
   ssh: ["getSshHosts", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
   compute: ["getComputeSettings"],
@@ -74,6 +76,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   "lit-sources": ["getLitSources"],
   projects: ["getProjectDefaults", "getProjectGitStatus"],
   telemetry: ["getTelemetry"],
+  "auto-continue-on-limit": ["getAutoContinueOnLimit"],
 };
 
 export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceScope>) {

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
-import type { SlurmPreflight, SshPreflight } from "../api";
+import type { SgePreflight, SlurmPreflight, SshPreflight } from "../api";
 import { ltr } from "../i18n";
 import { m } from "../paraglide/messages.js";
 import { isRecord } from "../workspaceState";
@@ -9,7 +9,8 @@ import { mountTerminal, type TerminalPalette } from "./terminal";
 
 export type SshConnectResult =
   | { backend: "ssh"; result: SshPreflight }
-  | { backend: "slurm"; result: SlurmPreflight };
+  | { backend: "slurm"; result: SlurmPreflight }
+  | { backend: "sge"; result: SgePreflight };
 
 const TERMINAL_CLASS_NAME = "overflow-hidden rounded-md bg-terminal p-2";
 
@@ -39,6 +40,19 @@ function isSlurmPreflight(value: unknown): value is SlurmPreflight {
   );
 }
 
+function isSgePreflight(value: unknown): value is SgePreflight {
+  return (
+    isRecord(value) &&
+    typeof value.reachable === "boolean" &&
+    typeof value.sgeFound === "boolean" &&
+    typeof value.toolsFound === "boolean" &&
+    typeof value.authBlocked === "boolean" &&
+    typeof value.masterRunning === "boolean" &&
+    isStringArray(value.projects) &&
+    (value.error === null || typeof value.error === "string")
+  );
+}
+
 function connectionResult(value: unknown): SshConnectResult | null {
   if (!isRecord(value) || value.type !== "complete") return null;
   if (value.backend === "ssh" && isSshPreflight(value.result)) {
@@ -46,6 +60,9 @@ function connectionResult(value: unknown): SshConnectResult | null {
   }
   if (value.backend === "slurm" && isSlurmPreflight(value.result)) {
     return { backend: "slurm", result: value.result };
+  }
+  if (value.backend === "sge" && isSgePreflight(value.result)) {
+    return { backend: "sge", result: value.result };
   }
   return null;
 }
@@ -69,7 +86,7 @@ export function SshConnectTerminal({
   onError,
 }: {
   host: string;
-  backend: "ssh" | "slurm";
+  backend: "ssh" | "slurm" | "sge";
   path?: string;
   active?: boolean;
   onComplete: (result: SshConnectResult) => void;

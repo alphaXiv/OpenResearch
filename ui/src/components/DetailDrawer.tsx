@@ -1,9 +1,12 @@
 import { m } from "../paraglide/messages.js";
-import { ChevronDown, CircleStop } from "lucide-react";
+import { ChevronDown, CircleStop, RefreshCw, TriangleAlert } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
+  backendJobLabel,
   cancelRun,
+  resyncRun,
   runDisplayStatus,
+  supervisorStateLabel,
   timeAgo,
   type Experiment,
   type Project,
@@ -14,7 +17,7 @@ import type { CodeView } from "./CodeTab";
 import { LogTerminal } from "./LogTerminal";
 import { StatusBadge } from "./StatusBadge";
 import type { TabOpenIntent } from "../tabPreview";
-import { Button, MenuItem } from "./ui";
+import { Button, CopyButton, MenuItem, showAlert } from "./ui";
 
 export type ExperimentView = "overview" | "terminal";
 
@@ -85,7 +88,7 @@ function TerminalView({
   selectedRunId: string | null;
   onSelectRun: (id: string | null) => void;
 }) {
-  const [error, setError] = useState<string | null>(null);
+  const [resyncing, setResyncing] = useState(false);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const historyRef = useRef<HTMLDivElement>(null);
@@ -116,27 +119,73 @@ function TerminalView({
 
   async function stop() {
     if (!selectedRun) return;
-    setError(null);
     setPendingRunId(selectedRun.id);
     try {
       await cancelRun(selectedRun.id);
     } catch (err) {
       setPendingRunId(null);
-      setError(err instanceof Error ? err.message : String(err));
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+    }
+  }
+
+  // The supervisor mirrors the backend's log into the local store. When that
+  // mirror stops advancing while the job is plainly still running, this is the
+  // escape hatch: it replaces the supervisor, which re-mirrors from the start.
+  //
+  // The outcome is phrased here rather than taken from the response: the API's
+  // `message` is CLI copy that names the run id, which this button's own row
+  // already identifies, and which no catalog can translate.
+  async function resync() {
+    if (!selectedRun) return;
+    setResyncing(true);
+    try {
+      const report = await resyncRun(selectedRun.id);
+      if (report.terminal) showAlert(m.detail_drawer_resync_terminal(), "info");
+      else if (report.replaced) showAlert(m.detail_drawer_resync_replaced(), "success");
+      else if (report.spawned) showAlert(m.detail_drawer_resync_started(), "success");
+      else showAlert(m.detail_drawer_resync_blocked(), "warning");
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setResyncing(false);
     }
   }
 
   return (
     <div className="term-view absolute inset-0 flex flex-col bg-background z-20">
-      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.error]:text-sm [&_.error]:text-accent-red [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
+      <div className="term-bar flex items-center gap-2 h-10 py-0 px-2.5 border-b border-b-border shrink-0 [&_.btn]:inline-flex [&_.btn]:items-center [&_.btn]:gap-[5px]">
         <div className="term-title min-w-0 text-sm font-semibold text-text overflow-hidden text-ellipsis whitespace-nowrap" title={experiment.title || experiment.slug}>
           {experiment.title || experiment.slug}
         </div>
-        <span className="flex-1" />
-        {error && (
-          <span className="error" role="alert">
-            {error}
+        {selectedRun && backendJobLabel(selectedRun.backend) && (
+          <span className="term-job inline-flex items-center gap-1 min-w-0 text-xs text-muted [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={m.experiment_overview_job()}>
+            <code>{backendJobLabel(selectedRun.backend)}</code>
+            <CopyButton text={backendJobLabel(selectedRun.backend)} title={m.md_copy()} />
           </span>
+        )}
+        {live && supervisorStateLabel(selectedRun?.supervisorState) && (
+          <span
+            className="term-supervisor-state inline-flex items-center gap-1 shrink-0 py-0.5 px-1.5 rounded-sm bg-accent-amber/15 text-accent-amber text-xs font-medium"
+            title={supervisorStateLabel(selectedRun?.supervisorState) ?? undefined}
+          >
+            <TriangleAlert size={12} className="shrink-0" aria-hidden="true" />
+            <span className="max-w-45 overflow-hidden text-ellipsis whitespace-nowrap">
+              {supervisorStateLabel(selectedRun?.supervisorState)}
+            </span>
+          </span>
+        )}
+        <span className="flex-1" />
+        {live && (
+          <Button
+            size="small"
+            variant="ghost"
+            title={m.detail_drawer_resync_hint()}
+            disabled={resyncing}
+            onClick={() => void resync()}
+          >
+            <RefreshCw size={13} className={resyncing ? "animate-spin" : undefined} />
+            {resyncing ? m.common_resyncing() : m.common_resync()}
+          </Button>
         )}
         {live && (
           <Button size="small" variant="ghost" disabled={cancelling} onClick={() => void stop()}>

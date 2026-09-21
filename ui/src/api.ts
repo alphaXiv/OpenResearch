@@ -89,7 +89,7 @@ export interface Experiment {
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
-export type RunDisplayStatus = RunStatus | "cancelling";
+export type RunDisplayStatus = RunStatus | "cancelling" | "queued";
 
 export interface Run {
   id: string;
@@ -105,11 +105,47 @@ export interface Run {
   endedAt?: number | null;
   exitCode?: number | null;
   cancelRequested: boolean;
+  /** The run's supervisor's last heartbeat (unix millis) — absent for a
+   *  backend that doesn't write one (anything but SGE today), or before its
+   *  first poll. */
+  supervisorSeenAt?: number | null;
+  /** `polling | stalled | inspect-error | blocked-wait | gone-wait |
+   *  unknown-state` — see `run_sge`'s heartbeat sites in supervise.rs. */
+  supervisorState?: string | null;
 }
 
-export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
+/** Human text for a run's `supervisorState`, or `null` for the ordinary
+ *  "polling" case — callers hide the badge entirely then, since a healthy
+ *  watcher isn't news. Mirrors the states `run_sge` (supervise.rs) writes. */
+export function supervisorStateLabel(state: string | null | undefined): string | null {
+  switch (state) {
+    case "stalled":
+      return m.supervisor_state_stalled();
+    case "inspect-error":
+      return m.supervisor_state_inspect_error();
+    case "blocked-wait":
+      return m.supervisor_state_blocked_wait();
+    case "gone-wait":
+      return m.supervisor_state_gone_wait();
+    case "unknown-state":
+      return m.supervisor_state_unknown();
+    default:
+      return null;
+  }
+}
+
+/** SGE has no separate "queued" run status — a job sitting in the grid
+ *  engine's queue (`qw`/`hqw`, or freshly submitted and not yet polled)
+ *  stores the same generic `"starting"` every backend uses. That's correct
+ *  as stored state (still not live/running), but reads as misleading on the
+ *  SCC where "starting" implies progress a queued job hasn't made yet — so
+ *  this relabels it for display only; nothing downstream that keys off the
+ *  stored `status` (liveness checks, SSE diffing, the CLI) changes. */
+export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested" | "backend">): RunDisplayStatus {
   const live = run.status === "running" || run.status === "starting";
-  return live && run.cancelRequested ? "cancelling" : run.status;
+  if (live && run.cancelRequested) return "cancelling";
+  if (run.status === "starting" && backendKind(run.backend) === "sge_job") return "queued";
+  return run.status;
 }
 
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
@@ -388,6 +424,24 @@ export const listInstances = () =>
 
 export const cancelRun = (runId: string) =>
   post<{ ok: boolean }>(`/api/runs/${runId}/cancel`).then(() => undefined);
+
+/** What a resync actually did. Not always a restart, so the caller reports the
+ *  outcome it got rather than assuming the happy path. */
+export interface ResyncReport {
+  /** The run had already finished; supervision was not restarted. */
+  terminal: boolean;
+  /** A live supervisor was found and retired. */
+  replaced: boolean;
+  /** A fresh supervisor was spawned. */
+  spawned: boolean;
+}
+
+/** Retire the run's supervisor and start a fresh one. The manual fallback for
+ *  a supervisor that is alive but no longer advancing the local log mirror.
+ *  The response also carries a `message`, but that one is CLI copy — it names
+ *  the run id and is not localized, so the UI phrases its own from the report. */
+export const resyncRun = (runId: string) =>
+  post<{ ok: boolean; report: ResyncReport }>(`/api/runs/${runId}/resync`).then((r) => r.report);
 
 export interface LogChunk {
   dataBase64: string;
@@ -860,6 +914,18 @@ export const setAutoUpdate = (enabled: boolean) =>
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
 
+export interface AutoContinueOnLimitSettings {
+  enabled: boolean;
+}
+
+/** Whether a Claude turn that failed on a usage/session limit auto-resumes
+ *  at its parsed reset time. Settings → harness (Claude). */
+export const getAutoContinueOnLimit = (signal?: AbortSignal) =>
+  get<AutoContinueOnLimitSettings>("/api/settings/auto-continue-on-limit", signal);
+
+export const setAutoContinueOnLimit = (enabled: boolean) =>
+  post<AutoContinueOnLimitSettings>("/api/settings/auto-continue-on-limit", { enabled });
+
 // --- settings: kubernetes -----------------------------------------------------
 
 export interface K8sPreflight {
@@ -1099,6 +1165,57 @@ export interface SlurmPreflight {
   error: string | null;
 }
 
+// --- settings: sge (Sun Grid Engine) -----------------------------------------
+
+export interface SgeSettings {
+  /** Default login node (an ~/.ssh/config alias); null = must pass --host. */
+  host: string | null;
+  /** Absolute shared scratch/work directory outside $HOME; null = the default. */
+  workDir: string | null;
+  /** Grid Engine project (`qsub -P`); null = the cluster decides. */
+  sccProject: string | null;
+  /** Parallel environment (`qsub -pe <pe> <slots>`); null = the default. */
+  pe: string | null;
+  /** Slots (cores) requested for the parallel environment; null = the default. */
+  slots: number | null;
+  timeLimit: string | null;
+  /** GPUs requested (`-l gpus=`); null = the default. */
+  gpus: number | null;
+  /** GPU model filter (`-l gpu_type=`), e.g. L40S; null = any. */
+  gpuType: string | null;
+  /** Login-node candidates, from ~/.ssh/config (same source as SSH). */
+  hosts: SshHost[];
+}
+
+export const getSgeSettings = (signal?: AbortSignal) => get<SgeSettings>("/api/settings/sge", signal);
+
+/**
+ * Omitting a field leaves it alone. Clearing it back to the cluster default is
+ * an empty string for the text fields and `null` for the counts — they are
+ * numbers on the wire, so `""` would fail to deserialize.
+ */
+export const saveSgeSettings = (body: {
+  host?: string;
+  workDir?: string;
+  sccProject?: string;
+  pe?: string;
+  slots?: number | null;
+  timeLimit?: string;
+  gpus?: number | null;
+  gpuType?: string;
+}) => post<SgeSettings>("/api/settings/sge", body);
+
+export interface SgePreflight {
+  reachable: boolean;
+  sgeFound: boolean;
+  toolsFound: boolean;
+  /** The login node answered, but the session needs a Duo/2FA approval first. */
+  authBlocked: boolean;
+  masterRunning: boolean;
+  projects: string[];
+  error: string | null;
+}
+
 // --- settings: ray ------------------------------------------------------------
 
 export interface RaySettings {
@@ -1137,6 +1254,7 @@ export type ComputeTargetId =
   | "k8s"
   | "ssh"
   | "slurm"
+  | "sge"
   | "ray"
   | "openresearch";
 
@@ -1438,6 +1556,31 @@ export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/a
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
+
+export interface SlackSettings {
+  /** Whether a webhook URL is saved; the URL itself is never echoed back. */
+  hasWebhook: boolean;
+  events: { jobSubmitted: boolean; runSynthesized: boolean };
+}
+
+export interface SlackPreflightResult {
+  ok: boolean;
+  error: string | null;
+}
+
+export const getSlackSettings = (signal?: AbortSignal) => get<SlackSettings>("/api/settings/slack", signal);
+
+export const saveSlackWebhook = (webhookUrl: string) =>
+  post<{ hasWebhook: boolean }>("/api/settings/slack", { webhookUrl });
+
+export const deleteSlackWebhook = () =>
+  writeResponse("/api/settings/slack", { method: "DELETE" }).then((r) => json<{ hasWebhook: boolean }>(r));
+
+export const setSlackEvents = (events: { jobSubmitted: boolean; runSynthesized: boolean }) =>
+  post<{ jobSubmitted: boolean; runSynthesized: boolean }>("/api/settings/slack/events", events);
+
+/** Sends a real test message to the currently saved webhook. */
+export const slackPreflight = () => post<SlackPreflightResult>("/api/settings/slack/preflight");
 
 export type OnboardingStep = "welcome" | "environment" | "profile";
 export type FirstActionSurface = "demo" | "project";
@@ -2013,6 +2156,14 @@ export const recoverChatTurn = (
     { action, ...opts },
   );
 
+/** Cancels a usage-limit turn's scheduled auto-continue (the "Don't" button
+ *  next to its countdown) without touching the failure itself — it falls
+ *  back to a manual Continue click. */
+export const cancelTurnResume = (sessionId: string, turnId: string) =>
+  writeResponse(`/api/chat/sessions/${sessionId}/turns/${turnId}/resume`, {
+    method: "DELETE",
+  }).then((r) => json<{ ok: boolean }>(r));
+
 /** Pass `text` to re-ask an edited version of a user message; omit it to retry a
  * response. Returns immediately; the new turn streams over /api/events. */
 export const forkChatTurn = (sessionId: string, messageId: string, text?: string) =>
@@ -2125,6 +2276,51 @@ export function backendDetail(backend: Run["backend"]): string {
   if (backendKind(backend) === "ray_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
   return "";
+}
+
+/** A short, human-legible identifier for the job a run's backend descriptor
+ *  points at — the thing a person would read to tell one compute job apart
+ *  from another of the same kind (an SGE job id, a Slurm job id, an ssh
+ *  host). Mirrors `BackendDescriptor::job_label` in src/jobs/mod.rs; keep the
+ *  two in sync. Empty before submission has recorded a job id, or for a kind
+ *  this doesn't recognize. */
+export function backendJobLabel(backend: Run["backend"]): string {
+  if (!backend) return "";
+  const kind = backendKind(backend);
+  const jobId = typeof backend.jobId === "string" ? backend.jobId : "";
+  const namespace = typeof backend.namespace === "string" ? backend.namespace : "";
+  switch (kind) {
+    case "sge_job":
+      return jobId && namespace ? `SGE ${jobId} @ ${namespace}` : "";
+    case "slurm_job":
+      return jobId && namespace ? `Slurm ${jobId} @ ${namespace}` : "";
+    case "ssh_job":
+      return namespace ? `ssh ${namespace}` : "";
+    case "hf_job":
+      return jobId && namespace ? `HF ${namespace}/${jobId}` : "";
+    case "k8s_job":
+      return jobId && namespace ? `k8s ${namespace}/${jobId}` : "";
+    case "modal_job":
+      return jobId ? `Modal ${jobId}` : "";
+    case "ray_job":
+      return jobId && namespace ? `Ray ${jobId} @ ${namespace}` : "";
+    case "openresearch_job":
+      return jobId && namespace ? `OpenResearch ${jobId} (${namespace})` : "";
+    case "local_job":
+      return "Local";
+    case "tinker_job":
+      return "Tinker";
+    default:
+      return "";
+  }
+}
+
+/** The absolute remote run directory recorded on a run's backend descriptor
+ *  (`sge_job` today — pinned at submit so a later `workDir` edit can't strand
+ *  a live run's supervisor). Empty when the backend doesn't record one. */
+export function backendRunDir(backend: Run["backend"]): string {
+  if (!backend) return "";
+  return typeof backend.runDir === "string" ? backend.runDir : "";
 }
 
 export interface LocalModelConnection {

@@ -75,6 +75,30 @@ pub struct SshTarget {
     pub dest: String,
     /// Extra ssh args before `--` (e.g. `["-p", "2222", "-o", …]`).
     pub extra_opts: Vec<String>,
+    /// Whether batch calls to this endpoint can authenticate unaided. Defaults
+    /// to [`SecondFactor::None`] from both constructors, so every backend that
+    /// predates this field is unchanged.
+    pub second_factor: SecondFactor,
+}
+
+/// Whether this endpoint's *batch* calls can authenticate on their own.
+///
+/// `BatchMode=yes` does not merely silence keyboard-interactive — OpenSSH's
+/// `authmethod_is_enabled` honours each method's `batch_flag`, so BatchMode
+/// **removes** kbdint from the client's candidate list. On a host configured
+/// `AuthenticationMethods publickey,keyboard-interactive` the key clears stage
+/// one, the server asks for stage two, and the client has nothing left to
+/// offer. A multiplexed session skips authentication entirely, which is why a
+/// live ControlMaster — not a key — is the real credential on such a host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SecondFactor {
+    /// A key or agent is sufficient; `BatchMode=yes` authenticates cold. Every
+    /// backend other than SGE.
+    #[default]
+    None,
+    /// sshd demands `publickey,keyboard-interactive` (Duo/PAM — BU's SCC). A
+    /// live ControlMaster is a hard prerequisite for every batch call.
+    Required,
 }
 
 /// How to treat the remote's SSH host key for a `host_port` target.
@@ -101,7 +125,14 @@ impl SshTarget {
         Self {
             dest: host.to_string(),
             extra_opts: Vec::new(),
+            second_factor: SecondFactor::None,
         }
+    }
+
+    /// Opt this endpoint into the ControlMaster-is-mandatory contract.
+    pub fn with_second_factor(mut self, second_factor: SecondFactor) -> Self {
+        self.second_factor = second_factor;
+        self
     }
 
     /// `dest` (an alias or `user@host`) on an explicit `port`, with an explicit
@@ -127,7 +158,11 @@ impl SshTarget {
                 ]);
             }
         }
-        Self { dest, extra_opts }
+        Self {
+            dest,
+            extra_opts,
+            second_factor: SecondFactor::None,
+        }
     }
 }
 
@@ -155,12 +190,27 @@ fn control_path(target: &SshTarget) -> PathBuf {
 
 /// Shared ssh options: setup may prompt, background work never does; on unix one shared
 /// socket lets a single login cover both.
+///
+/// `ServerAlive*` is not decoration. `ConnectTimeout` only bounds the TCP
+/// handshake, and a multiplexed call performs no handshake at all — it hands
+/// the channel to a master that already holds the socket. If that socket is
+/// half-open (laptop sleep, a Wi-Fi/VPN change, a NAT table reaped mid-run)
+/// nothing below the application layer ever notices: the master stays
+/// resident, `ssh -O check` keeps answering "running" because it is a local
+/// unix-socket query, and every channel opened through it blocks forever.
+/// Keepalives are the only thing that turns that into an observable failure —
+/// after `Interval * CountMax` (~90s) the master exits, its control socket
+/// goes away, and callers get a prompt error they can recover from.
 fn ssh_opts(target: &SshTarget, batch: bool) -> Vec<String> {
     let mut opts = vec![
         "-o".into(),
         format!("BatchMode={}", if batch { "yes" } else { "no" }),
         "-o".into(),
         "ConnectTimeout=10".into(),
+        "-o".into(),
+        "ServerAliveInterval=30".into(),
+        "-o".into(),
+        "ServerAliveCountMax=3".into(),
     ];
     opts.extend(multiplexing_opts(target));
     opts.extend(target.extra_opts.iter().cloned());
@@ -200,13 +250,8 @@ pub(crate) fn forward_args(
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
     let mut args = ssh_opts(target, true);
-    for option in [
-        "ExitOnForwardFailure=yes",
-        "ServerAliveInterval=30",
-        "ServerAliveCountMax=3",
-    ] {
-        args.extend(["-o".into(), option.into()]);
-    }
+    // Keepalives come from `ssh_opts`; a forward adds only its own failure mode.
+    args.extend(["-o".into(), "ExitOnForwardFailure=yes".into()]);
     args.extend([
         // No PTY: the remote session bearer is delivered over stdin and must
         // never be echoed by terminal line discipline.
@@ -258,6 +303,184 @@ pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     Ok(status.success())
 }
 
+/// A batch call refused to run: this endpoint needs a second factor and its
+/// multiplexed master is gone. Recoverable — nothing about the remote job
+/// changed, only our transport — so callers `downcast_ref` to tell it apart
+/// from a real remote failure and never mark a live job failed.
+#[derive(Debug, Clone)]
+pub struct MasterRequired {
+    pub dest: String,
+    /// Exactly what a human can run to re-establish it.
+    pub login_command: String,
+}
+
+impl std::fmt::Display for MasterRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{host} requires a second factor (Duo) that orx's background connections cannot \
+             answer. They ride one SSH session you open yourself:\n\n    {orx} ssh connect \
+             {host}\n\nApprove the prompt; orx keeps that session alive for every submit, \
+             status poll and log read. A plain `ssh {host}` will not do — orx uses its own \
+             private ControlPath.",
+            host = self.dest,
+            orx = crate::invocation::orx(),
+        )?;
+        // The raw form, for anyone debugging outside orx — it carries the
+        // private ControlPath that makes a plain `ssh` insufficient.
+        if !self.login_command.is_empty() {
+            write!(f, "\n\n(equivalently: {})", self.login_command)?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for MasterRequired {}
+
+/// Does this ssh failure mean the second factor could never be attempted?
+/// Backstop for the race where the master dies between check and exec.
+pub fn is_second_factor_failure(message: &str) -> bool {
+    message.contains("Permission denied") && message.contains("keyboard-interactive")
+}
+
+fn master_required(target: &SshTarget) -> MasterRequired {
+    MasterRequired {
+        dest: target.dest.clone(),
+        login_command: master_login_command(target).unwrap_or_default(),
+    }
+}
+
+/// `Ok(())` unless this endpoint needs a second factor and has no live master.
+/// Free for every existing backend — the flag short-circuits before any syscall.
+async fn require_master(target: &SshTarget) -> Result<()> {
+    if target.second_factor == SecondFactor::None {
+        return Ok(());
+    }
+    if master_is_running(target).await.unwrap_or(false) {
+        return Ok(());
+    }
+    Err(master_required(target).into())
+}
+
+/// The exact shell command that re-establishes the multiplexed master these
+/// batch calls ride on.
+///
+/// This is NOT `ssh <alias>`: orx keeps its control socket in a private
+/// `/tmp/orx-ssh-<uid>-<hash>/` directory, so a plain login authenticates a
+/// session orx cannot see. The rendered command carries orx's ControlPath.
+pub fn master_login_command(target: &SshTarget) -> Result<String> {
+    let args = interactive_args(target)?;
+    let mut parts = vec!["ssh".to_string()];
+    parts.extend(
+        args.into_iter()
+            .map(|a| if a.contains(' ') { sh_quote(&a) } else { a }),
+    );
+    Ok(parts.join(" "))
+}
+
+/// The ControlPath a live master is listening on, for anyone riding the
+/// session from outside orx (a shell, another tool, a coding agent poking at
+/// the host directly). It is a real unix socket on disk — `ssh -S <this> --
+/// <dest> <cmd>` authenticates nothing and just hands the channel to
+/// whichever process already holds it, orx or not. `None` on Windows, where
+/// there is no master to point at.
+#[cfg(unix)]
+pub fn control_path_for_riding(target: &SshTarget) -> Option<PathBuf> {
+    Some(control_path(target))
+}
+
+#[cfg(not(unix))]
+pub fn control_path_for_riding(_target: &SshTarget) -> Option<std::path::PathBuf> {
+    None
+}
+
+const MASTER_PROBE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Try to (re)establish the master WITHOUT a terminal.
+///
+/// Runs the interactive method — the only one that can reach
+/// keyboard-interactive at all — but shaped so it is *structurally* incapable
+/// of prompting, so it can never wedge a headless supervisor:
+///   * `setsid()` before exec: no controlling terminal, so OpenSSH's
+///     `open("/dev/tty")` fails and `readpassphrase(RPP_REQUIRE_TTY)` returns
+///     ENOTTY instead of blocking. (`/dev/null` on stdin is NOT enough —
+///     `read_passphrase` is called without `RP_ALLOW_STDIN` and reads the tty.)
+///   * `SSH_ASKPASS_REQUIRE=force` with `SSH_ASKPASS` pointed at a path that
+///     does not exist, and `DISPLAY` cleared.
+///   * `NumberOfPasswordPrompts=1`: one empty answer, not three.
+///   * `PasswordAuthentication=no`: BatchMode=no would otherwise re-enable
+///     password auth and send that empty string as a unix password.
+///   * an outer timeout, independent of the local OpenSSH version's behaviour.
+///
+/// Inside the cluster's second-factor grace window (SCC: 30 days per source
+/// IP plus login node) PAM answers with zero prompts and this succeeds
+/// silently, so
+/// a master lost to laptop sleep or a network change self-heals. Outside it,
+/// ssh exits in seconds. Returns `Ok(false)` — not an error — for the expired
+/// grace: that is a normal, user-actionable state.
+#[cfg(unix)]
+pub(crate) async fn ensure_master_headless(target: &SshTarget) -> Result<bool> {
+    if master_is_running(target).await.unwrap_or(false) {
+        return Ok(true);
+    }
+    prepare_control_dir()?;
+    let mut args = ssh_opts(target, false);
+    for option in [
+        "NumberOfPasswordPrompts=1",
+        "PasswordAuthentication=no",
+        "KbdInteractiveAuthentication=yes",
+    ] {
+        args.extend(["-o".into(), option.into()]);
+    }
+    args.extend(["-T".into(), "--".into(), target.dest.clone(), "true".into()]);
+
+    let mut cmd = Command::new("ssh");
+    cmd.args(args)
+        .env("SSH_ASKPASS_REQUIRE", "force")
+        .env("SSH_ASKPASS", "/nonexistent/orx-never-prompts")
+        .env_remove("DISPLAY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    // SAFETY: setsid() is async-signal-safe and the child is about to exec.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    match tokio::time::timeout(MASTER_PROBE_TIMEOUT, cmd.status()).await {
+        Ok(Ok(_)) => master_is_running(target).await,
+        Ok(Err(e)) => Err(anyhow!("Could not run ssh: {e}")),
+        Err(_) => Ok(false), // kill_on_drop reaps it
+    }
+}
+
+/// Windows cannot multiplex, so there is no master to establish.
+#[cfg(not(unix))]
+pub(crate) async fn ensure_master_headless(_target: &SshTarget) -> Result<bool> {
+    Ok(false)
+}
+
+/// A remote run dir rendered as a single shell word.
+///
+/// A relative dir keeps the historical `$HOME`-anchored meaning (the ssh and
+/// slurm backends' `.orx/runs/<id>`); an ABSOLUTE dir is used verbatim and
+/// single-quoted — the SGE backend roots its runs on a project filesystem
+/// because SCC home dirs carry a hard 10 GB quota. The relative branch emits
+/// the exact literal the callers used before, so those backends' remote
+/// commands are unchanged.
+pub(crate) fn remote_path(dir: &str) -> String {
+    // Never `Path::is_absolute()`: this is a POSIX remote path being judged on
+    // a possibly-Windows client.
+    if dir.starts_with('/') {
+        sh_quote(dir)
+    } else {
+        format!("\"$HOME/{dir}\"")
+    }
+}
+
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
 /// A non-zero exit is an error carrying stderr (the ssh/remote failure reason).
 /// Shared with the slurm backend, which drives a cluster's login node the same
@@ -270,12 +493,45 @@ pub(crate) async fn ssh_run(
     ssh_run_bytes(target, remote_cmd, stdin.map(str::as_bytes)).await
 }
 
+/// Ceiling on one non-streaming remote command.
+///
+/// Belt to the keepalives' braces: those let a dead master notice within ~90s,
+/// but nothing bounds a call that is merely pathological (an NFS-blocked
+/// `tail` on a hung mount, a login node under load, a `qstat` behind a stuck
+/// qmaster). The supervisor's poll and log-tail loops are the ones that matter
+/// — each caller treats a timeout as a retryable error, so the cost of being
+/// wrong here is one wasted poll, while the cost of no ceiling at all is a run
+/// whose log silently stops advancing until someone notices by eye.
+const SSH_EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+
 async fn ssh_run_bytes(
     target: &SshTarget,
     remote_cmd: &str,
     stdin: Option<&[u8]>,
 ) -> Result<String> {
+    match tokio::time::timeout(
+        SSH_EXEC_TIMEOUT,
+        ssh_run_bytes_inner(target, remote_cmd, stdin),
+    )
+    .await
+    {
+        Ok(result) => result,
+        // `kill_on_drop` reaps the child as the future is dropped.
+        Err(_) => Err(anyhow!(
+            "ssh {} timed out after {}s running a remote command.",
+            target.dest,
+            SSH_EXEC_TIMEOUT.as_secs()
+        )),
+    }
+}
+
+async fn ssh_run_bytes_inner(
+    target: &SshTarget,
+    remote_cmd: &str,
+    stdin: Option<&[u8]>,
+) -> Result<String> {
     prepare_control_dir()?;
+    require_master(target).await?;
     let mut cmd = Command::new("ssh");
     cmd.args(ssh_opts(target, true))
         .arg("--")
@@ -310,6 +566,10 @@ async fn ssh_run_bytes(
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         let err = err.trim();
+        // Race: the master died between require_master and the exec.
+        if target.second_factor == SecondFactor::Required && is_second_factor_failure(err) {
+            return Err(master_required(target).into());
+        }
         return Err(anyhow!(
             "ssh {} failed{}: {}",
             target.dest,
@@ -323,12 +583,20 @@ async fn ssh_run_bytes(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// As [`ssh_run`], but streams a local file to the remote command's stdin.
+///
+/// Deliberately NOT under [`SSH_EXEC_TIMEOUT`]: this is the source-archive
+/// upload, whose duration scales with the snapshot size and the link, so any
+/// fixed ceiling would abort legitimate transfers. It runs on the user-facing
+/// submit path where a stall is visible, not inside a headless supervisor
+/// loop, and the keepalives in [`ssh_opts`] still bound a dead connection.
 async fn ssh_run_file(
     target: &SshTarget,
     remote_cmd: &str,
     source: &std::path::Path,
 ) -> Result<String> {
     prepare_control_dir()?;
+    require_master(target).await?;
     let mut child = Command::new("ssh")
         .args(ssh_opts(target, true))
         .arg("--")
@@ -349,11 +617,12 @@ async fn ssh_run_file(
         .await
         .map_err(|e| anyhow!("ssh wait failed: {e}"))?;
     if !out.status.success() {
-        return Err(anyhow!(
-            "ssh {} failed: {}",
-            target.dest,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let err = String::from_utf8_lossy(&out.stderr);
+        let err = err.trim();
+        if target.second_factor == SecondFactor::Required && is_second_factor_failure(err) {
+            return Err(master_required(target).into());
+        }
+        return Err(anyhow!("ssh {} failed: {}", target.dest, err));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -367,27 +636,53 @@ pub async fn stage_source(
     archive: &std::path::Path,
     digest: &str,
 ) -> Result<String> {
-    let dir = format!(".orx/runs/{run_id}");
-    let cache = format!(".orx/source/{digest}.tar");
+    stage_source_under(target, None, run_id, archive, digest).await
+}
+
+/// As [`stage_source`], but rooted at `base` — an ABSOLUTE remote directory —
+/// when given. `None` means `$HOME`. Returns the run dir: relative to `$HOME`
+/// for `None`, absolute otherwise.
+///
+/// The presence probe is `test -r`, not `test -f`: under an absolute base the
+/// tree may be a shared group filesystem, where another user's 0600 cache entry
+/// exists but cannot be read — `-f` would report it present and the following
+/// `tar -xf` would fail with EACCES.
+pub async fn stage_source_under(
+    target: &SshTarget,
+    base: Option<&str>,
+    run_id: &str,
+    archive: &std::path::Path,
+    digest: &str,
+) -> Result<String> {
+    let root = match base {
+        Some(base) => format!("{}/.orx", base.trim_end_matches('/')),
+        None => ".orx".to_string(),
+    };
+    let dir = format!("{root}/runs/{run_id}");
+    let cache = format!("{root}/source/{digest}.tar");
+    let (d, c) = (remote_path(&dir), remote_path(&cache));
+    let runs = remote_path(&format!("{root}/runs"));
+    let source = remote_path(&format!("{root}/source"));
+
     let present = ssh_run(
         target,
-        &format!("test -f \"$HOME/{cache}\" && echo present || true"),
+        &format!("test -r {c} && echo present || true"),
         None,
     )
     .await?;
     if present.trim() != "present" {
         let upload = format!(
-            "umask 077; mkdir -p \"$HOME/.orx/source\"; \
-             tmp=\"$HOME/{cache}.tmp.$$\"; cat > \"$tmp\" && mv \"$tmp\" \"$HOME/{cache}\""
+            "umask 077; mkdir -p {source}; \
+             tmp={c}.tmp.$$; cat > \"$tmp\" && mv \"$tmp\" {c}"
         );
         ssh_run_file(target, &upload, archive).await?;
     }
     ssh_run(
         target,
         &format!(
-            "umask 077; mkdir -p \"$HOME/.orx/runs\" \"$HOME/{dir}/repo\"; \
-             chmod 700 \"$HOME/.orx/runs\" \"$HOME/{dir}\" \"$HOME/{dir}/repo\"; \
-             tar -xf \"$HOME/{cache}\" -C \"$HOME/{dir}/repo\""
+            "umask 077; mkdir -p {runs} {d}/repo; \
+             chmod 700 {runs} {d} {d}/repo; \
+             tar -xf {c} -C {d}/repo"
         ),
         None,
     )
@@ -460,10 +755,11 @@ pub async fn inspect_job(target: &SshTarget, dir: &str) -> Result<JobState> {
     // exit_code present -> finished; pid alive -> running; pid dead & no
     // exit_code -> killed/crashed; no pid yet -> just starting.
     let cmd = format!(
-        "d=\"$HOME/{dir}\"; \
+        "d={d}; \
          if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
          elif [ -f \"$d/pid\" ] && kill -0 \"$(cat \"$d/pid\")\" 2>/dev/null; then echo RUNNING; \
          elif [ -f \"$d/pid\" ]; then echo DEAD; else echo PENDING; fi",
+        d = remote_path(dir),
     );
     let out = ssh_run(target, &cmd, None).await?;
     let out = out.trim();
@@ -507,9 +803,9 @@ pub async fn stream_logs(
     sink: &mut (dyn FnMut(&str) + Send),
 ) -> Result<u64> {
     let cmd = format!(
-        "tail -n +{} \"$HOME/{}/log\" 2>/dev/null || true",
+        "tail -n +{} {}/log 2>/dev/null || true",
         skip + 1,
-        dir
+        remote_path(dir)
     );
     let out = ssh_run(target, &cmd, None).await?;
     let mut seen = skip;
@@ -526,8 +822,9 @@ pub async fn stream_logs(
 /// (nohup fallback). The negative-pid form targets the whole group.
 pub async fn cancel_job(target: &SshTarget, dir: &str) -> Result<()> {
     let cmd = format!(
-        "p=$(cat \"$HOME/{dir}/pid\" 2>/dev/null); \
+        "p=$(cat {d}/pid 2>/dev/null); \
          [ -n \"$p\" ] && {{ kill -TERM -\"$p\" 2>/dev/null || kill -TERM \"$p\" 2>/dev/null; }}; true",
+        d = remote_path(dir),
     );
     ssh_run(target, &cmd, None).await?;
     Ok(())
@@ -588,7 +885,8 @@ mod tests {
         assert_eq!(target.dest, "mybox");
         assert!(target.extra_opts.is_empty());
         // No `-p`/`-o Strict…` beyond the shared multiplexing opts.
-        let shared = 4 + multiplexing_opts(&target).len(); // BatchMode, ConnectTimeout
+        // BatchMode, ConnectTimeout, ServerAliveInterval, ServerAliveCountMax
+        let shared = 8 + multiplexing_opts(&target).len();
         assert_eq!(ssh_opts(&target, true).len(), shared);
     }
 
@@ -656,9 +954,82 @@ mod tests {
         let mk = |port: &str| SshTarget {
             dest: "root@h".to_string(),
             extra_opts: vec!["-p".into(), port.into()],
+            second_factor: SecondFactor::None,
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));
         assert_eq!(control_path(&mk("22022")), control_path(&mk("22022")));
+    }
+
+    /// THE load-bearing invariant of the second-factor design. The master is
+    /// primed by the Settings "Connect" button, which builds a plain
+    /// `alias()` (i.e. `SecondFactor::None`). If the flag entered the control
+    /// path hash, SGE's batch calls would look for a socket at a different
+    /// path and Connect would silently stop helping.
+    #[cfg(unix)]
+    #[test]
+    fn second_factor_does_not_change_the_control_path() {
+        let plain = SshTarget::alias("scc1");
+        let guarded = SshTarget::alias("scc1").with_second_factor(SecondFactor::Required);
+        assert_eq!(control_path(&plain), control_path(&guarded));
+    }
+
+    /// The flag must not leak into the argv either — it only gates whether we
+    /// spawn at all.
+    #[test]
+    fn batch_opts_are_identical_for_both_second_factor_values() {
+        let plain = SshTarget::alias("scc1");
+        let guarded = SshTarget::alias("scc1").with_second_factor(SecondFactor::Required);
+        assert_eq!(ssh_opts(&plain, true), ssh_opts(&guarded, true));
+    }
+
+    /// Relative dirs keep the historical `$HOME` anchor byte-for-byte; an
+    /// absolute dir is single-quoted and used verbatim.
+    #[test]
+    fn remote_path_anchors_relative_dirs_and_passes_absolute_through() {
+        assert_eq!(remote_path(".orx/runs/r1"), "\"$HOME/.orx/runs/r1\"");
+        assert_eq!(
+            remote_path("/projectnb/herbdl/workspaces/herb/faridkar/.orx/runs/r1"),
+            "'/projectnb/herbdl/workspaces/herb/faridkar/.orx/runs/r1'"
+        );
+    }
+
+    /// The Duo-lapse signature, and the false positive it must not catch: a
+    /// remote `Permission denied` from the command itself is exit 1, and never
+    /// mentions keyboard-interactive.
+    #[test]
+    fn second_factor_failure_is_distinguished_from_a_remote_permission_error() {
+        assert!(is_second_factor_failure(
+            "ssh scc1 failed (exit 255): faridkar@scc1.bu.edu: Permission denied \
+             (publickey,keyboard-interactive)."
+        ));
+        assert!(!is_second_factor_failure(
+            "ssh scc1 failed (exit 1): mkdir: cannot create directory: Permission denied"
+        ));
+        assert!(!is_second_factor_failure(
+            "ssh scc1 failed (exit 255): Connection timed out"
+        ));
+    }
+
+    /// A target that needs no second factor must never touch the filesystem or
+    /// fork `ssh -O check` — the gate is free for every existing backend.
+    #[tokio::test]
+    async fn require_master_is_free_for_targets_without_a_second_factor() {
+        let plain = SshTarget::alias("definitely-not-a-real-host-orx-test");
+        assert!(require_master(&plain).await.is_ok());
+    }
+
+    /// A guarded target with no live master fails fast with the typed,
+    /// downcastable error rather than a raw ssh string.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn require_master_rejects_a_guarded_target_without_a_master() {
+        let guarded = SshTarget::alias("definitely-not-a-real-host-orx-test")
+            .with_second_factor(SecondFactor::Required);
+        let err = require_master(&guarded).await.unwrap_err();
+        assert!(
+            err.downcast_ref::<MasterRequired>().is_some(),
+            "expected MasterRequired, got: {err}"
+        );
     }
 
     #[cfg(unix)]

@@ -33,6 +33,12 @@ export const getSlurmSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getSgeSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSgeSettings"),
+  queryFn: ({ signal }) => api.getSgeSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getRaySettingsQuery = () => queryOptions({
   queryKey: workspaceKey("getRaySettings"),
   queryFn: ({ signal }) => api.getRaySettings(signal),
@@ -111,6 +117,12 @@ export const getProfileQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getAutoContinueOnLimitQuery = () => queryOptions({
+  queryKey: workspaceKey("getAutoContinueOnLimit"),
+  queryFn: ({ signal }) => api.getAutoContinueOnLimit(signal),
+  staleTime: 30_000,
+});
+
 export const getLitSourcesQuery = () => queryOptions({
   queryKey: workspaceKey("getLitSources"),
   queryFn: ({ signal }) => api.getLitSources(signal),
@@ -132,6 +144,12 @@ export const getProjectGitStatusQuery = (projectId: string) => queryOptions({
 export const getTelemetryQuery = () => queryOptions({
   queryKey: workspaceKey("getTelemetry"),
   queryFn: ({ signal }) => api.getTelemetry(signal),
+  staleTime: 300_000,
+});
+
+export const getSlackSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSlackSettings"),
+  queryFn: ({ signal }) => api.getSlackSettings(signal),
   staleTime: 300_000,
 });
 

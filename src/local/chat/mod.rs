@@ -8,6 +8,8 @@
 //! normalized parts into the per-turn assistant message; every flush persists
 //! the message and broadcasts it as a `chat.message` SSE event.
 
+pub mod mentions;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -2390,6 +2392,26 @@ pub(crate) fn builtin_slash_skill_names(project: &LocalProject, text: &str) -> V
             SelectedSlashSkill::User { .. } => None,
         })
         .collect()
+}
+
+/// The checkout `@file` mentions resolve against: the session's worktree
+/// when one exists, falling back to the project's hub clone. Read-only —
+/// never provisions a worktree, so a mention to a file in a worktree that
+/// doesn't exist yet just falls through to the clone (or, if that also
+/// fails to canonicalize, mentions are left unexpanded). `session_id` is
+/// already this project's own session by the time `send_message_showing`
+/// calls this, so there's no separate ownership check to make (unlike
+/// `resolve_checkout_root` in `commands::up`, which takes an arbitrary
+/// caller-supplied id and must verify `session.project_id == project.id`
+/// via the store). Duplicated locally rather than shared with that
+/// function because it's private to `up.rs`, returns `up.rs`'s local
+/// `ApiError`, and has ten other call sites whose signature isn't this
+/// track's to change.
+fn mention_checkout_root(project: &LocalProject, session_id: &str) -> Option<PathBuf> {
+    let worktree = crate::local::git::existing_session_worktree_path(project, session_id);
+    crate::paths::canonicalize(&worktree)
+        .ok()
+        .or_else(|| crate::paths::canonicalize(&project.repo_path).ok())
 }
 
 /// Slash tokens select supplementary instructions. The transcript keeps the
@@ -4966,11 +4988,16 @@ impl ChatHost {
             &store,
             session.active_leaf_id.as_deref(),
         )?);
-        // Slash-skills: the transcript keeps the `/name` the user typed; the
-        // harness gets the expanded prompt.
+        // Slash-skills and @-mentions: the transcript keeps what the user
+        // typed (`/name`, `@path`); the harness gets the expanded prompt.
+        let mention_root = mention_checkout_root(&project, &session.id);
         let mut turn_text = prepared_input.unwrap_or_else(|| {
             let expanded = contextualize_messages(messages, |text| {
-                expand_slash_skills(&project, text, Some(&session.harness))
+                let text = expand_slash_skills(&project, text, Some(&session.harness));
+                match &mention_root {
+                    Some(root) => mentions::expand_mentions(&text, root),
+                    None => text,
+                }
             });
             with_turn_context(
                 session.native_session_id.as_deref(),
@@ -5042,6 +5069,7 @@ impl ChatHost {
             recovered_by_turn_id: None,
             created_at,
             updated_at: created_at,
+            resume_at: None,
         };
         let mut turns = self.turns.lock().await;
         let Some(TurnState::Reserved { turn_id: reserved }) = turns.get_mut(session_id) else {
@@ -5211,7 +5239,13 @@ impl ChatHost {
                     })
                     .unwrap_or(false);
                 if changed {
-                    ctx.push_turn_failure(&kind, message.clone(), action);
+                    let resume_at = ctx.resume_at.take();
+                    ctx.push_turn_failure(&kind, message.clone(), action, resume_at);
+                    if let Some(resume_at) = resume_at {
+                        if let Ok(store) = Store::open() {
+                            let _ = store.set_turn_resume_at(&ctx.turn_id, resume_at);
+                        }
+                    }
                 }
                 if changed && ctx.retry_exhausted {
                     crate::telemetry::capture(
@@ -5227,7 +5261,11 @@ impl ChatHost {
                 changed
             } else if let Ok(store) = Store::open() {
                 ctx.clear_retry_status();
-                store.complete_chat_turn(&ctx.turn_id).unwrap_or(false)
+                let completed = store.complete_chat_turn(&ctx.turn_id).unwrap_or(false);
+                if completed {
+                    notify_run_synthesized_if_wakeup_turn(&store, &ctx.turn_id);
+                }
+                completed
             } else {
                 false
             };
@@ -6360,6 +6398,11 @@ pub struct TurnCtx {
     orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     terminal_error: Option<(String, String)>,
+    /// Set alongside `terminal_error` by a harness that parsed a concrete
+    /// (or fallback) resume time out of a usage-limit failure — e.g. Claude's
+    /// "resets 7:40pm" text. Consumed once, at turn end, to persist
+    /// `chat_turns.resume_at` for the auto-continue scheduler.
+    resume_at: Option<i64>,
     pub session_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -6414,6 +6457,7 @@ fn turn_ctx_from_stored(
         orx_retry_started: None,
         orx_retry_count: 0,
         terminal_error: None,
+        resume_at: None,
         session_id: session.id.clone(),
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
@@ -6501,6 +6545,14 @@ impl TurnCtx {
 
     pub fn mark_terminal_failure(&mut self, kind: impl Into<String>, message: impl Into<String>) {
         self.terminal_error = Some((kind.into(), message.into()));
+    }
+
+    /// Records when a scheduler should automatically replay this turn's
+    /// recovery action (e.g. a usage limit's parsed reset time), alongside
+    /// a `mark_terminal_failure` call. Persisted to `chat_turns.resume_at`
+    /// once the failure is written, if the turn indeed ends up `failed`.
+    pub fn set_resume_at(&mut self, resume_at_ms: i64) {
+        self.resume_at = Some(resume_at_ms);
     }
 
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
@@ -6632,7 +6684,13 @@ impl TurnCtx {
         }
     }
 
-    fn push_turn_failure(&mut self, kind: &str, message: String, recovery_action: &str) {
+    fn push_turn_failure(
+        &mut self,
+        kind: &str,
+        message: String,
+        recovery_action: &str,
+        resume_at: Option<i64>,
+    ) {
         self.clear_retry_status();
         let mut part = WirePart::tool("turn-recovery", "error", "error", Some(message));
         if let Some(state) = part.state.as_mut() {
@@ -6640,6 +6698,7 @@ impl TurnCtx {
                 "turnId": self.turn_id,
                 "errorKind": kind,
                 "recoveryAction": recovery_action,
+                "resumeAt": resume_at,
             }));
         }
         self.upsert_part_raw(part);
@@ -6670,6 +6729,7 @@ impl TurnCtx {
             orx_retry_started: None,
             orx_retry_count: 0,
             terminal_error: None,
+            resume_at: None,
             session_id: "test-session".into(),
             harness: "test".into(),
             native_session_id: None,
@@ -7310,7 +7370,7 @@ async fn process_run_wakeups(
             .send_hidden_message(&wakeup.chat_session_id, text, guard)
             .await
         {
-            Ok(TurnSubmission::Started(_)) => {
+            Ok(TurnSubmission::Started(turn_id)) => {
                 if !store.mark_run_wakeup_delivered(
                     &wakeup.run.id,
                     &wakeup.chat_session_id,
@@ -7320,6 +7380,19 @@ async fn process_run_wakeups(
                         "run wake-up claim expired before delivery was recorded"
                     ));
                 }
+                // The missing link the Slack run-outcome notification needs:
+                // which turn this wake-up's message landed on, and the
+                // experiment description as of right now, so completion can
+                // later tell whether the agent changed it during the turn.
+                store.set_run_wakeup_turn_id(&wakeup.run.id, &wakeup.chat_session_id, &turn_id)?;
+                let pre_description = store
+                    .get_local_experiment(&wakeup.run.experiment_id)?
+                    .and_then(|exp| exp.description);
+                store.set_run_wakeup_pre_turn_description(
+                    &wakeup.run.id,
+                    &wakeup.chat_session_id,
+                    pre_description.as_deref(),
+                )?;
             }
             Ok(
                 TurnSubmission::Queued(_)
@@ -7334,6 +7407,56 @@ async fn process_run_wakeups(
                 if !chat.is_busy(&wakeup.chat_session_id).await {
                     eprintln!("orx up: run watcher: {err}");
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Auto-continues failed turns whose scheduled resume time has arrived — a
+/// Claude usage limit's parsed (or fixed-fallback) reset time, set by
+/// `harness::claude::apply_usage_limit_failure`. `recover_turn` owns its own
+/// per-session lock and re-validates the turn's state, so this just replays
+/// each due turn's stored recovery action.
+async fn process_turn_resumes(
+    chat: &Arc<ChatHost>,
+    store: Store,
+    data_dir_move_in_progress: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    if data_dir_move_in_progress.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Ok(());
+    }
+    if !crate::config::auto_continue_on_limit_enabled() {
+        return Ok(());
+    }
+    for turn in store.list_due_turn_resumes()? {
+        // Always populated in practice: `resume_at` is only ever set
+        // alongside `fail_chat_turn`'s own `Some(action)`. Handled
+        // defensively rather than asserted, since a `continue` with nothing
+        // rescheduled just means this turn stops showing up as due.
+        let Some(action) = turn.recovery_action.clone() else {
+            continue;
+        };
+        if let Err(err) = chat
+            .recover_turn(
+                &turn.session_id,
+                &turn.id,
+                &action,
+                RecoveryOverrides::default(),
+            )
+            .await
+        {
+            // Most often the session is mid-turn already (a manual Continue
+            // raced this tick, or another turn started). Back off with
+            // jitter rather than hammering it every 3s, but give up after
+            // ~30 minutes so a permanently stuck session doesn't retry
+            // forever — it's still reachable by a manual Continue at that
+            // point, which is exactly today's behavior without this feature.
+            eprintln!("orx up: turn resume {}: {err}", turn.id);
+            if now_ms() - turn.updated_at < Duration::from_secs(30 * 60).as_millis() as i64 {
+                let jitter_ms = 15_000 + (now_ms().rem_euclid(15_000));
+                let _ = store.set_turn_resume_at(&turn.id, now_ms() + jitter_ms);
             }
         }
     }
@@ -7413,6 +7536,49 @@ fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutc
         Some(error) => SpawnOutcome::Failed(truncated(error.trim(), SPAWN_REPORT_LIMIT)),
         None => SpawnOutcome::Silent,
     })
+}
+
+/// The Slack "run synthesized" hook. Called only from a chat turn's own
+/// completion, and only once that turn has genuinely transitioned to
+/// completed (a real state change, not a no-op re-completion) — so a plain
+/// chat turn, and a turn that failed, never reach here at all; see the call
+/// site in `launch_turn_ctx_locked`. A no-op if `turn_id` was not a
+/// delivered run wake-up's turn.
+fn notify_run_synthesized_if_wakeup_turn(store: &Store, turn_id: &str) {
+    let Ok(Some(wakeup)) = store.run_wakeup_by_turn_id(turn_id) else {
+        return;
+    };
+    let Ok(Some(session)) = store.get_chat_session(&wakeup.chat_session_id) else {
+        return;
+    };
+    let Ok(Some(project)) = store.get_local_project(&wakeup.run.project_id) else {
+        return;
+    };
+    let Ok(Some(experiment)) = store.get_local_experiment(&wakeup.run.experiment_id) else {
+        return;
+    };
+    let outcome_text = match spawn_outcome(store, &session) {
+        Ok(SpawnOutcome::Reply(text)) => Some(text),
+        Ok(SpawnOutcome::Failed(text)) => Some(format!("Agent reported an error:\n{text}")),
+        Ok(SpawnOutcome::Interrupted) => {
+            Some("The turn was interrupted before finishing.".to_string())
+        }
+        Ok(SpawnOutcome::Silent) | Err(_) => None,
+    };
+    let pre_description = store
+        .run_wakeup_pre_turn_description(&wakeup.run.id, &wakeup.chat_session_id)
+        .unwrap_or(None);
+    let description_changed = pre_description.as_deref() != experiment.description.as_deref();
+    if let Err(err) = crate::notify_events::enqueue_run_synthesized(
+        store,
+        &wakeup,
+        &project,
+        &experiment,
+        outcome_text.as_deref(),
+        description_changed,
+    ) {
+        eprintln!("orx up: could not enqueue Slack run-outcome notification: {err}");
+    }
 }
 
 /// Where the helper's work is. Deliberately claims no branch: session worktrees
@@ -7694,6 +7860,12 @@ pub async fn watch_runs(
             process_chat_spawns(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
         {
             eprintln!("orx up: spawn watcher: {err}");
+        }
+        let Ok(store) = Store::open() else { continue };
+        if let Err(err) =
+            process_turn_resumes(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
+        {
+            eprintln!("orx up: turn resume watcher: {err}");
         }
     }
 }
@@ -9716,6 +9888,21 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
 
         let store = Store::open_at(dir.clone()).unwrap();
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Slack run-outcome hook is only ever called from a turn's success
+    /// path (see the call site in `launch_turn_ctx_locked`), so a failed
+    /// turn structurally never reaches it — nothing to enqueue-and-assert
+    /// there. This covers the other half explicitly: an ordinary turn (no
+    /// `chat_run_wakeups` row for its turn id at all) enqueues nothing even
+    /// though the hook does run for it.
+    #[test]
+    fn an_ordinary_turn_enqueues_no_slack_notification() {
+        let (store, dir) = temp_store("ordinary-turn");
+        notify_run_synthesized_if_wakeup_turn(&store, "turn_not_a_wakeup");
+        assert_eq!(store.list_pending_notifications(10).unwrap().len(), 0);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

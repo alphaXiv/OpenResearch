@@ -39,6 +39,33 @@ export function isTurnStatusPart(part: ChatPart): boolean {
   return part.id === "turn-retry" || part.id === "turn-recovery";
 }
 
+/** Claude's `Task`/`Agent`, OpenCode's `task`, and Codex's `subagent` all spawn
+ * a nested transcript — rendered as its own block rather than folded into a
+ * tool-call group. */
+export function isSpawnTool(tool: string | undefined): boolean {
+  const name = (tool ?? "").toLowerCase();
+  return name === "subagent" || name === "task" || name === "agent";
+}
+
+/** Count of spawn/task parts still running in the session's current
+ * (streaming) assistant message, recursed into nested sub-agent transcripts.
+ * Pure derivation off the message tree already held client-side — no new
+ * events. */
+export function countOpenSubagents(messages: ChatMessage[]): number {
+  const message = messages.at(-1);
+  if (message?.role !== "assistant") return 0;
+  return countOpenSubagentParts(message.parts);
+}
+
+function countOpenSubagentParts(parts: ChatPart[]): number {
+  let count = 0;
+  for (const part of parts) {
+    if (part.type === "tool" && isSpawnTool(part.tool) && part.state?.status === "running") count++;
+    if (part.children?.length) count += countOpenSubagentParts(part.children);
+  }
+  return count;
+}
+
 /** The last visible part, when it is a non-errored tool. */
 export function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {
@@ -109,7 +136,13 @@ export function isModelAccessLimitPart(part: ChatPart): boolean {
 
 export function isUsageLimitPart(part: ChatPart): boolean {
   if (isModelAccessLimitPart(part)) return true;
-  if (part.state?.input?.errorKind === "claude_usage_limit") return true;
+  // "claude_limit_terminal" unifies both detection paths (a structured
+  // rate-limit signal and a generic result error whose text just happens to
+  // describe one) once the backend recognizes the message — see
+  // `apply_usage_limit_failure` in harness/claude.rs. "claude_usage_limit"
+  // is kept for transcripts recorded before that unification.
+  if (part.state?.input?.errorKind === "claude_usage_limit"
+    || part.state?.input?.errorKind === "claude_limit_terminal") return true;
   const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
   if (part.type === "tool" && part.tool === "error" && text
     && /usageLimitExceeded|rateLimitExceeded|insufficient_quota|(?:usage|rate|session) limit|(?:exceeded|exhausted) (?:your |the |current )*quota|insufficient (?:credits|balance)|(?:credit|quota)[ _-](?:exhausted|exceeded)/i.test(text)) return true;

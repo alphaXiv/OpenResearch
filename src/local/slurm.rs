@@ -138,6 +138,7 @@ pub async fn submit_local_slurm_with_source(
         source_digest: None,
         source_path: None,
         source_size: None,
+        run_dir: None,
     };
     source.apply_to_descriptor(&mut descriptor);
     if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
@@ -163,6 +164,11 @@ pub async fn submit_local_slurm_with_source(
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;
+    if let Err(err) =
+        crate::notify_events::enqueue_job_submitted(&store, &project, &exp, &run, &descriptor)
+    {
+        eprintln!("orx up: could not enqueue Slack job-submitted notification: {err}");
+    }
 
     spawn_detached_supervise(&run_id)?;
     Ok(run)

@@ -583,6 +583,46 @@ backend_adapter!(
 );
 
 backend_adapter!(
+    SgeCompute,
+    "sge",
+    "Sun Grid Engine",
+    true,
+    false,
+    false,
+    "SSH tar stream",
+    false,
+    preflight | args | {
+        let settings = crate::jobs::sge::load_settings()?.unwrap_or_default();
+        let host = args
+            .host
+            .as_deref()
+            .or(settings.host.as_deref())
+            .ok_or_else(|| anyhow!("Sun Grid Engine requires --host or a configured host."))?;
+        // Reject an unknown gpu_type before any network round-trip.
+        crate::jobs::sge::resolve_resources(args.flavor.as_deref(), &settings)?;
+        settings.resolved_work_dir()?;
+        let check = crate::jobs::sge::preflight(host).await;
+        if check.auth_blocked || (!check.reachable && !check.master_running) {
+            return Ok(not_ready(format!(
+                "{host} needs a second factor (Duo) that orx's background connections cannot \
+                 answer. Run `{orx} ssh connect {host}` once, approve the prompt, then retry. \
+                 A plain `ssh {host}` will not do — orx uses its own private ControlPath.",
+                orx = crate::invocation::orx()
+            )));
+        }
+        if !check.reachable || !check.sge_found || !check.tools_found {
+            return Ok(not_ready(check.error.as_deref().unwrap_or(
+                "The Grid Engine host needs bash, tar, qsub, qstat, qdel, and qacct.",
+            )));
+        }
+        ready()
+    },
+    submit | args,
+    source,
+    run_id | crate::local::sge::submit_local_sge_with_source(args, source, run_id).await
+);
+
+backend_adapter!(
     RayCompute,
     "ray",
     "Ray Jobs",
@@ -635,6 +675,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "k8s" => Ok(Box::new(KubernetesCompute)),
         "ssh" => Ok(Box::new(SshCompute)),
         "slurm" => Ok(Box::new(SlurmCompute)),
+        "sge" => Ok(Box::new(SgeCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
         _ => Err(anyhow!("Unknown compute backend '{id}'.")),
@@ -653,8 +694,15 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
     if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
         return Err(anyhow!("--manifest only applies with --backend k8s."));
     }
-    if args.host.is_some() && !matches!(args.backend.as_deref(), Some("ssh") | Some("slurm")) {
-        return Err(anyhow!("--host only applies with --backend ssh or slurm."));
+    if args.host.is_some()
+        && !matches!(
+            args.backend.as_deref(),
+            Some("ssh") | Some("slurm") | Some("sge")
+        )
+    {
+        return Err(anyhow!(
+            "--host only applies with --backend ssh, slurm, or sge."
+        ));
     }
     if args.org.is_some() && args.backend.as_deref() != Some("openresearch") {
         return Err(anyhow!("--org only applies with --backend openresearch."));
@@ -683,7 +731,8 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
             return Err(anyhow!(
                 "Unknown --backend '{}'. Local experiments support: hf (Hugging Face Jobs), \
                  modal (Modal serverless GPUs), k8s (your Kubernetes cluster), ssh (your own box), \
-                 slurm (your Slurm cluster), ray (a Ray Jobs cluster), \
+                 slurm (your Slurm cluster), sge (your Sun Grid Engine cluster), \
+                 ray (a Ray Jobs cluster), \
                  openresearch (an ephemeral OpenResearch box), tinker (local controller with remote model compute), \
                  local (this machine).",
                 backend
@@ -740,6 +789,7 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         source_digest: None,
         source_path: None,
         source_size: None,
+        run_dir: None,
     };
     source.0.apply_to_descriptor(&mut descriptor);
     let now = crate::store::now_ms();
@@ -909,6 +959,40 @@ mod tests {
             capabilities.source_transport,
             "local controller, remote model compute"
         );
+    }
+
+    /// `capabilities()` drops any id in BACKENDS that `backend()` cannot
+    /// resolve (it filter_maps the Result), so a half-registered backend simply
+    /// vanishes from the API instead of erroring. Assert it is really there.
+    #[test]
+    fn sge_is_registered_and_reachable_through_the_registry() {
+        let capabilities = backend("sge").unwrap().capabilities();
+        assert_eq!(capabilities.id, "sge");
+        assert_eq!(capabilities.label, "Sun Grid Engine");
+        assert!(capabilities.remote);
+        assert_eq!(capabilities.source_transport, "SSH tar stream");
+        assert!(
+            crate::compute::capabilities().iter().any(|c| c.id == "sge"),
+            "sge must survive the BACKENDS -> backend() filter_map"
+        );
+        assert!(crate::local::BACKENDS.contains(&"sge"));
+        assert!(crate::local::FLAVORED_BACKENDS.contains(&"sge"));
+    }
+
+    /// `--host` is gated by a hardcoded `matches!`, which is the single easiest
+    /// thing to forget — and it fails only at launch, long after the backend
+    /// otherwise looks wired up.
+    #[test]
+    fn sge_accepts_host_and_flavor() {
+        let mut args = tinker_args();
+        args.backend = Some("sge".into());
+        args.host = Some("scc1".into());
+        assert!(validate_run_args(&args).is_ok());
+        args.flavor = Some("A100:2".into());
+        assert!(validate_run_args(&args).is_ok());
+        // But the options that belong to other backends are still rejected.
+        args.manifest = Some("k8s.yaml".into());
+        assert!(validate_run_args(&args).is_err());
     }
 
     #[test]

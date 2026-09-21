@@ -77,6 +77,10 @@ const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
         content: include_str!("../../agent-skills/orx-compute/references/slurm.md"),
     },
     AgentSkillResource {
+        path: "references/sge.md",
+        content: include_str!("../../agent-skills/orx-compute/references/sge.md"),
+    },
+    AgentSkillResource {
         path: "references/ray.md",
         content: include_str!("../../agent-skills/orx-compute/references/ray.md"),
     },
@@ -145,7 +149,7 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
-const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
+const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, sge/SCC, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
 const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
 const S_COMPUTE: AgentSkill = AgentSkill {
