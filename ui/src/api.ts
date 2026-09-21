@@ -99,6 +99,33 @@ export interface Run {
   endedAt?: number | null;
   exitCode?: number | null;
   cancelRequested: boolean;
+  /** The run's supervisor's last heartbeat (unix millis) — absent for a
+   *  backend that doesn't write one (anything but SGE today), or before its
+   *  first poll. */
+  supervisorSeenAt?: number | null;
+  /** `polling | stalled | inspect-error | blocked-wait | gone-wait |
+   *  unknown-state` — see `run_sge`'s heartbeat sites in supervise.rs. */
+  supervisorState?: string | null;
+}
+
+/** Human text for a run's `supervisorState`, or `null` for the ordinary
+ *  "polling" case — callers hide the badge entirely then, since a healthy
+ *  watcher isn't news. Mirrors the states `run_sge` (supervise.rs) writes. */
+export function supervisorStateLabel(state: string | null | undefined): string | null {
+  switch (state) {
+    case "stalled":
+      return m.supervisor_state_stalled();
+    case "inspect-error":
+      return m.supervisor_state_inspect_error();
+    case "blocked-wait":
+      return m.supervisor_state_blocked_wait();
+    case "gone-wait":
+      return m.supervisor_state_gone_wait();
+    case "unknown-state":
+      return m.supervisor_state_unknown();
+    default:
+      return null;
+  }
 }
 
 /** SGE has no separate "queued" run status — a job sitting in the grid
