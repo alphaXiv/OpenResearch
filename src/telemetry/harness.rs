@@ -159,6 +159,33 @@ impl SetupAttempt {
 }
 
 #[cfg(test)]
+pub(super) async fn assert_production_contract() {
+    let mut settings = Settings::default();
+    ensure_initial(
+        &mut settings,
+        "cli-release-contract-test",
+        &json!({"harnesses": []}),
+    );
+    let snapshot = settings.harness_snapshot.unwrap();
+    assert_eq!(
+        post_payload(&snapshot.payload).await,
+        DeliveryOutcome::Acknowledged
+    );
+    for harness in IDS {
+        let payload = build_payload(
+            "harness_setup",
+            "cli-release-contract-test",
+            json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":harness,"action":"login","trigger":"manual","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+        );
+        assert_eq!(
+            post_payload(&payload).await,
+            DeliveryOutcome::Acknowledged,
+            "{harness}"
+        );
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn excerpt_for_test(output: &str) -> Option<String> {
     safe_error_excerpt(output)
 }
@@ -299,6 +326,41 @@ mod tests {
         assert_eq!(first, restarted.harness_snapshot.unwrap().payload);
         assert_eq!(first["events"].as_array().unwrap().len(), IDS.len());
     }
+    #[test]
+    fn snapshot_includes_antigravity_and_preserves_unknown_states() {
+        let mut settings = Settings::default();
+        ensure_initial(
+            &mut settings,
+            "installation",
+            &json!({"harnesses": [{
+                "id": "antigravity", "installed": true, "authenticated": true,
+                "authState": "ready", "authMethod": "oauth", "agentReady": true, "version": "1"
+            }]}),
+        );
+        let snapshot = settings.harness_snapshot.unwrap();
+        let events = snapshot.payload["events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        assert_eq!(
+            events
+                .iter()
+                .map(|e| e["properties"]["harness"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["claude-code", "codex", "opencode", "cursor", "antigravity"]
+        );
+        assert_eq!(
+            events[4]["properties"],
+            json!({
+                "harness": "antigravity", "installation": "installed", "auth": "signed_in",
+                "authEvidence": "cli_status", "compatibility": "no_known_requirement",
+                "usability": "usable", "localConfigured": false
+            })
+        );
+        for event in &events[..4] {
+            assert_eq!(event["properties"]["installation"], "unknown");
+            assert_eq!(event["properties"]["usability"], "unknown");
+        }
+    }
+
     #[test]
     fn distinguishes_free_auth_unknown_and_unsupported() {
         let base = json!({"installed":true,"authenticated":false,"agentReady":true,"authState":"ready","version":"1"});
