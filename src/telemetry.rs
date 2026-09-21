@@ -166,6 +166,11 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    /// Which Slack notifications are enabled (Settings → Slack). Absent (an
+    /// older settings.json, or a field never touched) falls back to `Default`
+    /// — both on — via the outer `#[serde(default)]` on `Settings::slack_events`.
+    #[serde(default)]
+    pub slack_events: SlackEventSettings,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -175,6 +180,33 @@ pub(crate) struct ProfilePaper {
     pub paper_id: String,
     #[serde(default)]
     pub title: Option<String>,
+}
+
+/// Which of T6's two Slack events a user wants delivered. Both default on —
+/// a user who bothered to save a webhook almost certainly wants both, and
+/// this is the one settings struct where "off" must be an explicit save, not
+/// merely an absent field (unlike `telemetry_disabled`, where absence means
+/// enabled by a different mechanism entirely).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SlackEventSettings {
+    #[serde(default = "default_true")]
+    pub job_submitted: bool,
+    #[serde(default = "default_true")]
+    pub run_synthesized: bool,
+}
+
+impl Default for SlackEventSettings {
+    fn default() -> Self {
+        Self {
+            job_submitted: true,
+            run_synthesized: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -262,6 +294,19 @@ pub(crate) fn set_profile(profile: ResearchProfile) -> std::io::Result<()> {
         s.background = profile.background.filter(|value| !value.is_empty());
         s.linked_papers = profile.papers;
     })
+}
+
+/// Which Slack events are enabled (Settings → Slack). `crate::config`
+/// re-exports this as `slack_event_settings`.
+pub(crate) fn slack_event_settings() -> SlackEventSettings {
+    load_settings().map(|s| s.slack_events).unwrap_or_default()
+}
+
+/// Persist the Slack event toggles, preserving every other settings field
+/// (same `mutate_settings` guarantees as the data dir). `crate::config`
+/// re-exports this as `set_slack_event_settings`.
+pub(crate) fn set_slack_event_settings(events: SlackEventSettings) -> std::io::Result<()> {
+    mutate_settings(|s| s.slack_events = events)
 }
 
 /// Literature sources the user has disabled (their `LitSource::as_str()` names).
@@ -1104,21 +1149,22 @@ pub(crate) fn capture_experiment_started(kind: &str, local: bool, target: Option
     capture("experiment_started", extra);
 }
 
+/// Serializes every test in this crate that mutates the process-global
+/// `XDG_CONFIG_HOME` (or the other `OPT_VARS` below) — shared with
+/// `config`'s own tests (see `config::tests`), since both ultimately bottom
+/// out in the same `config_dir()`. A test elsewhere that touches
+/// `XDG_CONFIG_HOME` or `config_dir()` must hold this lock, not a
+/// module-local one, or it races under the default multithreaded test
+/// runner.
+#[cfg(test)]
+pub(crate) static XDG_CONFIG_HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
+    use std::sync::MutexGuard;
 
-    // Serializes the telemetry tests below, which mutate the process-global
-    // variables in OPT_VARS. IMPORTANT: this lock
-    // is telemetry-module-local — it does NOT protect against a test in ANOTHER
-    // module reading those same vars concurrently under the default
-    // multithreaded test runner. Today no other test reads them at runtime (the
-    // k8s/slurm/ssh tests are pure functions; localbox uses a disjoint
-    // ORX_DATA_DIR), so there's no race. Any NEW test elsewhere that touches
-    // these vars or config_dir() must isolate itself (e.g. its own temp
-    // XDG_CONFIG_HOME) — it cannot rely on this lock.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use super::XDG_CONFIG_HOME_TEST_LOCK as ENV_LOCK;
 
     struct EnvGuard {
         _lock: MutexGuard<'static, ()>,

@@ -24,6 +24,7 @@ import {
   getHfSettingsQuery,
   getEnvVarsQuery,
   getTelemetryQuery,
+  getSlackSettingsQuery,
   getProjectDefaultsQuery,
   getProjectGitStatusQuery,
   getDataDirQuery,
@@ -59,6 +60,10 @@ import {
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
+  saveSlackWebhook,
+  deleteSlackWebhook,
+  setSlackEvents,
+  slackPreflight,
   saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
@@ -88,6 +93,8 @@ import {
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
   type TelemetrySettings,
+  type SlackSettings,
+  type SlackPreflightResult,
   type Harness,
   type HarnessId,
   type HfSettings,
@@ -3024,6 +3031,124 @@ function TelemetryTab() {
   );
 }
 
+function SlackSection() {
+  const deleteWebhookMutation = useMutation({ mutationFn: deleteSlackWebhook });
+  const setEventsMutation = useMutation({ mutationFn: setSlackEvents });
+
+  const settingsOptions = getSlackSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const patch = (next: Partial<SlackSettings>) =>
+    setScopedQueryData(settingsOptions.queryKey, {
+      hasWebhook: settings?.hasWebhook ?? false,
+      events: settings?.events ?? { jobSubmitted: false, runSynthesized: false },
+      ...next,
+    });
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? settingsQuery.error?.message ?? null;
+
+  const removeWebhook = () => {
+    if (saving) return;
+    setSaving(true);
+    setError(null);
+    void deleteWebhookMutation.mutateAsync()
+      .then((result) => patch({ hasWebhook: result.hasWebhook }))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  const toggleEvent = (key: "jobSubmitted" | "runSynthesized") => {
+    if (!settings || saving) return;
+    setSaving(true);
+    setError(null);
+    void setEventsMutation.mutateAsync({ ...settings.events, [key]: !settings.events[key] })
+      .then((events) => patch({ events }))
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  const runTest = () => {
+    // No persisted state to render for a one-off probe; report through a toast instead.
+    if (!settings?.hasWebhook || testing) return;
+    setTesting(true);
+    void slackPreflight()
+      .then((result: SlackPreflightResult) => {
+        showAlert(result.ok ? m.settings_page_slack_test_success() : (result.error ?? m.settings_page_slack_test_failed()), result.ok ? "success" : "error");
+      })
+      .catch((err) => showAlert(err instanceof Error ? err.message : String(err), "error"))
+      .finally(() => setTesting(false));
+  };
+
+  return (
+    <>
+      <h2>{m.settings_page_slack()}</h2>
+      {!settings ? (
+        error ? <div className="error">{error}</div> : <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
+      ) : (
+        <div className={`${SETTINGS_CARD_CLASS_NAME} mt-3`}>
+          <p>{m.settings_page_slack_description()}</p>
+          <div className={KV_CLASS_NAME}>
+            <span className="k">{m.settings_page_slack_webhook()}</span>
+            <span className="v">
+              <Badge variant={settings.hasWebhook ? "success" : "default"}>
+                {settings.hasWebhook ? m.settings_saved() : m.settings_not_set()}
+              </Badge>
+            </span>
+          </div>
+          {settings.hasWebhook ? (
+            <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+              <Button disabled={saving} onClick={removeWebhook}>
+                {saving ? m.settings_removing() : m.settings_remove_webhook()}
+              </Button>
+            </div>
+          ) : (
+            <TokenForm
+              save={saveSlackWebhook}
+              onSaved={(result) => patch({ hasWebhook: result.hasWebhook })}
+              placeholder={m.settings_page_slack_webhook_url_placeholder()}
+              createHref="https://api.slack.com/messaging/webhooks"
+            />
+          )}
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_slack_job_submitted_title()}</div>
+              <p>{m.settings_page_slack_job_submitted_description()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.events.jobSubmitted}
+              aria-label={m.settings_page_slack_job_submitted_title()}
+              disabled={!settings || saving}
+              onClick={() => toggleEvent("jobSubmitted")}
+            />
+          </div>
+          <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
+            <div>
+              <div className="project-default-title text-base font-medium">{m.settings_page_slack_run_synthesized_title()}</div>
+              <p>{m.settings_page_slack_run_synthesized_description()}</p>
+            </div>
+            <Switch
+              type="button"
+              checked={settings.events.runSynthesized}
+              aria-label={m.settings_page_slack_run_synthesized_title()}
+              disabled={!settings || saving}
+              onClick={() => toggleEvent("runSynthesized")}
+            />
+          </div>
+          <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+            <Button disabled={!settings.hasWebhook || testing} onClick={runTest}>
+              {testing ? m.settings_page_testing() : m.settings_page_slack_test()}
+            </Button>
+          </div>
+          {error && <div className="error">{error}</div>}
+        </div>
+      )}
+    </>
+  );
+}
+
 /** Offered only inside the macOS app: the bundle carries an `orx` its owner's
  *  terminal can't see until it's linked onto PATH. */
 function InstallCliRow({
@@ -3910,6 +4035,9 @@ export function SettingsView({
             )}
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
+            </section>
+            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <SlackSection />
             </section>
             {!remote && (
               <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>

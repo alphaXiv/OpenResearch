@@ -141,6 +141,12 @@ export const getTelemetryQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getSlackSettingsQuery = () => queryOptions({
+  queryKey: workspaceKey("getSlackSettings"),
+  queryFn: ({ signal }) => api.getSlackSettings(signal),
+  staleTime: 300_000,
+});
+
 export const getHarnessesQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnesses"),
   queryFn: ({ signal }) => api.getHarnesses(false, false, signal),
