@@ -4227,7 +4227,21 @@ export function ChatPanel({
   const composerStashRef = useRef(new Map<string, ComposerStash>());
   const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
   composerLiveRef.current = { draft, attachments, annotations };
-  const composerPrefillRef = useRef<string | null>(null);
+  // On offer until the user has sent anything in the demo: a send either adds
+  // a session or moves a recorded session's leaf off its seeded message. The
+  // nudge anchors to the first scope that had it — seeding it in every scope
+  // would read as the draft bleeding across chats.
+  const composerPrefillOffer =
+    projectId === DEMO_PROJECT_ID &&
+      sessions.length > 0 &&
+      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      ? DEMO_RUN_EXPERIMENT_PROMPT
+      : null;
+  const prefillScopeRef = useRef<string | null>(null);
+  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
+    prefillScopeRef.current = stashKey;
+  }
+  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
   // Layout effect: the restore must land before paint or the outgoing chat's
   // draft flashes for a frame inside the incoming one.
   useLayoutEffect(() => {
@@ -4239,11 +4253,11 @@ export function ChatPanel({
     setAttachments(restored.attachments);
     setAnnotations(restored.annotations);
     return () => {
-      const stashed = composerStashContent(composerLiveRef.current, composerPrefillRef.current);
+      const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
       if (stashed) composerStashRef.current.set(stashKey, stashed);
       else composerStashRef.current.delete(stashKey);
     };
-  }, [stashKey]);
+  }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
@@ -5009,15 +5023,6 @@ export function ChatPanel({
       setComposerCursor(prompt.length);
     });
   };
-  // On offer until the user has sent anything in the demo: a send either adds
-  // a session or moves a recorded session's leaf off its seeded message.
-  const composerPrefill =
-    projectId === DEMO_PROJECT_ID &&
-      sessions.length > 0 &&
-      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
-      ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
-  composerPrefillRef.current = composerPrefill;
   // Seeds without taking focus; focus may still belong to the welcome dialog.
   // Declared after the stash-restore effect so `current` below is the scope's
   // just-restored draft.
@@ -5026,7 +5031,7 @@ export function ChatPanel({
     setDraft((current) => current || composerPrefill);
     setSkillMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
-  }, [composerPrefill, stashKey]);
+  }, [composerPrefill]);
   useEffect(() => {
     if (composerFocusNonce === 0) return;
     // The welcome dialog restores its previous focus on unmount; run after that.
@@ -5604,6 +5609,7 @@ export function ChatPanel({
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
     composerStashRef.current.delete(sessionId);
+    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
