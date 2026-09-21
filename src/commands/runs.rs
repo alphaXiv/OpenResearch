@@ -49,6 +49,7 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
                 },
                 format_duration(r.duration_secs),
                 r.updated_display.clone(),
+                r.job_label.clone().unwrap_or_else(|| "—".to_string()),
             ]
         })
         .collect();
@@ -61,6 +62,7 @@ pub async fn run(args: crate::RunsArgs) -> Result<()> {
             "COMMIT",
             "DURATION",
             "UPDATED",
+            "JOB",
         ],
         &rows,
     );

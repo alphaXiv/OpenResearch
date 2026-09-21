@@ -1,6 +1,7 @@
 export { Badge } from "./Badge";
 export type { BadgeVariant } from "./Badge";
 export { Button, ButtonLink } from "./Button";
+export { CopyButton } from "./CopyButton";
 export { IconButton, IconButtonLink } from "./IconButton";
 export { Input } from "./Input";
 export type { InputProps } from "./Input";

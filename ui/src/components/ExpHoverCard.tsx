@@ -16,6 +16,7 @@ import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
 import {
+  backendJobLabel,
   backendKind,
   fmtDuration,
   fmtNumber,
@@ -29,6 +30,7 @@ import { countChanges } from "./GitDiff";
 import { StatusBadge } from "./StatusBadge";
 import { useMeasure, usePopoverPosition } from "./tourGeometry";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
+import { CopyButton } from "./ui";
 
 const CARD_W = 380;
 const GAP = 12; // node ↔ card
@@ -279,6 +281,14 @@ export function ExpHoverCard({
           ])}
         </span>
         {latestRun && backendKind(latestRun.backend) && <BackendBadge backend={latestRun.backend} />}
+        {latestRun && backendJobLabel(latestRun.backend) && (
+          <span className="hc-job inline-flex items-center gap-1 min-w-0">
+            <code className="text-text overflow-hidden text-ellipsis whitespace-nowrap max-w-32">
+              {backendJobLabel(latestRun.backend)}
+            </code>
+            <CopyButton text={backendJobLabel(latestRun.backend)} title={m.md_copy()} />
+          </span>
+        )}
         {duration && <span>{duration}</span>}
         {latestRun && <span>{timeAgo(latestRun.createdAt)}</span>}
       </div>

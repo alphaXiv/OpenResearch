@@ -83,7 +83,7 @@ export interface Experiment {
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
-export type RunDisplayStatus = RunStatus | "cancelling";
+export type RunDisplayStatus = RunStatus | "cancelling" | "queued";
 
 export interface Run {
   id: string;
@@ -99,11 +99,47 @@ export interface Run {
   endedAt?: number | null;
   exitCode?: number | null;
   cancelRequested: boolean;
+  /** The run's supervisor's last heartbeat (unix millis) — absent for a
+   *  backend that doesn't write one (anything but SGE today), or before its
+   *  first poll. */
+  supervisorSeenAt?: number | null;
+  /** `polling | stalled | inspect-error | blocked-wait | gone-wait |
+   *  unknown-state` — see `run_sge`'s heartbeat sites in supervise.rs. */
+  supervisorState?: string | null;
 }
 
-export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): RunDisplayStatus {
+/** Human text for a run's `supervisorState`, or `null` for the ordinary
+ *  "polling" case — callers hide the badge entirely then, since a healthy
+ *  watcher isn't news. Mirrors the states `run_sge` (supervise.rs) writes. */
+export function supervisorStateLabel(state: string | null | undefined): string | null {
+  switch (state) {
+    case "stalled":
+      return m.supervisor_state_stalled();
+    case "inspect-error":
+      return m.supervisor_state_inspect_error();
+    case "blocked-wait":
+      return m.supervisor_state_blocked_wait();
+    case "gone-wait":
+      return m.supervisor_state_gone_wait();
+    case "unknown-state":
+      return m.supervisor_state_unknown();
+    default:
+      return null;
+  }
+}
+
+/** SGE has no separate "queued" run status — a job sitting in the grid
+ *  engine's queue (`qw`/`hqw`, or freshly submitted and not yet polled)
+ *  stores the same generic `"starting"` every backend uses. That's correct
+ *  as stored state (still not live/running), but reads as misleading on the
+ *  SCC where "starting" implies progress a queued job hasn't made yet — so
+ *  this relabels it for display only; nothing downstream that keys off the
+ *  stored `status` (liveness checks, SSE diffing, the CLI) changes. */
+export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested" | "backend">): RunDisplayStatus {
   const live = run.status === "running" || run.status === "starting";
-  return live && run.cancelRequested ? "cancelling" : run.status;
+  if (live && run.cancelRequested) return "cancelling";
+  if (run.status === "starting" && backendKind(run.backend) === "sge_job") return "queued";
+  return run.status;
 }
 
 const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
@@ -2165,6 +2201,51 @@ export function backendDetail(backend: Run["backend"]): string {
   if (backendKind(backend) === "ray_job") return "";
   if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
   return "";
+}
+
+/** A short, human-legible identifier for the job a run's backend descriptor
+ *  points at — the thing a person would read to tell one compute job apart
+ *  from another of the same kind (an SGE job id, a Slurm job id, an ssh
+ *  host). Mirrors `BackendDescriptor::job_label` in src/jobs/mod.rs; keep the
+ *  two in sync. Empty before submission has recorded a job id, or for a kind
+ *  this doesn't recognize. */
+export function backendJobLabel(backend: Run["backend"]): string {
+  if (!backend) return "";
+  const kind = backendKind(backend);
+  const jobId = typeof backend.jobId === "string" ? backend.jobId : "";
+  const namespace = typeof backend.namespace === "string" ? backend.namespace : "";
+  switch (kind) {
+    case "sge_job":
+      return jobId && namespace ? `SGE ${jobId} @ ${namespace}` : "";
+    case "slurm_job":
+      return jobId && namespace ? `Slurm ${jobId} @ ${namespace}` : "";
+    case "ssh_job":
+      return namespace ? `ssh ${namespace}` : "";
+    case "hf_job":
+      return jobId && namespace ? `HF ${namespace}/${jobId}` : "";
+    case "k8s_job":
+      return jobId && namespace ? `k8s ${namespace}/${jobId}` : "";
+    case "modal_job":
+      return jobId ? `Modal ${jobId}` : "";
+    case "ray_job":
+      return jobId && namespace ? `Ray ${jobId} @ ${namespace}` : "";
+    case "openresearch_job":
+      return jobId && namespace ? `OpenResearch ${jobId} (${namespace})` : "";
+    case "local_job":
+      return "Local";
+    case "tinker_job":
+      return "Tinker";
+    default:
+      return "";
+  }
+}
+
+/** The absolute remote run directory recorded on a run's backend descriptor
+ *  (`sge_job` today — pinned at submit so a later `workDir` edit can't strand
+ *  a live run's supervisor). Empty when the backend doesn't record one. */
+export function backendRunDir(backend: Run["backend"]): string {
+  if (!backend) return "";
+  return typeof backend.runDir === "string" ? backend.runDir : "";
 }
 
 export interface LocalModelConnection {

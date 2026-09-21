@@ -5,10 +5,13 @@ import {
   Clock3,
   FolderTree,
   GitCommitHorizontal,
+  Hash,
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
+  backendJobLabel,
+  backendRunDir,
   fmtDuration,
   runDisplayStatus,
   timeAgo,
@@ -21,7 +24,7 @@ import { BackendBadge } from "./BackendLogos";
 import { BranchPill } from "./BranchPill";
 import { Md } from "./Md";
 import { StatusBadge } from "./StatusBadge";
-import { Button } from "./ui";
+import { Button, CopyButton } from "./ui";
 
 const EXPERIMENT_OVERVIEW_SECTION_CLASS_NAME = [
   "experiment-overview-section mt-5.5 pt-4.5 border-t border-t-border-variant",
@@ -120,6 +123,13 @@ export function ExperimentOverview({
               <div className="experiment-overview-meta flex items-center flex-wrap gap-y-2.5 gap-x-4.5 text-text text-sm [&_svg]:text-muted [&_.backend-badge]:text-text [&_.status-badge]:text-text [&_>_span]:inline-flex [&_>_span]:items-center [&_>_span]:gap-[5px] [&_code]:text-text [&_code]:text-xs">
                 <StatusBadge status={runDisplayStatus(latestRun)} />
                 <BackendBadge backend={latestRun.backend} />
+                {backendJobLabel(latestRun.backend) && (
+                  <span title={m.experiment_overview_job()}>
+                    <Hash size={13} />
+                    <code>{backendJobLabel(latestRun.backend)}</code>
+                    <CopyButton text={backendJobLabel(latestRun.backend)} title={m.md_copy()} />
+                  </span>
+                )}
                 <span title={m.experiment_overview_started()}>
                   <CalendarDays size={13} />
                   {fmtDate(latestRun.createdAt)}
@@ -142,6 +152,16 @@ export function ExperimentOverview({
               </div>
               {latestRun.command && (
                 <code className={EXPERIMENT_OVERVIEW_COMMAND_CLASS_NAME}>$ {latestRun.command}</code>
+              )}
+              {backendRunDir(latestRun.backend) && (
+                <div
+                  className="experiment-overview-run-dir flex items-center gap-1.5 mt-1.5 text-muted text-xs [&_code]:text-text [&_code]:wrap-anywhere"
+                  title={m.experiment_overview_run_dir()}
+                >
+                  <FolderTree size={12} />
+                  <code>{backendRunDir(latestRun.backend)}</code>
+                  <CopyButton text={backendRunDir(latestRun.backend)} title={m.md_copy()} />
+                </div>
               )}
               {latestRun.resultMarkdown && (
                 <div
@@ -183,6 +203,7 @@ export function ExperimentOverview({
               {runs.map((run, index) => (
                 <button
                   key={run.id}
+                  title={backendJobLabel(run.backend) || undefined}
                   {...tabOpenGestureHandlers<HTMLButtonElement>((intent) =>
                     onOpenLogs(run.id, intent),
                   )}

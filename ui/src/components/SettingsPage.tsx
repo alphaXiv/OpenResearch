@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  backendJobLabel,
   deleteEnvVar,
   deleteOverleafSession,
   deleteOverleafToken,
@@ -130,6 +131,7 @@ import {
   Badge,
   Button,
   ButtonLink,
+  CopyButton,
   IconButton,
   IconButtonLink,
   Input,
@@ -3697,6 +3699,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
         <thead>
           <tr>
             <th>{m.settings_page_backend()}</th>
+            <th>{m.settings_page_job()}</th>
             <th>{m.settings_page_status()}</th>
             <th>{m.settings_page_started()}</th>
             <th>{m.settings_page_runtime()}</th>
@@ -3706,6 +3709,7 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
           {instances.map((inst) => {
             // HF jobs carry their dashboard URL; Modal stores only a sandbox id.
             const url = typeof inst.backend?.url === "string" ? inst.backend.url : undefined;
+            const jobLabel = backendJobLabel(inst.backend);
             return (
               <tr key={inst.id}>
                 <td>
@@ -3724,6 +3728,14 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
                       </IconButtonLink>
                     )}
                   </span>
+                </td>
+                <td>
+                  {jobLabel && (
+                    <span className="job-cell inline-flex items-center gap-1 min-w-0">
+                      <code className="text-text text-sm">{jobLabel}</code>
+                      <CopyButton text={jobLabel} title={m.md_copy()} />
+                    </span>
+                  )}
                 </td>
                 <td>
                   <StatusBadge status={runDisplayStatus(inst)} />

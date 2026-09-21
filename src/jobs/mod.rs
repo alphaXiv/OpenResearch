@@ -243,6 +243,51 @@ impl BackendDescriptor {
             ssh::HostKeyPolicy::Ephemeral,
         ))
     }
+
+    /// A short, human-legible identifier for the job this descriptor points
+    /// at — the thing a person would read to tell one compute job apart from
+    /// another of the same backend kind (an SGE job id, a Slurm job id, an
+    /// ssh host). `None` before submission has recorded enough to say
+    /// anything (no `job_id` yet), or for a kind this doesn't recognize.
+    pub fn job_label(&self) -> Option<String> {
+        match self.kind.as_str() {
+            "sge_job" => Some(format!(
+                "SGE {} @ {}",
+                self.job_id.as_deref()?,
+                self.namespace.as_deref()?
+            )),
+            "slurm_job" => Some(format!(
+                "Slurm {} @ {}",
+                self.job_id.as_deref()?,
+                self.namespace.as_deref()?
+            )),
+            "ssh_job" => Some(format!("ssh {}", self.namespace.as_deref()?)),
+            "hf_job" => Some(format!(
+                "HF {}/{}",
+                self.namespace.as_deref()?,
+                self.job_id.as_deref()?
+            )),
+            "k8s_job" => Some(format!(
+                "k8s {}/{}",
+                self.namespace.as_deref()?,
+                self.job_id.as_deref()?
+            )),
+            "modal_job" => Some(format!("Modal {}", self.job_id.as_deref()?)),
+            "ray_job" => Some(format!(
+                "Ray {} @ {}",
+                self.job_id.as_deref()?,
+                self.namespace.as_deref()?
+            )),
+            "openresearch_job" => Some(format!(
+                "OpenResearch {} ({})",
+                self.job_id.as_deref()?,
+                self.namespace.as_deref()?
+            )),
+            "local_job" => Some("Local".to_string()),
+            "tinker_job" => Some("Tinker".to_string()),
+            _ => None,
+        }
+    }
 }
 
 /// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
@@ -358,6 +403,51 @@ mod tests {
         let opts = target.extra_opts.join(" ");
         assert!(opts.contains("-p 22022"), "{opts}");
         assert!(opts.contains("StrictHostKeyChecking=no"), "{opts}");
+    }
+
+    #[test]
+    fn job_label_names_the_job_per_backend() {
+        let mut d =
+            BackendDescriptor::parse(r#"{"kind":"sge_job","namespace":"scc1","jobId":"1234567"}"#)
+                .unwrap();
+        assert_eq!(d.job_label().as_deref(), Some("SGE 1234567 @ scc1"));
+
+        d.kind = "slurm_job".to_string();
+        assert_eq!(d.job_label().as_deref(), Some("Slurm 1234567 @ scc1"));
+
+        d.kind = "ssh_job".to_string();
+        assert_eq!(d.job_label().as_deref(), Some("ssh scc1"));
+
+        let hf =
+            BackendDescriptor::parse(r#"{"kind":"hf_job","namespace":"my-org","jobId":"abcdef"}"#)
+                .unwrap();
+        assert_eq!(hf.job_label().as_deref(), Some("HF my-org/abcdef"));
+
+        let ray = BackendDescriptor::parse(
+            r#"{"kind":"ray_job","namespace":"10.0.0.1:8265","jobId":"raysubmit_1"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ray.job_label().as_deref(),
+            Some("Ray raysubmit_1 @ 10.0.0.1:8265")
+        );
+
+        let tinker =
+            BackendDescriptor::parse(r#"{"kind":"tinker_job","jobId":"/tmp/run"}"#).unwrap();
+        assert_eq!(tinker.job_label().as_deref(), Some("Tinker"));
+    }
+
+    /// Before submission finishes (no job id recorded yet), or for a kind we
+    /// don't recognize, there is nothing meaningful to show — never fabricate
+    /// a label from a half-empty descriptor.
+    #[test]
+    fn job_label_is_none_before_submission_or_for_unknown_kinds() {
+        let unsubmitted =
+            BackendDescriptor::parse(r#"{"kind":"sge_job","namespace":"scc1"}"#).unwrap();
+        assert_eq!(unsubmitted.job_label(), None);
+
+        let unknown = BackendDescriptor::parse(r#"{"kind":"future_job","jobId":"x"}"#).unwrap();
+        assert_eq!(unknown.job_label(), None);
     }
 
     #[test]

@@ -3,7 +3,7 @@ import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
-import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { backendJobLabel, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button } from "./ui";
@@ -122,7 +122,10 @@ export function ExperimentsTable({
                   <code>{experiment.branchName}</code>
                 </span>
               </div>
-              <div className="experiment-table-meta [grid-area:meta] self-start flex items-center justify-end gap-4.5 whitespace-nowrap [@container((max-width:_560px))]:flex-col [@container((max-width:_560px))]:items-end [@container((max-width:_560px))]:gap-1.5 [@container((max-width:_400px))]:!flex-row [@container((max-width:_400px))]:!items-center [@container((max-width:_400px))]:flex-wrap [@container((max-width:_400px))]:justify-start [@container((max-width:_400px))]:gap-3">
+              <div
+                className="experiment-table-meta [grid-area:meta] self-start flex items-center justify-end gap-4.5 whitespace-nowrap [@container((max-width:_560px))]:flex-col [@container((max-width:_560px))]:items-end [@container((max-width:_560px))]:gap-1.5 [@container((max-width:_400px))]:!flex-row [@container((max-width:_400px))]:!items-center [@container((max-width:_400px))]:flex-wrap [@container((max-width:_400px))]:justify-start [@container((max-width:_400px))]:gap-3"
+                title={logsRun ? backendJobLabel(logsRun.backend) || undefined : undefined}
+              >
                 <div className="experiment-table-status flex items-center min-w-0">
                   <StatusBadge status={status} />
                 </div>
