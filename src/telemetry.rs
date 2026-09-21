@@ -20,6 +20,8 @@
 //!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
+pub(crate) mod harness;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -176,6 +178,8 @@ pub(crate) struct Settings {
     /// — both on — via the outer `#[serde(default)]` on `Settings::slack_events`.
     #[serde(default)]
     pub slack_events: SlackEventSettings,
+    #[serde(default)]
+    harness_snapshot: Option<harness::InitialSnapshot>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -977,8 +981,27 @@ pub(crate) fn capture_onboarding_research_profile(profile: &ResearchProfile) {
     );
 }
 
-pub(crate) fn capture_project_created(local: bool) {
-    capture("project_created", json!({ "local": local }));
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectCreationMode {
+    Blank,
+    Folder,
+    Paper,
+}
+
+pub(crate) fn capture_project_created(local: bool, mode: Option<ProjectCreationMode>) {
+    let mut properties = json!({ "local": local });
+    if let Some(mode) = mode {
+        properties["creationMode"] = json!(mode);
+    }
+    capture("project_created", properties);
+}
+
+pub(crate) fn capture_demo_welcome_choice(choice: &str) {
+    if !WELCOME_CHOICES.contains(&choice) {
+        return;
+    }
+    capture("demo_welcome_choice", json!({ "choice": choice }));
 }
 
 pub(crate) fn capture_chat_session_started(harness: &str) {
@@ -1081,8 +1104,9 @@ impl TelemetrySession {
 /// Onboarding screens, in order; must match the API's
 /// `CLI_ANALYTICS_ONBOARDING_STEPS` or the event is rejected at ingest.
 pub(crate) const ONBOARDING_STEPS: [&str; 3] = ["welcome", "environment", "profile"];
+pub(crate) const WELCOME_CHOICES: [&str; 3] = ["explore_demo", "create_project", "dismiss"];
 pub(crate) const DEMO_EXPERIMENT_KINDS: [&str; 2] = ["curated", "run"];
-/// Starter prompts are model-generated, so only the slot position is stable.
+/// Starter prompts are usually model-generated, so only the slot position is stable.
 /// The upper bound is headroom — the UI renders whatever the model returns.
 pub(crate) const STARTER_SLOTS: std::ops::RangeInclusive<u8> = 1..=8;
 pub(crate) const FIRST_ACTION_SURFACES: [&str; 2] = ["demo", "project"];
@@ -1744,6 +1768,7 @@ mod tests {
             ("demo_experiment_started", "cli_demo_experiment_started"),
             ("project_starter_clicked", "cli_project_starter_clicked"),
             ("first_action", "cli_first_action"),
+            ("demo_welcome_choice", "cli_demo_welcome_choice"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(
@@ -1925,7 +1950,13 @@ mod tests {
     #[ignore = "release workflow production contract gate"]
     async fn production_contract_is_accepted() {
         assert_eq!(build_channel(), "production");
+        harness::assert_production_contract().await;
         let payloads = [
+            build_payload(
+                "harness_setup",
+                "cli-release-contract-test",
+                json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":"opencode","action":"install","trigger":"automatic","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+            ),
             build_payload(
                 "command",
                 "cli-release-contract-test",
@@ -1951,6 +1982,16 @@ mod tests {
                 "project_created",
                 "cli-release-contract-test",
                 json!({ "local": true }),
+            ),
+            build_payload(
+                "project_created",
+                "cli-release-contract-test",
+                json!({ "local": true, "creationMode": "blank" }),
+            ),
+            build_payload(
+                "demo_welcome_choice",
+                "cli-release-contract-test",
+                json!({ "choice": "explore_demo" }),
             ),
             build_payload(
                 "chat_session_started",
@@ -2103,6 +2144,15 @@ mod tests {
         keys
     }
 
+    #[test]
+    fn project_creation_modes_are_allowlisted() {
+        for mode in ["blank", "folder", "paper"] {
+            let parsed: ProjectCreationMode = serde_json::from_value(json!(mode)).unwrap();
+            assert_eq!(json!(parsed), json!(mode));
+        }
+        assert!(serde_json::from_value::<ProjectCreationMode>(json!("/private/path")).is_err());
+    }
+
     #[tokio::test]
     async fn environment_disabled_consent_never_creates_an_install_id() {
         let _g = EnvGuard::new(OPT_VARS);
@@ -2134,9 +2184,12 @@ mod tests {
         assert!(environment_disabled_reason().is_some());
 
         let session = TelemetrySession::start(Some("up"));
+        harness::capture_initial(&json!({"harnesses":[]}));
+        harness::SetupAttempt::new("opencode", "install", "automatic");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
-        capture_project_created(true);
+        capture_project_created(true, Some(ProjectCreationMode::Blank));
+        capture_demo_welcome_choice("explore_demo");
         capture_chat_session_started("codex");
         capture_chat_message_sent("codex");
         capture_skill_invoked("reproduce-paper", "slash", Some("codex"));

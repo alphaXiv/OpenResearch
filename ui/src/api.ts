@@ -24,6 +24,12 @@ export const DEMO_EXPERIMENT_LABELS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "literature",
 };
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
+/** Leaf message each recorded demo session is seeded with; a send moves it. */
+export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
+  [DEMO_MAIN_SESSION_ID]: "msg_demo_nanochat_assistant_v1",
+  [DEMO_FIGURE_SESSION_ID]: "msg_demo_nanochat_figures_assistant_v1",
+  [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
+};
 export const DEMO_RUN_EXPERIMENT_PROMPT =
   "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
 
@@ -288,6 +294,7 @@ export interface NewProject {
   runCommand?: string;
   paperId?: string;
   cloneUrl?: string;
+  creationMode?: "blank" | "folder" | "paper";
   createFolder?: boolean;
   requireNewFolder?: boolean;
   initializeGit?: boolean;
@@ -346,17 +353,20 @@ export const resolvePaper = (id: string, signal?: AbortSignal) =>
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
-/** One suggested opening message for the empty chat, written by a model that
- *  read the project. */
+/** One suggested opening message for the empty chat: written by a model that
+ *  read the project, or pre-written when the project is blank. */
 export interface StarterPrompt {
   title: string;
   prompt: string;
 }
 
 export interface ProjectStarterPrompts {
-  /** Empty when the project already has experiments; null when the harness
-   *  could not answer. */
+  /** Empty when the project already has experiments or is blank; null when
+   *  the harness could not answer. */
   prompts: StarterPrompt[] | null;
+  /** The project has nothing to read yet, so the UI offers its pre-written
+   *  prompts instead of model-generated ones. */
+  blank: boolean;
 }
 
 /** Start generating starter prompts for a project that is about to be created,
@@ -855,8 +865,8 @@ export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/setting
 
 // --- updates ------------------------------------------------------------------
 
-/** How orx was installed. Only `installer` and `app-bundle` update themselves. */
-export type InstallChannel = "installer" | "app-bundle" | "cargo" | "homebrew" | "nix" | "unknown";
+/** How orx was installed. `installer`, `app-bundle` and `portable` update themselves. */
+export type InstallChannel = "installer" | "app-bundle" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
 
 export interface UpdateStatus {
   current: string;
@@ -874,7 +884,7 @@ export interface UpdateStatus {
    *  land between the install and the restart. */
   installedVersion: string | null;
   restartRequired: boolean;
-  /** Whether this platform supports `restartApp`; pair with `restartRequired`. */
+  /** Whether `restartApp` is honored; always true today, kept for a channel that cannot. */
   canRestart: boolean;
   /** Per-process id: changes when the server has relaunched. */
   instance: string;
@@ -1032,7 +1042,7 @@ export const saveSshConfig = (content: string, previousContent: string) =>
   put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
 export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
+  get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
 export type RemoteSessionStatus =
   | "connecting"
@@ -1584,6 +1594,7 @@ export type FirstAction =
   | "open_settings";
 
 type UiEvent =
+  | { name: "demo_welcome_choice"; choice: "explore_demo" | "create_project" | "dismiss" }
   | { name: "onboarding_step_viewed"; step: OnboardingStep }
   | { name: "demo_experiment_started"; kind: "curated" | "run"; experiment: string }
   | { name: "project_starter_clicked"; slot: number }
@@ -1595,7 +1606,7 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
 export interface HarnessModel {
   id: string;
@@ -1763,17 +1774,35 @@ export interface Harness {
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
   authMethod?: "oauth" | "apiKey" | "local";
+  accountLoading?: boolean;
   account?: string;
   org?: string;
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** Setup is blocked by something no install/update/login command repairs —
+   * an environment credential overriding the saved login, a database the CLI
+   * will not open. `agentNote` carries the repair; offer no setup button. */
+  needsConfigRepair?: boolean;
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
   models: HarnessModel[];
   options: HarnessOptions;
 }
+
+export interface HarnessSetupCommands {
+  install: string;
+  /** The vendor bootstrap URL an install note quotes; `install` runs the
+   * platform's own installer, which on Windows is a PowerShell script. */
+  installUrl?: string;
+  login: string;
+  update: string;
+  requiresNpm: boolean;
+}
+
+export const getHarnessSetupCommands = (signal?: AbortSignal) =>
+  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();
@@ -1976,6 +2005,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   busy: boolean;
+  activeLeafId: string | null;
   contextUsage?: ContextUsage;
 }
 

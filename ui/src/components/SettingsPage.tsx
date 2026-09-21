@@ -1,4 +1,6 @@
+import { cn } from "./ui/cn";
 import { TARGET_LABELS } from "../computeTargets";
+import { HarnessSetupDialog } from "./HarnessSetupDialog";
 import {
   setScopedQueryData,
   workspaceScope,
@@ -10,6 +12,7 @@ import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
 import {
   getAutoContinueOnLimitQuery,
   getHarnessesQuery,
+  getHarnessSetupCommandsQuery,
   refreshHarnesses,
   getK8sSettingsQuery,
   getModalSettingsQuery,
@@ -98,6 +101,7 @@ import {
   type SlackSettings,
   type SlackPreflightResult,
   type Harness,
+  type HarnessSetupCommands,
   type HarnessId,
   type HfSettings,
   type TinkerSettings,
@@ -132,9 +136,10 @@ import { renderNote } from "./agentNote";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { HarnessLogo } from "./HarnessLogo";
 import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { OpenResearchSetupTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
 import { SshConfigDialog } from "./SshConfigDialog";
 import {
   Badge,
@@ -294,30 +299,112 @@ const SETTINGS_STACK_SECTION_CLASS_NAME = [
 export type SettingsTab = import("../workspaceState").SettingsSection;
 type Tab = SettingsTab;
 
+// --- runnable notes ----------------------------------------------------------
+
+/** Commands the server's settings allowlist accepts; keep in sync with
+ * `SETTINGS_COMMANDS` in `src/commands/up.rs`. */
+const SETTINGS_COMMANDS = new Set(["gh auth login", "hf auth login", "claude auth status"]);
+
+function settingsCommandPath(command: string) {
+  return SETTINGS_COMMANDS.has(command) ? `/api/settings/commands/run?command=${encodeURIComponent(command)}` : undefined;
+}
+
+type CommandRun = { command: string; path: string; attempt: number; owner?: string };
+
+/** The run outlives the note that started it: a successful sign-in removes
+ * the note (and often its whole card section), and the terminal must stay. */
+function useCommandRun() {
+  const [run, setRun] = useState<CommandRun | null>(null);
+  const start = (command: string, path: string, owner?: string) =>
+    setRun((current) => ({ command, path, owner, attempt: (current?.attempt ?? 0) + 1 }));
+  return { run, start, clear: () => setRun(null) };
+}
+
+/** A note whose backticked commands get a play button when `resolve` maps
+ * them to a terminal route. `disabled` hides every button: remote workspaces
+ * (the routes are local) or a tool that is not installed yet. */
+function RunnableNote({ note, className, disabled, resolve = settingsCommandPath, onRun }: {
+  note: string | undefined;
+  className: string;
+  disabled: boolean;
+  resolve?: (command: string) => string | undefined;
+  onRun: (command: string, path: string) => void;
+}) {
+  if (!note) return null;
+  return (
+    <p className={className}>
+      {renderNote(note, {
+        canRun: (command) => !disabled && resolve(command) !== undefined,
+        onRun: (command) => {
+          const path = resolve(command);
+          if (path) onRun(command, path);
+        },
+      })}
+    </p>
+  );
+}
+
+function CommandRunTerminal({ run, onComplete, onClose }: {
+  run: CommandRun | null;
+  onComplete: () => void;
+  onClose: () => void;
+}) {
+  if (!run) return null;
+  return (
+    <SettingsCommandTerminal
+      key={`${run.command}-${run.attempt}`}
+      path={run.path}
+      label={run.command}
+      onComplete={onComplete}
+      onError={(error) => showAlert(error, "error")}
+      onClose={onClose}
+    />
+  );
+}
+
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
+  if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
   if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
   if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
   if (h.installBroken) return { cls: "warn", variant: "warning", label: m.settings_page_install_broken() };
   if (h.authMethod === "local") return { cls: "warn", variant: "warning", label: m.onboarding_server_unavailable() };
-  if (h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  // A config fault reports `unsupported`, but no update repairs it; the note
+  // carries the actual repair, so the badge must not promise an update.
+  if (h.needsConfigRepair || h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.authState === "unsupported") return { cls: "warn", variant: "warning", label: m.settings_page_update_required() };
   return { cls: "warn", variant: "warning", label: m.settings_page_not_signed_in() };
 }
 
 function AuthLabel({ h }: { h: Harness }) {
+  if (h.id === "opencode" && h.agentReady && !h.authenticated && !h.authMethod) return <>{m.settings_free_models_no_sign_in()}</>;
   if (!h.authMethod) return <>—</>;
   if (h.authMethod === "local") return <>{m.projects_local()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
-function HarnessesTab() {
+/** A note command that is one of the harness's setup commands runs through the
+ * setup route, which owns install/login/update semantics (telemetry, OpenCode's
+ * isolated store, verification); `shell` keeps the terminal open afterwards. */
+function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undefined, command: string) {
+  if (!setup) return undefined;
+  // Install notes quote the vendor one-liner (`curl … | bash`) while the shown
+  // setup command fetches to a temp file first, so exact equality would drop the
+  // play button from every install note. The shared bootstrap URL identifies it.
+  const installsSameSource = setup.installUrl !== undefined && command.includes(setup.installUrl);
+  const action = command === setup.login ? "login" : command === setup.install ? "install" : command === setup.update ? "update" : installsSameSource ? "install" : null;
+  if (!action) return undefined;
+  if (action !== "install" && (!h.installed || h.installBroken)) return undefined;
+  return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
+}
+
+function HarnessesTab({ remote }: { remote: boolean }) {
   const harnessesOptions = getHarnessesQuery();
   const { data: harnesses = null } = useQuery(harnessesOptions);
-  const [active, setActive] = useState<HarnessId>("claude-code");
+  const [active, setActive] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const { data: autoContinueOnLimit } = useQuery({
     ...getAutoContinueOnLimitQuery(),
@@ -326,6 +413,9 @@ function HarnessesTab() {
   const setAutoContinueOnLimitMutation = useMutation({
     mutationFn: (enabled: boolean) => setAutoContinueOnLimitApi(enabled),
   });
+  const setupRun = useCommandRun();
+  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const setupCommands = useQuery(getHarnessSetupCommandsQuery());
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
@@ -334,22 +424,52 @@ function HarnessesTab() {
       .finally(() => setRefreshing(false));
   };
 
-  const h = harnesses?.find((x) => x.id === active);
+  const orderedHarnesses = [...(harnesses ?? [])].sort(
+    (a, b) => Number(b.agentReady) - Number(a.agentReady),
+  );
+  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      <div className="harness-tabs mt-3 flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
-        {(harnesses ?? []).map((x) => (
-          <button
-            key={x.id}
-            className={x.id === active ? "active" : ""}
-            onClick={() => setActive(x.id)}
-          >
-            {x.name}
-            <span className={`w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
-          </button>
-        ))}
+      {!remote && setupHarness && setupCommands.data && (
+        <HarnessSetupDialog
+          harness={setupHarness}
+          commands={setupCommands.data[setupHarness.id]}
+          onClose={() => setSetupHarness(null)}
+        />
+      )}
+      <div className="mt-3 mb-3.5 w-fit max-w-full [&_.option-menu]:w-max">
+        <OptionPicker
+          variant="field"
+          dropDown
+          title={m.settings_page_harnesses()}
+          choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
+          value={h?.id ?? null}
+          onSelect={(id) => {
+            const selected = orderedHarnesses.find((harness) => harness.id === id);
+            if (selected) setActive(selected.id);
+          }}
+          renderIcon={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            return harness && <HarnessLogo harness={harness.id} />;
+          }}
+          renderLabel={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            const status = harness && harnessStatus(harness);
+            return (
+              <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                {choice.label}
+                {status && (
+                  <>
+                    <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
+                    <span className="sr-only">{status.label}</span>
+                  </>
+                )}
+              </span>
+            );
+          }}
+        />
       </div>
       {!harnesses ? (
         <LoadingRow>
@@ -360,11 +480,16 @@ function HarnessesTab() {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
+            {!remote && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported" && (
+              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                <SquareTerminal size={14} /> {m.harness_setup_login()}
+              </Button>
+            )}
             <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
               <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
             </Button>
           </div>
-          <div className={KV_CLASS_NAME}>
+          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
             <span className="k">{m.settings_page_binary()}</span>
             <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
@@ -398,7 +523,20 @@ function HarnessesTab() {
                 : m.settings_none()}
             </span>
           </div>
-          {h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{renderNote(h.agentNote)}</p>}
+          <RunnableNote
+            note={h.agentNote}
+            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+            disabled={remote}
+            resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
+            onRun={(command, path) => setupRun.start(command, path, h.id)}
+          />
+          {setupRun.run && (
+            // Hidden, not unmounted, while another harness tab is showing: a
+            // switch mid-OAuth must not kill the sign-in.
+            <div hidden={setupRun.run.owner !== h.id}>
+              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+            </div>
+          )}
           {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
           {h.id === "claude-code" && autoContinueOnLimit && (
             <div className={PROJECT_DEFAULT_ROW_CLASS_NAME}>
@@ -689,7 +827,7 @@ function useSshMasterStatuses(hosts: string[]) {
   return [statuses, markRunning] as const;
 }
 
-function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | undefined }) {
+function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting)
     return (
       <span role="status">
@@ -885,7 +1023,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
+function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
   if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
@@ -2083,7 +2221,7 @@ function BackendDetailPage({
   );
 }
 
-function QuickSetupDialog({ target, onClose }: { target: ComputeTargetSummary; onClose: () => void }) {
+function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSummary; remote: boolean; onClose: () => void }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [editState, setEditState] = useState({ dirty: false, saving: false });
 
@@ -2128,7 +2266,7 @@ function QuickSetupDialog({ target, onClose }: { target: ComputeTargetSummary; o
         </IconButton>
       </div>
       {target.id === "tinker" && <TinkerSection target={target} />}
-      {target.id === "hf" && <HfSection />}
+      {target.id === "hf" && <HfSection remote={remote} />}
       {target.id === "modal" && <ModalSection />}
       {target.id === "ray" && <RaySection />}
       {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
@@ -2237,7 +2375,7 @@ function ComputeTab({
               </div>
             </section>
           )}
-          {selected && <QuickSetupDialog target={selected} onClose={() => setSelectedTarget(null)} />}
+          {selected && <QuickSetupDialog target={selected} remote={remote} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
@@ -2354,7 +2492,7 @@ function HfStatusBadge({ settings }: { settings: HfSettings }) {
   return null;
 }
 
-function HfSection() {
+function HfSection({ remote }: { remote: boolean }) {
   const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
 
   const settingsOptions = getHfSettingsQuery();
@@ -2368,6 +2506,7 @@ function HfSection() {
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const login = useCommandRun();
 
   async function refresh() {
     if (saving || refreshing || (!settings && !loadError)) return;
@@ -2433,10 +2572,14 @@ function HfSection() {
             </p>
           )}
           {settings.validationStatus === "valid" && settings.jobsWrite === null && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_hf_token_help({ login: ltr("hf auth login"), url: ltr("huggingface.co/settings/tokens") })}
-            </p>
+            <RunnableNote
+              note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
+              className={SETTINGS_NOTE_CLASS_NAME}
+              disabled={remote}
+              onRun={login.start}
+            />
           )}
+          <CommandRunTerminal run={login.run} onComplete={() => void settingsQuery.refetch()} onClose={login.clear} />
         </>
       )}
       <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
@@ -2753,6 +2896,9 @@ const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "en", label: "English" },
   { id: "zh-CN", label: "简体中文" },
   { id: "fa", label: "فارسی" },
+  { id: "ar", label: "العربية" },
+  { id: "es", label: "Español" },
+  { id: "hi", label: "हिन्दी" },
 ];
 
 function AppearanceTab() {
@@ -2833,6 +2979,7 @@ function AppearanceTab() {
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
   installer: m.updates_channel_installer,
   "app-bundle": m.updates_channel_app,
+  portable: m.updates_channel_portable,
   cargo: m.updates_channel_cargo,
   homebrew: m.updates_channel_homebrew,
   nix: m.updates_channel_nix,
@@ -3241,7 +3388,7 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function ProjectDefaultsTab() {
+function ProjectDefaultsTab({ remote }: { remote: boolean }) {
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
   const settingsOptions = getProjectDefaultsQuery();
@@ -3255,6 +3402,7 @@ function ProjectDefaultsTab() {
   const error = actionError ?? settingsQuery.error?.message ?? null;
 
   const load = async () => { await settingsQuery.refetch({ cancelRefetch: false }); };
+  const gh = useCommandRun();
 
   const toggle = () => {
     if (!settings || saving) return;
@@ -3297,9 +3445,10 @@ function ProjectDefaultsTab() {
           </div>
           {!settings.githubAuthenticated && (
             <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-              <GitHubCliHelp ghInstalled={settings.ghInstalled} onCheck={load} />
+              <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} onRun={gh.start} />
             </div>
           )}
+          <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
         </div>
       )}
@@ -3309,10 +3458,14 @@ function ProjectDefaultsTab() {
 
 function GitHubCliHelp({
   ghInstalled,
+  remote,
   onCheck,
+  onRun,
 }: {
   ghInstalled: boolean;
+  remote: boolean;
   onCheck: () => Promise<void>;
+  onRun: (command: string, path: string) => void;
 }) {
   const [checking, setChecking] = useState(false);
   const check = () => {
@@ -3322,9 +3475,12 @@ function GitHubCliHelp({
 
   return (
     <>
-      <p className="git-card-helper m-0 text-sm leading-relaxed text-text">
-        {renderNote(ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login())}
-      </p>
+      <RunnableNote
+        note={ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login()}
+        className="git-card-helper m-0 text-sm leading-relaxed text-text"
+        disabled={remote || !ghInstalled}
+        onRun={onRun}
+      />
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
           <ButtonLink variant="primary"
@@ -3450,14 +3606,17 @@ function OverleafCard() {
 function GitTab({
   project,
   onProjectUpdate,
+  remote,
 }: {
   project: Project | null;
   onProjectUpdate: (project: Project) => void;
+  remote: boolean;
 }) {
   const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
   const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
   const statusQuery = useQuery(statusOptions);
+  const gh = useCommandRun();
   const status = statusQuery.data ?? null;
   const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
     setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
@@ -3551,9 +3710,10 @@ function GitTab({
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load()} />
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} onRun={gh.start} />
               </div>
             )}
+            <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
             {status.github.authenticated && !status.github.enabled && (
               <>
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
@@ -4059,10 +4219,10 @@ export function SettingsView({
               <AppearanceTab />
             </section>
             <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <ProjectDefaultsTab />
+              <ProjectDefaultsTab remote={remote} />
             </section>
             <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab />
+              <HarnessesTab remote={remote} />
             </section>
             {!remote && (
               <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
@@ -4104,6 +4264,7 @@ export function SettingsView({
         <GitTab
           project={project}
           onProjectUpdate={onProjectUpdate}
+          remote={remote}
         />
       )}
     </div>

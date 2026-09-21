@@ -1,5 +1,5 @@
-//! Unified chat layer for `orx up` — one session/message model over four
-//! harness adapters (Claude Code, Codex, OpenCode, Cursor), each a local child
+//! Unified chat layer for `orx up` — one session/message model over
+//! harness adapters (Claude Code, Codex, OpenCode, Cursor, Antigravity), each a local child
 //! process using the user's own login. orx's SQLite is the system of record
 //! for transcripts; each harness keeps its native session for context/resume.
 //!
@@ -2057,6 +2057,7 @@ struct ActiveTurn {
 struct GateToken {
     value: String,
     plan_mode: bool,
+    bypass: bool,
 }
 
 enum TurnState {
@@ -2857,13 +2858,14 @@ impl ChatHost {
     /// re-minting while a plan child is live would strand its held bridge
     /// requests, since `request_permission` equality-checks the token with no
     /// expiry.
-    pub fn mint_gate_token(&self, session_id: &str, plan_mode: bool) -> String {
+    pub fn mint_gate_token(&self, session_id: &str, plan_mode: bool, bypass: bool) -> String {
         let token = uuid::Uuid::new_v4().to_string();
         self.gate_tokens.lock().unwrap().insert(
             session_id.to_string(),
             GateToken {
                 value: token.clone(),
                 plan_mode,
+                bypass,
             },
         );
         token
@@ -2890,8 +2892,8 @@ impl ChatHost {
         // The endpoint grants tool permissions, so unlike the rest of the
         // localhost API it authenticates: the bridge must echo the token its
         // child was spawned with.
-        let plan_mode = match self.gate_tokens.lock().unwrap().get(session_id) {
-            Some(gate) if gate.value == token => gate.plan_mode,
+        let (plan_mode, bypass) = match self.gate_tokens.lock().unwrap().get(session_id) {
+            Some(gate) if gate.value == token => (gate.plan_mode, gate.bypass),
             _ => return Err(anyhow!("unknown or stale gate token")),
         };
         // A bridge child that outlived its turn has nothing left to approve.
@@ -2899,6 +2901,24 @@ impl ChatHost {
             return Ok(PermissionDecision::deny(
                 "the turn this approval belonged to has already ended",
             ));
+        }
+
+        let is_bypass = self
+            .permission_changes
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .map(|(_, mode)| mode == "bypass")
+            .unwrap_or(bypass);
+
+        if is_bypass
+            && !plan_mode
+            && tool_name != "ExitPlanMode"
+            && crate::local::harness::question_prompt(tool_name, Some(&tool_input)).is_none()
+        {
+            return Ok(PermissionDecision::Allow {
+                updated_input: Some(tool_input),
+            });
         }
 
         // Tier 1 — Plan has a small automatic read/deny policy. Manual and
@@ -5417,12 +5437,8 @@ impl ChatHost {
                 if let Ok(store) = Store::open() {
                     if let Ok(Some(session)) = store.get_chat_session(&session_id) {
                         if session.harness == "opencode" {
-                            if let (Some(nid), Some(port)) = (
-                                &session.native_session_id,
-                                host.opencode.port_for(&session_id).await,
-                            ) {
-                                let url = format!("http://127.0.0.1:{port}/session/{nid}/abort");
-                                let _ = host.http.post(url).body("{}").send().await;
+                            if let Some(nid) = &session.native_session_id {
+                                let _ = host.opencode.interrupt(&session_id, nid).await;
                             }
                         } else if session.harness == "codex" {
                             return host.codex.interrupt_session(&session_id).await;
@@ -5829,6 +5845,9 @@ impl ChatHost {
                 session_id.to_string(),
                 (revision, permission_mode.to_string()),
             );
+        }
+        if let Some(gate) = self.gate_tokens.lock().unwrap().get_mut(session_id) {
+            gate.bypass = permission_mode == "bypass";
         }
         Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
@@ -6837,6 +6856,12 @@ impl TurnCtx {
     }
 
     /// Record the harness's own session id (CLIs mint/rotate them per turn).
+    pub fn persist_native_session_id(&mut self, native_id: &str) -> Result<()> {
+        Store::open()?.set_chat_session_native_id(&self.session_id, Some(native_id))?;
+        self.native_session_id = Some(native_id.to_string());
+        Ok(())
+    }
+
     pub fn set_native_session_id(&mut self, native_id: &str) {
         if self.native_session_id.as_deref() == Some(native_id) {
             return;
@@ -8952,11 +8977,23 @@ mod bridge_tests {
     #[test]
     fn gate_token_captures_the_childs_plan_policy() {
         let host = test_host();
-        let token = host.mint_gate_token("session", true);
+        let token = host.mint_gate_token("session", true, false);
         let gates = host.gate_tokens.lock().unwrap();
         let gate = gates.get("session").unwrap();
         assert_eq!(gate.value, token);
         assert!(gate.plan_mode);
+        assert!(!gate.bypass);
+    }
+
+    #[test]
+    fn gate_token_captures_bypass() {
+        let host = test_host();
+        let token = host.mint_gate_token("session", false, true);
+        let gates = host.gate_tokens.lock().unwrap();
+        let gate = gates.get("session").unwrap();
+        assert_eq!(gate.value, token);
+        assert!(!gate.plan_mode);
+        assert!(gate.bypass);
     }
 
     #[test]

@@ -9,11 +9,12 @@ import { useRuntime } from "./RemoteRuntime";
 import { clearReadDemoSessions } from "./demoSessionState";
 import { globalResumeLocation, projectResumeLocation } from "./routeResume";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
+import { initialPanelWidth } from "./panelLayout";
 import { m } from "./paraglide/messages.js";
 import { Onboarding } from "./components/Onboarding";
 import { ProjectsHome } from "./components/ProjectsHome";
 import { OfflineBanner } from "./components/OfflineBanner";
-import { RemoteStatus } from "./components/RemoteStatus";
+import { WorkspaceConnection } from "./components/WorkspaceConnection";
 import { UpdateBanner, useUpdateStatus } from "./components/UpdateBanner";
 import { Button, showAlert, Spinner } from "./components/ui";
 
@@ -72,6 +73,7 @@ export function ProjectsPage() {
   const stateQuery = useQuery(getUiStateQuery());
   const projects = projectsQuery.data;
   const state = stateQuery.data;
+  const onboarding = projects?.length === 0 && state?.onboardingCompleted === false;
   const error = projectsQuery.error ?? stateQuery.error;
   const retry = () => { void projectsQuery.refetch(); void stateQuery.refetch(); };
   const { status } = useUpdateStatus(runtime.kind === "local");
@@ -79,7 +81,7 @@ export function ProjectsPage() {
     document.title = "OpenResearch";
     if (!state) return;
     globalWorkspaceWriter.queue({
-      ...(getRememberedGlobalWorkspace() ?? state.workspace ?? { railOpen: true, panelWidth: 760, experimentsView: "table" }),
+      ...(getRememberedGlobalWorkspace() ?? state.workspace ?? { railOpen: true, panelWidth: initialPanelWidth(), experimentsView: "table" }),
       lastLocation: "/projects",
     });
   }, [state]);
@@ -90,8 +92,9 @@ export function ProjectsPage() {
       {runtime.kind === "local" && <><OfflineBanner /><UpdateBanner status={status} /></>}
       {error && (!projects || !state) ? <RouteFailure error={error} reset={retry} />
         : !projects || !state ? <RoutePending />
-          : projects.length === 0 && !state.onboardingCompleted ? (
+          : onboarding ? (
             <Onboarding
+              remote={runtime.kind === "ssh"}
               preferredAgent={state.preferredAgent}
               onDone={(project) => {
                 clearReadDemoSessions();
@@ -112,7 +115,7 @@ export function ProjectsPage() {
               onDeleted={(id) => setScopedQueryData(projectsOptions.queryKey, (current) => current?.filter((project) => project.id !== id))}
             />
           )}
-      {runtime.kind === "ssh" && <RemoteStatus runtime={runtime} corner />}
+      {(runtime.kind === "ssh" || (projects && state && !onboarding)) && <WorkspaceConnection runtime={runtime} corner />}
     </div>
   );
 }

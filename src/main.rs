@@ -115,7 +115,7 @@ enum Command {
     /// Add reusable LaTeX templates to the local OpenResearch library.
     Templates(LibraryArgs),
 
-    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor).
+    /// Install the OpenResearch skill into local coding agents (Claude Code, Codex, OpenCode, Cursor, Antigravity).
     #[command(name = "install-skills")]
     InstallSkills(InstallSkillsArgs),
 
@@ -165,6 +165,9 @@ enum Command {
     /// an approval card and blocks until answered. Not a user command.
     #[command(name = "mcp-gate", hide = true)]
     McpGate,
+
+    #[command(name = "antigravity-gate", hide = true)]
+    AntigravityGate,
 
     /// Internal: detached worker for optional local-project publication.
     #[command(name = "publish-branch", hide = true)]
@@ -657,7 +660,7 @@ pub enum LibraryCommand {
 #[derive(Args, Debug)]
 pub struct InstallSkillsArgs {
     /// Which agent(s) to install into: `claude`, `codex`, `opencode`, `cursor`,
-    /// or `all`. Defaults to every agent already set up on this machine.
+    /// `antigravity`, or `all`. Defaults to every agent already set up on this machine.
     #[arg(long)]
     pub agent: Option<String>,
 
@@ -851,7 +854,10 @@ pub struct PaperArgs {
 #[tokio::main]
 async fn main() {
     #[cfg(windows)]
-    install_panic_reporter();
+    {
+        install_panic_reporter();
+        updates::remove_retired_exes();
+    }
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
     // server, browser) instead of parsing CLI args. Also require an empty argv so
     // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
@@ -900,6 +906,13 @@ async fn main() {
     // `mcp-gate` is Claude's stdio MCP child for the turn: stdout is the MCP
     // channel (nothing else may write to it) and startup must be instant or
     // Claude times the server out — skip the update check and telemetry.
+    if matches!(command, Command::AntigravityGate) {
+        if let Err(error) = commands::mcp_gate::run_antigravity().await {
+            eprintln!("orx antigravity-gate: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if matches!(command, Command::McpGate) {
         if let Err(err) = commands::mcp_gate::run().await {
             // stderr only; a failed bridge degrades plan mode, never the CLI.
@@ -1070,6 +1083,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Telemetry(_) => "telemetry",
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
+        Command::AntigravityGate => "antigravity-gate",
         Command::PublishBranch(_) => "publish-branch",
         Command::RemoteHost(_) => "remote-host",
     }
@@ -1124,6 +1138,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
+        Command::AntigravityGate => commands::mcp_gate::run_antigravity().await,
         Command::PublishBranch(_) => unreachable!("handled before dispatch"),
         Command::RemoteHost(_) => unreachable!("handled before dispatch"),
     }
@@ -1142,6 +1157,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Telemetry(_)
             | Command::PlanGate
             | Command::McpGate
+            | Command::AntigravityGate
             | Command::PublishBranch(_)
             | Command::RemoteHost(_)
     )

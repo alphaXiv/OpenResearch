@@ -244,6 +244,7 @@ export function NewProjectForm({
       const result = await createMutation.mutateAsync({
         name: name.trim(),
         path: projectPath.trim(),
+        creationMode: mode,
         createFolder: mode !== "folder",
         requireNewFolder: mode === "blank",
         initializeGit: true,
@@ -262,13 +263,12 @@ export function NewProjectForm({
   }
 
   // Debounced pre-warm; only cases whose brief will match the created project.
+  // A blank project gets pre-written prompts, so there is nothing to warm.
   const prewarmName = name.trim();
   const prewarmPaperId = mode === "paper" && paper && !paper.repoUrl ? paper.paperId : null;
   const prewarmPath =
     mode === "folder" && pathStatus?.gitState === "ready" ? (pathStatus.resolvedPath ?? null) : null;
-  const prewarmReady =
-    prewarmName !== "" &&
-    (mode === "blank" || prewarmPaperId !== null || prewarmPath !== null);
+  const prewarmReady = prewarmName !== "" && (prewarmPaperId !== null || prewarmPath !== null);
   useEffect(() => {
     if (!prewarmReady) return;
     const timer = window.setTimeout(() => {

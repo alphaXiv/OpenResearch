@@ -38,6 +38,10 @@ which installs to `%USERPROFILE%\.cargo\bin`:
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.ps1 | iex"
 ```
 
+Either install updates itself. `orx update`, or the Updates section of the
+dashboard's Settings page, replaces `orx.exe` in place, and a running dashboard
+offers a Restart button once the new version is on disk.
+
 ### The SmartScreen warning
 
 `orx.exe` is not code-signed yet, so Windows shows "Windows protected your PC"
@@ -63,7 +67,7 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 | | |
 |---|---|
 | `orx up --remote-host` | Refused. The control channel is a Unix domain socket. |
-| Self-update | `orx update` does not work on Windows; re-run the installer to upgrade. |
-| SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page reports a host as "Disconnected" even when it works. Use a key held by an agent, or one without a passphrase. |
+| Restart after an update | There is no `exec`, so a restarting `orx up` starts a new process and exits. In a terminal the prompt comes back while the server keeps running in that console, where Ctrl+C still stops it; a supervisor sees the old process exit. |
+| SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page uses the most recent preflight result instead of reporting a missing multiplexed master as a disconnection. Use a key held by an agent, or one without a passphrase. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |

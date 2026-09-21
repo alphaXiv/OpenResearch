@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   unreadAfterBusyChange,
   partIsVisible,
+  pendingQuestionId,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -160,4 +161,14 @@ test("Codex and OpenCode terminal limits use the shared disclosure without class
   for (const error of ["Invalid API key", "Context length exceeded", "Connection refused"]) {
     assert.equal(isUsageLimitPart({ type: "tool", tool: "error", state: { error } }), false);
   }
+});
+
+test("live OpenCode questions route composer text to the existing prompt", () => {
+  const question = { id: "question", type: "prompt", prompt: { kind: "question", nativeId: '["frm_test","answer"]', resolved: false } };
+  for (const harness of ["opencode", "claude-code", "codex"]) {
+    assert.equal(pendingQuestionId([message(question)], harness, true), "question");
+    assert.equal(pendingQuestionId([message(question)], harness, false), null);
+  }
+  assert.equal(pendingQuestionId([message({ ...question, prompt: { ...question.prompt, resolved: true } })], "opencode", true), null);
+  assert.equal(pendingQuestionId([message(question)], "cursor", true), null);
 });

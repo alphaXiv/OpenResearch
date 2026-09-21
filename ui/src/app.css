@@ -7,18 +7,22 @@
   mix-blend-mode: screen;
 }
 
-:root[lang="fa"] #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
+:root:is([lang="fa"], [lang="ar"]) #root :where(p, h1, h2, h3, h4, h5, h6, button, label, li, th, td, dt, dd, [role="status"], [role="alert"]) {
   unicode-bidi: plaintext;
 }
 
 .md :where(p, h1, h2, h3, h4, li, th, td, blockquote),
-:root[lang="fa"] #root .file-view-note {
+:root:is([lang="fa"], [lang="ar"]) #root .file-view-note {
   unicode-bidi: plaintext;
 }
 
 :where(pre, code, .font-mono, .code-source-text, .xterm, .openresearch-diff) {
   direction: ltr;
   unicode-bidi: isolate;
+}
+
+.xterm {
+  color-scheme: dark;
 }
 
 @keyframes or-pulse {

@@ -9,7 +9,8 @@
 //! redirect with no API rate limit.
 //!
 //! The cargo-dist shell installer writes an install receipt to
-//! `${XDG_CONFIG_HOME:-~/.config}/openresearch-cli/openresearch-cli-receipt.json`.
+//! `${XDG_CONFIG_HOME:-~/.config}/openresearch-cli/openresearch-cli-receipt.json`
+//! (its PowerShell twin: `%LOCALAPPDATA%\openresearch-cli\` on Windows).
 //! That receipt is the only thing distinguishing an installer-managed binary
 //! from a `cargo install` one (both live at `~/.cargo/bin/orx` because
 //! dist-workspace.toml sets `install-path = "CARGO_HOME"`), so `orx update`
@@ -28,6 +29,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{anyhow, Result};
 
 pub mod macos_app;
+#[cfg(windows)]
+pub(crate) mod windows;
 
 /// GitHub repo the released binaries come from.
 pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
@@ -154,7 +157,9 @@ pub async fn fetch_release_asset(tag: &str, asset: &str, timeout: Duration) -> R
 pub struct Receipt {
     pub install_prefix: String,
     pub version: String,
+    /// Read only where the shell installer is re-run; the Windows swap never touches PATH.
     #[serde(default)]
+    #[cfg_attr(windows, allow(dead_code))]
     pub modify_path: bool,
 }
 
@@ -164,6 +169,11 @@ pub fn receipt_path() -> PathBuf {
     let base = crate::local::shell_env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
+            // Where the PowerShell installer writes it.
+            #[cfg(windows)]
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                return PathBuf::from(local);
+            }
             dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".config")
@@ -223,6 +233,10 @@ pub enum InstallChannel {
     },
     /// The executable inside `OpenResearch.app`; the path is the bundle root.
     AppBundle(PathBuf),
+    /// A Windows `orx.exe` extracted from the release zip; the path is its
+    /// directory, where orx swaps the new `orx.exe` in.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Portable(PathBuf),
     /// `cargo install` — lands in the same `~/.cargo/bin/orx` as the installer,
     /// so only the absent receipt tells them apart.
     Cargo,
@@ -237,6 +251,7 @@ impl InstallChannel {
         match self {
             InstallChannel::Installer { .. } => "installer",
             InstallChannel::AppBundle(_) => "app-bundle",
+            InstallChannel::Portable(_) => "portable",
             InstallChannel::Cargo => "cargo",
             InstallChannel::Homebrew => "homebrew",
             InstallChannel::Nix => "nix",
@@ -249,7 +264,9 @@ impl InstallChannel {
     pub fn self_updates(&self) -> bool {
         matches!(
             self,
-            InstallChannel::Installer { .. } | InstallChannel::AppBundle(_)
+            InstallChannel::Installer { .. }
+                | InstallChannel::AppBundle(_)
+                | InstallChannel::Portable(_)
         )
     }
 }
@@ -288,7 +305,115 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     if exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin")) {
         return Ok(InstallChannel::Cargo);
     }
+    #[cfg(windows)]
+    if let Some(dir) = portable_dir(exe) {
+        return Ok(InstallChannel::Portable(dir));
+    }
     Ok(InstallChannel::Unknown)
+}
+
+/// The directory of a zip-extracted `orx.exe`. The name must be exactly what the
+/// zip ships, since the installer writes that name back; and the directory must
+/// not belong to something else that manages it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn portable_dir(exe: &Path) -> Option<PathBuf> {
+    if exe.file_name().is_none_or(|name| name != "orx.exe") {
+        return None;
+    }
+    let dir = exe.parent()?;
+    (!package_manager_owns(dir)).then(|| dir.to_path_buf())
+}
+
+/// Scoop, Chocolatey and winget each install under a directory named for them;
+/// `Program Files` is never a user's unpacked download; `target` is a cargo
+/// build that must not be swapped for a release. Split from [`portable_dir`] so
+/// it can be tested with Windows paths off Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn package_manager_owns(dir: &Path) -> bool {
+    let lower = dir.to_string_lossy().to_ascii_lowercase();
+    [
+        "\\scoop\\",
+        "\\chocolatey\\",
+        "\\winget\\",
+        "\\program files",
+        "\\target\\",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Where a replaced Windows binary is parked: `orx.exe.<id>.old` beside it. The
+/// id is fresh per update, so a server still mapping the last one never blocks
+/// the next; [`remove_retired_exes`] sweeps them all.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn retired_path(exe: &Path) -> PathBuf {
+    let mut retired = exe.as_os_str().to_owned();
+    retired.push(format!(".{}.old", uuid::Uuid::new_v4().simple()));
+    PathBuf::from(retired)
+}
+
+/// Delete the `orx.exe.*.old` files earlier updates left beside this binary.
+/// Best effort: a process still running one keeps it until the next start.
+#[cfg(windows)]
+pub fn remove_retired_exes() {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let (Some(dir), Some(name)) = (exe.parent(), exe.file_name()) else {
+        return;
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file = entry.file_name();
+        let file = file.to_string_lossy();
+        if file.starts_with(&prefix) && file.ends_with(".old") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// A relaunched `orx up` waits here for the process it replaces to release the
+/// port, then sweeps the binary that process was running. Only Windows
+/// relaunches by spawning; everywhere else this is a no-op.
+pub fn await_replaced_parent() {
+    #[cfg(windows)]
+    if windows::await_replaced_parent() {
+        remove_retired_exes();
+    }
+}
+
+/// Set the receipt's `version` after a Windows update, which swaps the binary
+/// itself instead of letting the installer rewrite the receipt. Every other
+/// field is left as the installer wrote it.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn rewrite_receipt_version(path: &Path, version: &str) -> Result<()> {
+    let raw = std::fs::read_to_string(path)?;
+    let mut receipt: serde_json::Value = serde_json::from_str(&raw)?;
+    let Some(fields) = receipt.as_object_mut() else {
+        return Err(anyhow!(
+            "Install receipt at {} is not an object",
+            path.display()
+        ));
+    };
+    fields.insert("version".into(), serde_json::Value::String(version.into()));
+    // Rename, not overwrite: a concurrent `orx` reading a half-written receipt
+    // would classify itself as a corrupt install.
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    std::fs::write(&tmp, serde_json::to_string(&receipt)?)?;
+    if let Err(err) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err.into());
+    }
+    Ok(())
+}
+
+/// [`rewrite_receipt_version`] for the receipt this install reads.
+#[cfg(windows)]
+pub fn record_receipt_version(version: &str) -> Result<()> {
+    rewrite_receipt_version(&receipt_path(), version)
 }
 
 /// The running executable, canonicalized. Canonical because
@@ -331,8 +456,13 @@ pub fn auto_update_eligible() -> bool {
 }
 
 /// The one-liner that reinstalls orx through the release installer.
-const INSTALL_HINT: &str = "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh";
+const INSTALL_HINT: &str = if cfg!(windows) {
+    "powershell -ExecutionPolicy Bypass -c \"irm \
+https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.ps1 | iex\""
+} else {
+    "curl --proto '=https' --tlsv1.2 -LsSf \
+https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh"
+};
 
 /// Confirm a directory can be written before an update commits to it — root-owned
 /// installs and read-only filesystems fail here rather than after a download.
@@ -351,6 +481,9 @@ pub enum UpdateTarget {
     Installer(Receipt),
     /// The `.app` root to swap. macOS only; see the `macos_app` module.
     AppBundle(PathBuf),
+    /// The directory holding a zip-extracted `orx.exe`. Only Windows reads it.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Portable(PathBuf),
 }
 
 /// Classify the install and, for the installer channel, check everything that
@@ -361,6 +494,16 @@ pub fn preflight(force: bool) -> Result<UpdateTarget> {
     let channel = detect_channel(&exe)?;
     let (receipt, prefix) = match channel {
         InstallChannel::AppBundle(root) => return Ok(UpdateTarget::AppBundle(root)),
+        InstallChannel::Portable(dir) => {
+            probe_writable(&dir).map_err(|e| {
+                anyhow!(
+                    "No write permission for {} ({}). Move orx.exe somewhere you can write to.",
+                    dir.display(),
+                    e
+                )
+            })?;
+            return Ok(UpdateTarget::Portable(dir));
+        }
         InstallChannel::Nix => {
             return Err(anyhow!(
                 "This orx is managed by Nix ({}). Update it through your Nix configuration.",
@@ -586,9 +729,11 @@ fn updater_command() -> Result<tokio::process::Command> {
         cmd.env(key, value);
     });
     // Own process group, so a Ctrl-C — or an agent killing the group it spawned
-    // `orx` in — can't land between the two renames that swap the app bundle.
+    // `orx` in — can't land between the two renames that swap the binary.
     #[cfg(unix)]
     cmd.process_group(0);
+    #[cfg(windows)]
+    cmd.creation_flags(windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP);
     Ok(cmd)
 }
 
@@ -662,9 +807,9 @@ pub struct UpdateStatus {
     /// because a release can land between the install and the restart.
     pub installed_version: Option<String>,
     pub restart_required: bool,
-    /// Whether this platform supports `POST /api/update/restart` (see
-    /// [`relaunch`]); pair with `restart_required`. Reported so the dashboard
-    /// only offers a button the server will honor.
+    /// Whether `POST /api/update/restart` is honored (see [`relaunch`]); pair
+    /// with `restart_required`. Always true now that every platform relaunches;
+    /// kept in the API shape for a channel that one day cannot.
     pub can_restart: bool,
     /// Identifies this server process, so a client can tell a relaunched server
     /// from the one it was talking to even when both report the same version.
@@ -685,7 +830,7 @@ pub fn status() -> UpdateStatus {
             .as_ref()
             .is_some_and(|latest| is_outdated(&current, latest)),
         restart_required: installed.is_some(),
-        can_restart: cfg!(unix),
+        can_restart: true,
         instance: instance_id(),
         installed_version: installed.map(|v| v.to_string()),
         latest: latest.map(|v| v.to_string()),
@@ -743,9 +888,11 @@ pub fn relaunch(port: u16) -> std::io::Error {
         .exec()
 }
 
-#[cfg(not(unix))]
+/// Windows has no `exec`: spawn the new binary, which waits for this process to
+/// exit before it binds the port, then leave.
+#[cfg(windows)]
 pub fn relaunch(_port: u16) -> std::io::Error {
-    std::io::Error::from(std::io::ErrorKind::Unsupported)
+    windows::relaunch(relaunch_args(std::env::args_os().skip(1)))
 }
 
 /// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
@@ -759,10 +906,14 @@ fn relaunch_target(exe: PathBuf) -> PathBuf {
 }
 
 /// The original arguments plus `--no-browser`: the tab that asked for the
-/// restart reloads itself, so a second tab would only be clutter.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// restart reloads itself, so a second tab would only be clutter. No arguments
+/// means a double-clicked exe, which `main` turned into `orx up`; the flag is
+/// `up`'s, so that conversion is made explicit here.
 fn relaunch_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = args.collect();
+    if args.is_empty() {
+        args.push("up".into());
+    }
     if !args.iter().any(|arg| arg == "--no-browser") {
         args.push("--no-browser".into());
     }
@@ -1102,8 +1253,9 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, parse_manifest, precedence, relaunch_args, relaunch_target, render, warning_for,
-        CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        now_unix, package_manager_owns, parse_manifest, portable_dir, precedence, relaunch_args,
+        relaunch_target, render, retired_path, warning_for, CheckCache, InstallChannel,
+        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1296,8 +1448,67 @@ mod tests {
     }
 
     #[test]
+    fn a_portable_exe_is_anywhere_nothing_else_manages() {
+        let owned = |dir: &str| package_manager_owns(Path::new(dir));
+        assert!(!owned(r"C:\Users\me\Downloads\orx"));
+        assert!(!owned(r"C:\Users\me\Desktop"));
+        assert!(owned(r"C:\Users\me\scoop\apps\orx\current"));
+        assert!(owned(r"C:\ProgramData\chocolatey\bin"));
+        assert!(owned(
+            r"C:\Users\me\AppData\Local\Microsoft\WinGet\Packages\x"
+        ));
+        assert!(owned(r"C:\Program Files\orx"));
+        assert!(owned(r"C:\Program Files (x86)\orx"));
+        assert!(owned(r"C:\src\openresearch-cli\target\debug"));
+    }
+
+    #[test]
+    fn a_portable_exe_must_carry_the_name_the_zip_ships() {
+        // Forward slashes, so the parent splits the same way off Windows.
+        assert_eq!(
+            portable_dir(Path::new("Downloads/orx.exe")),
+            Some(PathBuf::from("Downloads"))
+        );
+        assert_eq!(portable_dir(Path::new("Downloads/orx-0.2.exe")), None);
+        assert_eq!(portable_dir(Path::new("Downloads/ORX.EXE")), None);
+    }
+
+    #[test]
+    fn retired_paths_sit_beside_the_exe_and_never_collide() {
+        let exe = Path::new(r"C:\Users\me\.cargo\bin\orx.exe");
+        let (a, b) = (retired_path(exe), retired_path(exe));
+        for retired in [&a, &b] {
+            let retired = retired.to_string_lossy();
+            assert!(retired.starts_with(r"C:\Users\me\.cargo\bin\orx.exe."));
+            assert!(retired.ends_with(".old"));
+        }
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn rewriting_the_receipt_version_keeps_every_other_field() {
+        let dir = std::env::temp_dir().join(format!("orx-receipt-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("receipt.json");
+        std::fs::write(
+            &path,
+            r#"{"install_prefix":"C:\\Users\\me\\.cargo","modify_path":false,"version":"0.1.0"}"#,
+        )
+        .unwrap();
+        super::rewrite_receipt_version(&path, "0.2.0").unwrap();
+        let receipt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(receipt["version"], "0.2.0");
+        assert_eq!(receipt["install_prefix"], r"C:\Users\me\.cargo");
+        assert_eq!(receipt["modify_path"], false);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn relaunch_args_add_no_browser_once() {
         let args = |list: &[&str]| relaunch_args(list.iter().map(OsString::from));
+        // A double-clicked exe has no arguments; `main` ran it as `up`.
+        assert_eq!(args(&[]), ["up", "--no-browser"]);
         assert_eq!(
             args(&["up", "--port", "1"]),
             ["up", "--port", "1", "--no-browser"]

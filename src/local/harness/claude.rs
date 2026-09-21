@@ -32,8 +32,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    bin_version, nonempty_str, parse_version, probe_bin, read_json, HarnessAuthState, HarnessInfo,
-    ModelInfo,
+    bin_version, nonempty_str, parse_version, read_json, HarnessAuthState, HarnessInfo, ModelInfo,
 };
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
@@ -88,6 +87,10 @@ const CLAUDE_REINSTALL: &str = "Reinstall it from claude.com/download";
 struct AuthProbe {
     state: HarnessAuthState,
     method: Option<&'static str>,
+    /// The CLI answered with a saved login that an environment credential
+    /// overrides — proven, not inferred from an `Unknown` a timeout also
+    /// produces. No login or update command can repair it.
+    credential_conflict: bool,
 }
 
 fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
@@ -115,7 +118,11 @@ fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
         (_, Some(false)) => HarnessAuthState::NeedsLogin,
         _ => HarnessAuthState::Unknown,
     };
-    AuthProbe { state, method }
+    AuthProbe {
+        state,
+        method,
+        credential_conflict: false,
+    }
 }
 
 async fn probe_auth(bin: &Path) -> AuthProbe {
@@ -127,9 +134,12 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
     prepare_env(&mut cmd);
     match tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await {
         Ok(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
+        // A timeout or a spawn failure: no evidence of anything, least of all a
+        // credential conflict.
         _ => AuthProbe {
             state: HarnessAuthState::Unknown,
             method: None,
+            credential_conflict: false,
         },
     }
 }
@@ -141,6 +151,10 @@ async fn effective_auth_probe(bin: &Path) -> AuthProbe {
     // it has only verified leftover OAuth metadata, not the credential the
     // worker will actually send.
     if has_api_credential() && probe.method != Some("apiKey") {
+        // Only a login the CLI reports as working proves the credential is
+        // overriding it. A signed-out or unanswered probe proves nothing and
+        // must not cost the user their sign-in button.
+        probe.credential_conflict = probe.state == HarnessAuthState::Ready;
         probe.state = HarnessAuthState::Unknown;
         probe.method = None;
     } else if probe.state == HarnessAuthState::Ready && probe.method.is_none() {
@@ -160,6 +174,8 @@ fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe 
     probe
 }
 
+/// Polled on a timer by the auth monitor, so it must not re-probe every
+/// candidate: `find_claude` already returns the executable detection selected.
 pub(crate) async fn current_auth_state() -> HarnessAuthState {
     match find_claude() {
         Some(bin) => {
@@ -433,17 +449,32 @@ async fn claude_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `claude` on PATH, else the common install drop locations.
-pub(crate) fn find_claude() -> Option<PathBuf> {
-    find_on_path("claude").or_else(|| {
-        let home = dirs::home_dir()?;
+/// `claude` on PATH, then the common install drop locations, in preference order.
+fn claude_candidates() -> Vec<PathBuf> {
+    let drops = dirs::home_dir().into_iter().flat_map(|home| {
         [
             home.join(".claude").join("local"),
             home.join(".local").join("bin"),
         ]
         .into_iter()
-        .find_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
-    })
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "claude"))
+    });
+    find_on_path("claude").into_iter().chain(drops).collect()
+}
+
+/// The executable detection selected, else `claude` on PATH / the drop
+/// locations. Sync callers (chat, one-shot) cannot probe, so reading detection's
+/// choice is what keeps them off a stale launcher it already skipped.
+pub(crate) fn find_claude() -> Option<PathBuf> {
+    super::detect::selected_bin("claude-code", claude_candidates())
+}
+
+/// The first candidate that runs and is new enough for the OAuth gate — an
+/// update writes to `~/.local/bin` while a pre-`MIN_CLAUDE_VERSION` `claude`
+/// keeps its earlier PATH slot, which would report `Unsupported` forever.
+pub(super) async fn find_claude_working() -> Option<(PathBuf, super::detect::BinProbe)> {
+    super::detect::select_working("claude-code", claude_candidates(), Some(MIN_CLAUDE_VERSION))
+        .await
 }
 
 #[async_trait]
@@ -468,8 +499,8 @@ impl Harness for ClaudeCode {
 
     async fn detect(&self) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(bin) = find_claude() {
-            info.record_bin(&bin, probe_bin(&bin).await);
+        if let Some((bin, probe)) = find_claude_working().await {
+            info.record_bin(&bin, probe);
         }
         // The CLI owns OAuth and Keychain refresh. Its live status decides
         // whether this harness can run; a broken binary would only fail it too.
@@ -482,10 +513,12 @@ impl Harness for ClaudeCode {
                 None => AuthProbe {
                     state: HarnessAuthState::Unknown,
                     method: None,
+                    credential_conflict: false,
                 },
             };
             info.auth_state = probe.state;
             info.auth_method = probe.method;
+            info.needs_config_repair = probe.credential_conflict;
             if info.auth_state == HarnessAuthState::Ready {
                 info.authenticated = true;
                 if probe.method == Some("oauth") {
@@ -536,8 +569,12 @@ impl Harness for ClaudeCode {
                 "Update Claude Code to 2.1.211 or newer, then re-check this harness.".to_string(),
             );
         } else if info.installed {
+            // A saved OAuth login overridden by the environment credential is
+            // flagged where it is proven (`effective_auth_probe`): `claude auth
+            // login` succeeds and changes nothing, so the recovery is to fix the
+            // credential, not to sign in again.
             info.agent_note = Some(match info.auth_state {
-                HarnessAuthState::Unknown if has_api_credential() =>
+                HarnessAuthState::Unknown if info.needs_config_repair =>
                     "Claude Code could not verify the effective `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Fix or unset it, then re-check this harness.".to_string(),
                 HarnessAuthState::Unknown =>
                     "Open a terminal and run `claude auth status`, then re-check this harness.".to_string(),
@@ -3465,6 +3502,7 @@ mod tests {
             AuthProbe {
                 state: HarnessAuthState::Ready,
                 method: Some("oauth"),
+                credential_conflict: false,
             }
         );
         assert_eq!(
@@ -3472,6 +3510,7 @@ mod tests {
             AuthProbe {
                 state: HarnessAuthState::Ready,
                 method: Some("apiKey"),
+                credential_conflict: false,
             }
         );
         // Claude intentionally exits 1 for this valid signed-out response.
@@ -3480,6 +3519,7 @@ mod tests {
             AuthProbe {
                 state: HarnessAuthState::NeedsLogin,
                 method: None,
+                credential_conflict: false,
             }
         );
         assert_eq!(
@@ -3487,6 +3527,7 @@ mod tests {
             AuthProbe {
                 state: HarnessAuthState::Unknown,
                 method: None,
+                credential_conflict: false,
             }
         );
         assert_eq!(
@@ -3494,6 +3535,7 @@ mod tests {
                 AuthProbe {
                     state: HarnessAuthState::Ready,
                     method: Some("oauth"),
+                    credential_conflict: false,
                 },
                 None,
             )
@@ -3505,11 +3547,24 @@ mod tests {
                 AuthProbe {
                     state: HarnessAuthState::Ready,
                     method: Some("apiKey"),
+                    credential_conflict: false,
                 },
                 Some("2.0.0"),
             )
             .state,
             HarnessAuthState::Ready
+        );
+        // The version gate must carry a proven conflict through untouched.
+        assert!(
+            gate_oauth_version(
+                AuthProbe {
+                    state: HarnessAuthState::Unknown,
+                    method: None,
+                    credential_conflict: true,
+                },
+                Some("2.0.0"),
+            )
+            .credential_conflict
         );
     }
 

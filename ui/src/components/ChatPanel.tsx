@@ -13,8 +13,6 @@ import { useChatState } from "../queries/chatStore";
 
 import {
   getHarnessesQuery,
-  getSshHostsQuery,
-  listRemoteSessionsQuery,
   getSkillsQuery,
 } from "../queries/settings";
 import { listChatSessionsQuery, getChatMessagesQuery } from "../queries/chat";
@@ -22,7 +20,6 @@ import { getProjectStarterPromptsQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
-import { getThemePreference } from "../theme";
 import {
   ArrowDown,
   ArrowUpRight,
@@ -51,12 +48,12 @@ import {
   Search,
   SlidersHorizontal,
   SquareTerminal,
+  Terminal,
   ToggleRight,
   TriangleAlert,
   Users,
   X,
 } from "lucide-react";
-import { createPortal } from "react-dom";
 import {
   memo,
   useCallback,
@@ -79,9 +76,10 @@ import {
   captureUiEvent,
   DEMO_EXPERIMENT_LABELS,
   DEMO_PROJECT_ID,
+  DEMO_RUN_EXPERIMENT_PROMPT,
+  DEMO_SEEDED_LEAF_IDS,
   forkChatTurn,
   fmtNumber,
-  createRemoteSession,
   interruptChat,
   cancelTurnResume,
   reasoningFor,
@@ -109,6 +107,7 @@ import {
   type PromptAnswer,
   type RuntimeInfo,
   type SkillInfo,
+  type StarterPrompt,
 } from "../api";
 import { getLocale } from "../paraglide/runtime.js";
 import { activePath, forkPositions } from "../transcriptTree";
@@ -119,6 +118,7 @@ import {
   unreadAfterBusyChange,
   isTurnStatusPart,
   partIsVisible,
+  pendingQuestionId,
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
@@ -142,7 +142,7 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { Md } from "./Md";
+import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
@@ -158,6 +158,7 @@ import {
 import { SshConfigDialog } from "./SshConfigDialog";
 import { RemoteIcon } from "./RemoteIcon";
 import { RemoteStatus } from "./RemoteStatus";
+import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
   defaultSelection,
   HARNESS_LABELS,
@@ -190,8 +191,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
-import { useDialogFocus } from "./useDialogFocus";
+import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -4244,8 +4244,15 @@ function SessionRow({
 
 // --- panel -------------------------------------------------------------------
 
-// The four starter prompts progress understand → gap → baseline → experiment.
+// The four starter prompts progress starting point → gap → baseline → experiment.
 const STARTER_ICONS = [BookOpen, Search, SquareTerminal, FlaskConical];
+// A blank project has nothing for a model to read, so its prompts are pre-written.
+const blankStarterPrompts = (): StarterPrompt[] => [
+  { title: m.chat_panel_starter_blank_1_title(), prompt: m.chat_panel_starter_blank_1_prompt() },
+  { title: m.chat_panel_starter_blank_2_title(), prompt: m.chat_panel_starter_blank_2_prompt() },
+  { title: m.chat_panel_starter_blank_3_title(), prompt: m.chat_panel_starter_blank_3_prompt() },
+  { title: m.chat_panel_starter_blank_4_title(), prompt: m.chat_panel_starter_blank_4_prompt() },
+];
 // One outline colour per step so the four boxes read as distinct choices.
 const STARTER_TONES = [
   { box: "border-accent-blue/45", icon: "text-accent-blue" },
@@ -4255,124 +4262,6 @@ const STARTER_TONES = [
 ];
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
-
-function RemoteHostDialog({
-  onClose,
-  onConfigureSsh,
-}: {
-  onClose: () => void;
-  onConfigureSsh: () => void;
-}) {
-  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) });
-
-  const hostsQuery = useQuery(getSshHostsQuery());
-  const sessionsQuery = useQuery(listRemoteSessionsQuery());
-  const hosts = hostsQuery.data ?? null;
-  const sessions = sessionsQuery.data ?? [];
-  const [query, setQuery] = useState("");
-  const loadError = !hosts ? hostsQuery.error?.message ?? sessionsQuery.error?.message ?? null : null;
-  const [openingHost, setOpeningHost] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useDialogFocus(dialogRef, onClose);
-
-  async function openRemote(host: string) {
-    const remoteWindow = window.open("/remote-launch", "_blank");
-    if (!remoteWindow) {
-      showAlert(m.remote_popup_blocked(), "error");
-      return;
-    }
-    setOpeningHost(host);
-    try {
-      const session = await createRemoteSessionMutation.mutateAsync([host, {
-        theme: getThemePreference(),
-        locale: getLocale(),
-      }]);
-      remoteWindow.location.replace(session.gatewayUrl);
-      onClose();
-    } catch (error) {
-      remoteWindow.close();
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setOpeningHost(null);
-    }
-  }
-
-  const filteredHosts = hosts?.filter((host) =>
-    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
-  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="remote-host-dialog-title"
-        tabIndex={-1}
-      >
-        <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={onClose}>
-          <X size={16} />
-        </IconButton>
-        <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-          <h2 id="remote-host-dialog-title" className="m-0 text-xl font-medium">{m.remote_dialog_title()}</h2>
-          <p className="mt-2 mb-0 text-sm leading-normal text-subtext">{m.remote_dialog_description()}</p>
-          <Input
-            data-initial-focus
-            className="mt-4"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={m.remote_search_hosts()}
-            aria-label={m.remote_search_hosts()}
-          />
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
-          {loadError ? (
-            <p className="m-3 text-sm text-accent-red">{loadError}</p>
-          ) : hosts === null ? (
-            <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
-          ) : filteredHosts?.length === 0 ? (
-            <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
-          ) : (
-            filteredHosts?.map((host) => {
-              const session = sessionByHost.get(host.host);
-              return (
-                <Button
-                  key={host.host}
-                  variant="ghost"
-                  className="w-full justify-start text-base font-normal"
-                  disabled={openingHost === host.host}
-                  onClick={() => void openRemote(host.host)}
-                >
-                  <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
-                  {openingHost === host.host ? (
-                    <Spinner />
-                  ) : session ? (
-                    <span className="text-sm text-subtext">{m.remote_open()}</span>
-                  ) : null}
-                </Button>
-              );
-            })
-          )}
-        </div>
-        <div className="shrink-0 border-t border-border-variant p-2">
-          <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={onConfigureSsh}>
-            <SlidersHorizontal size={15} />
-            {m.ssh_configure_hosts()}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 export function ChatPanel({
   projectId,
@@ -4391,7 +4280,8 @@ export function ChatPanel({
   onOpenSubagent,
   runtime,
   onOpenDemoWelcome,
-  composerPrefill = null,
+  composerFocusNonce = 0,
+  demoRunningRunId = null,
   activeSessionId,
   onActiveSessionChange,
   preferredAgent,
@@ -4447,7 +4337,10 @@ export function ChatPanel({
   runtime: RuntimeInfo;
   /** Reopen the demo welcome modal from the chat header. */
   onOpenDemoWelcome?: () => void;
-  composerPrefill?: string | null;
+  /** Increments when the demo welcome hands focus to the composer. */
+  composerFocusNonce?: number;
+  /** Demo run currently executing, for the monitor-it hint above the composer. */
+  demoRunningRunId?: string | null;
   activeSessionId: string | null;
   onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean }) => void;
   /** Database-backed selection used to seed new chat sessions. */
@@ -4478,8 +4371,6 @@ export function ChatPanel({
       return next;
     });
   }, [sessionsOptions]);
-  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
-  const [sshConfigOpen, setSshConfigOpen] = useState(false);
   const activeId = activeSessionId;
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
@@ -4488,6 +4379,8 @@ export function ChatPanel({
   const [unreadSessionIds, setUnreadSessionIds] = useState<ReadonlySet<string>>(new Set());
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("active");
   const [draft, setDraft] = useState("");
+  const [demoHintDismissed, setDemoHintDismissed] = useState(false);
+  const [demoRunHintDismissed, setDemoRunHintDismissed] = useState(false);
   const [annotations, setAnnotations] = useState<ComposerAnnotation[]>([]);
   const annotationId = useRef(0);
   const composerScopeRef = useRef({ projectId, activeId, mainView });
@@ -4999,6 +4892,8 @@ export function ChatPanel({
         : new Set(),
     );
     setDraft("");
+    setDemoHintDismissed(false);
+    setDemoRunHintDismissed(false);
     setAttachments([]);
     setTitleReveals(new Map());
     seenTitles.current = new Map();
@@ -5184,30 +5079,11 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // The newest ANSWERABLE unresolved question card's part id: typed composer
-  // text answers IT as a custom answer, instead of racing the held turn with
-  // a new message (which the busy guard would reject/drop). Plan cards have
-  // their own inline revise textarea (PlanStrip) and don't route through
-  // here. Claude + Codex sessions: both accept a note-only reply (codex's
-  // user_input_reply takes the note as the surfaced question's freeform
-  // answer). Opencode is excluded — it rejects note-only replies (see
-  // reply_inline), so its options stay the interface. A held (nativeId) card
-  // is answerable only while its turn is alive — a zombie left by a process
-  // restart must not capture the composer (its own buttons error and the
-  // backend collapses it on the first attempt).
-  const pendingQuestion = useMemo(() => {
-    const harness = activeSession?.harness;
-    if (!activeId || (harness !== "claude-code" && harness !== "codex")) return null;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      for (const part of messages[i].parts) {
-        if (part.type !== "prompt" || !part.prompt || part.prompt.resolved) continue;
-        if (part.prompt.kind !== "question") continue;
-        if (part.prompt.nativeId && !state.busySessions.has(activeId)) return null;
-        return part.id;
-      }
-    }
-    return null;
-  }, [messages, activeSession?.harness, activeId, state.busySessions]);
+  // Native questions own the composer only while their turn is still running.
+  const pendingQuestion = useMemo(
+    () => activeId ? pendingQuestionId(messages, activeSession?.harness, state.busySessions.has(activeId)) : null,
+    [messages, activeSession?.harness, activeId, state.busySessions],
+  );
   // A pending question card owns typed text, so `!` is just an answer there.
   const bashActive = bashMode && !pendingQuestion;
 
@@ -5310,7 +5186,9 @@ export function ChatPanel({
     enabled: starterVisible && starterHarness !== null,
     subscribed: starterVisible && starterHarness !== null,
   });
-  const starterPrompts = starterQuery.data?.prompts ?? null;
+  const starterPrompts = starterQuery.data?.blank
+    ? blankStarterPrompts()
+    : (starterQuery.data?.prompts ?? null);
   const starterLoading = starterHarness !== null && starterQuery.isPending;
   // The demo project is the only surface that isn't a user-created project.
   const telemetrySurface: FirstActionSurface =
@@ -5327,15 +5205,37 @@ export function ChatPanel({
       setComposerCursor(prompt.length);
     });
   };
-  // Seeds the draft while a prefill is offered without taking focus, which may
-  // belong to the demo welcome dialog; clearing the prefill later leaves the draft.
+  // On offer until the user has sent anything in the demo: a send either adds
+  // a session or moves a recorded session's leaf off its seeded message.
+  const composerPrefill =
+    projectId === DEMO_PROJECT_ID &&
+      sessions.length > 0 &&
+      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      ? DEMO_RUN_EXPERIMENT_PROMPT
+      : null;
+  // Seeds without taking focus; focus may still belong to the welcome dialog.
   useEffect(() => {
     if (!composerPrefill) return;
-    setDraft(composerPrefill);
+    setDraft((current) => current || composerPrefill);
     setSkillMenuDismissed(false);
     setMentionMenuDismissed(false);
     setComposerCursor(composerPrefill.length);
   }, [composerPrefill]);
+  useEffect(() => {
+    if (composerFocusNonce === 0) return;
+    // The welcome dialog restores its previous focus on unmount; run after that.
+    const frame = window.requestAnimationFrame(() => {
+      const el = composerRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+      el.scrollIntoView({ block: "nearest" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [composerFocusNonce]);
+  const demoHintId = useId();
+  const demoHintVisible =
+    projectId === DEMO_PROJECT_ID && draft === DEMO_RUN_EXPERIMENT_PROMPT && !demoHintDismissed;
   const updateTranscriptBottom = useCallback((el: HTMLDivElement) => {
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
     stickToBottom.current = atBottom;
@@ -6111,38 +6011,7 @@ export function ChatPanel({
           </div>
         )}
       </div>
-      {runtime.kind === "ssh" ? (
-        <RemoteStatus runtime={runtime} />
-      ) : (
-        <div className="relative shrink-0 border-t border-border">
-          <div className="flex items-center gap-1.5 py-2 ps-1 pe-2.5">
-            <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
-              <RemoteIcon size={14} className="shrink-0" />
-            </IconButton>
-            <span className="flex min-w-0 flex-col gap-1 text-start text-text">
-              <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
-              <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
-            </span>
-          </div>
-        </div>
-      )}
-      {remoteDialogOpen && (
-        <RemoteHostDialog
-          onClose={() => setRemoteDialogOpen(false)}
-          onConfigureSsh={() => {
-            setRemoteDialogOpen(false);
-            setSshConfigOpen(true);
-          }}
-        />
-      )}
-      {sshConfigOpen && (
-        <SshConfigDialog
-          onClose={() => {
-            setSshConfigOpen(false);
-            setRemoteDialogOpen(true);
-          }}
-        />
-      )}
+      <WorkspaceConnection runtime={runtime} />
     </aside>
   );
 
@@ -6294,34 +6163,36 @@ export function ChatPanel({
             }}
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
-              <Transcript
-                key={activeId}
-                scrollRef={threadRef}
-                scrollToEndRef={scrollToEndRef}
-                stickToBottom={stickToBottom}
-                onPinToBottom={pinTranscriptToBottom}
-                messages={messages}
-                allMessages={allMessages}
-                canFork={canFork}
-                onFork={forkTurn}
-                onSelectFork={selectBranch}
-                busy={busy}
-                onOpenFile={openFileInSession}
-                onOpenRun={onOpenRun}
-                onOpenSpawnedSession={openSpawnedSession}
-                runExperimentName={runExperimentName}
-                onOpenExperiment={onOpenExperiment}
-                experimentName={experimentName}
-                onRespond={respond}
-                onOpenPlan={openPlan}
-                onOpenSubagent={openSubagent}
-                recoveringTurnId={recoveringTurnId}
-                onRecover={recoverFailedTurn}
-                onCancelResume={cancelTurnAutoResume}
-                skills={commands}
-                sessionModel={activeSession?.model}
-                sessionBusy={lookupSessionBusy}
-              />
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <Transcript
+                  key={activeId}
+                  scrollRef={threadRef}
+                  scrollToEndRef={scrollToEndRef}
+                  stickToBottom={stickToBottom}
+                  onPinToBottom={pinTranscriptToBottom}
+                  messages={messages}
+                  allMessages={allMessages}
+                  canFork={canFork}
+                  onFork={forkTurn}
+                  onSelectFork={selectBranch}
+                  busy={busy}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                  onOpenSpawnedSession={openSpawnedSession}
+                  runExperimentName={runExperimentName}
+                  onOpenExperiment={onOpenExperiment}
+                  experimentName={experimentName}
+                  onRespond={respond}
+                  onOpenPlan={openPlan}
+                  onOpenSubagent={openSubagent}
+                  recoveringTurnId={recoveringTurnId}
+                  onRecover={recoverFailedTurn}
+                  onCancelResume={cancelTurnAutoResume}
+                  skills={commands}
+                  sessionModel={activeSession?.model}
+                  sessionBusy={lookupSessionBusy}
+                />
+              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -6463,6 +6334,59 @@ export function ChatPanel({
               ))}
             </div>
           )}
+          {demoHintVisible && (
+            <div
+              id={demoHintId}
+              role="note"
+              className={`composer-demo-hint ${COMPOSER_HINT_CLASS}`}
+            >
+              <FlaskConical size={16} className="shrink-0 text-primary" />
+              <span className="flex-1" dir="auto">{m.chat_panel_demo_hint_body()}</span>
+              <IconButton
+                size="small"
+                aria-label={m.chat_panel_dismiss_demo_hint()}
+                title={m.chat_panel_dismiss_demo_hint()}
+                onClick={() => {
+                  setDemoHintDismissed(true);
+                  composerRef.current?.focus();
+                }}
+              >
+                <X size={14} />
+              </IconButton>
+            </div>
+          )}
+          {demoRunningRunId && !demoRunHintDismissed && onOpenRun && (
+            <div
+              role="note"
+              className={`composer-demo-run-hint ${COMPOSER_HINT_CLASS}`}
+            >
+              <FlaskConical size={16} className="shrink-0 text-primary" />
+              <span className="flex flex-1 flex-wrap items-center gap-x-1.5 gap-y-1" dir="auto">
+                <span>{m.chat_panel_demo_run_hint_before()}</span>
+                <Button size="small" onClick={() => onOpenRun(demoRunningRunId, "keepOpen")}>
+                  <Terminal size={14} />
+                  {m.experiments_table_logs()}
+                </Button>
+                <span>{m.chat_panel_demo_run_hint_after()}</span>
+              </span>
+              <IconButton
+                size="small"
+                aria-label={m.chat_panel_dismiss_demo_hint()}
+                title={m.chat_panel_dismiss_demo_hint()}
+                onClick={() => {
+                  setDemoRunHintDismissed(true);
+                  composerRef.current?.focus();
+                }}
+              >
+                <X size={14} />
+              </IconButton>
+            </div>
+          )}
+          <span className="sr-only" role="status" aria-live="polite">
+            {demoRunningRunId
+              ? `${m.chat_panel_demo_run_hint_before()} ${m.experiments_table_logs()} ${m.chat_panel_demo_run_hint_after()}`
+              : ""}
+          </span>
           <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
@@ -6540,6 +6464,7 @@ export function ChatPanel({
               <textarea
                 dir="auto"
                 ref={composerRef}
+                aria-describedby={demoHintVisible ? demoHintId : undefined}
                 // Native prose stays visible; the aligned mirror paints only skill tokens.
                 className="relative z-1 bg-transparent"
                 value={draft}
@@ -6755,6 +6680,7 @@ export function ChatPanel({
                 <ModelPicker
                   value={composerSelection}
                   onSelect={selectModel}
+                  onOpenSettings={() => onSelectMainView("harnesses")}
                   permissionChoices={activeHarness?.agentReady ? (opts?.permissionModes ?? []) : []}
                   defaultPermissionId={opts?.defaultPermissionMode ?? null}
                   onSelectPermission={setPermissionMode}
@@ -6776,7 +6702,7 @@ export function ChatPanel({
                 </IconButton>
               ) : (
                 <IconButton
-                  className="send-btn"
+                  className={`send-btn ${demoHintVisible && activeHarness?.agentReady ? "ring-2 ring-primary ring-offset-2 ring-offset-background" : ""}`}
                   variant="primary"
                   title={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
                   aria-label={bashActive ? m.chat_panel_run() : m.chat_panel_send()}
@@ -6799,6 +6725,8 @@ export function ChatPanel({
   );
 }
 
+const COMPOSER_HINT_CLASS =
+  "flex items-center gap-2.5 mb-2.5 py-2 ps-3.5 pe-2 rounded-lg border border-border bg-surface text-text text-sm leading-normal";
 const EMPTY_SKILLS: SkillInfo[] = [];
 
 const EMPTY_HARNESSES: Harness[] = [];

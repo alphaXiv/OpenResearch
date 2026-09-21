@@ -2,7 +2,8 @@
 //! actually contains — paper, README, code, manifests — handed to a headless
 //! harness child that writes four prompts about *this* project. Results are
 //! cached per brief fingerprint so reopening the empty state doesn't pay for
-//! another model call.
+//! another model call. A blank project has nothing to brief, so it gets the
+//! UI's pre-written prompts and no model call at all.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -41,6 +42,15 @@ const STARTER_PROMPT_CHARS: usize = 600;
 pub struct StarterPrompt {
     pub title: String,
     pub prompt: String,
+}
+
+/// What the empty chat has to offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Starter {
+    /// Nothing to read yet: the UI shows its pre-written prompts.
+    Blank,
+    /// Written about this project; `None` when the harness can't answer.
+    Generated(Option<Vec<StarterPrompt>>),
 }
 
 const SETUP_FILES: &[&str] = &[
@@ -85,20 +95,30 @@ impl Agent {
 }
 
 /// Four prompts about this project, from the cache or a fresh model call.
-/// `None` when the harness can't answer (not installed, timed out, replied
-/// with something that isn't four prompts).
-pub async fn prompts(
-    project: &LocalProject,
-    agent: &Agent,
-    locale: &str,
-) -> Option<Vec<StarterPrompt>> {
+/// `Generated(None)` when the harness can't answer (not installed, timed out,
+/// replied with something that isn't four prompts).
+pub async fn prompts(project: &LocalProject, agent: &Agent, locale: &str) -> Starter {
     let brief = tokio::task::spawn_blocking({
         let project = project.clone();
-        move || brief(&project)
+        move || {
+            let files = list_files(Path::new(&project.repo_path));
+            (!is_blank(project.paper_id.as_deref(), &files)).then(|| brief(&project, &files))
+        }
     })
-    .await
-    .ok()?;
-    generate(brief, project.paper_id.as_deref(), agent, locale).await
+    .await;
+    match brief {
+        Ok(Some(brief)) => {
+            Starter::Generated(generate(brief, project.paper_id.as_deref(), agent, locale).await)
+        }
+        Ok(None) => Starter::Blank,
+        Err(_) => Starter::Generated(None),
+    }
+}
+
+/// A project with no paper and no files: there is nothing for a model to
+/// read, so prompts about "this project" would only be generic.
+fn is_blank(paper_id: Option<&str>, files: &[String]) -> bool {
+    paper_id.is_none() && files.is_empty()
 }
 
 /// Generate for a project that does not exist yet, from what the new-project
@@ -106,6 +126,9 @@ pub async fn prompts(
 /// The brief is built exactly as it will be once the project is created, so
 /// the cache entry is found by content the moment the empty chat opens.
 pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, locale: String) {
+    if paper_id.is_none() && path.is_none() {
+        return;
+    }
     tokio::spawn(async move {
         let agent = resolve_agent().await?;
         let brief = tokio::task::spawn_blocking({
@@ -116,6 +139,9 @@ pub fn prewarm(name: String, paper_id: Option<String>, path: Option<String>, loc
                     // typed folder, so brief the same root.
                     let repo = super::git::repository_root(Path::new(&path)).ok()?;
                     let files = list_files(&repo);
+                    if is_blank(paper_id.as_deref(), &files) {
+                        return None;
+                    }
                     Some(brief_parts(&name, None, paper_id.as_deref(), &repo, &files))
                 }
                 None => {
@@ -246,7 +272,7 @@ pub(crate) async fn resolve_agent() -> Option<Agent> {
 pub fn warm(project: LocalProject, locale: String) {
     tokio::spawn(async move {
         let agent = resolve_agent().await?;
-        prompts(&project, &agent, &locale).await
+        Some(prompts(&project, &agent, &locale).await)
     });
 }
 
@@ -354,15 +380,13 @@ fn clip(text: &str, chars: usize) -> String {
 
 /// Everything local the model gets to read about the project, in a stable
 /// order (the fingerprint depends on it).
-fn brief(project: &LocalProject) -> String {
-    let repo = Path::new(&project.repo_path);
-    let files = list_files(repo);
+fn brief(project: &LocalProject, files: &[String]) -> String {
     brief_parts(
         &project.name,
         project.run_command.as_deref(),
         project.paper_id.as_deref(),
-        repo,
-        &files,
+        Path::new(&project.repo_path),
+        files,
     )
 }
 
@@ -595,7 +619,8 @@ mod tests {
         write(&root, "requirements.txt", "torch>=2.0\n");
         write(&root, "train.py", "import torch\nprint('hi')\n");
         write(&root, "src/model.py", "");
-        let brief = brief(&project(&root));
+        let project = project(&root);
+        let brief = brief(&project, &list_files(&root));
 
         assert!(brief.contains("## Project name\ndemo"));
         assert!(brief.contains("## Run command\npython train.py --steps 10"));
@@ -611,10 +636,17 @@ mod tests {
         let root = temp_root();
         let mut project = project(&root);
         project.run_command = None;
-        let brief = brief(&project);
+        let brief = brief(&project, &list_files(&root));
         assert!(brief.contains("(the project folder is empty)"));
         assert!(!brief.contains("Run command"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn blank_means_no_paper_and_no_files() {
+        assert!(is_blank(None, &[]));
+        assert!(!is_blank(None, &["train.py".to_string()]));
+        assert!(!is_blank(Some("2401.12345"), &[]));
     }
 
     #[test]
@@ -682,18 +714,14 @@ mod tests {
 
     #[test]
     fn prewarm_brief_matches_the_created_project() {
-        // A blank project: nothing on disk once created.
+        // A paper project without a repository: just the PDF.
         let root = temp_root();
         let mut project = project(&root);
         project.name = "Fresh idea".into();
         project.run_command = None;
-        let created = brief(&project);
-        let ahead = brief_parts("Fresh idea", None, None, Path::new(""), &[]);
-        assert_eq!(created, ahead);
-        // A paper project without a repository: just the PDF.
         write(&root, "paper.pdf", "%PDF");
         project.paper_id = Some("2401.12345".into());
-        let created = brief(&project);
+        let created = brief(&project, &list_files(&root));
         let ahead = brief_parts(
             "Fresh idea",
             None,

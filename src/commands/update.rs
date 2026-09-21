@@ -7,6 +7,9 @@
 //! The installer owns the hard parts — checksum verification and the atomic
 //! rename into `~/.cargo/bin` (never an in-place overwrite, which on macOS
 //! trips the kernel's per-inode code-signature cache and SIGKILLs the binary).
+//! Windows runs the `.ps1` twin of that installer, which unpacks but does not
+//! verify checksums, into a staging directory, then swaps the binary in itself
+//! since Windows will not overwrite a running exe; see `updates::windows`.
 //!
 //! Guards, in order:
 //!   - `OPENRESEARCH_CLI_DISABLE_UPDATE=1` refuses outright (same switch the
@@ -91,14 +94,11 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     let current = updates::current_version();
     let target = updates::preflight(args.force)?;
 
-    let receipt = match target {
-        UpdateTarget::AppBundle(root) => {
-            return updates::macos_app::update(&root, &current, args.dry_run, args.background)
-                .await
-                .map(|_| Outcome::Done)
-        }
-        UpdateTarget::Installer(receipt) => receipt,
-    };
+    if let UpdateTarget::AppBundle(root) = &target {
+        return updates::macos_app::update(root, &current, args.dry_run, args.background)
+            .await
+            .map(|_| Outcome::Done);
+    }
 
     let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
     // Record what the release actually is before acting on it, so a cache that
@@ -128,24 +128,53 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
     // version we report is exactly the version that gets installed.
     let installer = updates::fetch_release_asset(
         &latest.tag,
-        &format!("{}-installer.sh", updates::APP_NAME),
+        &format!("{}-installer.{}", updates::APP_NAME, INSTALLER_EXT),
         Duration::from_secs(60),
     )
     .await?;
-    let script = std::env::temp_dir().join(format!("orx-installer-{}.sh", uuid::Uuid::new_v4()));
-    std::fs::write(&script, &installer)?;
+    run_installer(&target, &installer, args.background)?;
 
-    // `sh <script>` rather than executing the file: immune to noexec /tmp
-    // mounts. The installer verifies artifact checksums and renames the new
-    // binary into place atomically; replacing a running orx is safe on
-    // macOS/Linux (old processes keep the old inode).
+    // Keep the update-check cache in sync so the warning doesn't fire on a stale
+    // answer, and so a running `orx up` learns a restart would pick this up.
+    updates::record_installed(&latest.version.to_string());
+    // The shell installer rewrites the receipt itself; orx did the Windows swap,
+    // so it fills in the version. The binary is already new: a warning, not a failure.
+    #[cfg(windows)]
+    if let UpdateTarget::Installer(_) = &target {
+        if let Err(e) = updates::record_receipt_version(&latest.version.to_string()) {
+            eprintln!(
+                "warning: orx was updated, but its install receipt at {} was not: {e}",
+                updates::receipt_path().display()
+            );
+        }
+    }
+    if !args.background {
+        println!("✓ Updated orx {} → {}.", current, latest.version);
+    }
+    Ok(Outcome::Done)
+}
+
+/// cargo-dist ships a shell installer and a PowerShell one.
+const INSTALLER_EXT: &str = if cfg!(windows) { "ps1" } else { "sh" };
+
+/// `sh <script>` rather than executing the file: immune to noexec /tmp mounts.
+/// The installer verifies artifact checksums and renames the new binary into
+/// place atomically; replacing a running orx is safe on macOS/Linux (old
+/// processes keep the old inode).
+#[cfg(not(windows))]
+fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result<()> {
+    let UpdateTarget::Installer(receipt) = target else {
+        return Err(anyhow!("This install is not managed by the installer."));
+    };
+    let script = std::env::temp_dir().join(format!("orx-installer-{}.sh", uuid::Uuid::new_v4()));
+    std::fs::write(&script, installer)?;
     let mut cmd = std::process::Command::new("sh");
     cmd.arg(&script)
         .env("CARGO_DIST_FORCE_INSTALL_DIR", &receipt.install_prefix);
     if !receipt.modify_path {
         cmd.env("OPENRESEARCH_CLI_NO_MODIFY_PATH", "1");
     }
-    if args.background {
+    if quiet {
         // Nobody is watching this child, and its stdio is inherited from a
         // terminal the user is still using.
         cmd.stdout(std::process::Stdio::null())
@@ -160,12 +189,20 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
             status
         ));
     }
+    Ok(())
+}
 
-    // Keep the update-check cache in sync so the warning doesn't fire on a stale
-    // answer, and so a running `orx up` learns a restart would pick this up.
-    updates::record_installed(&latest.version.to_string());
-    if !args.background {
-        println!("✓ Updated orx {} → {}.", current, latest.version);
-    }
-    Ok(Outcome::Done)
+/// Resolve where `orx.exe` lives for this target and hand it to `updates::windows`.
+#[cfg(windows)]
+fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result<()> {
+    let installed = match target {
+        UpdateTarget::Installer(receipt) => std::path::Path::new(&receipt.install_prefix)
+            .join("bin")
+            .join("orx.exe"),
+        UpdateTarget::Portable(dir) => dir.join("orx.exe"),
+        UpdateTarget::AppBundle(_) => {
+            return Err(anyhow!("This install is not managed by the installer."))
+        }
+    };
+    updates::windows::install(&installed, installer, quiet)
 }

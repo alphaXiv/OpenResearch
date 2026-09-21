@@ -153,10 +153,17 @@ export const getSlackSettingsQuery = () => queryOptions({
   staleTime: 300_000,
 });
 
+export const getHarnessSetupCommandsQuery = () => queryOptions({
+  queryKey: workspaceKey("getHarnessSetupCommands"),
+  queryFn: ({ signal }) => api.getHarnessSetupCommands(signal),
+  staleTime: Infinity,
+});
+
 export const getHarnessesQuery = () => queryOptions({
   queryKey: workspaceKey("getHarnesses"),
   queryFn: ({ signal }) => api.getHarnesses(false, false, signal),
   staleTime: 300_000,
+  refetchInterval: (query) => query.state.data?.some((h) => h.accountLoading) ? 1_000 : false,
 });
 
 export const getSkillsQuery = (harness?: string) => queryOptions({

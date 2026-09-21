@@ -103,7 +103,7 @@ interface Props {
   location: string;
   pane: Pane | undefined;
   isTask: boolean;
-  demoOverview: boolean;
+  firstDemoOpen: boolean;
   state: RightPaneSessionState;
   apply: (state: RightPaneSessionState, saved: TaskWorkspace | undefined, restored: boolean) => void;
   getScroll: () => TaskWorkspace["scroll"];
@@ -139,7 +139,7 @@ export function useProjectWorkspace(props: Props): {
   capture: () => void;
   workspace: MutableRefObject<ProjectWorkspace>;
 } {
-  const { projectId, taskKey, location, pane, isTask, demoOverview, state, apply, getScroll, sourceModes, revision } = props;
+  const { projectId, taskKey, location, pane, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision } = props;
   const workspace = useRef<ProjectWorkspace>(emptyProjectWorkspace());
   const saveError = useSyncExternalStore(subscribeErrors, () => projectId ? saveErrors.get(projectId) ?? null : null);
   const [readError, setReadError] = useState<string | null>(null);
@@ -193,7 +193,7 @@ export function useProjectWorkspace(props: Props): {
       appliedScope.current = scope;
       appliedPane.current = paneKey;
       if (isTask) {
-        const saved = getTaskWorkspace(document, taskKey) ?? (isDemoProjectId(projectId) ? defaultTaskWorkspace(taskKey, demoOverview) : undefined);
+        const saved = getTaskWorkspace(document, taskKey) ?? (isDemoProjectId(projectId) ? defaultTaskWorkspace(taskKey, firstDemoOpen) : undefined);
         apply(restoreWorkspace(saved, pane), saved, true);
       }
       setRenderedScope(scope);
@@ -213,7 +213,7 @@ export function useProjectWorkspace(props: Props): {
       committed.current = { projectId, taskKey, scope, location, pane, state: resolvedState };
     } else save(projectId, location);
     workspace.current = projectCache.get(projectId) ?? document;
-  }, [projectId, taskKey, location, pane, paneKey, isTask, demoOverview, state, apply, getScroll, sourceModes, revision, loadedProject, scope, renderedScope, capture]);
+  }, [projectId, taskKey, location, pane, paneKey, isTask, firstDemoOpen, state, apply, getScroll, sourceModes, revision, loadedProject, scope, renderedScope, capture]);
 
   useEffect(() => {
     const visit = epoch;

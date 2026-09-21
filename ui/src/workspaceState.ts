@@ -1,5 +1,5 @@
 export type Pane =
-  | { kind: "home"; view: "experiments" | "files" | "artifacts" }
+  | { kind: "home"; view: "experiments" | "files" | "artifacts" | "terminal" }
   | { kind: "experiment"; experimentId: string; view: "overview" | "terminal"; runId?: string }
   | { kind: "file"; path: string; source?: "repo" | "artifacts" | "abs"; sessionId?: string; ref?: string; line?: number; branchLabel?: string }
   | { kind: "code"; experimentId: string; branch: string; view: "files" | "changes" }
@@ -54,7 +54,7 @@ export function parsePane(value: unknown): Pane | undefined {
   const only = (...fields: string[]) => Object.keys(value).every((field) => fields.includes(field));
   switch (value.kind) {
     case "home":
-      if (only("kind", "view") && (value.view === "experiments" || value.view === "files" || value.view === "artifacts"))
+      if (only("kind", "view") && (value.view === "experiments" || value.view === "files" || value.view === "artifacts" || value.view === "terminal"))
         return { kind: "home", view: value.view };
       break;
     case "experiment":
