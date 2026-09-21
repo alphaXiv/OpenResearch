@@ -37,6 +37,7 @@ use crate::error::{anyhow, Result};
 use crate::local;
 use crate::local::chat::ChatHost;
 use crate::local::opencode::AgentHost;
+use crate::notify::NotificationProvider;
 use crate::store::{
     log_path, now_ms, SshHostTest, Store, StoredAgentSelection, StoredChatSession, StoredRun,
 };
@@ -80,6 +81,10 @@ pub async fn run(args: UpArgs) -> Result<()> {
         Err(error) => return Err(anyhow!("Could not bind 127.0.0.1:{}: {}", port, error)),
     };
     let actual_port = listener.local_addr()?.port();
+    // So `notify_events`'s deep links can name this dashboard from any
+    // launcher or chat-turn call site without the port being threaded
+    // through each one — see that module's `set_up_port` doc comment.
+    crate::notify_events::set_up_port(actual_port);
     // Open early so the schema exists before any request or agent spawn.
     {
         let store = Store::open()?;
@@ -167,6 +172,17 @@ pub async fn run(args: UpArgs) -> Result<()> {
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
+    // Only start the drain loop when a webhook is actually configured —
+    // otherwise every drain pass would just poll an empty-or-doomed-to-fail
+    // outbox. This means changing the webhook in Settings while `orx up` is
+    // already running takes effect on the next restart, not live: a
+    // live-reload path (watching config for changes, swapping the provider
+    // under the loop) is more machinery than two events warrant for T6.
+    if let Some(webhook_url) = crate::config::slack_webhook_url() {
+        crate::notify::spawn_notifier_loop(std::sync::Arc::new(
+            crate::notify::SlackWebhookProvider::new(webhook_url),
+        ));
+    }
     spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
     spawn_background_tasks(remote_auth.is_none());
     let live_events = state.chat.clone();
@@ -641,6 +657,14 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(ray_settings).post(set_ray_settings),
         )
         .route("/api/settings/ray/preflight", post(ray_preflight))
+        .route(
+            "/api/settings/slack",
+            get(slack_settings)
+                .post(set_slack_webhook)
+                .delete(delete_slack_webhook),
+        )
+        .route("/api/settings/slack/events", post(set_slack_events))
+        .route("/api/settings/slack/preflight", post(slack_preflight))
         .route("/api/settings/compute", get(compute_settings))
         .route("/api/settings/compute/default", post(set_compute_default))
         .route("/api/settings/local", get(local_machine_settings))
@@ -5232,6 +5256,109 @@ async fn set_auto_continue_on_limit(Json(req): Json<SetAutoContinueOnLimitReq>) 
     .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))?
 }
 
+// --- slack --------------------------------------------------------------------
+
+fn slack_settings_json() -> Value {
+    let events = crate::telemetry::slack_event_settings();
+    json!({
+        "hasWebhook": crate::config::slack_webhook_url().is_some(),
+        "events": {
+            "jobSubmitted": events.job_submitted,
+            "runSynthesized": events.run_synthesized,
+        },
+    })
+}
+
+async fn slack_settings() -> ApiResult {
+    blocking_api(move || Ok(Json(slack_settings_json()))).await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSlackWebhookReq {
+    webhook_url: String,
+}
+
+/// The one prefix every Slack Incoming Webhook URL has — checked here so a
+/// pasted API token or a copy-pasted unrelated URL fails fast with a message
+/// that says what's wrong, rather than surfacing as an opaque delivery
+/// failure the first time the drain loop tries it.
+fn looks_like_slack_webhook(url: &str) -> bool {
+    url.starts_with("https://hooks.slack.com/services/")
+}
+
+async fn set_slack_webhook(Json(req): Json<SetSlackWebhookReq>) -> ApiResult {
+    blocking_api(move || {
+        let url = req.webhook_url.trim().to_string();
+        if !looks_like_slack_webhook(&url) {
+            return Err(bad_request(
+                "That does not look like a Slack incoming webhook URL — it should start with \
+                 https://hooks.slack.com/services/. Create one from a Slack app's Incoming \
+                 Webhooks page.",
+            ));
+        }
+        crate::config::set_slack_webhook_url(&url)?;
+        Ok(Json(json!({ "hasWebhook": true })))
+    })
+    .await
+}
+
+async fn delete_slack_webhook() -> ApiResult {
+    blocking_api(move || {
+        crate::config::clear_slack_webhook_url()?;
+        Ok(Json(json!({ "hasWebhook": false })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetSlackEventsReq {
+    job_submitted: bool,
+    run_synthesized: bool,
+}
+
+async fn set_slack_events(Json(req): Json<SetSlackEventsReq>) -> ApiResult {
+    blocking_api(move || {
+        crate::telemetry::set_slack_event_settings(crate::telemetry::SlackEventSettings {
+            job_submitted: req.job_submitted,
+            run_synthesized: req.run_synthesized,
+        })
+        .map_err(|e| ApiError::from(anyhow!("could not save slack event settings: {e}")))?;
+        Ok(Json(json!({
+            "jobSubmitted": req.job_submitted,
+            "runSynthesized": req.run_synthesized,
+        })))
+    })
+    .await
+}
+
+/// Synchronous "test now" probe, matching `sge_preflight`'s shape: sends a
+/// real message straight through a one-off provider rather than the outbox,
+/// so the result is a Slack answer, not "enqueued".
+async fn slack_preflight() -> ApiResult {
+    let Some(webhook_url) = crate::config::slack_webhook_url() else {
+        return Ok(Json(
+            json!({ "ok": false, "error": "No Slack webhook is saved yet." }),
+        ));
+    };
+    let provider = crate::notify::SlackWebhookProvider::new(webhook_url);
+    let outcome = provider
+        .send("preflight", &json!({ "text": "orx connected \u{2713}" }))
+        .await;
+    Ok(Json(match outcome {
+        crate::notify::DeliveryOutcome::Sent => json!({ "ok": true, "error": Value::Null }),
+        crate::notify::DeliveryOutcome::Rejected => json!({
+            "ok": false,
+            "error": "Slack rejected the message — the webhook may be revoked or malformed.",
+        }),
+        crate::notify::DeliveryOutcome::Retryable => json!({
+            "ok": false,
+            "error": "Could not reach Slack. Check the webhook URL and try again.",
+        }),
+    }))
+}
+
 // --- updates -----------------------------------------------------------------
 
 async fn update_status() -> ApiResult {
@@ -8107,6 +8234,24 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slack_webhook_url_shape_is_checked_before_saving() {
+        assert!(looks_like_slack_webhook(
+            "https://hooks.slack.com/services/T000/B000/xxxxxxxxxxxxxxxxxxxxxxxx"
+        ));
+        assert!(!looks_like_slack_webhook(""));
+        assert!(!looks_like_slack_webhook(
+            "hooks.slack.com/services/T000/B000/xxx"
+        ));
+        assert!(!looks_like_slack_webhook("https://example.com/webhook"));
+        assert!(!looks_like_slack_webhook(
+            "http://hooks.slack.com/services/T000/B000/xxx"
+        ));
+        assert!(!looks_like_slack_webhook(
+            "https://slack.com/api/chat.postMessage"
+        ));
+    }
 
     #[tokio::test]
     async fn closed_dashboard_releases_idle_chat_receiver() {

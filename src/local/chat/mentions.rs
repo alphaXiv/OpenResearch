@@ -10,11 +10,14 @@
 //! with no store, no filesystem, and no session lookups, and the two later
 //! tracks share one tokenizer instead of writing their own.
 //!
-//! Nothing outside this module's tests calls it yet — see the
-//! `#![allow(dead_code)]` below — until T5 wires a file provider into
-//! `send_message_showing`'s prepared-input step.
+//! `expand_mentions` is the T5 file provider: it resolves `File` mentions
+//! against a checkout root and rewrites them into evidence tags for the
+//! harness, while `Session`/`Message` mentions (T7's job) pass through
+//! untouched.
 
 #![allow(dead_code)]
+
+use std::path::{Path, PathBuf};
 
 /// What a mention token refers to, with the id/path exactly as typed — case,
 /// extension, and all. Resolving it against real files or sessions is the
@@ -149,6 +152,47 @@ pub fn find_mentions(text: &str) -> Vec<Mention> {
     mentions
 }
 
+/// Rewrite each `File` mention in `text` that resolves to an existing file
+/// inside `root` into a `<file path="…"/>` evidence tag, using the path
+/// exactly as typed — the harness has its own Read tool, so the file's
+/// bytes are never inlined here. `Session`/`Message` mentions (T7) and any
+/// `File` mention that fails to resolve (missing, escapes `root`, or errors
+/// canonicalizing) are left as the literal token the user typed — silently,
+/// since a typo'd `@path` shouldn't break the message.
+pub fn expand_mentions(text: &str, root: &Path) -> String {
+    let Ok(canonical_root) = crate::paths::canonicalize(root) else {
+        return text.to_string();
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut cursor = 0;
+    let mut expanded_any = false;
+    for mention in find_mentions(text) {
+        let MentionKind::File(path) = &mention.kind else {
+            continue;
+        };
+        let candidate = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            canonical_root.join(path)
+        };
+        let Ok(resolved) = crate::paths::canonicalize(&candidate) else {
+            continue;
+        };
+        if !resolved.starts_with(&canonical_root) {
+            continue;
+        }
+        out.push_str(&text[cursor..mention.start]);
+        out.push_str(&format!(r#"<file path="{path}"/>"#));
+        cursor = mention.end;
+        expanded_any = true;
+    }
+    out.push_str(&text[cursor..]);
+    if expanded_any {
+        out.push_str("\n\nRead the referenced files before answering.");
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +270,65 @@ mod tests {
             found.iter().map(|m| m.kind.clone()).collect::<Vec<_>>(),
             vec![file("a.py"), file("b.py"), file("c.py")]
         );
+    }
+
+    fn expand_root() -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("orx-mentions-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("foo.rs"), "fn main() {}").unwrap();
+        root
+    }
+
+    #[test]
+    fn a_mention_of_a_real_file_expands_to_an_evidence_tag() {
+        let root = expand_root();
+        let expanded = expand_mentions("look at @src/foo.rs please", &root);
+        assert_eq!(
+            expanded,
+            "look at <file path=\"src/foo.rs\"/> please\n\nRead the referenced files before answering."
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_mention_of_a_missing_file_is_left_unchanged() {
+        let root = expand_root();
+        let text = "look at @src/missing.rs please";
+        assert_eq!(expand_mentions(text, &root), text);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_mention_that_escapes_the_root_is_rejected() {
+        let root = expand_root();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("orx-mentions-outside-{}.txt", uuid::Uuid::new_v4()));
+        std::fs::write(&outside, "secret").unwrap();
+        let text = format!("see @../{}", outside.file_name().unwrap().to_str().unwrap());
+        assert_eq!(expand_mentions(&text, &root), text);
+        let _ = std::fs::remove_file(&outside);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_and_message_mentions_are_left_untouched_by_expansion() {
+        let root = expand_root();
+        let text = "see @session:chat_abc and @message:chat_xyz now";
+        assert_eq!(expand_mentions(text, &root), text);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn multiple_file_mentions_all_expand() {
+        let root = expand_root();
+        std::fs::write(root.join("src").join("bar.rs"), "fn bar() {}").unwrap();
+        let expanded = expand_mentions("diff @src/foo.rs against @src/bar.rs", &root);
+        assert_eq!(
+            expanded,
+            "diff <file path=\"src/foo.rs\"/> against <file path=\"src/bar.rs\"/>\n\nRead the referenced files before answering."
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

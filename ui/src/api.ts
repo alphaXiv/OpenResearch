@@ -1547,6 +1547,31 @@ export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/a
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
+export interface SlackSettings {
+  /** Whether a webhook URL is saved; the URL itself is never echoed back. */
+  hasWebhook: boolean;
+  events: { jobSubmitted: boolean; runSynthesized: boolean };
+}
+
+export interface SlackPreflightResult {
+  ok: boolean;
+  error: string | null;
+}
+
+export const getSlackSettings = (signal?: AbortSignal) => get<SlackSettings>("/api/settings/slack", signal);
+
+export const saveSlackWebhook = (webhookUrl: string) =>
+  post<{ hasWebhook: boolean }>("/api/settings/slack", { webhookUrl });
+
+export const deleteSlackWebhook = () =>
+  writeResponse("/api/settings/slack", { method: "DELETE" }).then((r) => json<{ hasWebhook: boolean }>(r));
+
+export const setSlackEvents = (events: { jobSubmitted: boolean; runSynthesized: boolean }) =>
+  post<{ jobSubmitted: boolean; runSynthesized: boolean }>("/api/settings/slack/events", events);
+
+/** Sends a real test message to the currently saved webhook. */
+export const slackPreflight = () => post<SlackPreflightResult>("/api/settings/slack/preflight");
+
 export type OnboardingStep = "welcome" | "environment" | "profile";
 export type FirstActionSurface = "demo" | "project";
 export type FirstAction =

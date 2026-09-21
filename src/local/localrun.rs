@@ -160,6 +160,11 @@ async fn submit_controller_run(
         chat_session_id: args.launching_chat_session(),
     };
     store.upsert_run(&run)?;
+    if let Err(err) =
+        crate::notify_events::enqueue_job_submitted(&store, &project, &exp, &run, &descriptor)
+    {
+        eprintln!("orx up: could not enqueue Slack job-submitted notification: {err}");
+    }
 
     spawn_detached_supervise(&run_id)?;
     Ok(run)

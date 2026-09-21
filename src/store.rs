@@ -239,9 +239,12 @@ pub struct RunWakeup {
 }
 
 /// A queued outbound notification (e.g. a Slack message) awaiting delivery.
-/// See [`Store::enqueue_notification`].
+/// See [`Store::enqueue_notification`]. A full row mirror — `drain_once`
+/// only reads `id`/`kind`/`payload_json`/`attempts`; the rest exist for
+/// debugging visibility into the outbox, not because any Rust code reads
+/// them back today.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Consumed by the notifier (P0.4).
+#[allow(dead_code)]
 pub struct StoredNotification {
     pub id: String,
     pub created_at: i64,
@@ -579,6 +582,7 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
             "ALTER TABLE chat_turns ADD COLUMN resume_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN turn_id TEXT",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN pre_turn_description TEXT",
         ] {
             let _ = conn.execute(ddl, []);
         }
@@ -1024,8 +1028,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    // Consumed by later local-mode stages (supervise + `orx up` API).
-    #[allow(dead_code)]
     pub fn list_runs_by_experiment(&self, experiment_id: &str) -> Result<Vec<StoredRun>> {
         let mut stmt = self.conn.prepare(&format!(
             "{SELECT_RUN} WHERE experiment_id = ?1 ORDER BY created_at DESC"
@@ -1190,7 +1192,6 @@ impl Store {
     /// Record which chat turn a delivered run wake-up landed on, so a later
     /// step can tell whether that turn's synthesis came from a run outcome
     /// (and post about it) rather than an ordinary message.
-    #[allow(dead_code)] // Consumed by the Slack run-outcome notification (T6).
     pub fn set_run_wakeup_turn_id(
         &self,
         run_id: &str,
@@ -1206,7 +1207,7 @@ impl Store {
     }
 
     /// The chat turn a delivered run wake-up landed on, if recorded.
-    #[allow(dead_code)] // Consumed by the Slack run-outcome notification (T6).
+    #[allow(dead_code)] // Forward lookup; the Slack run-outcome hook (T6) needs the reverse (see `run_wakeup_by_turn_id`).
     pub fn run_wakeup_turn_id(
         &self,
         run_id: &str,
@@ -1223,11 +1224,72 @@ impl Store {
             .flatten())
     }
 
+    /// The wake-up row a chat turn landed on, if that turn was in fact a
+    /// delivered run wake-up — the reverse of `run_wakeup_turn_id`. The
+    /// Slack run-outcome hook only has a `turn_id` in hand at turn
+    /// completion, so it needs this direction.
+    pub fn run_wakeup_by_turn_id(&self, turn_id: &str) -> Result<Option<RunWakeup>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
+                    r.created_at, r.updated_at, r.ended_at, r.exit_code,
+                    r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
+                    w.chat_session_id, w.state
+             FROM chat_run_wakeups w
+             JOIN runs r ON r.id = w.run_id
+             WHERE w.turn_id = ?1",
+        )?;
+        Ok(stmt
+            .query_row(params![turn_id], |row| {
+                Ok(RunWakeup {
+                    run: row_to_run(row)?,
+                    chat_session_id: row.get(14)?,
+                    state: row.get(15)?,
+                })
+            })
+            .optional()?)
+    }
+
+    /// Snapshot the experiment's description at the moment a wake-up is
+    /// delivered, so the Slack run-outcome hook can tell at turn completion
+    /// whether the agent changed it during the turn. `None` clears back to
+    /// no snapshot (an experiment with no description set).
+    pub fn set_run_wakeup_pre_turn_description(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        description: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_run_wakeups SET pre_turn_description = ?3
+             WHERE run_id = ?1 AND chat_session_id = ?2",
+            params![run_id, chat_session_id, description],
+        )?;
+        Ok(())
+    }
+
+    /// The experiment description snapshotted when this wake-up was
+    /// delivered, if any.
+    pub fn run_wakeup_pre_turn_description(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT pre_turn_description FROM chat_run_wakeups
+                 WHERE run_id = ?1 AND chat_session_id = ?2",
+                params![run_id, chat_session_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten())
+    }
+
     /// Queue a notification (e.g. a Slack message) for delivery by whatever
     /// process drains the outbox. Durable and process-independent: a
     /// detached `orx supervise` can enqueue one exactly like `orx up` can.
     /// Returns the row's generated id.
-    #[allow(dead_code)] // Consumed by the notifier (P0.4) and its callers (T3, T6).
     pub fn enqueue_notification(&self, kind: &str, payload_json: &str) -> Result<String> {
         let id = format!("notif_{}", uuid::Uuid::new_v4());
         self.conn.execute(
@@ -1239,7 +1301,6 @@ impl Store {
     }
 
     /// Unsent notifications, oldest first, for the drainer to attempt.
-    #[allow(dead_code)] // Consumed by the notifier (P0.4).
     pub fn list_pending_notifications(&self, limit: usize) -> Result<Vec<StoredNotification>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, created_at, kind, payload_json, sent_at, attempts, last_error
@@ -1261,7 +1322,6 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
-    #[allow(dead_code)] // Consumed by the notifier (P0.4).
     pub fn mark_notification_sent(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE notifications_outbox SET sent_at = ?2 WHERE id = ?1",
@@ -1270,7 +1330,6 @@ impl Store {
         Ok(())
     }
 
-    #[allow(dead_code)] // Consumed by the notifier (P0.4).
     pub fn mark_notification_attempt_failed(&self, id: &str, error: &str) -> Result<()> {
         self.conn.execute(
             "UPDATE notifications_outbox SET attempts = attempts + 1, last_error = ?2 WHERE id = ?1",
@@ -4851,6 +4910,75 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("turn_xyz")
+        );
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_wakeup_by_turn_id_finds_the_wakeup_a_turn_landed_on() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-wakeup-by-turn-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "done", Some("chat_A")))
+            .unwrap();
+        store.register_run_wakeup("run_1", "chat_A").unwrap();
+
+        assert!(store.run_wakeup_by_turn_id("turn_xyz").unwrap().is_none());
+
+        store
+            .set_run_wakeup_turn_id("run_1", "chat_A", "turn_xyz")
+            .unwrap();
+        let wakeup = store
+            .run_wakeup_by_turn_id("turn_xyz")
+            .unwrap()
+            .expect("wakeup found by its turn id");
+        assert_eq!(wakeup.run.id, "run_1");
+        assert_eq!(wakeup.chat_session_id, "chat_A");
+
+        // An unrelated turn id still finds nothing.
+        assert!(store
+            .run_wakeup_by_turn_id("turn_unrelated")
+            .unwrap()
+            .is_none());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_wakeup_pre_turn_description_round_trips() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-wakeup-predesc-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "done", Some("chat_A")))
+            .unwrap();
+        store.register_run_wakeup("run_1", "chat_A").unwrap();
+
+        assert_eq!(
+            store
+                .run_wakeup_pre_turn_description("run_1", "chat_A")
+                .unwrap(),
+            None
+        );
+        store
+            .set_run_wakeup_pre_turn_description("run_1", "chat_A", Some("before the turn"))
+            .unwrap();
+        assert_eq!(
+            store
+                .run_wakeup_pre_turn_description("run_1", "chat_A")
+                .unwrap()
+                .as_deref(),
+            Some("before the turn")
         );
 
         drop(store);
