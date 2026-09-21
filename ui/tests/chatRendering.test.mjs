@@ -6,6 +6,8 @@ import {
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
+  isSpawnTool,
+  countOpenSubagents,
 } from "../src/chatRendering.ts";
 
 const message = (...parts) => ({ id: "assistant", role: "assistant", parts, createdAt: 0 });
@@ -115,6 +117,31 @@ test("Cursor model restrictions use the limit disclosure without treating them a
     assert.equal(isUsageLimitPart({ type: "text", text }), false);
   }
   assert.equal(isModelAccessLimitPart({ type: "tool", tool: "error", state: { error: "Rate limit reached" } }), false);
+});
+
+test("isSpawnTool recognizes every harness's spawn tool name, case-insensitively", () => {
+  assert.equal(isSpawnTool("Task"), true);
+  assert.equal(isSpawnTool("agent"), true);
+  assert.equal(isSpawnTool("subagent"), true);
+  assert.equal(isSpawnTool("bash"), false);
+  assert.equal(isSpawnTool(undefined), false);
+});
+
+test("countOpenSubagents counts only running spawn parts in the streaming message, recursing into nested ones", () => {
+  const running = (id, children) => ({ id, type: "tool", tool: "task", state: { status: "running" }, children });
+  const done = (id) => ({ id, type: "tool", tool: "task", state: { status: "completed" } });
+
+  assert.equal(countOpenSubagents([]), 0);
+  assert.equal(countOpenSubagents([message(done("a"))]), 0);
+  assert.equal(countOpenSubagents([message(running("a"), running("b"))]), 2);
+  // A running spawn nested inside another running spawn counts too.
+  assert.equal(countOpenSubagents([message(running("a", [running("nested")]))]), 2);
+  // Only the last (streaming) message is considered — an earlier turn's
+  // spawn parts are already resolved by the time a new turn starts.
+  assert.equal(
+    countOpenSubagents([message(running("a")), { id: "u", role: "user", parts: [], createdAt: 0 }]),
+    0,
+  );
 });
 
 test("Codex and OpenCode terminal limits use the shared disclosure without classifying ordinary tool failures", async () => {

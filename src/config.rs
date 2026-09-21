@@ -290,6 +290,18 @@ pub fn set_auto_update_enabled(enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Whether a Claude usage-limit failure auto-continues once its parsed reset
+/// time arrives (Settings → harness). Same storage/ownership rationale as
+/// `auto_update_enabled` above. Read by the turn-resume scheduler.
+pub fn auto_continue_on_limit_enabled() -> bool {
+    crate::telemetry::auto_continue_on_limit_enabled()
+}
+
+pub fn set_auto_continue_on_limit_enabled(enabled: bool) -> Result<()> {
+    crate::telemetry::set_auto_continue_on_limit_enabled(enabled)?;
+    Ok(())
+}
+
 pub fn github_default_prompt_seen() -> bool {
     crate::telemetry::github_default_prompt_seen()
 }

@@ -166,6 +166,11 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    /// Whether a Claude turn that failed on a usage/session limit auto-resumes
+    /// once its parsed reset time arrives, rather than waiting for a manual
+    /// Continue click. Absent = enabled (Settings → harness).
+    #[serde(default)]
+    pub auto_continue_on_limit: Option<bool>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -299,6 +304,18 @@ pub(crate) fn auto_update_enabled() -> bool {
 
 pub(crate) fn set_auto_update_enabled(enabled: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.auto_update = Some(enabled))
+}
+
+/// Whether a Claude usage-limit failure auto-continues once its parsed reset
+/// time arrives. Defaults to enabled.
+pub(crate) fn auto_continue_on_limit_enabled() -> bool {
+    load_settings()
+        .and_then(|settings| settings.auto_continue_on_limit)
+        .unwrap_or(true)
+}
+
+pub(crate) fn set_auto_continue_on_limit_enabled(enabled: bool) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.auto_continue_on_limit = Some(enabled))
 }
 
 pub(crate) fn github_default_prompt_seen() -> bool {

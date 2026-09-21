@@ -5194,7 +5194,13 @@ impl ChatHost {
                     })
                     .unwrap_or(false);
                 if changed {
-                    ctx.push_turn_failure(&kind, message.clone(), action);
+                    let resume_at = ctx.resume_at.take();
+                    ctx.push_turn_failure(&kind, message.clone(), action, resume_at);
+                    if let Some(resume_at) = resume_at {
+                        if let Ok(store) = Store::open() {
+                            let _ = store.set_turn_resume_at(&ctx.turn_id, resume_at);
+                        }
+                    }
                 }
                 if changed && ctx.retry_exhausted {
                     crate::telemetry::capture(
@@ -6344,6 +6350,11 @@ pub struct TurnCtx {
     orx_retry_started: Option<Instant>,
     orx_retry_count: u32,
     terminal_error: Option<(String, String)>,
+    /// Set alongside `terminal_error` by a harness that parsed a concrete
+    /// (or fallback) resume time out of a usage-limit failure — e.g. Claude's
+    /// "resets 7:40pm" text. Consumed once, at turn end, to persist
+    /// `chat_turns.resume_at` for the auto-continue scheduler.
+    resume_at: Option<i64>,
     pub session_id: String,
     pub harness: String,
     pub native_session_id: Option<String>,
@@ -6398,6 +6409,7 @@ fn turn_ctx_from_stored(
         orx_retry_started: None,
         orx_retry_count: 0,
         terminal_error: None,
+        resume_at: None,
         session_id: session.id.clone(),
         harness: session.harness.clone(),
         native_session_id: session.native_session_id.clone(),
@@ -6485,6 +6497,14 @@ impl TurnCtx {
 
     pub fn mark_terminal_failure(&mut self, kind: impl Into<String>, message: impl Into<String>) {
         self.terminal_error = Some((kind.into(), message.into()));
+    }
+
+    /// Records when a scheduler should automatically replay this turn's
+    /// recovery action (e.g. a usage limit's parsed reset time), alongside
+    /// a `mark_terminal_failure` call. Persisted to `chat_turns.resume_at`
+    /// once the failure is written, if the turn indeed ends up `failed`.
+    pub fn set_resume_at(&mut self, resume_at_ms: i64) {
+        self.resume_at = Some(resume_at_ms);
     }
 
     pub fn schedule_orx_retry(&mut self, explicit: Option<Duration>) -> Option<(u32, Duration)> {
@@ -6616,7 +6636,13 @@ impl TurnCtx {
         }
     }
 
-    fn push_turn_failure(&mut self, kind: &str, message: String, recovery_action: &str) {
+    fn push_turn_failure(
+        &mut self,
+        kind: &str,
+        message: String,
+        recovery_action: &str,
+        resume_at: Option<i64>,
+    ) {
         self.clear_retry_status();
         let mut part = WirePart::tool("turn-recovery", "error", "error", Some(message));
         if let Some(state) = part.state.as_mut() {
@@ -6624,6 +6650,7 @@ impl TurnCtx {
                 "turnId": self.turn_id,
                 "errorKind": kind,
                 "recoveryAction": recovery_action,
+                "resumeAt": resume_at,
             }));
         }
         self.upsert_part_raw(part);
@@ -6654,6 +6681,7 @@ impl TurnCtx {
             orx_retry_started: None,
             orx_retry_count: 0,
             terminal_error: None,
+            resume_at: None,
             session_id: "test-session".into(),
             harness: "test".into(),
             native_session_id: None,
@@ -7318,6 +7346,56 @@ async fn process_run_wakeups(
     Ok(())
 }
 
+/// Auto-continues failed turns whose scheduled resume time has arrived — a
+/// Claude usage limit's parsed (or fixed-fallback) reset time, set by
+/// `harness::claude::apply_usage_limit_failure`. `recover_turn` owns its own
+/// per-session lock and re-validates the turn's state, so this just replays
+/// each due turn's stored recovery action.
+async fn process_turn_resumes(
+    chat: &Arc<ChatHost>,
+    store: Store,
+    data_dir_move_in_progress: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<()> {
+    if data_dir_move_in_progress.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Ok(());
+    }
+    if !crate::config::auto_continue_on_limit_enabled() {
+        return Ok(());
+    }
+    for turn in store.list_due_turn_resumes()? {
+        // Always populated in practice: `resume_at` is only ever set
+        // alongside `fail_chat_turn`'s own `Some(action)`. Handled
+        // defensively rather than asserted, since a `continue` with nothing
+        // rescheduled just means this turn stops showing up as due.
+        let Some(action) = turn.recovery_action.clone() else {
+            continue;
+        };
+        if let Err(err) = chat
+            .recover_turn(
+                &turn.session_id,
+                &turn.id,
+                &action,
+                RecoveryOverrides::default(),
+            )
+            .await
+        {
+            // Most often the session is mid-turn already (a manual Continue
+            // raced this tick, or another turn started). Back off with
+            // jitter rather than hammering it every 3s, but give up after
+            // ~30 minutes so a permanently stuck session doesn't retry
+            // forever — it's still reachable by a manual Continue at that
+            // point, which is exactly today's behavior without this feature.
+            eprintln!("orx up: turn resume {}: {err}", turn.id);
+            if now_ms() - turn.updated_at < Duration::from_secs(30 * 60).as_millis() as i64 {
+                let jitter_ms = 15_000 + (now_ms().rem_euclid(15_000));
+                let _ = store.set_turn_resume_at(&turn.id, now_ms() + jitter_ms);
+            }
+        }
+    }
+    Ok(())
+}
+
 // --- spawned agents -------------------------------------------------------------
 
 /// How much of a helper's closing reply, and of the brief echoed back with it,
@@ -7672,6 +7750,12 @@ pub async fn watch_runs(
             process_chat_spawns(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
         {
             eprintln!("orx up: spawn watcher: {err}");
+        }
+        let Ok(store) = Store::open() else { continue };
+        if let Err(err) =
+            process_turn_resumes(&chat, store, Some(data_dir_move_in_progress.as_ref())).await
+        {
+            eprintln!("orx up: turn resume watcher: {err}");
         }
     }
 }

@@ -594,6 +594,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
         )
+        .route(
+            "/api/settings/auto-continue-on-limit",
+            get(auto_continue_on_limit_settings).post(set_auto_continue_on_limit),
+        )
         .route("/api/update", get(update_status))
         .route("/api/update/apply", post(apply_update))
         .route("/api/update/restart", post(restart_after_update))
@@ -690,6 +694,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
+        )
+        .route(
+            "/api/chat/sessions/{id}/turns/{turnId}/resume",
+            axum::routing::delete(cancel_turn_resume),
         )
         .route("/api/chat/sessions/{id}/fork", post(fork_chat_turn))
         .route("/api/chat/sessions/{id}/branch", post(select_chat_branch))
@@ -5195,6 +5203,35 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
 }
 
+/// Whether a Claude turn that failed on a usage/session limit auto-resumes at
+/// its parsed reset time. Settings → harness.
+async fn auto_continue_on_limit_settings() -> ApiResult {
+    tokio::task::spawn_blocking(|| {
+        Ok(Json(
+            json!({ "enabled": crate::config::auto_continue_on_limit_enabled() }),
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetAutoContinueOnLimitReq {
+    enabled: bool,
+}
+
+async fn set_auto_continue_on_limit(Json(req): Json<SetAutoContinueOnLimitReq>) -> ApiResult {
+    let enabled = req.enabled;
+    tokio::task::spawn_blocking(move || {
+        crate::config::set_auto_continue_on_limit_enabled(enabled).map_err(|e| {
+            ApiError::from(anyhow!("could not save the auto-continue setting: {e}"))
+        })?;
+        Ok(Json(json!({ "enabled": enabled })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("settings task failed: {e}")))?
+}
+
 // --- updates -----------------------------------------------------------------
 
 async fn update_status() -> ApiResult {
@@ -7457,6 +7494,19 @@ async fn recover_chat_turn(
         .await
         .map_err(|error| ApiError(StatusCode::CONFLICT, error.to_string()))?;
     Ok(Json(json!({ "ok": true, "turn": result })))
+}
+
+/// The "Don't" button on a turn's usage-limit auto-continue countdown —
+/// clears `resume_at` without touching the failure itself, so the turn falls
+/// back to a manual Continue click.
+async fn cancel_turn_resume(Path((id, turn_id)): Path<(String, String)>) -> ApiResult {
+    tokio::task::spawn_blocking(move || {
+        let store = crate::store::Store::open()?;
+        store.clear_turn_resume_at(&id, &turn_id)?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("turn resume task failed: {e}")))?
 }
 
 #[derive(Deserialize)]

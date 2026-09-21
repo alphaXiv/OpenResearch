@@ -58,6 +58,11 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 # File identity for Windows' hard-link fallback (native_store.rs); already in the tree via walkdir.
 same-file = "1.0"
+# Parses "resets 7:40pm (America/New_York)" out of a Claude usage-limit
+# message into an absolute instant (usage-limit auto-continue). Bundles the
+# IANA tz database so this resolves on a static musl build, which has no
+# /usr/share/zoneinfo to read from.
+jiff = { version = "0.2", features = ["tzdb-bundle-always"] }
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree
