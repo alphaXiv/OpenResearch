@@ -246,7 +246,7 @@
   "onboarding_choose_one_or_more": "اختر واحدًا أو أكثر.",
   "onboarding_consolidate_your_research": "وحّد أبحاثك",
   "onboarding_continue": "متابعة",
-  "onboarding_detecting_claude_code_codex_open_code": "جارٍ اكتشاف Claude Code وCodex وOpenCode وCursor…",
+  "onboarding_detecting_claude_code_codex_open_code": "جارٍ اكتشاف Claude Code وCodex وOpenCode وCursor وAntigravity…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "مثال: أعمل على تعلّم معزّز عالي الكفاءة في العيّنات لِما بعد تدريب نماذج اللغة الكبيرة، مع التركيز على الطرق التي لا تعتمد على نماذج المكافأة.",
   "onboarding_everything_stays_local": "كل شيء يبقى محليًا",
   "onboarding_get_started": "ابدأ الآن",
@@ -1184,5 +1184,8 @@
   "onboarding_loading_account": "جارٍ تحميل تفاصيل الحساب…",
   "onboarding_opencode_not_ready": "تعذّر التحقق من جاهزية OpenCode. أعد المحاولة للتحقق من التثبيت والنماذج.",
   "settings_free_models_no_sign_in": "نماذج مجانية · لا يلزم تسجيل الدخول",
-  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر"
+  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر",
+  "image_zoom_out": "تصغير",
+  "image_zoom_in": "تكبير",
+  "image_zoom_reset": "إعادة ضبط التكبير للملاءمة"
 }

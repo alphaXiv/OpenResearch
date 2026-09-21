@@ -82,8 +82,19 @@ impl ProbeEnvironment {
     }
 }
 
+/// First opencode that resolves, in discovery order — picking the highest
+/// version instead would move a pinned 1.x install onto the 2.x protocol.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
-    resolve_binary_at(super::find_opencode()?).await
+    let mut first_error = None;
+    for candidate in super::opencode_candidates() {
+        match resolve_binary_at(candidate).await {
+            Ok(binary) => return Ok(binary),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    Err(first_error.unwrap_or_else(super::not_found))
 }
 
 pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {

@@ -86,15 +86,20 @@ impl Harness for OpenCode {
         let mut config = Value::Null;
         let bin = find_opencode().ok();
         let mut resolved_binary = None;
-        if let Some(bin) = &bin {
-            let resolved = crate::local::opencode::resolve_binary_at(bin.clone()).await;
-            info.record_bin(
-                bin,
-                match &resolved {
-                    Ok(binary) => BinProbe::Answered(Some(binary.version.clone())),
-                    Err(error) => BinProbe::Broken(error.to_string()),
-                },
-            );
+        if let Some(discovered) = &bin {
+            // Resolves across every discovery candidate, so a stale launcher
+            // first on PATH does not hide the install that actually works.
+            let resolved = crate::local::opencode::resolve_binary().await;
+            let (bin, probe) = match &resolved {
+                Ok(binary) => (
+                    binary.path.clone(),
+                    BinProbe::Answered(Some(binary.version.clone())),
+                ),
+                // Nothing resolved: report what discovery first named, so the
+                // UI shows a broken install rather than "not detected".
+                Err(error) => (discovered.clone(), BinProbe::Broken(error.to_string())),
+            };
+            info.record_bin(&bin, probe);
             if let Ok(binary) = resolved {
                 if binary.protocol == crate::local::opencode::Protocol::V2 {
                     return Some(v2::detect(binary, info).await);
@@ -111,15 +116,26 @@ impl Harness for OpenCode {
                     Err(anyhow!("OpenCode database inspection failed: {error}"))
                 });
                 if let Err(error) = preflight {
-                    info.auth_state = if error
+                    let busy = error
                         .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
-                        .is_some()
-                    {
+                        .is_some();
+                    info.auth_state = if busy {
                         HarnessAuthState::Unknown
                     } else {
                         HarnessAuthState::Unsupported
                     };
-                    info.agent_note = Some(error.to_string());
+                    // A database the CLI will not open is not an out-of-date
+                    // binary: upgrading a current install cannot repair it, and
+                    // orx must never delete a user's database to clear it.
+                    info.needs_config_repair = !busy;
+                    info.agent_note = Some(if busy {
+                        error.to_string()
+                    } else {
+                        format!(
+                            "{error}\nThis is an OpenCode database problem, not an out-of-date install. \
+                             Close other OpenCode processes and re-check; if it persists, move the file aside so OpenCode can recreate it."
+                        )
+                    });
                     return Some(info);
                 }
             }

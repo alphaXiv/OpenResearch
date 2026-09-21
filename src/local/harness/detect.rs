@@ -141,6 +141,13 @@ pub struct HarnessInfo {
     pub agent_ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_note: Option<String>,
+    /// Setup is blocked by something the harness's own install/login commands
+    /// cannot repair — an environment credential that overrides the saved
+    /// login, a database the CLI will not open. Signing in again or updating
+    /// runs a command that provably cannot help, so the UI shows `agent_note`
+    /// as the repair instead of offering one.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub needs_config_repair: bool,
     /// Whether a running turn accepts further user input, which is what lets
     /// the composer steer instead of parking the message until the turn ends.
     pub supports_steering: bool,
@@ -166,6 +173,7 @@ impl HarnessInfo {
             plan: None,
             agent_ready: false,
             agent_note: None,
+            needs_config_repair: false,
             supports_steering: false,
             models: Vec::new(),
             options: super::HarnessOptions::none(),
@@ -215,6 +223,83 @@ impl HarnessInfo {
 /// a path that can't be resolved is returned unchanged.
 pub(super) fn resolve_symlinks(path: PathBuf) -> PathBuf {
     crate::paths::canonicalize(&path).unwrap_or(path)
+}
+
+/// The first candidate that runs, in discovery order, with its `--version`
+/// answer. `minimum` is only for a harness that rejects old versions (Claude's
+/// OAuth gate); all-broken returns the first, so the caller says
+/// installed-but-broken rather than "not found".
+pub(super) async fn select_working(
+    key: &'static str,
+    candidates: Vec<PathBuf>,
+    minimum: Option<(u64, u64, u64)>,
+) -> Option<(PathBuf, BinProbe)> {
+    let selected = select_working_from(candidates, minimum).await;
+    // The sync `find_*` callers cannot probe; publishing the choice keeps them
+    // on the verified binary instead of the first PATH hit it skipped.
+    if let Some((path, _)) = &selected {
+        selected_bins()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(key, path.clone());
+    }
+    selected
+}
+
+/// The executable the last detection pass selected for `key`, else the first
+/// candidate. A selection that no longer exists or has dropped out of discovery
+/// is stale and ignored.
+pub(super) fn selected_bin(key: &str, candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    let selected = selected_bins()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(key)
+        .cloned();
+    selected
+        .filter(|path| path.exists() && candidates.contains(path))
+        .or_else(|| candidates.into_iter().next())
+}
+
+fn selected_bins() -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, PathBuf>> {
+    static SELECTED: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<&'static str, PathBuf>>,
+    > = std::sync::OnceLock::new();
+    SELECTED.get_or_init(Default::default)
+}
+
+async fn select_working_from(
+    candidates: Vec<PathBuf>,
+    minimum: Option<(u64, u64, u64)>,
+) -> Option<(PathBuf, BinProbe)> {
+    let mut fallback: Option<(PathBuf, BinProbe)> = None;
+    for candidate in unique(candidates) {
+        let probe = probe_bin(&candidate).await;
+        let version = match &probe {
+            BinProbe::Answered(version) => version.as_deref().and_then(parse_version),
+            // Not a working install: hold the first one only until something answers.
+            BinProbe::Unknown | BinProbe::Broken(_) => {
+                fallback.get_or_insert((candidate, probe));
+                continue;
+            }
+        };
+        // Only a harness with a minimum keeps looking past a binary that ran.
+        if minimum.is_some_and(|min| version.is_none_or(|version| version < min)) {
+            if !matches!(fallback, Some((_, BinProbe::Answered(_)))) {
+                fallback = Some((candidate, probe));
+            }
+            continue;
+        }
+        return Some((candidate, probe));
+    }
+    fallback
+}
+
+/// Discovery order, one entry per path. `Vec::dedup` drops only *adjacent*
+/// repeats, so a non-adjacent `~/.local/bin` hit would be probed twice.
+pub(crate) fn unique(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|path| seen.insert(path.clone()));
+    candidates
 }
 
 /// What `<bin> --version` said about an install found on PATH.
@@ -435,6 +520,130 @@ mod tests {
         info.record_bin(&PathBuf::from("/usr/local/bin/codex"), probe);
         info.authenticated = true;
         info
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn select_working_takes_the_first_healthy_candidate_in_path_order() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("orx-select-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, body).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+
+        // The reported shape: an npm shim first on PATH whose Node is gone,
+        // and the healthy native binary the installer just wrote.
+        let stale = script("stale", "#!/bin/sh\necho 'spawn ENOENT' >&2\nexit 1\n");
+        let fresh = script("fresh", "#!/bin/sh\necho '1.18.31'\n");
+        let (picked, _) = select_working_from(vec![stale.clone(), fresh.clone()], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            picked, fresh,
+            "a launcher that cannot run is not an install"
+        );
+
+        // PATH order is the user's choice: a working older binary keeps it.
+        let old = script("old", "#!/bin/sh\necho '2.1.210 (Claude Code)'\n");
+        let new = script("new", "#!/bin/sh\necho '2.1.277 (Claude Code)'\n");
+        assert_eq!(
+            select_working_from(vec![old.clone(), new.clone()], None)
+                .await
+                .unwrap()
+                .0,
+            old
+        );
+        // Only a version the harness actually rejects makes it look further.
+        let (picked, probe) =
+            select_working_from(vec![old.clone(), new.clone()], Some((2, 1, 211)))
+                .await
+                .unwrap();
+        assert_eq!(picked, new);
+        assert!(matches!(probe, BinProbe::Answered(Some(v)) if v.starts_with("2.1.277")));
+        // No candidate clears the bar: the one that runs is still reported.
+        assert_eq!(
+            select_working_from(vec![old.clone()], Some((2, 1, 211)))
+                .await
+                .unwrap()
+                .0,
+            old
+        );
+
+        // Every candidate broken still reports an install (the first), so the
+        // UI says "installed but failed to run", not "not found".
+        let also_stale = script("also-stale", "#!/bin/sh\nexit 1\n");
+        let (picked, probe) = select_working_from(vec![stale.clone(), also_stale], None)
+            .await
+            .unwrap();
+        assert_eq!(picked, stale);
+        assert!(matches!(probe, BinProbe::Broken(_)));
+
+        // Answered-but-unversioned is a working install, and wins outright.
+        let quiet = script("quiet", "#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            select_working_from(vec![quiet.clone(), fresh.clone()], None)
+                .await
+                .unwrap()
+                .0,
+            quiet
+        );
+        // ...but it cannot clear a minimum, so the versioned one wins there.
+        assert_eq!(
+            select_working_from(vec![quiet, fresh.clone()], Some((1, 0, 0)))
+                .await
+                .unwrap()
+                .0,
+            fresh
+        );
+        assert!(select_working_from(Vec::new(), None).await.is_none());
+
+        // Non-adjacent repeats are one candidate, so the same binary is never
+        // probed twice at `VERSION_TIMEOUT`.
+        assert_eq!(
+            unique(vec![fresh.clone(), stale.clone(), fresh.clone()]),
+            vec![fresh.clone(), stale.clone()]
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn selected_bin_ignores_a_choice_that_left_discovery() {
+        let dir = std::env::temp_dir().join(format!("orx-selected-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chosen = dir.join("chosen");
+        std::fs::write(&chosen, "").unwrap();
+        let first = dir.join("first");
+        std::fs::write(&first, "").unwrap();
+        selected_bins()
+            .lock()
+            .unwrap()
+            .insert("test-harness", chosen.clone());
+
+        // Detection's choice beats PATH order for the sync callers.
+        let candidates = vec![first.clone(), chosen.clone()];
+        assert_eq!(
+            selected_bin("test-harness", candidates),
+            Some(chosen.clone())
+        );
+        // Dropped out of discovery, and deleted: both make the choice stale.
+        assert_eq!(
+            selected_bin("test-harness", vec![first.clone()]),
+            Some(first.clone())
+        );
+        std::fs::remove_file(&chosen).unwrap();
+        assert_eq!(
+            selected_bin("test-harness", vec![first.clone(), dir.join("chosen")]),
+            Some(first)
+        );
+        assert_eq!(selected_bin("unknown-harness", Vec::new()), None);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

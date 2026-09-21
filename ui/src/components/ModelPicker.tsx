@@ -45,6 +45,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   cursor: "Cursor",
+  antigravity: "Google Antigravity",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -159,7 +160,7 @@ export function ModelPicker({
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor") models = models.slice(0, 5);
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);

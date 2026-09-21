@@ -284,7 +284,7 @@ export function Onboarding({
   };
 
   useEffect(() => {
-    if (remote || automaticSetupStarted.current || harnesses?.length !== 4 || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
+    if (remote || automaticSetupStarted.current || !harnesses?.length || !harnesses.every((h) => !h.installed && !h.installBroken)) return;
     void startAutomaticSetup();
   }, [harnesses, remote]);
 
@@ -674,7 +674,9 @@ function agentBadge(h: Harness): { tone: StatusTone; label: string } {
   if (!h.installed) return { tone: "neutral", label: m.onboarding_not_detected() };
   if (h.installBroken) return { tone: "warning", label: m.onboarding_install_broken() };
   if (h.authMethod === "local") return { tone: "warning", label: m.onboarding_server_unavailable() };
-  if (h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
+  // A config fault reports `unsupported`, but no update repairs it; the note
+  // carries the actual repair, so the badge must not promise an update.
+  if (h.needsConfigRepair || h.authState === "unknown") return { tone: "warning", label: m.onboarding_unable_to_verify() };
   if (h.authState === "unsupported") return { tone: "warning", label: m.onboarding_update_required() };
   if (h.installed) return { tone: "warning", label: m.onboarding_not_signed_in() };
   return { tone: "neutral", label: m.onboarding_not_detected() };
@@ -708,7 +710,11 @@ function AgentCard({
   commands?: HarnessSetupCommands;
   onSetup: () => void;
 }) {
-  const canSetup = !remote && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
+  // needsConfigRepair means no install/update/login command can fix this state
+  // (an environment credential overriding the saved login, a database the CLI
+  // will not open). Offering one sends the user through a command that
+  // provably cannot help; the agentNote below carries the actual repair.
+  const canSetup = !remote && !h.needsConfigRepair && (!h.installed || h.installBroken || h.authState === "unsupported" || (h.authMethod !== "local" && h.authMethod !== "apiKey" && (h.authState === "needsLogin" || h.authState === "unknown")));
   const showSetupAction = !h.agentReady && canSetup;
   const showStatusDot = canSetup && (!h.installed || (!h.agentReady && h.authState === "needsLogin"));
   const badge = agentBadge(h);
@@ -755,7 +761,7 @@ function AgentCard({
         {h.authState === "unsupported" && version && (
           <div className={ONB_CARD_META_CLASS_NAME}>{version}</div>
         )}
-        {(!canSetup || h.authState === "unknown") && h.agentNote && (
+        {!showSetupAction && h.agentNote && (
           <div className={`${ONB_CARD_META_CLASS_NAME} [&_code]:whitespace-pre-wrap break-words`}>{renderNote(h.agentNote)}</div>
         )}
       </div>
