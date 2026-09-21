@@ -83,6 +83,7 @@ import {
   fmtNumber,
   createRemoteSession,
   interruptChat,
+  cancelTurnResume,
   reasoningFor,
   recoverChatTurn,
   reconcileReasoning,
@@ -2224,6 +2225,7 @@ function TurnStatusRow({
   busy,
   recovering,
   onRecover,
+  onCancelResume,
   usageLimited = false,
 }: {
   part: ChatPart;
@@ -2231,21 +2233,25 @@ function TurnStatusRow({
   busy: boolean;
   recovering: boolean;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  onCancelResume?: (turnId: string) => void;
 }) {
   const input = part.state?.input;
   const nextRetryAt = input?.nextRetryAt ?? null;
+  const resumeAt = typeof input?.resumeAt === "number" ? input.resumeAt : null;
   const [now, setNow] = useState(Date.now());
   useEffect(() => {
-    if (typeof nextRetryAt !== "number") return;
+    if (typeof nextRetryAt !== "number" && resumeAt === null) return;
     setNow(Date.now());
-    if (nextRetryAt <= Date.now()) return;
+    const dueAt = [nextRetryAt, resumeAt].filter((v): v is number => typeof v === "number");
+    if (dueAt.every((at) => at <= Date.now())) return;
     const timer = window.setInterval(() => {
       const current = Date.now();
       setNow(current);
-      if (current >= nextRetryAt) window.clearInterval(timer);
+      if (dueAt.every((at) => current >= at)) window.clearInterval(timer);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [nextRetryAt]);
+  }, [nextRetryAt, resumeAt]);
+  const [resumeCancelled, setResumeCancelled] = useState(false);
   if (part.id === "turn-retry") {
     const label = retryStatusLabel(input ?? {}, now);
     return (
@@ -2262,6 +2268,7 @@ function TurnStatusRow({
     : usageLimited ? m.chat_session_limit_reached() : m.chat_turn_incomplete();
   const Icon = usageLimited ? Gauge : TriangleAlert;
   const errorMessage = cleanToolError(part.state?.error || m.chat_turn_incomplete());
+  const showResumeCountdown = usageLimited && resumeAt !== null && !resumeCancelled;
   return (
     <details className="turn-usage-limit group/limit text-base text-subtext">
       <summary className="flex w-fit max-w-full items-center gap-2 cursor-pointer list-none rounded-sm focus-visible:outline-2 focus-visible:outline-text [&::-webkit-details-marker]:hidden">
@@ -2272,6 +2279,31 @@ function TurnStatusRow({
       <pre className="mt-2 rounded-md bg-surface p-2 text-sm font-mono whitespace-pre-wrap wrap-anywhere">
         {errorMessage}
       </pre>
+      {showResumeCountdown && resumeAt !== null && (
+        <div className="turn-resume-row mt-2 flex flex-wrap items-center gap-2 text-sm text-subtext">
+          <Clock size={14} className="shrink-0" aria-hidden="true" />
+          <span>
+            {now >= resumeAt
+              ? m.chat_limit_resuming_now()
+              : m.chat_limit_resume_at({
+                  time: new Date(resumeAt).toLocaleTimeString(getLocale(), { hour: "numeric", minute: "2-digit" }),
+                  countdown: fmtDuration(Math.max(0, resumeAt - now)),
+                })}
+          </span>
+          {onCancelResume && turnId && now < resumeAt && (
+            <Button
+              type="button"
+              size="small"
+              onClick={() => {
+                setResumeCancelled(true);
+                onCancelResume(turnId);
+              }}
+            >
+              {m.chat_limit_dont_resume()}
+            </Button>
+          )}
+        </div>
+      )}
       {!usageLimited && onRecover && turnId && (action === "retry" || action === "continue") && (
         <Button
           type="button"
@@ -2903,6 +2935,7 @@ const Message = memo(function Message({
   busy = false,
   recoveringTurnId,
   onRecover,
+  onCancelResume,
   skills,
   predictTextTail = false,
   forkCount,
@@ -2931,6 +2964,7 @@ const Message = memo(function Message({
   busy?: boolean;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  onCancelResume?: (turnId: string) => void;
   /** Known slash-skills, for rendering a `/name` token as a command chip. */
   skills?: SkillInfo[];
   predictTextTail?: boolean;
@@ -3088,6 +3122,7 @@ const Message = memo(function Message({
           busy={busy}
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
+          onCancelResume={onCancelResume}
         />
       )}
     </div>
@@ -3643,6 +3678,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent,
   recoveringTurnId,
   onRecover,
+  onCancelResume,
   skills,
 }: {
   /** The branch on screen, oldest first. */
@@ -3669,6 +3705,7 @@ const Transcript = memo(function Transcript({
   onOpenSubagent?: OpenSubagent;
   recoveringTurnId?: string | null;
   onRecover?: (turnId: string, action: "retry" | "continue") => void;
+  onCancelResume?: (turnId: string) => void;
   skills?: SkillInfo[];
 }) {
   useLocale();
@@ -3787,6 +3824,7 @@ const Transcript = memo(function Transcript({
             busy={recoveryDisabled}
             recoveringTurnId={turnId === recoveringTurnId ? recoveringTurnId : null}
             onRecover={onRecover}
+            onCancelResume={onCancelResume}
             skills={skills}
             predictTextTail={busy && m === activeMessage && m.role === "assistant"}
           />
@@ -5575,6 +5613,19 @@ export function ChatPanel({
     [activeId, recoveryOverrides, reseedSession],
   );
 
+  /** The "Don't" button on a usage-limit turn's auto-continue countdown. */
+  const cancelTurnAutoResume = useCallback(
+    async (turnId: string) => {
+      if (!activeId) return;
+      try {
+        await cancelTurnResume(activeId, turnId);
+      } catch {
+        setSettingsError(m.chat_recover_failed());
+      }
+    },
+    [activeId],
+  );
+
   const forkTurn = useCallback(
     (messageId: string, text: string) => {
       if (!activeId || busy || !activeHarness?.agentReady) return;
@@ -6070,6 +6121,7 @@ export function ChatPanel({
                 onOpenSubagent={openSubagent}
                 recoveringTurnId={recoveringTurnId}
                 onRecover={recoverFailedTurn}
+                onCancelResume={cancelTurnAutoResume}
                 skills={commands}
               />
               {busy && awaitingInput && (

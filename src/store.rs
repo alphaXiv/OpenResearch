@@ -2491,7 +2491,6 @@ impl Store {
     /// Schedule an automatic recovery replay for a `failed` turn — e.g. a
     /// usage-limit's parsed reset time. A no-op once the turn has already
     /// been recovered (`recovered_by_turn_id` set) or moved on from `failed`.
-    #[allow(dead_code)] // Consumed by the usage-limit auto-continue scheduler (T3).
     pub fn set_turn_resume_at(&self, turn_id: &str, resume_at: i64) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE chat_turns SET resume_at = ?2
@@ -2504,7 +2503,6 @@ impl Store {
     /// Failed turns whose scheduled resume time has arrived and that no one
     /// has recovered yet, oldest due first. The caller (`watch_runs`) replays
     /// each one's `recovery_action` through [`ChatHost::recover_turn`].
-    #[allow(dead_code)] // Consumed by the usage-limit auto-continue scheduler (T3).
     pub fn list_due_turn_resumes(&self) -> Result<Vec<StoredChatTurn>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_TURN_COLS} FROM chat_turns
@@ -2514,6 +2512,38 @@ impl Store {
         ))?;
         let rows = stmt.query_map(params![now_ms()], row_to_chat_turn)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Cancels a scheduled auto-resume without touching the turn's failure
+    /// itself — the "Don't" affordance next to the countdown. A no-op (not
+    /// an error) once the turn has moved on from `failed`.
+    pub fn clear_turn_resume_at(&self, session_id: &str, turn_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_turns SET resume_at = NULL WHERE id = ?1 AND session_id = ?2",
+            params![turn_id, session_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// How many of this session's turns failed with `error_kind` since
+    /// `since_ms` — used to bound the usage-limit auto-continue's fixed
+    /// fallback delay (a message whose wording gave up no concrete reset
+    /// time) so a session stuck repeating the same unparseable limit message
+    /// doesn't retry forever.
+    pub fn count_recent_turn_failures(
+        &self,
+        session_id: &str,
+        error_kind: &str,
+        since_ms: i64,
+    ) -> Result<i64> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_turns
+                 WHERE session_id = ?1 AND error_kind = ?2 AND created_at >= ?3",
+                params![session_id, error_kind, since_ms],
+                |row| row.get(0),
+            )
+            .map_err(Into::into)
     }
 
     pub fn interrupt_chat_turn(&self, id: &str) -> Result<()> {
@@ -4704,6 +4734,95 @@ mod tests {
         // Once recovered, it drops out even if still "due" by time.
         assert!(store.mark_chat_turn_recovered("one", "two").unwrap());
         assert_eq!(store.list_due_turn_resumes().unwrap().len(), 0);
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clear_turn_resume_at_cancels_the_schedule_without_touching_the_failure() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-cancel-resume-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let turn = chat_turn_fixture("one", "client-1");
+        store.admit_chat_turn(None, &turn).unwrap();
+        store
+            .fail_chat_turn(
+                "one",
+                "unknown",
+                "claude_limit_terminal",
+                "hit a limit",
+                Some("continue"),
+            )
+            .unwrap();
+        assert!(store.set_turn_resume_at("one", now_ms() - 1).unwrap());
+        assert_eq!(store.list_due_turn_resumes().unwrap().len(), 1);
+
+        // The "Don't" button: the schedule clears, but the turn is still a
+        // failed turn a person can Continue by hand.
+        assert!(store.clear_turn_resume_at("chat_1", "one").unwrap());
+        assert_eq!(store.list_due_turn_resumes().unwrap().len(), 0);
+        let turn = store.get_chat_turn("chat_1", "one").unwrap().unwrap();
+        assert_eq!(turn.state, "failed");
+        assert_eq!(turn.recovery_action.as_deref(), Some("continue"));
+
+        // A mismatched session id is a no-op, not a cross-session write.
+        assert!(!store.clear_turn_resume_at("other-session", "one").unwrap());
+
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn count_recent_turn_failures_only_counts_the_matching_kind_within_the_window() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-limit-streak-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        // chat_turn_fixture pins created_at to a fixed early timestamp, so a
+        // since_ms of 0 covers every fixture turn below.
+        for (id, kind) in [
+            ("one", "claude_limit_terminal"),
+            ("two", "claude_limit_terminal"),
+            ("three", "claude_terminal"), // a different failure kind
+        ] {
+            let turn = chat_turn_fixture(id, &format!("client-{id}"));
+            store.admit_chat_turn(None, &turn).unwrap();
+            store
+                .fail_chat_turn(id, "unknown", kind, "boom", Some("continue"))
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .count_recent_turn_failures("chat_1", "claude_limit_terminal", 0)
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .count_recent_turn_failures("chat_1", "claude_terminal", 0)
+                .unwrap(),
+            1
+        );
+        // A window starting after every fixture turn's created_at sees none.
+        assert_eq!(
+            store
+                .count_recent_turn_failures("chat_1", "claude_limit_terminal", now_ms())
+                .unwrap(),
+            0
+        );
+        // A different session's turns never count toward this one's streak.
+        assert_eq!(
+            store
+                .count_recent_turn_failures("some-other-session", "claude_limit_terminal", 0)
+                .unwrap(),
+            0
+        );
 
         drop(store);
         let _ = std::fs::remove_dir_all(dir);

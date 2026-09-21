@@ -904,6 +904,18 @@ export const setAutoUpdate = (enabled: boolean) =>
 export const installCli = (force = false) =>
   post<InstalledCli>("/api/update/install-cli", { force });
 
+export interface AutoContinueOnLimitSettings {
+  enabled: boolean;
+}
+
+/** Whether a Claude turn that failed on a usage/session limit auto-resumes
+ *  at its parsed reset time. Settings → harness (Claude). */
+export const getAutoContinueOnLimit = (signal?: AbortSignal) =>
+  get<AutoContinueOnLimitSettings>("/api/settings/auto-continue-on-limit", signal);
+
+export const setAutoContinueOnLimit = (enabled: boolean) =>
+  post<AutoContinueOnLimitSettings>("/api/settings/auto-continue-on-limit", { enabled });
+
 // --- settings: kubernetes -----------------------------------------------------
 
 export interface K8sPreflight {
@@ -2088,6 +2100,14 @@ export const recoverChatTurn = (
     `/api/chat/sessions/${sessionId}/turns/${turnId}/recover`,
     { action, ...opts },
   );
+
+/** Cancels a usage-limit turn's scheduled auto-continue (the "Don't" button
+ *  next to its countdown) without touching the failure itself — it falls
+ *  back to a manual Continue click. */
+export const cancelTurnResume = (sessionId: string, turnId: string) =>
+  writeResponse(`/api/chat/sessions/${sessionId}/turns/${turnId}/resume`, {
+    method: "DELETE",
+  }).then((r) => json<{ ok: boolean }>(r));
 
 /** Pass `text` to re-ask an edited version of a user message; omit it to retry a
  * response. Returns immediately; the new turn streams over /api/events. */

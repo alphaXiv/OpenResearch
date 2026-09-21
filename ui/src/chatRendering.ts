@@ -93,7 +93,13 @@ export function isModelAccessLimitPart(part: ChatPart): boolean {
 
 export function isUsageLimitPart(part: ChatPart): boolean {
   if (isModelAccessLimitPart(part)) return true;
-  if (part.state?.input?.errorKind === "claude_usage_limit") return true;
+  // "claude_limit_terminal" unifies both detection paths (a structured
+  // rate-limit signal and a generic result error whose text just happens to
+  // describe one) once the backend recognizes the message — see
+  // `apply_usage_limit_failure` in harness/claude.rs. "claude_usage_limit"
+  // is kept for transcripts recorded before that unification.
+  if (part.state?.input?.errorKind === "claude_usage_limit"
+    || part.state?.input?.errorKind === "claude_limit_terminal") return true;
   const text = part.type === "text" ? part.text : part.tool === "error" ? part.state?.error : null;
   if (part.type === "tool" && part.tool === "error" && text
     && /usageLimitExceeded|rateLimitExceeded|insufficient_quota|(?:usage|rate|session) limit|(?:exceeded|exhausted) (?:your |the |current )*quota|insufficient (?:credits|balance)|(?:credit|quota)[ _-](?:exhausted|exceeded)/i.test(text)) return true;
