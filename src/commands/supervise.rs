@@ -1425,7 +1425,7 @@ async fn run_sge(
         done_rx,
     ));
 
-    let mut last_status = stored.status.clone();
+    let mut last_status = status_of(&stored)?;
     let mut cancel_sent = false;
     let mut cancel_forced = false;
     let mut cancel_polls = 0u32;
@@ -1641,8 +1641,8 @@ async fn run_sge(
         let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
 
         if is_terminal_stage(stage) {
-            store.update_status(&run_id, &status, Some(now_ms()), None)?;
-            if status == "failed" {
+            let applied = store.update_status(&run_id, status, Some(now_ms()), None)?;
+            if applied && status == RunStatus::Failed {
                 if let Some(msg) = &job.message {
                     if let Err(err) =
                         store.set_result_markdown(&run_id, &format!("Job failed: {msg}"))
@@ -1656,10 +1656,9 @@ async fn run_sge(
             return Ok(());
         }
 
-        if status != last_status {
-            store.update_status(&run_id, &status, None, None)?;
+        if status != last_status && store.update_status(&run_id, status, None, None)? {
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
-            last_status = status.clone();
+            last_status = status;
         }
         if local_cancel_requested(&store, &run_id) {
             if !cancel_sent {

@@ -155,9 +155,6 @@ import {
   rankMentionMatches,
   type MentionContext,
 } from "../mentionCommand";
-import { SshConfigDialog } from "./SshConfigDialog";
-import { RemoteIcon } from "./RemoteIcon";
-import { RemoteStatus } from "./RemoteStatus";
 import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
   defaultSelection,
