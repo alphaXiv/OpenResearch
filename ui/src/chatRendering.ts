@@ -23,6 +23,33 @@ export function isTurnStatusPart(part: ChatPart): boolean {
   return part.id === "turn-retry" || part.id === "turn-recovery";
 }
 
+/** Claude's `Task`/`Agent`, OpenCode's `task`, and Codex's `subagent` all spawn
+ * a nested transcript — rendered as its own block rather than folded into a
+ * tool-call group. */
+export function isSpawnTool(tool: string | undefined): boolean {
+  const name = (tool ?? "").toLowerCase();
+  return name === "subagent" || name === "task" || name === "agent";
+}
+
+/** Count of spawn/task parts still running in the session's current
+ * (streaming) assistant message, recursed into nested sub-agent transcripts.
+ * Pure derivation off the message tree already held client-side — no new
+ * events. */
+export function countOpenSubagents(messages: ChatMessage[]): number {
+  const message = messages.at(-1);
+  if (message?.role !== "assistant") return 0;
+  return countOpenSubagentParts(message.parts);
+}
+
+function countOpenSubagentParts(parts: ChatPart[]): number {
+  let count = 0;
+  for (const part of parts) {
+    if (part.type === "tool" && isSpawnTool(part.tool) && part.state?.status === "running") count++;
+    if (part.children?.length) count += countOpenSubagentParts(part.children);
+  }
+  return count;
+}
+
 /** The last visible part, when it is a non-errored tool. */
 export function partsTailToolId(parts: ChatPart[]): string | null {
   for (let index = parts.length - 1; index >= 0; index--) {
