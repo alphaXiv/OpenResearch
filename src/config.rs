@@ -222,6 +222,69 @@ pub fn clear_overleaf_session() -> Result<()> {
     save_overleaf_credentials(&credentials)
 }
 
+/// Where the Slack incoming-webhook URL lives. Same reasoning as
+/// `overleaf_credentials_path`: a notification target, not synced env, so it
+/// stays out of `~/.openresearch/env` and out of the data dir.
+fn slack_credentials_path() -> PathBuf {
+    config_dir().join("slack.json")
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct SlackCredentials {
+    #[serde(default, rename = "webhookUrl")]
+    webhook_url: String,
+}
+
+fn slack_credentials() -> SlackCredentials {
+    std::fs::read_to_string(slack_credentials_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Writes owner-only, like `save_overleaf_credentials` beside it. An empty
+/// file goes away rather than lingering with nothing in it.
+fn save_slack_credentials(credentials: &SlackCredentials) -> Result<()> {
+    let path = slack_credentials_path();
+    if credentials.webhook_url.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let body = serde_json::to_string_pretty(credentials)?;
+    std::fs::write(&path, format!("{body}\n"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+pub fn slack_webhook_url() -> Option<String> {
+    non_empty(slack_credentials().webhook_url)
+}
+
+/// Stored as given — the caller (the `/api/settings/slack` handler) is where
+/// the `hooks.slack.com` shape gets validated, matching how `set_overleaf_token`
+/// validates before ever reaching this module.
+pub fn set_slack_webhook_url(url: &str) -> Result<()> {
+    let mut credentials = slack_credentials();
+    credentials.webhook_url = url.to_string();
+    save_slack_credentials(&credentials)
+}
+
+pub fn clear_slack_webhook_url() -> Result<()> {
+    let mut credentials = slack_credentials();
+    credentials.webhook_url.clear();
+    save_slack_credentials(&credentials)
+}
+
 /// The user-chosen data dir, if one is persisted and non-empty. Consumed by
 /// `store::data_dir()` between the `$ORX_DATA_DIR` override and the XDG default.
 ///
@@ -442,4 +505,76 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Points `config_dir()` at a fresh temp directory for the duration of
+    /// `f`, serialized through `telemetry::XDG_CONFIG_HOME_TEST_LOCK` — see
+    /// that static's doc comment: any test touching `XDG_CONFIG_HOME` must
+    /// hold it, not a module-local lock, or it races the telemetry tests
+    /// under the default multithreaded runner.
+    fn with_isolated_config_dir<T>(f: impl FnOnce() -> T) -> T {
+        let _lock = crate::telemetry::XDG_CONFIG_HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved = std::env::var("XDG_CONFIG_HOME").ok();
+        let dir = std::env::temp_dir().join(format!("orx-config-test-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let result = f();
+        match saved {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    #[test]
+    fn slack_credentials_round_trip_through_webhook_url_accessors() {
+        with_isolated_config_dir(|| {
+            assert_eq!(slack_webhook_url(), None);
+            assert!(!slack_credentials_path().exists());
+
+            set_slack_webhook_url("https://hooks.slack.com/services/T000/B000/xxx").unwrap();
+            assert_eq!(
+                slack_webhook_url().as_deref(),
+                Some("https://hooks.slack.com/services/T000/B000/xxx")
+            );
+            assert!(slack_credentials_path().exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(slack_credentials_path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
+                assert_eq!(mode, 0o600);
+            }
+
+            clear_slack_webhook_url().unwrap();
+            assert_eq!(slack_webhook_url(), None);
+            assert!(
+                !slack_credentials_path().exists(),
+                "an emptied webhook deletes the file rather than leaving it behind"
+            );
+        });
+    }
+
+    #[test]
+    fn slack_credentials_json_shape_uses_camel_case_webhook_url() {
+        let credentials = SlackCredentials {
+            webhook_url: "https://hooks.slack.com/services/T000/B000/xxx".to_string(),
+        };
+        let json = serde_json::to_string(&credentials).unwrap();
+        assert_eq!(
+            json,
+            r#"{"webhookUrl":"https://hooks.slack.com/services/T000/B000/xxx"}"#
+        );
+        let parsed: SlackCredentials = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.webhook_url, credentials.webhook_url);
+    }
 }

@@ -8,11 +8,10 @@
 //!
 //! This module is the drain mechanics and the Slack transport. Deciding
 //! *when* to enqueue (a run starting, a run's outcome getting synthesized,
-//! a usage limit hit) is each feature's own job, as is where a webhook URL
-//! comes from (a Settings page writing `config_dir()/slack.json`, the same
-//! shape as `overleaf.json` in `src/config.rs`). Nothing calls
-//! [`spawn_notifier_loop`] yet — see the `#[allow(dead_code)]` below —
-//! until that Settings piece exists to construct a real provider.
+//! a usage limit hit) is each feature's own job — see `notify_events` —
+//! as is where a webhook URL comes from (`config_dir()/slack.json`, the
+//! same shape as `overleaf.json` in `src/config.rs`). [`spawn_notifier_loop`]
+//! is started from `commands::up::run`, only when a webhook is configured.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -294,5 +293,57 @@ mod tests {
         assert_eq!(open(&dir).list_pending_notifications(10).unwrap().len(), 1);
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// `SlackWebhookProvider` against a real local HTTP server — never a live
+    /// `hooks.slack.com` URL, per this track's credential-handling rule.
+    /// Doubles as coverage for the `/api/settings/slack/preflight` route,
+    /// which sends through the exact same provider.
+    #[tokio::test]
+    async fn slack_webhook_provider_delivers_through_a_local_axum_stub() {
+        use axum::extract::State;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicU16, Ordering};
+
+        async fn respond(
+            State(status): State<Arc<AtomicU16>>,
+            body: axum::body::Bytes,
+        ) -> StatusCode {
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["text"], "hello from orx");
+            StatusCode::from_u16(status.load(Ordering::SeqCst)).unwrap()
+        }
+
+        let status = Arc::new(AtomicU16::new(200));
+        let app = axum::Router::new()
+            .route("/webhook", post(respond))
+            .with_state(status.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = SlackWebhookProvider::new(format!("http://{addr}/webhook"));
+        let message = serde_json::json!({ "text": "hello from orx" });
+
+        status.store(200, Ordering::SeqCst);
+        assert_eq!(
+            provider.send("preflight", &message).await,
+            DeliveryOutcome::Sent
+        );
+
+        status.store(404, Ordering::SeqCst);
+        assert_eq!(
+            provider.send("preflight", &message).await,
+            DeliveryOutcome::Rejected
+        );
+
+        status.store(500, Ordering::SeqCst);
+        assert_eq!(
+            provider.send("preflight", &message).await,
+            DeliveryOutcome::Retryable
+        );
     }
 }

@@ -5241,7 +5241,11 @@ impl ChatHost {
                 changed
             } else if let Ok(store) = Store::open() {
                 ctx.clear_retry_status();
-                store.complete_chat_turn(&ctx.turn_id).unwrap_or(false)
+                let completed = store.complete_chat_turn(&ctx.turn_id).unwrap_or(false);
+                if completed {
+                    notify_run_synthesized_if_wakeup_turn(&store, &ctx.turn_id);
+                }
+                completed
             } else {
                 false
             };
@@ -7341,7 +7345,7 @@ async fn process_run_wakeups(
             .send_hidden_message(&wakeup.chat_session_id, text, guard)
             .await
         {
-            Ok(TurnSubmission::Started(_)) => {
+            Ok(TurnSubmission::Started(turn_id)) => {
                 if !store.mark_run_wakeup_delivered(
                     &wakeup.run.id,
                     &wakeup.chat_session_id,
@@ -7351,6 +7355,19 @@ async fn process_run_wakeups(
                         "run wake-up claim expired before delivery was recorded"
                     ));
                 }
+                // The missing link the Slack run-outcome notification needs:
+                // which turn this wake-up's message landed on, and the
+                // experiment description as of right now, so completion can
+                // later tell whether the agent changed it during the turn.
+                store.set_run_wakeup_turn_id(&wakeup.run.id, &wakeup.chat_session_id, &turn_id)?;
+                let pre_description = store
+                    .get_local_experiment(&wakeup.run.experiment_id)?
+                    .and_then(|exp| exp.description);
+                store.set_run_wakeup_pre_turn_description(
+                    &wakeup.run.id,
+                    &wakeup.chat_session_id,
+                    pre_description.as_deref(),
+                )?;
             }
             Ok(
                 TurnSubmission::Queued(_)
@@ -7494,6 +7511,49 @@ fn spawn_outcome(store: &Store, session: &StoredChatSession) -> Result<SpawnOutc
         Some(error) => SpawnOutcome::Failed(truncated(error.trim(), SPAWN_REPORT_LIMIT)),
         None => SpawnOutcome::Silent,
     })
+}
+
+/// The Slack "run synthesized" hook. Called only from a chat turn's own
+/// completion, and only once that turn has genuinely transitioned to
+/// completed (a real state change, not a no-op re-completion) — so a plain
+/// chat turn, and a turn that failed, never reach here at all; see the call
+/// site in `launch_turn_ctx_locked`. A no-op if `turn_id` was not a
+/// delivered run wake-up's turn.
+fn notify_run_synthesized_if_wakeup_turn(store: &Store, turn_id: &str) {
+    let Ok(Some(wakeup)) = store.run_wakeup_by_turn_id(turn_id) else {
+        return;
+    };
+    let Ok(Some(session)) = store.get_chat_session(&wakeup.chat_session_id) else {
+        return;
+    };
+    let Ok(Some(project)) = store.get_local_project(&wakeup.run.project_id) else {
+        return;
+    };
+    let Ok(Some(experiment)) = store.get_local_experiment(&wakeup.run.experiment_id) else {
+        return;
+    };
+    let outcome_text = match spawn_outcome(store, &session) {
+        Ok(SpawnOutcome::Reply(text)) => Some(text),
+        Ok(SpawnOutcome::Failed(text)) => Some(format!("Agent reported an error:\n{text}")),
+        Ok(SpawnOutcome::Interrupted) => {
+            Some("The turn was interrupted before finishing.".to_string())
+        }
+        Ok(SpawnOutcome::Silent) | Err(_) => None,
+    };
+    let pre_description = store
+        .run_wakeup_pre_turn_description(&wakeup.run.id, &wakeup.chat_session_id)
+        .unwrap_or(None);
+    let description_changed = pre_description.as_deref() != experiment.description.as_deref();
+    if let Err(err) = crate::notify_events::enqueue_run_synthesized(
+        store,
+        &wakeup,
+        &project,
+        &experiment,
+        outcome_text.as_deref(),
+        description_changed,
+    ) {
+        eprintln!("orx up: could not enqueue Slack run-outcome notification: {err}");
+    }
 }
 
 /// Where the helper's work is. Deliberately claims no branch: session worktrees
@@ -9791,6 +9851,21 @@ with other project runs using `orx runs p1` and inspect this run's logs using `o
 
         let store = Store::open_at(dir.clone()).unwrap();
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 1);
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The Slack run-outcome hook is only ever called from a turn's success
+    /// path (see the call site in `launch_turn_ctx_locked`), so a failed
+    /// turn structurally never reaches it — nothing to enqueue-and-assert
+    /// there. This covers the other half explicitly: an ordinary turn (no
+    /// `chat_run_wakeups` row for its turn id at all) enqueues nothing even
+    /// though the hook does run for it.
+    #[test]
+    fn an_ordinary_turn_enqueues_no_slack_notification() {
+        let (store, dir) = temp_store("ordinary-turn");
+        notify_run_synthesized_if_wakeup_turn(&store, "turn_not_a_wakeup");
+        assert_eq!(store.list_pending_notifications(10).unwrap().len(), 0);
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

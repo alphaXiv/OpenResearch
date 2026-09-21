@@ -66,6 +66,7 @@ const settingsFamilies: Record<string, readonly string[]> = {
   slurm: ["getSlurmSettings", "getComputeSettings"],
   sge: ["getSgeSettings", "getComputeSettings"],
   ray: ["getRaySettings", "getComputeSettings"],
+  slack: ["getSlackSettings"],
   env: ["getEnvVars", "getHfSettings", "getTinkerSettings", "getModalSettings", "getSlurmSettings", "getSgeSettings", "getRaySettings", "getK8sSettings", "getOpenResearchSettings", "getComputeSettings", "getHarnesses"],
   "data-dir": ["getDataDir"],
   ssh: ["getSshHosts", "getSshConfig", "getSshMasterStatus", "getComputeSettings"],
