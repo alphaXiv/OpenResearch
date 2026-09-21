@@ -1887,12 +1887,8 @@ mod tests {
     #[ignore = "release workflow production contract gate"]
     async fn production_contract_is_accepted() {
         assert_eq!(build_channel(), "production");
+        harness::assert_production_contract().await;
         let payloads = [
-            build_payload(
-                "harness_initial_state",
-                "cli-release-contract-test",
-                json!({"harness":"opencode","installation":"installed","auth":"signed_out","authEvidence":"configuration","compatibility":"no_known_requirement","usability":"usable","localConfigured":false}),
-            ),
             build_payload(
                 "harness_setup",
                 "cli-release-contract-test",

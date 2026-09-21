@@ -98,7 +98,7 @@ export function OpenResearchSetupTerminal({ login, onComplete, onError }: {
   return <CommandTerminal
     path={login ? "/api/settings/openresearch/login" : "/api/settings/openresearch/ssh-key"}
     label={login ? "orx login" : "orx ssh-key add"}
-    heightClass="h-80"
+    heightClass="h-96"
     onError={onError}
     onComplete={(value) => {
       if (!isComplete(value)) return false;

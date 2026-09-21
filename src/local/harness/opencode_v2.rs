@@ -86,7 +86,7 @@ pub(super) async fn run_turn(
     if let Some(model) = model {
         post(&endpoint, &format!("{path}/model"), &json!({"model":model})).await?;
     }
-    let before = get(&endpoint, &format!("{path}/export")).await?;
+    let before = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
     let previous: HashSet<String> = messages(&before)?
         .iter()
         .filter_map(|m| m["id"].as_str().map(str::to_owned))
@@ -107,7 +107,7 @@ pub(super) async fn run_turn(
     let mut was_idle = false;
     loop {
         // ponytail: full projected history polling; switch to paged durable log if long chats make this costly.
-        let projection = get(&endpoint, &format!("{path}/export")).await?;
+        let projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
         let current = messages(&projection)?;
         let delivered = current.iter().any(|m| m["id"].as_str() == Some(&prompt_id));
         merge_projection(ctx, &endpoint, &native_id, current, &previous).await?;
@@ -127,7 +127,7 @@ pub(super) async fn run_turn(
             .ok_or_else(|| anyhow!("OpenCode V2 active response is invalid"))?
             .contains_key(&native_id);
         if observed_idle(&mut was_idle, queued, running) {
-            let final_projection = get(&endpoint, &format!("{path}/export")).await?;
+            let final_projection = get(&endpoint, &endpoint.v2_export_path(&native_id)).await?;
             let final_messages = messages(&final_projection)?;
             let delivered = delivered
                 || final_messages
@@ -219,7 +219,7 @@ async fn merge_projection(
             else {
                 continue;
             };
-            let child = get(endpoint, &format!("/api/session/{child_id}/export")).await?;
+            let child = get(endpoint, &endpoint.v2_export_path(child_id)).await?;
             if child.pointer("/data/info/parentID").and_then(Value::as_str) != Some(native_id) {
                 return Err(anyhow!("OpenCode returned an unrelated subagent session"));
             }
@@ -472,6 +472,15 @@ pub(super) async fn reply(
     let (form_id, field_key): (String, String) = serde_json::from_str(id)?;
     let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
     if submitted.is_empty() {
+        if !endpoint.legacy_v2_api {
+            endpoint
+                .client
+                .delete(format!("{}{path}/form/{form_id}", endpoint.base_url))
+                .send()
+                .await?
+                .error_for_status()?;
+            return Ok(());
+        }
         return post(
             endpoint,
             &format!("{path}/form/{form_id}/cancel"),
@@ -640,15 +649,7 @@ pub(super) async fn detect(
                     .ok_or_else(|| anyhow!("OpenCode database has no parent"))?,
             );
         let (mut child, endpoint) = crate::local::opencode::start_server(&binary, cmd).await?;
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
-            post(&endpoint, "/api/plugin/await-activation", &json!({})).await?;
-            let models = get(&endpoint, "/api/model").await?;
-            let integrations = get(&endpoint, "/api/integration").await?;
-            Ok::<_, anyhow::Error>((models, integrations))
-        })
-        .await
-        .map_err(|_| anyhow!("OpenCode model discovery timed out"))
-        .and_then(|result| result);
+        let result = discover_models(&endpoint).await;
         let _ = child.kill().await;
         let _ = child.wait().await;
         result
@@ -712,6 +713,33 @@ pub(super) async fn detect(
     info
 }
 
+async fn discover_models(endpoint: &AgentEndpoint) -> Result<(Value, Value)> {
+    let mut catalog = None;
+    let result = tokio::time::timeout(Duration::from_secs(30), async {
+        if endpoint.legacy_v2_api {
+            post(endpoint, "/api/plugin/await-activation", &json!({})).await?;
+        }
+        loop {
+            let models = get(endpoint, "/api/model").await?;
+            let integrations = get(endpoint, "/api/integration").await?;
+            let ready = models["data"]
+                .as_array()
+                .is_some_and(|models| !models.is_empty());
+            catalog = Some((models, integrations));
+            if endpoint.legacy_v2_api || ready {
+                return Ok::<_, anyhow::Error>(());
+            }
+            // OpenCode 2.0.4 removed await-activation; cold catalogs can initially be empty.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await;
+    if let Ok(result) = result {
+        result?;
+    }
+    catalog.ok_or_else(|| anyhow!("OpenCode model discovery timed out"))
+}
+
 pub(super) async fn generate(
     binary: crate::local::opencode::ResolvedBinary,
     model: Option<String>,
@@ -734,7 +762,11 @@ pub(super) async fn generate(
         let result = tokio::time::timeout(timeout, async {
             let response: Value = endpoint
                 .client
-                .post(format!("{}/api/generate", endpoint.base_url))
+                .post(format!(
+                    "{}{}",
+                    endpoint.base_url,
+                    endpoint.v2_generate_path()
+                ))
                 .json(&body)
                 .send()
                 .await?
@@ -760,6 +792,47 @@ pub(super) async fn generate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn discovery_waits_for_a_cold_v2_catalog() {
+        use axum::{routing::get, Json, Router};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        let app = Router::new()
+            .route(
+                "/api/model",
+                get(move || {
+                    let count = count.clone();
+                    async move {
+                        Json(if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            json!({"data":[]})
+                        } else {
+                            json!({"data":[{"id":"fixture"}]})
+                        })
+                    }
+                }),
+            )
+            .route(
+                "/api/integration",
+                get(|| async { Json(json!({"data":[]})) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = AgentEndpoint {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            client: reqwest::Client::new(),
+            protocol: crate::local::opencode::Protocol::V2,
+            legacy_v2_api: false,
+        };
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (models, _) = discover_models(&endpoint).await.unwrap();
+        assert_eq!(models["data"][0]["id"], "fixture");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
     #[test]
     fn free_text_and_numeric_notes_survive_form_replies_and_reload() {
         let note = "a custom answer".to_string();
