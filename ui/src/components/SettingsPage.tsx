@@ -65,6 +65,7 @@ import {
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
+  connectProjectGithub,
   initializeProjectGit,
   saveHfToken,
   saveTinkerKey,
@@ -3180,6 +3181,25 @@ function GitTab({
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
+  const [repositoryFormOpen, setRepositoryFormOpen] = useState(false);
+  const [repository, setRepository] = useState("");
+
+  const connectRepository = async () => {
+    if (!project || saving || !repository.trim()) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const result = await connectProjectGithub(project.id, repository.trim());
+      setStatus(result.git);
+      onProjectUpdate(result.project);
+      setRepositoryFormOpen(false);
+      setRepository("");
+    } catch (error) {
+      setError(syncErrorMessage(error));
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
@@ -3289,6 +3309,34 @@ function GitTab({
                   <Button disabled={saving} onClick={() => { setSaving(true); void disableProjectGithub(project.id).then((result) => { setStatus(result.git); onProjectUpdate(result.project); }).catch((err) => setError(err instanceof Error ? err.message : String(err))).finally(() => setSaving(false)); }}>{saving ? m.repository_updating() : m.repository_disable_syncing()}</Button>
                 </div>
               </>
+            )}
+            {status.github.authenticated && (
+              <div className="mt-3.5 pt-3.5 border-t border-border-variant">
+                {!repositoryFormOpen ? (
+                  <Button disabled={saving} onClick={() => {
+                    setRepository(hasGithubRepository ? `${status.github.owner}/${status.github.repo}` : "");
+                    setError(null);
+                    setRepositoryFormOpen(true);
+                  }}>
+                    {hasGithubRepository ? m.repository_change() : m.repository_connect_existing()}
+                  </Button>
+                ) : (
+                  <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void connectRepository(); }}>
+                    <label className="flex flex-col gap-1 text-sm">
+                      {m.repository_target()}
+                      <Input autoFocus value={repository} onChange={(event) => setRepository(event.target.value)}
+                        placeholder="owner/repo" disabled={saving} required />
+                    </label>
+                    <p className="m-0 text-sm text-subtext">{m.repository_connect_description()}</p>
+                    <div className="flex gap-2">
+                      <Button type="submit" variant="primary" disabled={saving || !repository.trim()}>
+                        {saving ? m.repository_enabling() : m.repository_connect_and_sync()}
+                      </Button>
+                      <Button type="button" disabled={saving} onClick={() => setRepositoryFormOpen(false)}>{m.settings_page_cancel()}</Button>
+                    </div>
+                  </form>
+                )}
+              </div>
             )}
           </div>
           <OverleafCard />
@@ -3801,6 +3849,7 @@ export function SettingsView({
       )}
       {tab === "git" && (
         <GitTab
+          key={project?.id}
           project={project}
           onProjectUpdate={onProjectUpdate}
           remote={remote}

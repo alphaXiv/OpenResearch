@@ -1220,5 +1220,10 @@
   "ssh_run_in": "التشغيل في",
   "ssh_direct_host": "المضيف مباشرة",
   "ssh_existing_container": "حاوية موجودة",
-  "ssh_container_reference": "اسم الحاوية أو معرّفها"
+  "ssh_container_reference": "اسم الحاوية أو معرّفها",
+  "repository_change": "تغيير المستودع",
+  "repository_connect_existing": "ربط مستودع موجود",
+  "repository_target": "رابط مستودع GitHub أو owner/repo",
+  "repository_connect_description": "ادفع فروع الأساس والتجارب إلى هذا المستودع وفعّل المزامنة التلقائية. تُحفظ المستودعات الحالية والوجهات البعيدة غير المرتبطة. يؤدي تعارض السجل إلى إيقاف الربط دون استبدال الالتزامات البعيدة.",
+  "repository_connect_and_sync": "ربط ومزامنة"
 }

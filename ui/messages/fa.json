@@ -1220,5 +1220,10 @@
   "ssh_run_in": "اجرا در",
   "ssh_direct_host": "مستقیماً روی میزبان",
   "ssh_existing_container": "کانتینر موجود",
-  "ssh_container_reference": "نام یا شناسهٔ کانتینر"
+  "ssh_container_reference": "نام یا شناسهٔ کانتینر",
+  "repository_change": "تغییر مخزن",
+  "repository_connect_existing": "اتصال مخزن موجود",
+  "repository_target": "نشانی مخزن GitHub یا owner/repo",
+  "repository_connect_description": "شاخه‌های پایه و آزمایش را به این مخزن ارسال و همگام‌سازی خودکار را فعال کنید. مخزن‌های موجود و ریموت‌های نامرتبط حفظ می‌شوند. تعارض تاریخچه، اتصال را بدون بازنویسی کامیت‌های راه دور متوقف می‌کند.",
+  "repository_connect_and_sync": "اتصال و همگام‌سازی"
 }

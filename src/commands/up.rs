@@ -468,6 +468,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/projects/{id}/git/init", post(initialize_project_git))
         .route("/api/projects/{id}/github", post(enable_project_github))
         .route(
+            "/api/projects/{id}/github/repository",
+            post(connect_project_github),
+        )
+        .route(
             "/api/projects/{id}/github/disable",
             post(disable_project_github),
         )
@@ -1442,7 +1446,7 @@ async fn create_project(
         .ok_or_else(|| bad_request("project deletion is in progress"))?;
     drop(create_admission);
     let (project, github_publication_error) = if github_sync_enabled {
-        match push_project_for_sync(project.clone()).await {
+        match push_project_for_sync(project.clone(), true).await {
             Ok((project, _)) => (project, None),
             Err(error) => {
                 let project = Store::open()?
@@ -1630,6 +1634,7 @@ async fn create_independent_project_repository(
 
 async fn push_project_for_sync(
     mut project: local::model::LocalProject,
+    allow_replacement: bool,
 ) -> Result<(local::model::LocalProject, local::github::Status)> {
     let github_status = local::github::status().await;
     if !github_status.installed {
@@ -1643,12 +1648,18 @@ async fn push_project_for_sync(
 
     let mut using_existing_repository = project.has_github_repository();
     if using_existing_repository {
-        let can_push = local::github::repo_meta(&project.github_owner, &project.github_repo)
-            .await?
-            .is_some_and(|meta| meta.can_push && !meta.archived);
-        if !can_push {
-            project = create_independent_project_repository(project).await?;
-            using_existing_repository = false;
+        if allow_replacement {
+            let can_push = local::github::repo_meta(&project.github_owner, &project.github_repo)
+                .await?
+                .is_some_and(|meta| meta.can_push && !meta.archived);
+            if !can_push {
+                project = create_independent_project_repository(project).await?;
+                using_existing_repository = false;
+            }
+        } else {
+            // Re-enabling a configured target must never silently change its destination.
+            local::github::require_writable_repository(&project.github_owner, &project.github_repo)
+                .await?;
         }
     } else {
         project = create_independent_project_repository(project).await?;
@@ -1664,7 +1675,10 @@ async fn push_project_for_sync(
         .await
         .map_err(|error| anyhow!("Git push task failed: {error}"))?;
     if let Err(error) = first_push {
-        if !using_existing_repository || !github_push_was_rejected(&error.to_string()) {
+        if !allow_replacement
+            || !using_existing_repository
+            || !github_push_was_rejected(&error.to_string())
+        {
             return Err(error);
         }
         project = create_independent_project_repository(project).await?;
@@ -1690,11 +1704,57 @@ async fn enable_project_github(State(state): State<AppState>, Path(id): Path<Str
     let project = store
         .get_local_project(&id)?
         .ok_or_else(|| not_found("project"))?;
-    let (project, github_status) = push_project_for_sync(project).await.map_err(bad_request)?;
+    let (project, github_status) = push_project_for_sync(project, false)
+        .await
+        .map_err(bad_request)?;
     let git_status = project_git_json(&project, github_status);
     Ok(Json(
         json!({ "project": project_json(&project), "git": git_status }),
     ))
+}
+
+#[derive(Deserialize)]
+struct ConnectProjectGithubReq {
+    repository: String,
+}
+
+async fn connect_project_github(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ConnectProjectGithubReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let (owner, repo) = local::github::selected_repository(&req.repository).map_err(bad_request)?;
+    let _admission = state
+        .project_lifecycle
+        .admit(&id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let _lock = project_publication_lock(&state, &id).await;
+    reject_if_moving(&state)?;
+    let mut project = Store::open()?
+        .get_local_project(&id)?
+        .ok_or_else(|| not_found("project"))?;
+    let github_status = local::github::status().await;
+    if !github_status.authenticated {
+        return Err(bad_request(
+            "Authenticate GitHub first with `gh auth login`.",
+        ));
+    }
+    local::github::require_writable_repository(&owner, &repo)
+        .await
+        .map_err(bad_request)?;
+    tokio::task::spawn_blocking(move || -> Result<Value> {
+        let path = std::path::Path::new(&project.repo_path);
+        local::git::push_selected_repository(path, &project.baseline_branch, &owner, &repo)?;
+        // Keep the previous binding on rejected pushes; preserve unrelated remotes.
+        local::git::add_github_remote(path, &owner, &repo)?;
+        project.github_owner = owner;
+        project.github_repo = repo;
+        project.github_sync_enabled = true;
+        Store::open()?.update_local_project(&project)?;
+        Ok(json!({ "project": project_json(&project), "git": project_git_json(&project, github_status) }))
+    }).await.map_err(|error| anyhow!("Git task failed: {error}"))?
+        .map(Json).map_err(bad_request)
 }
 
 async fn disable_project_github(

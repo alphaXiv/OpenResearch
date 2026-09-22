@@ -94,6 +94,56 @@ fn repository_endpoint(owner: &str, repo: &str) -> String {
     )
 }
 
+/// Parse a user-selected repository without accepting credentials, extra paths or options.
+pub fn selected_repository(input: &str) -> Result<(String, String)> {
+    let input = input.trim();
+    let path = input
+        .strip_prefix("https://github.com/")
+        .or_else(|| input.strip_prefix("git@github.com:"))
+        .or_else(|| input.strip_prefix("ssh://git@github.com/"))
+        .unwrap_or(input)
+        .trim_end_matches('/');
+    let (owner, repo) = path
+        .split_once('/')
+        .ok_or_else(|| anyhow!("Enter a GitHub repository URL or owner/repo."))?;
+    let repo = repo.strip_suffix(".git").unwrap_or(repo);
+    let valid_owner = !owner.is_empty()
+        && owner.len() <= 39
+        && !owner.starts_with('-')
+        && !owner.ends_with('-')
+        && owner
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-');
+    let valid_repo = !repo.is_empty()
+        && repo.len() <= 100
+        && repo != "."
+        && repo != ".."
+        && repo
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c));
+    if !valid_owner || !valid_repo {
+        return Err(anyhow!("Enter a GitHub repository URL or owner/repo."));
+    }
+    Ok((owner.to_string(), repo.to_string()))
+}
+
+pub async fn require_writable_repository(owner: &str, repo: &str) -> Result<()> {
+    let meta = repo_meta(owner, repo).await?.ok_or_else(|| {
+        anyhow!("GitHub repository {owner}/{repo} was not found or is not accessible.")
+    })?;
+    if meta.archived {
+        return Err(anyhow!(
+            "GitHub repository {owner}/{repo} is archived and read-only."
+        ));
+    }
+    if !meta.can_push {
+        return Err(anyhow!(
+            "Permission denied: you do not have write access to {owner}/{repo}."
+        ));
+    }
+    Ok(())
+}
+
 pub async fn create_project_repo(repo: &str) -> Result<(String, String)> {
     let owner = viewer_login().await?;
     for suffix in 1..=100 {
@@ -212,6 +262,36 @@ fn repository_name_exists(error: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_repository_accepts_github_names_and_urls() {
+        for input in [
+            "alice/research",
+            " https://github.com/alice/research.git/ ",
+            "git@github.com:alice/research.git",
+            "ssh://git@github.com/alice/research.git",
+        ] {
+            assert_eq!(
+                selected_repository(input).unwrap(),
+                ("alice".into(), "research".into())
+            );
+        }
+        for input in [
+            "",
+            "alice",
+            "../repo",
+            "-alice/repo",
+            "alice/..",
+            "alice/repo/extra",
+            "https://example.com/alice/repo",
+            "https://token@github.com/alice/repo",
+            "alice/repo?token=secret",
+            "alice/repo#main",
+            "alice/repo\n--force",
+        ] {
+            assert!(selected_repository(input).is_err(), "accepted {input:?}");
+        }
+    }
 
     #[test]
     fn shallow_clone_is_reserved_for_large_repositories() {
