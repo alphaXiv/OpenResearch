@@ -3214,10 +3214,7 @@ struct OpenProjectFileReq {
     session_id: Option<String>,
 }
 
-/// Validates a checkout-relative request path and resolves it to the
-/// canonicalized absolute path, confined to the checkout root — shared by the
-/// routes that hand a file to an OS action on this machine. `verb` names the
-/// action in error messages ("open", "reveal").
+/// Canonical path of a checkout-relative file, confined to the checkout root.
 fn confined_checkout_file(
     id: &str,
     req: &OpenProjectFileReq,
@@ -3262,11 +3259,7 @@ async fn open_project_file(
     .await
 }
 
-/// Reveal a checkout file in the machine's file manager (Finder/Explorer),
-/// selecting it where the platform supports that. Confines the path like
-/// `open_project_file`, minus the directory rejection — revealing a directory
-/// is meaningful. The escape hatch for a binary or unrecognized file the
-/// dashboard cannot preview inline.
+/// Reveal a checkout file in the OS file manager; unlike open, directories are allowed.
 async fn reveal_project_file(
     Path(id): Path<String>,
     Json(req): Json<OpenProjectFileReq>,

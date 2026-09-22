@@ -518,8 +518,7 @@ export const openFileInEditor = (
     sessionId: opts.sessionId,
   });
 
-/** Reveal a checkout file in the OS file manager (Finder/Explorer) on the
- * machine running `orx up`, selecting it where the platform supports that. */
+/** Reveal a checkout file in the OS file manager on the machine running `orx up`. */
 export const revealFileInManager = (
   projectId: string,
   path: string,

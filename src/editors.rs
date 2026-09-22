@@ -46,10 +46,7 @@ pub fn open_in_default_app(path: &std::path::Path) -> std::io::Result<()> {
     spawn_detached(&mut cmd)
 }
 
-/// Builds the command that reveals `path` in the machine's file manager,
-/// selecting it where the platform supports that (Finder on macOS, Explorer on
-/// Windows). On Linux there is no portable "select this file" call, so the
-/// command opens the containing directory instead.
+/// Command that reveals `path` in the OS file manager (Linux opens its parent directory).
 fn reveal_command(path: &std::path::Path) -> Command {
     #[cfg(target_os = "macos")]
     let cmd = {
@@ -60,13 +57,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     };
     #[cfg(target_os = "windows")]
     let cmd = {
-        // `explorer /select,"<path>"` opens the folder with the file selected.
-        // explorer reparses its own command line — commas split parameters and
-        // it does not understand backslash-escaped quotes — so the path must
-        // reach it verbatim: quoted (comma-safe) and appended with raw_arg
-        // (Command::arg would emit \" escapes explorer rejects). NTFS forbids
-        // '"' in names, so the canonicalized path can't break out of the
-        // quotes.
+        // explorer splits on commas and rejects \" escapes: quote via raw_arg (NTFS bans '"').
         use std::os::windows::process::CommandExt;
         let mut c = Command::new("explorer.exe");
         let mut arg = std::ffi::OsString::from("/select,\"");
@@ -77,9 +68,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let cmd = {
-        // No portable "select the file" opener across Linux file managers, so
-        // open the containing directory. `unwrap_or` only covers a filesystem
-        // root; callers pass a canonicalized path under a checkout root.
+        // No portable "select the file" opener on Linux, so open the containing directory.
         let mut c = Command::new("xdg-open");
         c.arg(path.parent().unwrap_or(path));
         c
@@ -87,9 +76,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
     cmd
 }
 
-/// Reveals `path` in the machine's file manager (see [`reveal_command`]).
-/// Detached and non-blocking, like [`open_in_default_app`]; the caller has
-/// already confirmed the file exists inside the project checkout.
+/// Reveals `path` in the OS file manager, detached like [`open_in_default_app`].
 pub fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
     spawn_detached(&mut reveal_command(path))
 }

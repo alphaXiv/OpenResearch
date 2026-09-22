@@ -124,9 +124,7 @@ function CopyableCommand({ command }: { command: string }) {
   );
 }
 
-/** Busy/error wrapper for a detached OS action on a checkout file (open in
- * editor, reveal in file manager): the call can only fail before the OS takes
- * over, so the error is worth surfacing as a tooltip. */
+/** Busy/error state for a detached OS file action; failures surface as a tooltip. */
 function useOsFileAction(run: () => Promise<unknown>) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -431,8 +429,6 @@ export function FileViewer({
   const openEditor = useOsFileAction(() =>
     openFileInEditor(projectId, filePath, { sessionId }),
   );
-  // Show the file in the OS file manager (Finder/Explorer), the useful action
-  // for a binary or unrecognized file the dashboard can't preview inline.
   const revealManager = useOsFileAction(() =>
     revealFileInManager(projectId, filePath, { sessionId }),
   );
