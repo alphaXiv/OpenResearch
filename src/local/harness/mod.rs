@@ -43,8 +43,8 @@ use crate::store::Store;
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
 pub(crate) use detect::{
-    clear_probe_timings, detect_spawn_output_timed, probe_timing_scope, take_probe_timings,
-    unique as unique_bins, ProbeTiming,
+    detect_spawn_output_timed, probe_timing_scope, unique as unique_bins, ProbeTiming,
+    ProbeTimingSink,
 };
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode};

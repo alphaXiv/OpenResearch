@@ -429,13 +429,11 @@ mod tests {
                     harness: "opencode",
                     probe: "models",
                     ms: 6_900,
-                    fill: fill_id,
                 },
                 crate::local::harness::ProbeTiming {
                     harness: "opencode",
                     probe: "total",
                     ms: 7_895,
-                    fill: fill_id,
                 },
             ],
         );
@@ -470,7 +468,6 @@ mod tests {
                     harness: "codex",
                     probe: "spec",
                     ms: 1,
-                    fill: fill_id,
                 })
                 .collect(),
         );

@@ -186,8 +186,24 @@ impl OpenCode {
                 // consumes (provider gates, local providers, the default
                 // model) — project/plugin layers are off under `--pure` and
                 // the child runs from the home dir anyway — so the file read
-                // stands in for a multi-second spawn.
+                // stands in for a multi-second spawn. It falls back to the
+                // child only for a config the strict parse cannot honor —
+                // `opencode.jsonc` or a `.json` carrying comments — which
+                // opencode accepts and a `Null` here would silently drop
+                // (configured local providers would vanish).
                 config = snapshot_config();
+                if unresolved_config_source() {
+                    if let Some(text) = super::detect::timed_probe(
+                        "opencode",
+                        "config",
+                        run_models(binary.path.clone(), &["debug", "config", "--pure"]),
+                    )
+                    .await
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    {
+                        config = text;
+                    }
+                }
             } else if snapshot {
                 // `debug config` costs a child process; the snapshot reads
                 // the config file directly.
@@ -518,6 +534,46 @@ fn snapshot_config() -> Value {
         let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
     }
     config
+}
+
+/// A config source the snapshot's strict file read cannot honor: an
+/// `OPENCODE_CONFIG` target or `opencode.json` that fails strict JSON
+/// (comments make opencode's own parser fine with it), or a sibling
+/// `opencode.jsonc`. The full pass resolves these with the CLI's own
+/// `debug config --pure` rather than silently dropping the user's provider
+/// config.
+fn unresolved_config_source() -> bool {
+    if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT") {
+        // Inline content is authoritative — the file never enters the
+        // picture — but comments in it still outrun the strict parse.
+        return serde_json::from_str::<Value>(&content.to_string_lossy()).is_err();
+    }
+    if !crate::local::local_models::read()
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return false;
+    }
+    let dir = super::xdg_config_home().join("opencode");
+    if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
+        let path = PathBuf::from(custom);
+        // An explicit target that exists but won't strict-parse (comments)
+        // is still real config to the CLI.
+        return path.exists()
+            && std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_none();
+    }
+    let json = dir.join("opencode.json");
+    // opencode honors a sibling `.jsonc` alongside — and comments inside —
+    // `.json`; either outruns what the file read can claim to have covered.
+    dir.join("opencode.jsonc").exists()
+        || (json.exists()
+            && std::fs::read_to_string(&json)
+                .ok()
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_none())
 }
 
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
@@ -893,18 +949,23 @@ async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
     }
     cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
     let status = {
-        let spawned = super::detect::detect_spawn_child(cmd).await;
-        match spawned {
-            Ok((mut child, _permit)) => tokio::time::timeout(Duration::from_secs(20), child.wait())
-                .await
-                .map(|done| done.ok()),
-            Err(_) => Ok(None),
-        }
+        // The lane is acquired before the deadline, but the spawn itself is
+        // inside it — a `CreateProcess` wedged on an AV scan must not hold the
+        // fill (and its single-flight flag) forever. On timeout the dropped
+        // future kills the child via `kill_on_drop`.
+        let permit = super::detect::detect_spawn_permit().await;
+        tokio::time::timeout(Duration::from_secs(20), async move {
+            let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
+            child.wait().await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
     };
     let stdout = std::fs::read(&path).ok();
     std::fs::remove_file(&path).ok();
     let stdout = stdout?;
-    matches!(status, Ok(Some(status)) if status.success())
+    matches!(status, Some(status) if status.success())
         .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 

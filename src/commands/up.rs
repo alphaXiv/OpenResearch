@@ -7282,112 +7282,137 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
     {
         return;
     }
-    tokio::spawn(local::harness::probe_timing_scope(fill_id, async move {
-        let _fill = FillGuard(state.harness_fill_in_flight.clone());
-        let probe_generation = state.claude.auth_snapshot().generation;
-        let started = std::time::Instant::now();
-        // Residue from a fill that died mid-pass cannot be attributed — start
-        // clean so this fill's payload carries only its own probes.
-        local::harness::clear_probe_timings();
-        // Commit each harness as its probes land: the onboarding gate is
-        // per-entry (`agentReady && !catalogPending`), so a ready agent must
-        // not wait for the slowest sibling's catalog child. The batch swap at
-        // the end still applies the cross-entry reconciliation
-        // (`finish_harnesses_payload`) to the complete set.
-        let mut stream = std::pin::pin!(local::harness::detect_harnesses_each());
-        let mut ordered = Vec::new();
-        // `first_ready_ms` answers the churn question directly: how far into
-        // the fill did a usable agent actually publish.
-        let mut first_ready_ms = None;
-        while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
-            // A progressive claude entry settles shared auth *now*: reads
-            // overlay that state onto every non-pending entry, so a Ready
-            // probe left unobserved until fill end would be stamped back to
-            // Unknown on each answer — the stall this loop exists to remove.
-            if info.id == "claude-code" {
-                state
-                    .claude
-                    .observe_auth_state(info.auth_state, probe_generation);
-            }
-            let mut published = false;
-            {
-                let mut cache = state.harnesses.lock().await;
-                // Same guard as the final swap: a refresh or retry that
-                // landed in between owns the cache.
-                if let Some((at, payload)) = cache.as_mut() {
-                    if *at == snapshot_at {
-                        if let Some(slot) = payload["harnesses"].as_array_mut().and_then(|all| {
-                            all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
-                        }) {
-                            *slot = json!(info);
-                            published = true;
+    let probe_timings = local::harness::ProbeTimingSink::default();
+    tokio::spawn(local::harness::probe_timing_scope(
+        probe_timings.clone(),
+        async move {
+            let _fill = FillGuard(state.harness_fill_in_flight.clone());
+            let probe_generation = state.claude.auth_snapshot().generation;
+            let started = std::time::Instant::now();
+            // Commit each harness as its probes land: the onboarding gate is
+            // per-entry (`agentReady && !catalogPending`), so a ready agent must
+            // not wait for the slowest sibling's catalog child. The batch swap at
+            // the end still applies the cross-entry reconciliation
+            // (`finish_harnesses_payload`) to the complete set.
+            let mut stream = std::pin::pin!(local::harness::detect_harnesses_each());
+            let mut ordered = Vec::new();
+            // `first_ready_ms` answers the churn question directly: how far into
+            // the fill did a usable agent actually publish.
+            let mut first_ready_ms = None;
+            while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
+                // A progressive claude entry settles shared auth *now*: reads
+                // overlay that state onto every non-pending entry, so a Ready
+                // probe left unobserved until fill end would be stamped back to
+                // Unknown on each answer — the stall this loop exists to remove.
+                if info.id == "claude-code" {
+                    state
+                        .claude
+                        .observe_auth_state(info.auth_state, probe_generation);
+                }
+                let mut published = false;
+                {
+                    let mut cache = state.harnesses.lock().await;
+                    // Same guard as the final swap: a refresh or retry that
+                    // landed in between owns the cache.
+                    if let Some((at, payload)) = cache.as_mut() {
+                        if *at == snapshot_at {
+                            if let Some(slot) =
+                                payload["harnesses"].as_array_mut().and_then(|all| {
+                                    all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                                })
+                            {
+                                *slot = json!(info);
+                                published = true;
+                            }
                         }
                     }
                 }
-            }
-            // A superseded fill publishes nothing and must not announce: the
-            // pass that owns the cache emits its own catalog events.
-            if !published {
+                // A superseded fill publishes nothing and must not announce: the
+                // pass that owns the cache emits its own catalog events.
+                if !published {
+                    ordered.push((index, info));
+                    continue;
+                }
+                state.chat.emit_event("harness.catalog", json!({}));
+                // For claude, "ready" means the overlay won't stamp it back down
+                // — its committed `agentReady` only stands once shared auth is
+                // Ready (the observation above).
+                if first_ready_ms.is_none()
+                    && info.agent_ready
+                    && (info.id != "claude-code"
+                        || state.claude.auth_snapshot().state
+                            == local::harness::HarnessAuthState::Ready)
+                {
+                    first_ready_ms = Some(started.elapsed().as_millis() as u64);
+                }
                 ordered.push((index, info));
-                continue;
             }
-            state.chat.emit_event("harness.catalog", json!({}));
-            // For claude, "ready" means the overlay won't stamp it back down
-            // — its committed `agentReady` only stands once shared auth is
-            // Ready (the observation above).
-            if first_ready_ms.is_none()
-                && info.agent_ready
-                && (info.id != "claude-code"
-                    || state.claude.auth_snapshot().state
-                        == local::harness::HarnessAuthState::Ready)
-            {
-                first_ready_ms = Some(started.elapsed().as_millis() as u64);
-            }
-            ordered.push((index, info));
-        }
-        ordered.sort_by_key(|(index, _)| *index);
-        let harnesses: Vec<local::harness::HarnessInfo> =
-            ordered.into_iter().map(|(_, info)| info).collect();
-        let installed = harnesses.iter().filter(|h| h.installed).count();
-        let ready = harnesses.iter().filter(|h| h.agent_ready).count();
-        // Finish before touching the cache: the Claude re-probe inside can
-        // cost a child process, and holding the lock across it stalls every
-        // reader the snapshot was meant to unblock.
-        let (mut payload, announce) =
-            finish_harnesses_payload(&state, harnesses, probe_generation, false).await;
-        // Readiness can be *established* by the finish (a Ready shared-auth
-        // overlay retry that ran no stream probe). The post-finish payload is
-        // authoritative — overlay applied — so count it here.
-        if first_ready_ms.is_none() && payload_has_ready_agent(&payload) {
-            first_ready_ms = Some(started.elapsed().as_millis() as u64);
-        }
-        // Emit before the ownership check below: a fill that loses the cache
-        // race still ran real probes, and its timings are real data.
-        crate::telemetry::harness::capture_detect(
-            fill_id,
-            "full",
-            started.elapsed().as_millis() as u64,
-            first_ready_ms,
-            installed,
-            ready,
-            local::harness::take_probe_timings(fill_id),
-        );
-        {
-            let mut cache = state.harnesses.lock().await;
-            // A refresh or retry that landed in between owns the cache. No
-            // event: clients holding a provisional payload already poll it at
-            // 1 Hz, and the discarded pass must not announce auth it never
-            // committed.
-            if !matches!(cache.as_ref(), Some((at, _)) if *at == snapshot_at) {
+            ordered.sort_by_key(|(index, _)| *index);
+            let harnesses: Vec<local::harness::HarnessInfo> =
+                ordered.into_iter().map(|(_, info)| info).collect();
+            // Finish before touching the cache: the Claude re-probe inside can
+            // cost a child process, and holding the lock across it stalls every
+            // reader the snapshot was meant to unblock.
+            let (mut payload, announce) =
+                finish_harnesses_payload(&state, harnesses, probe_generation, false).await;
+            // The reconciled payload is authoritative — overlay applied — so
+            // readiness is counted from it, not the raw probes.
+            let installed = payload["harnesses"]
+                .as_array()
+                .map(|all| all.iter().filter(|h| h["installed"] == true).count())
+                .unwrap_or(0);
+            let ready = payload["harnesses"]
+                .as_array()
+                .map(|all| {
+                    all.iter()
+                        .filter(|h| h["agentReady"] == true && h["catalogPending"] != true)
+                        .count()
+                })
+                .unwrap_or(0);
+            let committed = {
+                let mut cache = state.harnesses.lock().await;
+                // A refresh or retry that landed in between owns the cache. No
+                // event: clients holding a provisional payload already poll it at
+                // 1 Hz, and the discarded pass must not announce auth it never
+                // committed.
+                if !matches!(cache.as_ref(), Some((at, _)) if *at == snapshot_at) {
+                    false
+                } else {
+                    // Readiness can be *established* by the finish (a Ready
+                    // shared-auth retry that ran no stream probe) — count it, but
+                    // only once publication is confirmed: a superseded fill
+                    // reports its probe timings with no invented readiness mark.
+                    if first_ready_ms.is_none() && payload_has_ready_agent(&payload) {
+                        first_ready_ms = Some(started.elapsed().as_millis() as u64);
+                    }
+                    let filled_at = std::time::Instant::now();
+                    spawn_cursor_account_details(&state, &mut payload, filled_at);
+                    *cache = Some((filled_at, payload));
+                    true
+                }
+            };
+            // Emit regardless of the race outcome: a fill that lost it still ran
+            // real probes, and its timings are real data.
+            crate::telemetry::harness::capture_detect(
+                fill_id,
+                "full",
+                started.elapsed().as_millis() as u64,
+                first_ready_ms,
+                installed,
+                ready,
+                std::mem::take(
+                    &mut *probe_timings
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                ),
+            );
+            if !committed {
                 return;
             }
-            let filled_at = std::time::Instant::now();
-            spawn_cursor_account_details(&state, &mut payload, filled_at);
-            *cache = Some((filled_at, payload));
-        }
-        state.chat.emit_event("harness.catalog", json!({}));
-        emit_auth_announcement(&state, announce);
-    }));
+            state.chat.emit_event("harness.catalog", json!({}));
+            emit_auth_announcement(&state, announce);
+        },
+    ));
 }
 
 /// Clears the single-flight flag however the fill task exits once polled —

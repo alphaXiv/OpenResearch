@@ -457,12 +457,11 @@ async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
-/// The Full pass's probes on one binary. `status` is the auth oracle and
-/// answers quickly; the `models` catalog child costs several seconds and is
-/// useless to a signed-out agent, so it launches speculatively only when an
-/// API key already proves auth — otherwise it waits for the verdict rather
-/// than racing (and usually aborting) a spawn the other harnesses' probes
-/// need the CPU for.
+/// The Full pass's probes on one binary. An API key already proves auth, so
+/// `status` and the multi-second `models` catalog child run concurrently.
+/// Without one, `status` is the auth oracle and `models` only runs on a
+/// logged-in verdict — racing it would spend a spawn the other harnesses'
+/// probes need the CPU for.
 async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInfo>>) {
     let status_probe = || {
         super::detect::timed_probe(
@@ -471,10 +470,6 @@ async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInf
             cursor_command_json(&bin, &["status", "--format", "json"]),
         )
     };
-    // An API key already proves auth, so the catalog child is never wasted —
-    // run both probes concurrently. Without one, `status` is the auth oracle
-    // and `models` only runs on a logged-in verdict: racing it would spend a
-    // multi-second child the signed-out answer aborts anyway.
     if api_key("CURSOR_API_KEY").is_some() {
         let (status, models) = tokio::join!(
             status_probe(),
