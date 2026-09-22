@@ -124,3 +124,10 @@ orx <command> --no-telemetry
 ```
 
 Source and development builds do not send analytics.
+
+Coding agents may also file product feedback with `orx feedback` when you hit
+a bug, wish for a feature, or get frustrated with OpenResearch. Each report is
+a short description of the workflow problem, written to omit your research
+details. Reports are sent from every build, linked to your account when you
+are logged in, and turned off by `orx telemetry off`. The `--no-telemetry`
+flag covers only the command it is passed to.

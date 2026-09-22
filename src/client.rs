@@ -291,6 +291,32 @@ async fn request_no_content(
     Ok(())
 }
 
+/// `POST /feedback`. Accepted without a login; a token only attributes it.
+pub async fn submit_feedback(creds: Option<&Credentials>, body: &impl Serialize) -> Result<()> {
+    let base = creds.map_or_else(crate::config::default_api_url, |c| c.api_url.clone());
+    let mut req = http()
+        .post(format!("{base}/feedback"))
+        .timeout(std::time::Duration::from_secs(10))
+        .json(body);
+    if let Some(creds) = creds {
+        req = req.bearer_auth(&creds.token);
+    }
+    let res = req.send().await?;
+    let status = res.status();
+    if !status.is_success() {
+        // The body names the rejected field so the agent can fix it and retry.
+        let detail: String = res
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(1000)
+            .collect();
+        return Err(anyhow!("Feedback rejected ({status}): {detail}"));
+    }
+    Ok(())
+}
+
 async fn api_get<T: DeserializeOwned>(creds: &Credentials, path: &str) -> Result<T> {
     request(creds, Method::GET, path, None).await
 }

@@ -488,7 +488,7 @@ fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
 /// one persisted on first use. Returns `None` only if the id can't be persisted
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
-fn install_id() -> Option<String> {
+pub(crate) fn install_id() -> Option<String> {
     // Fast path: already generated.
     if let Some(id) = load_settings().and_then(|s| s.install_id) {
         return Some(id);
@@ -585,6 +585,14 @@ pub(crate) fn effective_disabled_reason() -> Option<DisabledReason> {
 
 pub(crate) fn preference_enabled() -> bool {
     preference_disabled_reason(false).is_none()
+}
+
+/// Opt-outs and `ORX_TELEMETRY_ENV`, but not the build channel: `orx feedback`
+/// honors them, and source builds may still report.
+pub(crate) fn preference_allows_sending() -> bool {
+    let runtime_environment = std::env::var("ORX_TELEMETRY_ENV").ok();
+    environment_disabled_reason_for("production", runtime_environment.as_deref()).is_none()
+        && preference_disabled_reason(flag()).is_none()
 }
 
 /// Convenience: `true` when events should be sent.
