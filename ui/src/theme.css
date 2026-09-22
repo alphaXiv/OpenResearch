@@ -61,6 +61,7 @@
   --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
   --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
+  --color-image-backdrop: rgb(29 27 26 / 85%);
   --color-modal-backdrop: rgb(29 27 26 / 42%);
   --color-modal-backdrop-light: rgb(29 27 26 / 40%);
   --color-diff-selection: color-mix(in oklab, var(--surface) 76%, var(--primary));

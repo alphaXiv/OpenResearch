@@ -492,11 +492,17 @@ pub struct ExpRunArgs {
     /// you belong to exactly one org.
     #[arg(long)]
     pub org: Option<String>,
-    /// The ~/.ssh/config host alias to run on (with `--backend ssh`), or the
+    /// The ~/.ssh/config host alias (SSH defaults to its saved default host), or the
     /// cluster login node (with `--backend slurm`; defaults to the slurm
     /// settings' host).
     #[arg(long)]
     pub host: Option<String>,
+    /// Existing running Docker container on the SSH host (name or ID).
+    #[arg(long, conflicts_with = "no_container")]
+    pub container: Option<String>,
+    /// Run directly on the SSH host, overriding its saved container.
+    #[arg(long)]
+    pub no_container: bool,
     /// Repo-relative path to the k8s manifest on the experiment branch (with
     /// `--backend k8s`; default .orx/k8s.yaml). The manifest declares the run's
     /// resources — image, GPUs, topology — and orx injects the run script, env

@@ -192,14 +192,87 @@ pub fn complete_onboarding(selection: DemoSelection) -> Result<DemoCompletion> {
     seed_at(&store, &data_root, &repo, selection)
 }
 
+thread_local! {
+    /// Set on `prewarm`'s blocking thread: its git children run at idle
+    /// priority on Windows so the demo build only takes cores the catalog
+    /// fill's probes and real user work leave free.
+    static BACKGROUND_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Raised when the onboarding confirm path reaches for the demo install. A
+/// click that lands mid-prewarm makes its remaining git children run at
+/// normal priority, so the lock wait is only the rest of the build at full
+/// speed rather than at yield priority.
+static FOREGROUND_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Build the embedded demo worktree off the request path while the onboarding
+/// screen is up. `seed_at` only writes its store rows once the user confirms,
+/// so a fresh install's "Get started" click stops paying the ~15 sequential
+/// git spawns — on Windows that was several seconds of "Setting things up".
+/// `install_repository`'s lock makes a click that beats the warm-up wait for
+/// it and then validate, rather than build a second copy. `data_dir_gate`
+/// keeps it from writing into a data dir while a directory move is in flight —
+/// a contended gate just skips the warm-up; `seed_at` covers the confirm path.
+/// (`try_lock`, not `blocking_lock`: that panics under a runtime context, and
+/// `spawn_blocking` still carries one.)
+pub fn prewarm(
+    move_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    data_dir_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+) {
+    BACKGROUND_BUILD.with(|flag| flag.set(true));
+    // A move sets its flag before awaiting the gate, so a set flag here (or a
+    // contended lock) means a move owns the data dir — skip the warm-up and
+    // let `seed_at` cover the confirm path. The flag is checked again under
+    // the guard so one claimed between the two reads still wins. The guard
+    // covers only the store read: holding it across the install's ~15 git
+    // spawns would stall a mid-flight move for the whole clone.
+    if move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let onboarding_pending = {
+        let Ok(_guard) = data_dir_gate.try_lock() else {
+            return;
+        };
+        if move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let Ok(store) = Store::open() else {
+            return;
+        };
+        !store
+            .ui_state()
+            .map(|state| state.onboarding_completed)
+            .unwrap_or(true)
+    };
+    // A move that starts here races the install's writes — acceptable:
+    // `seed_at` re-validates and repairs the worktree on the confirm path.
+    if !onboarding_pending || move_in_progress.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    // `install_repository` decides for itself: an existing worktree is
+    // validated (and repaired) rather than rebuilt, so a half-written repo
+    // from a killed boot still gets finished before the user clicks.
+    if let Err(error) = install_repository(&super::git::clone_path(OWNER, REPO), &demo_bare_path())
+    {
+        eprintln!("orx up: demo pre-install failed: {error}");
+    }
+}
+
+/// The bare repository the demo worktree's `origin` points at.
+fn demo_bare_path() -> PathBuf {
+    demo_bare_path_in(&crate::store::data_dir())
+}
+
+fn demo_bare_path_in(data_root: &std::path::Path) -> PathBuf {
+    data_root.join("demo-repos").join("nanochat.git")
+}
+
 pub(crate) fn installed_origin(owner: &str, repo: &str) -> Option<PathBuf> {
     if owner != OWNER || repo != REPO {
         return None;
     }
     Store::open().ok()?.get_local_project(PROJECT_ID).ok()??;
-    let origin = crate::store::data_dir()
-        .join("demo-repos")
-        .join("nanochat.git");
+    let origin = demo_bare_path();
     origin.exists().then_some(origin)
 }
 
@@ -253,7 +326,7 @@ fn repair_installed_origin_at(data_root: &Path, repo: &Path) -> Result<()> {
     if !repo.join(".git").is_dir() {
         return Ok(());
     }
-    let bare = data_root.join("demo-repos").join("nanochat.git");
+    let bare = demo_bare_path_in(data_root);
     if !matches!(
         git(&bare, &["rev-parse", "--is-bare-repository"]).as_deref(),
         Ok("true")
@@ -286,6 +359,7 @@ fn seed_at(
     repo: &Path,
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
+    FOREGROUND_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(project) = store.get_local_project(PROJECT_ID)? {
         if !same_path(&project.repo_path, repo)
             || project.github_owner != OWNER
@@ -342,7 +416,7 @@ fn seed_at(
     // Seeded history is dated from onboarding so the demo reads as recent work. The
     // bundled run log and commit dates stay absolute; the commits are SHA-pinned.
     let seeded_at = now_ms();
-    let bare = data_root.join("demo-repos").join("nanochat.git");
+    let bare = demo_bare_path_in(data_root);
     let commit_sha = install_repository(repo, &bare)?;
 
     let project_slug = demo_project_slug(store)?;
@@ -1293,6 +1367,12 @@ fn tool_part(
 }
 
 fn install_repository(repo: &Path, bare: &Path) -> Result<String> {
+    // The onboarding pre-warm and a "Get started" click can overlap; the lock
+    // makes the second caller validate the first's work instead of racing it.
+    static INSTALL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _install = INSTALL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if repo.exists() {
         validate_worktree(repo)?;
     } else if bare.join("HEAD").is_file() {
@@ -1510,6 +1590,15 @@ fn commit(repo: &Path, message: &str) -> Result<()> {
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
+    // The prewarm's children yield to the catalog fill and to foreground work;
+    // a click landing mid-build flips the rest back to normal priority.
+    #[cfg(windows)]
+    if BACKGROUND_BUILD.with(|flag| flag.get())
+        && !FOREGROUND_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS);
+    }
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",

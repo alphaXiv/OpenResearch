@@ -82,21 +82,43 @@ impl ProbeEnvironment {
     }
 }
 
+/// First opencode that resolves, in discovery order — picking the highest
+/// version instead would move a pinned 1.x install onto the 2.x protocol.
+/// The `--version` probes run in parallel (a cold node start can take
+/// seconds); only the pick stays discovery-ordered.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
-    resolve_binary_at(super::find_opencode()?).await
+    let candidates = super::opencode_candidates();
+    let results = futures::future::join_all(candidates.into_iter().map(resolve_binary_at)).await;
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(binary) => return Ok(binary),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    Err(first_error.unwrap_or_else(super::not_found))
 }
 
 pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     let path = crate::paths::canonicalize(path)?;
+    // The installer's layout pins the matching plugin release in
+    // `<install>/package.json` next to `bin/` — when that pin is at least as
+    // fresh as the binary it stands in for the multi-second `--version`
+    // child (one costs ~4s on Windows).
+    if let Some(binary) = resolve_binary_from_pin(&path) {
+        return Ok(binary);
+    }
     let metadata = std::fs::metadata(&path)?;
     let probe = ProbeEnvironment::new()?;
     let mut cmd = Command::new(&path);
     crate::local::chat::prepare_env(&mut cmd);
     probe.configure(&mut cmd);
     cmd.arg("--version");
-    let output = tokio::time::timeout(Duration::from_secs(15), cmd.output())
+    let output = crate::local::harness::detect_spawn_output_timed(cmd, Duration::from_secs(15))
         .await
-        .map_err(|_| anyhow!("OpenCode version check timed out"))??;
+        .ok_or_else(|| anyhow!("OpenCode version check timed out"))??;
     if !output.status.success() {
         return Err(anyhow!(
             "OpenCode version check failed: {}",
@@ -114,6 +136,52 @@ pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     };
     binary.check_unchanged()?;
     Ok(binary)
+}
+
+/// The opencode version pinned by the installer's own layout:
+/// `<install>/{package.json,bin/opencode.exe}` carries
+/// `dependencies."@opencode-ai/plugin"` written at install/upgrade time.
+/// A binary whose mtime sits outside the manifest's install burst was
+/// replaced without the pin following — distrust it and let the caller spawn
+/// `--version` instead. Any other layout returns `None` the same way.
+fn resolve_binary_from_pin(path: &Path) -> Option<ResolvedBinary> {
+    let install = path.parent()?.parent()?;
+    if !install
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().contains("opencode"))
+    {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    let pin_path = install.join("package.json");
+    let pin_modified = std::fs::metadata(&pin_path).ok()?.modified().ok()?;
+    // The installer writes the manifest then extracts the binary, so a fresh
+    // install legitimately has the binary a few seconds newer; a *replaced*
+    // binary differs by days, and a manifest newer than the binary describes
+    // a different install. Five minutes separates the two, either direction.
+    let gap = match metadata.modified().ok()?.duration_since(pin_modified) {
+        Ok(gap) => gap,
+        Err(earlier) => earlier.duration(),
+    };
+    if gap > Duration::from_secs(300) {
+        return None;
+    }
+    let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(pin_path).ok()?).ok()?;
+    let deps = &pkg["dependencies"];
+    let version = deps["@opencode-ai/plugin"]
+        .as_str()
+        .or_else(|| deps["opencode-ai"].as_str())?
+        .trim_start_matches(['^', '~', 'v'])
+        .to_string();
+    let protocol = protocol_for_version(&version).ok()?;
+    Some(ResolvedBinary {
+        path: path.to_path_buf(),
+        version,
+        protocol,
+        modified: metadata.modified().ok()?,
+        size: metadata.len(),
+    })
 }
 
 fn protocol_for_version(version: &str) -> Result<Protocol> {

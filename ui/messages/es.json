@@ -1196,5 +1196,13 @@
   "harness_setup_install_preview": "Aprueba el siguiente comando para descargar e instalar {agent} en tu equipo.",
   "harness_setup_update_preview": "Aprueba el siguiente comando para actualizar {agent} en tu equipo.",
   "harness_setup_approve_run": "Aprobar y ejecutar",
-  "onboarding_choose_another_agent": "Elegir otro agente de programación"
+  "onboarding_choose_another_agent": "Elegir otro agente de programación",
+  "image_zoom_out": "Alejar",
+  "image_zoom_in": "Acercar",
+  "image_zoom_reset": "Restablecer zoom para ajustar",
+  "ssh_default_host": "Servidor SSH predeterminado",
+  "ssh_run_in": "Ejecutar en",
+  "ssh_direct_host": "Servidor directamente",
+  "ssh_existing_container": "Contenedor existente",
+  "ssh_container_reference": "Nombre o ID del contenedor"
 }

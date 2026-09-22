@@ -50,6 +50,8 @@ pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, Stri
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_container: Option<ssh::ContainerRun>,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -249,6 +251,7 @@ mod tests {
 
     fn openresearch_descriptor() -> BackendDescriptor {
         BackendDescriptor {
+            ssh_container: None,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),
@@ -301,6 +304,20 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+        assert_eq!(d.ssh_container, None);
+        let mut d = d;
+        d.ssh_container = Some(ssh::ContainerRun {
+            reference: "research".into(),
+            id: "immutable-id".into(),
+            started_at: "2026-09-21T00:00:00Z".into(),
+            run_dir: "/home/user/.orx/runs/r1".into(),
+        });
+        let json = d.to_json();
+        assert!(json.contains("sshContainer"));
+        assert_eq!(
+            BackendDescriptor::parse(&json).unwrap().ssh_container,
+            d.ssh_container
+        );
     }
 
     #[test]

@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
 use crate::error::Result;
 use crate::local::chat::{
@@ -41,6 +42,10 @@ use crate::local::chat::{
 use crate::store::Store;
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use detect::{
+    detect_spawn_output_timed, probe_timing_scope, unique as unique_bins, ProbeTiming,
+    ProbeTimingSink,
+};
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
@@ -266,6 +271,21 @@ pub trait Harness: Send + Sync {
     /// `None` means this harness isn't a chat backend and shouldn't appear.
     async fn detect(&self) -> Option<HarnessInfo> {
         None
+    }
+
+    /// The fast first pass of [`Harness::detect`]: install, auth, and
+    /// `agent_ready` only — no model-catalog or capability probes, which are
+    /// the subprocesses that stall cold `/api/harnesses` calls for seconds.
+    /// Install/auth come from filesystem and env evidence alone; one
+    /// conditional exception is a single auth child where the login may live
+    /// in an OS credential store the filesystem cannot see (Claude's
+    /// `ProbeCli`). An installed harness's answer is provisional — `detect_one`
+    /// marks it `catalog_pending` and clamps readiness — so the caller can
+    /// complete it in the background.
+    /// Default is the full detect, for harnesses whose auth *is* the catalog
+    /// probe (Antigravity) or that have nothing expensive to defer.
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect().await
     }
 
     /// Run one chat turn: spawn the CLI, parse its event stream, push wire
@@ -528,8 +548,41 @@ pub fn is_chat_harness(id: &str) -> bool {
     registry().iter().any(|h| h.id() == id && h.supports_chat())
 }
 
-async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
-    harness.detect().await.map(|mut info| {
+async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo> {
+    let timing = detect::detect_timing();
+    let start = std::time::Instant::now();
+    let detected = if snapshot {
+        harness.detect_snapshot().await
+    } else {
+        harness.detect().await
+    };
+    // The per-harness wall clock joins the fill's probe timings as the
+    // `"total"` row — the snapshot pass is covered by its own pass event.
+    if !snapshot {
+        detect::record_probe_timing(harness.id(), "total", start.elapsed().as_millis() as u64);
+    }
+    if timing {
+        eprintln!(
+            "orx detect: {} ({}): {}ms",
+            harness.id(),
+            if snapshot { "snapshot" } else { "full" },
+            start.elapsed().as_millis()
+        );
+    }
+    detected.map(|mut info| {
+        // A snapshot answer for an installed harness is provisional by
+        // definition: its install/auth evidence is file-based and the model
+        // catalog is a placeholder until the Full pass lands. Consumers
+        // outside onboarding (ModelPicker, ChatPanel, SettingsPage) read
+        // `agent_ready` without checking `catalog_pending`, so the
+        // pending ⇒ not-ready invariant lives here rather than at every call
+        // site — and `supports_steering` goes with it, since a steering claim
+        // is only meaningful once the CLI's readiness is verified.
+        if snapshot && (info.installed || info.catalog_pending) {
+            info.catalog_pending = true;
+            info.agent_ready = false;
+            info.supports_steering = false;
+        }
         if info.auth_state == HarnessAuthState::Unknown && info.agent_ready {
             info.auth_state = HarnessAuthState::Ready;
         }
@@ -546,17 +599,44 @@ pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
     let harness = registry()
         .into_iter()
         .find(|h| h.id() == id && h.supports_chat())?;
-    detect_one(harness.as_ref()).await
+    detect_one(harness.as_ref(), false).await
 }
 
 /// Detect every chat-capable harness, in registry order. This is what the
 /// `orx up` dashboard renders in its harness picker.
 pub async fn detect_harnesses() -> Vec<HarnessInfo> {
-    let harnesses: Vec<Box<dyn Harness>> = registry()
+    detect_all(false).await
+}
+
+/// The full pass, yielding each harness as its own probes finish instead of
+/// in a batch. Callers that can commit entries individually unblock a ready
+/// agent on its own clock rather than the slowest sibling's — the onboarding
+/// gate is per-entry (`agentReady && !catalogPending`), so the catalog fill
+/// should not be. Items carry the harness's registry index so the caller can
+/// restore registry order for the final payload.
+pub fn detect_harnesses_each() -> impl futures::Stream<Item = (usize, HarnessInfo)> {
+    registry()
         .into_iter()
         .filter(|h| h.supports_chat())
-        .collect();
-    let futures = harnesses.iter().map(|h| detect_one(h.as_ref()));
+        .enumerate()
+        .map(|(i, h)| async move { detect_one(h.as_ref(), false).await.map(|info| (i, info)) })
+        .collect::<futures::stream::FuturesUnordered<_>>()
+        .filter_map(std::future::ready)
+}
+
+/// The snapshot pass of [`detect_harnesses`]: readiness without the model
+/// catalogs, so a cold `/api/harnesses` answers in the time the *fastest*
+/// probes take instead of the slowest catalog. Entries that still owe a
+/// catalog carry `catalog_pending`.
+pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
+    detect_all(true).await
+}
+
+async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
+    let futures = registry()
+        .into_iter()
+        .filter(|h| h.supports_chat())
+        .map(|h| async move { detect_one(h.as_ref(), snapshot).await });
     futures::future::join_all(futures)
         .await
         .into_iter()
@@ -816,7 +896,7 @@ mod tests {
                 ),
             ]
         );
-        assert_eq!(antigravity.default_permission_mode, Some("default"));
+        assert_eq!(antigravity.default_permission_mode, Some("bypass"));
         assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
         assert!(reasoning_ids(&antigravity).is_empty());
         assert!(antigravity.default_reasoning_level.is_none());

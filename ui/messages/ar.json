@@ -1196,5 +1196,13 @@
   "onboarding_loading_account": "جارٍ تحميل تفاصيل الحساب…",
   "onboarding_opencode_not_ready": "تعذّر التحقق من جاهزية OpenCode. أعد المحاولة للتحقق من التثبيت والنماذج.",
   "settings_free_models_no_sign_in": "نماذج مجانية · لا يلزم تسجيل الدخول",
-  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر"
+  "onboarding_choose_another_agent": "اختيار وكيل برمجة آخر",
+  "image_zoom_out": "تصغير",
+  "image_zoom_in": "تكبير",
+  "image_zoom_reset": "إعادة ضبط التكبير للملاءمة",
+  "ssh_default_host": "مضيف SSH الافتراضي",
+  "ssh_run_in": "التشغيل في",
+  "ssh_direct_host": "المضيف مباشرة",
+  "ssh_existing_container": "حاوية موجودة",
+  "ssh_container_reference": "اسم الحاوية أو معرّفها"
 }

@@ -7,8 +7,9 @@ import { useLocale } from "../locale";
 // `<run id="..."/>` tags render as chips that open a run's logs — so the agent
 // can cite the code and the run behind a claim.
 
-import { Check, Copy, FileCode, PanelRight, ScrollText } from "lucide-react";
-import { memo, useMemo, useState, type ReactNode } from "react";
+import { Check, Copy, FileCode, PanelRight, ScrollText, X, Download, Minus, Plus } from "lucide-react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Markdown as StreamingMarkdown } from "@clo/react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import rehypeKatex from "rehype-katex";
@@ -19,9 +20,101 @@ import remarkRehype from "remark-rehype";
 import { unified } from "unified";
 import { resolveSyntaxLanguage } from "../syntaxLanguage";
 import { highlight } from "../syntaxHighlight";
+import { remarkFigures } from "../remarkFigures";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
-import { IconButton } from "./ui";
+import { Button, IconButton, IconButtonLink } from "./ui";
+import { absoluteFileUrl, artifactUrl, projectFileUrl } from "../api";
+import { chatImageTarget, isWindowsDrivePath } from "../markdownTarget";
+
+const ImageResolverContext = createContext<((src: string, fallback?: boolean) => string | null) | undefined>(undefined);
+
+export function ChatImageScope({ projectId, sessionId, children }: {
+  projectId: string;
+  sessionId?: string | null;
+  children: ReactNode;
+}) {
+  const resolver = useMemo(() => (src: string, fallback = false) => {
+    if (/^(https?:)?\/\//i.test(src)) return src;
+    const target = chatImageTarget(src);
+    if (!target) return null;
+    const url = target.source === "absolute" ? absoluteFileUrl(target.path)
+      : target.source === "artifact" && !fallback ? artifactUrl(projectId, target.path)
+      : projectFileUrl(projectId, target.source === "artifact" ? `artifacts/${target.path}` : target.path, { sessionId: sessionId ?? undefined });
+    return url + target.hash;
+  }, [projectId, sessionId]);
+  return <ImageResolverContext value={resolver}>{children}</ImageResolverContext>;
+}
+
+function ImageModal({ src, alt, name, onClose }: { src: string; alt: string; name?: string; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const [bounds, setBounds] = useState({ width: 0, height: 0 });
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    dialog?.focus();
+    const area = viewport.current;
+    const observer = new ResizeObserver(([entry]) => {
+      setBounds({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    if (area) observer.observe(area);
+    return () => { observer.disconnect(); dialog?.close(); };
+  }, []);
+  const fit = size.width && bounds.width
+    ? Math.min(1, bounds.width * 0.9 / size.width, bounds.height * 0.9 / size.height)
+    : 1;
+  return createPortal(
+    <dialog ref={ref} tabIndex={-1} aria-label={alt || m.chat_pasted_image()}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
+      className="fixed inset-0 m-0 max-w-none max-h-none w-full h-dvh border-0 outline-none bg-transparent p-0 text-text backdrop:bg-image-backdrop"
+      onClick={(event) => { event.stopPropagation(); if (event.target === event.currentTarget) onClose(); }}>
+      <div ref={viewport} className="absolute inset-x-4 sm:inset-x-12 top-16 bottom-32 overflow-auto overscroll-contain"
+        onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+        <div className="flex min-h-full min-w-full w-max pointer-events-none">
+          <img src={src} alt={alt} onLoad={(event) => setSize({ width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })}
+            style={size.width ? { width: size.width * fit * zoom, height: size.height * fit * zoom } : undefined}
+            className={`pointer-events-auto block m-auto shrink-0 max-w-none rounded-lg shadow-modal ${size.width && bounds.width ? "visible" : "invisible"}`} />
+        </div>
+      </div>
+      <div className="absolute top-5 right-5 flex gap-2">
+        <IconButtonLink shape="circle" href={src} download={name || true} aria-label={m.media_preview_download()} title={m.media_preview_download()}
+          className="bg-background shadow-popover"><Download size={16} /></IconButtonLink>
+        <IconButton shape="circle" onClick={onClose} aria-label={m.tour_close()} title={m.tour_close()}
+          className="bg-background shadow-popover"><X size={16} /></IconButton>
+      </div>
+      <div className="absolute bottom-6 inset-x-6 flex flex-col items-center gap-3 pointer-events-none">
+        {alt && <div className="max-w-xl line-clamp-2 rounded-xl bg-background px-4 py-2 text-center text-sm leading-snug shadow-popover">{alt}</div>}
+        <div className="pointer-events-auto flex items-center gap-1 rounded-full bg-background p-1.5 shadow-popover">
+          <IconButton shape="circle" disabled={zoom <= 0.25} onClick={() => setZoom((value) => Math.max(0.25, value - 0.25))}
+            aria-label={m.image_zoom_out()} title={m.image_zoom_out()}><Minus size={16} /></IconButton>
+          <Button variant="ghost" className="min-w-16 tabular-nums" onClick={() => setZoom(1)} title={m.image_zoom_reset()} aria-label={m.image_zoom_reset()}>{Math.round(zoom * 100)}%</Button>
+          <IconButton shape="circle" disabled={zoom >= 4} onClick={() => setZoom((value) => Math.min(4, value + 0.25))}
+            aria-label={m.image_zoom_in()} title={m.image_zoom_in()}><Plus size={16} /></IconButton>
+        </div>
+      </div>
+    </dialog>, document.body,
+  );
+}
+
+function MarkdownImage({ src, fallbackSrc, downloadName, alt = "", ...props }: ImgHTMLAttributes<HTMLImageElement> & { fallbackSrc?: string | null; downloadName?: string }) {
+  const [failed, setFailed] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const displayedSrc = failed && fallbackSrc ? fallbackSrc : src;
+  return <>
+    <img {...props} src={displayedSrc} alt={alt} role="button" tabIndex={0} aria-haspopup="dialog"
+      onClick={(event) => { event.preventDefault(); event.stopPropagation(); setExpanded(true); }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault(); event.stopPropagation(); setExpanded(true);
+        }
+      }}
+      onError={!failed && fallbackSrc && fallbackSrc !== src ? () => setFailed(true) : undefined} />
+    {expanded && displayedSrc && <ImageModal src={displayedSrc} alt={alt} name={downloadName} onClose={() => setExpanded(false)} />}
+  </>;
+}
 
 // Chat blocks are short; cap tokenizing well below the file viewer's limit.
 const HIGHLIGHT_MAX_BYTES = 100_000;
@@ -67,6 +160,7 @@ interface MdastPosition {
 }
 
 interface HastNode {
+  tagName?: string;
   children?: HastNode[];
   properties?: Record<string, unknown>;
 }
@@ -184,7 +278,9 @@ function rehypeSafeUrls() {
     const visit = (node: HastNode) => {
       for (const key of ["href", "src"]) {
         if (node.properties && Object.hasOwn(node.properties, key)) {
-          node.properties[key] = defaultUrlTransform(String(node.properties[key] || ""));
+          const value = String(node.properties[key] || "");
+          node.properties[key] = key === "src" && node.tagName === "img" && isWindowsDrivePath(value)
+            ? value : defaultUrlTransform(value);
         }
       }
       node.children?.forEach(visit);
@@ -263,6 +359,7 @@ const markdownProcessor = unified()
   .use(remarkParse)
   .use(remarkGfm)
   .use(remarkMath, remarkMathOptions)
+  .use(remarkFigures)
   .use(remarkMentions)
   .use(remarkRehype)
   .use(rehypeSafeUrls)
@@ -298,6 +395,10 @@ export const mdCodeComponents: Record<string, (props: any) => ReactNode> = {
   pre: ({ children }: any) => <>{children}</>,
 };
 
+function PaperFigure({ children }: { children: ReactNode }) {
+  return <figure className="my-6 mx-auto max-w-full text-left [&_img]:mx-auto [&_img]:my-0 [&_img]:w-auto [&_img]:h-auto [&_img]:max-h-[min(480px,60vh)] [&_img]:object-contain [&_img]:border-0 [&_img]:rounded-none">{children}</figure>;
+}
+
 /** Memoized: markdown + KaTeX parsing is the expensive part of a chat render,
  * and during streaming only the growing part's text actually changes — every
  * other Md in the transcript can skip the re-parse (memo compares `text` by
@@ -324,6 +425,8 @@ export const Md = memo(function Md({
   predict?: boolean;
 }) {
   useLocale();
+  const chatImageSrc = useContext(ImageResolverContext);
+  const imageSrc = resolveImageSrc ?? chatImageSrc;
   const components: Record<string, (props: any) => ReactNode> = useMemo(() => ({
     "file-mention": (props) => (
       <FileChip path={props.path} lines={props.lines} exp={props.exp} onOpenFile={onOpenFile} />
@@ -331,7 +434,16 @@ export const Md = memo(function Md({
     "run-mention": (props) => (
       <RunChip id={props.id} label={props.label} onOpenRun={onOpenRun} />
     ),
-    a: ({ node: _node, href, children, ...rest }) => {
+    a: ({ node: _node, href, children, "data-figure-src": figureSrc, ...rest }) => {
+      const figure = typeof figureSrc === "string" ? chatImageTarget(figureSrc) : null;
+      if (figure && onOpenFile) {
+        const localPath = figure.source === "artifact" ? `artifacts/${figure.path}` : figure.path;
+        const path = resolveFilePath ? resolveFilePath(localPath) : localPath;
+        if (path) return <button type="button" className="text-primary underline cursor-pointer text-start"
+          {...tabOpenGestureHandlers<HTMLButtonElement>((intent) => onOpenFile(path, undefined, undefined, undefined, intent))}>
+          {children}
+        </button>;
+      }
       // Agents sometimes link files as plain markdown links; open those as
       // file tabs instead of navigating the dashboard away.
       if (href && isFileHref(href) && onOpenFile) {
@@ -350,24 +462,29 @@ export const Md = memo(function Md({
         </a>
       );
     },
+    figure: ({ children }) => <PaperFigure>{children}</PaperFigure>,
+    figcaption: ({ children }) => <figcaption className="mt-3 text-sm italic leading-relaxed text-text">{children}</figcaption>,
     th: ({ node: _node, ...rest }) => <th dir="auto" {...rest} />,
     td: ({ node: _node, ...rest }) => <td dir="auto" {...rest} />,
     img: ({ node: _node, src, alt, className, ...rest }) => {
       if (!src || typeof src !== "string") return null;
-      const resolved = resolveImageSrc ? resolveImageSrc(src) : src;
+      const resolved = imageSrc ? imageSrc(src) : src;
       if (!resolved) return null;
       return (
-        <img
+        <MarkdownImage
           {...rest}
+          key={resolved}
+          downloadName={src.split(/[\\/]/).pop()?.split(/[?#]/)[0]}
           src={resolved}
+          fallbackSrc={!resolveImageSrc ? chatImageSrc?.(src, true) : null}
           alt={alt ?? ""}
           loading="lazy"
-          className={`block max-w-full h-auto my-3 rounded-sm border border-border ${className ?? ""}`}
+          className={`block max-w-full h-auto my-3 rounded-sm border border-border cursor-zoom-in focus-visible:outline-2 focus-visible:outline-primary ${className ?? ""}`}
        />
       );
     },
     ...mdCodeComponents,
-  }), [onOpenFile, onOpenRun, resolveFilePath, resolveImageSrc]);
+  }), [onOpenFile, onOpenRun, resolveFilePath, resolveImageSrc, chatImageSrc, imageSrc]);
 
   return (
     <div dir="auto" data-streaming={predict || undefined} className="md min-w-0 wrap-anywhere text-text leading-[1.62] [&_>_*:first-child]:mt-0 [&_>_*:last-child]:mb-0 [&_p]:my-2.5 [&_p]:mx-0 [&_strong]:text-text [&_strong]:font-semibold [&_pre]:bg-surface [&_pre]:border [&_pre]:border-border-muted [&_pre]:rounded-md [&_pre]:py-2 [&_pre]:px-3 [&_pre]:overflow-x-auto [&_pre]:text-sm [&_pre]:text-text [&_code]:font-mono [&_code]:text-sm [&_code]:font-medium [&_code]:text-primary [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_.katex]:text-prose-emphasis [&_.katex-display]:my-3 [&_.katex-display]:mx-0 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5 [&_.katex-display]:px-0 [&_.file-chip]:inline-flex [&_.file-chip]:items-center [&_.file-chip]:gap-1 [&_.file-chip]:max-w-full [&_.file-chip]:my-0 [&_.file-chip]:mx-px [&_.file-chip]:py-0 [&_.file-chip]:px-1.5 [&_.file-chip]:align-baseline [&_.file-chip]:font-mono [&_.file-chip]:text-sm [&_.file-chip]:font-medium [&_.file-chip]:text-text [&_.file-chip]:bg-panel [&_.file-chip]:border [&_.file-chip]:border-border-variant [&_.file-chip]:rounded-xs [&_.file-chip]:cursor-pointer [&_.file-chip:hover:not(:disabled)]:bg-surface [&_.file-chip:hover:not(:disabled)]:text-primary [&_.file-chip_svg]:flex-none [&_.file-chip_svg]:opacity-60 [&_.file-chip-label]:max-w-65 [&_.file-chip-label]:overflow-hidden [&_.file-chip-label]:text-ellipsis [&_.file-chip-label]:whitespace-nowrap [&_.run-chip_svg]:opacity-100 [&_.run-chip_svg]:text-primary [&_pre_code]:bg-none [&_pre_code]:bg-transparent [&_pre_code]:border-0 [&_pre_code]:text-inherit [&_pre_code]:p-0 [&_pre_code]:font-normal [&_h1]:text-text [&_h1]:text-prose-emphasis [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h2]:text-text [&_h2]:text-prose-emphasis [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mx-0 [&_h2]:mb-1.5 [&_h3]:text-text [&_h3]:text-prose-emphasis [&_h3]:font-semibold [&_h3]:mt-3 [&_h3]:mx-0 [&_h3]:mb-1.5 [&_h4]:text-text [&_h4]:text-prose-emphasis [&_h4]:font-semibold [&_h4]:mt-3 [&_h4]:mx-0 [&_h4]:mb-1.5 [&_ul]:my-1.5 [&_ul]:mx-0 [&_ul]:ps-5.5 [&_ol]:my-1.5 [&_ol]:mx-0 [&_ol]:ps-5.5 [&_li::marker]:text-primary [&_a]:text-primary [&_table]:border-collapse [&_table]:block [&_table]:w-max [&_table]:max-w-full [&_table]:text-sm [&_table]:my-2.5 [&_table]:mx-0 [&_table]:border [&_table]:border-border [&_table]:rounded-md [&_table]:overflow-x-auto [&_th]:border-b [&_th]:border-b-border-variant [&_th]:py-2 [&_th]:px-3.5 [&_th]:text-start [&_th]:text-text [&_th]:break-normal [&_th]:break-words [&_td]:border-b [&_td]:border-b-border-variant [&_td]:py-2 [&_td]:px-3.5 [&_td]:text-start [&_td]:text-text [&_td]:break-normal [&_td]:break-words [&_tr:last-child_td]:border-b-0 [&_thead_th]:bg-surface [&_thead_th]:font-medium [&_thead_th]:text-text [&_thead_th]:border-b [&_thead_th]:border-b-border [&_tbody_tr:hover_td]:bg-surface-bright [&_blockquote]:my-1.5 [&_blockquote]:mx-0 [&_blockquote]:pt-0.5 [&_blockquote]:pe-0 [&_blockquote]:pb-0.5 [&_blockquote]:ps-2.5 [&_blockquote]:border-s-[3px] [&_blockquote]:border-s-border [&_blockquote]:text-subtext [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:italic [:is(&,_.openresearch-diff,_.file-view)_.token.operator]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.entity]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.url]:text-syntax-cyan [:is(&,_.openresearch-diff,_.file-view)_.token.comment]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.prolog]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.cdata]:text-syntax-comment [:is(&,_.openresearch-diff,_.file-view)_.token.punctuation]:text-syntax-text [:is(&,_.openresearch-diff,_.file-view)_.token.property]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.tag]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.deleted]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.constant]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.symbol]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.boolean]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.number]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.selector]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.attr-name]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.char]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.inserted]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.string]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.builtin]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.atrule]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.attr-value]:text-syntax-orange [:is(&,_.openresearch-diff,_.file-view)_.token.keyword]:text-syntax-purple [:is(&,_.openresearch-diff,_.file-view)_.token.function]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.decorator]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.def]:text-syntax-blue [:is(&,_.openresearch-diff,_.file-view)_.token.class-name]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.namespace]:text-syntax-yellow [:is(&,_.openresearch-diff,_.file-view)_.token.regex]:text-syntax-green [:is(&,_.openresearch-diff,_.file-view)_.token.important]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.variable]:text-syntax-red [:is(&,_.openresearch-diff,_.file-view)_.token.parameter]:text-syntax-text">

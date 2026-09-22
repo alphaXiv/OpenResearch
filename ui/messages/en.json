@@ -1196,5 +1196,13 @@
   "harness_setup_install_preview": "Approve the command below to download and install {agent} on your computer.",
   "harness_setup_update_preview": "Approve the command below to update {agent} on your computer.",
   "harness_setup_approve_run": "Approve and run",
-  "onboarding_choose_another_agent": "Choose another coding agent"
+  "onboarding_choose_another_agent": "Choose another coding agent",
+  "image_zoom_out": "Zoom out",
+  "image_zoom_in": "Zoom in",
+  "image_zoom_reset": "Reset zoom to fit",
+  "ssh_default_host": "Default SSH host",
+  "ssh_run_in": "Run in",
+  "ssh_direct_host": "Direct host",
+  "ssh_existing_container": "Existing container",
+  "ssh_container_reference": "Container name or ID"
 }
