@@ -113,6 +113,7 @@ export function ModelPicker({
   defaultReasoningId,
   onSelectReasoning,
   lockHarness = false,
+  openRequest = 0,
   className,
 }: {
   value: ModelSelection | null;
@@ -128,6 +129,8 @@ export function ModelPicker({
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
   lockHarness?: boolean;
+  /** Bumped to open the picker from elsewhere (the composer's `/model`). */
+  openRequest?: number;
   className?: string;
 }) {
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
@@ -144,6 +147,16 @@ export function ModelPicker({
     setPage("root");
     setFilter("");
   };
+
+  // Seeded with the mount value so a remount doesn't replay an old request.
+  const handledOpenRequest = useRef(openRequest);
+  useEffect(() => {
+    if (openRequest === handledOpenRequest.current) return;
+    handledOpenRequest.current = openRequest;
+    setPage("models");
+    setFilter("");
+    setOpen(true);
+  }, [openRequest, setOpen]);
 
   useEffect(() => {
     if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {

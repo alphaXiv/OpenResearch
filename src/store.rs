@@ -619,6 +619,7 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
@@ -825,6 +826,15 @@ impl Store {
     /// without `commit()`. Keep network I/O out of the closure it guards.
     pub fn begin(&self) -> Result<rusqlite::Transaction<'_>> {
         Ok(self.conn.unchecked_transaction()?)
+    }
+
+    /// `begin` that takes the write lock up front, so a check made inside it
+    /// cannot be raced by another writer between the check and the insert.
+    pub fn begin_immediate(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
     }
 
     /// Coalesce the WAL back into the main `orx.db` file and truncate it, so a
@@ -1832,6 +1842,16 @@ impl Store {
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
+    /// Every project's sessions for the composer's `/resume` picker, capped so a
+    /// long-lived install cannot turn one dialog open into a multi-megabyte read.
+    pub fn list_all_chat_sessions(&self) -> Result<Vec<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions ORDER BY updated_at DESC LIMIT 500"
+        ))?;
+        let rows = stmt.query_map([], row_to_chat_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
     pub fn list_chat_session_project_ids(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self
             .conn
@@ -1959,6 +1979,56 @@ impl Store {
         self.conn.execute(
             "UPDATE chat_sessions SET context_usage_json = ?2 WHERE id = ?1",
             params![id, json],
+        )?;
+        Ok(())
+    }
+
+    /// The session bound to an agent's own chat, if one was already adopted.
+    pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             ORDER BY created_at LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Native ids orx already has a session for, so the `/resume` picker can
+    /// offer each of the agent's own chats exactly once.
+    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn set_chat_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET goal = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, goal, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Cleared after a compaction: the pre-compaction total would otherwise be
+    /// inherited by the next turn and keep the meter pinned high.
+    pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET context_usage_json = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_bootstrap_context(
+        &self,
+        id: &str,
+        context: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET bootstrap_context = ?2 WHERE id = ?1",
+            params![id, context],
         )?;
         Ok(())
     }
@@ -2846,6 +2916,9 @@ pub struct StoredChatSession {
     /// Hidden context prepended only when a seeded transcript starts its first
     /// real native harness session. Never serialized to the UI.
     pub bootstrap_context: Option<String>,
+    /// What the user asked the agent to keep working toward (`/goal`), carried
+    /// into every turn until they clear it.
+    pub goal: Option<String>,
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
@@ -2999,7 +3072,8 @@ fn row_to_chat_turn(
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
-     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id";
+     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id, \
+     goal";
 
 fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
     Ok(ChatSpawn {
@@ -3035,6 +3109,7 @@ fn row_to_chat_session(
         bootstrap_context: row.get(16)?,
         active_leaf_id: row.get(17)?,
         parent_session_id: row.get(18)?,
+        goal: row.get(19)?,
     })
 }
 
@@ -4049,6 +4124,7 @@ mod tests {
             archived: false,
             context_usage_json: None,
             bootstrap_context: None,
+            goal: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,
@@ -4093,6 +4169,35 @@ mod tests {
                 .parent_session_id
                 .as_deref(),
             Some("chat_parent")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_resume_picker_sees_every_project_newest_first() {
+        let dir = std::env::temp_dir().join(format!("orx-store-allchats-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        for (id, project, updated_at) in [
+            ("chat_old", "proj_1", 10),
+            ("chat_other_project", "proj_2", 30),
+            ("chat_middle", "proj_1", 20),
+        ] {
+            let mut session = chat_session_fixture(id);
+            session.project_id = project.into();
+            session.updated_at = updated_at;
+            store.create_chat_session(&session).unwrap();
+        }
+
+        let all = store.list_all_chat_sessions().unwrap();
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["chat_other_project", "chat_middle", "chat_old"]
+        );
+        assert_eq!(
+            store.list_chat_sessions_by_project("proj_1").unwrap().len(),
+            2
         );
 
         let _ = std::fs::remove_dir_all(&dir);

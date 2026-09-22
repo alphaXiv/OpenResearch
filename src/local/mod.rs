@@ -28,6 +28,7 @@ pub mod local_models;
 pub mod localrun;
 pub mod modal;
 pub mod model;
+pub mod native_chats;
 pub mod native_store;
 pub mod opencode;
 pub mod openresearch;

@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  commandMatchesQuery,
   commandsForHarness,
   effectiveCommandPlanMode,
-  parsePlanCommand,
+  parseComposerCommand,
   insertSlashCommand,
   removeSlashCommand,
   slashCommandContext,
   splitCommandTokens,
-} from "../src/planCommand.ts";
+} from "../src/composerCommands.ts";
 
 test("a selected skill can be removed with its trailing composer spaces", () => {
   const selected = insertSlashCommand("/deb", { start: 0, end: 4, query: "deb" }, "debate", 2);
@@ -21,42 +22,100 @@ test("a selected skill can be removed with its trailing composer spaces", () => 
   });
 });
 
-test("Plan is the first command for every plan-capable harness", () => {
+const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume"];
+
+test("every harness gets the same commands ahead of its skills", () => {
   const skills = [{ name: "review", description: "Review", source: "user" }];
-  assert.deepEqual(commandsForHarness(skills, "command").map((item) => item.name), [
-    "plan",
-    "review",
-  ]);
-  assert.deepEqual(commandsForHarness(skills, "permission").map((item) => item.name), [
-    "plan",
-    "review",
-  ]);
+  for (const activation of ["command", "permission"]) {
+    assert.deepEqual(commandsForHarness(skills, activation).map((item) => item.name), [
+      ...ALL_COMMANDS,
+      "review",
+    ]);
+  }
 });
 
-test("built-in Plan replaces legacy user-skill collisions", () => {
-  const skills = [
-    { name: "PLAN", description: "Legacy collision", source: "user" },
-    { name: "review", description: "Review", source: "user" },
-  ];
-  const commands = commandsForHarness(skills, "command");
-  assert.deepEqual(commands.map((item) => item.name), ["plan", "review"]);
-  assert.equal(commands[0].source, "command");
+test("Plan is only offered where the harness can plan", () => {
   assert.deepEqual(
-    commandsForHarness(skills, "permission").map((item) => item.name),
-    ["plan", "review"],
+    commandsForHarness([], null).map((item) => item.name),
+    ALL_COMMANDS.filter((name) => name !== "plan"),
   );
 });
 
+test("built-in commands replace user-skill collisions, aliases included", () => {
+  const skills = [
+    { name: "PLAN", description: "Legacy collision", source: "user" },
+    { name: "export", description: "Collision", source: "builtin" },
+    { name: "clear", description: "Alias collision", source: "user" },
+    { name: "export", description: "Plugin collision", source: "user", plugin: "acme" },
+    { name: "review", description: "Review", source: "user" },
+  ];
+  const commands = commandsForHarness(skills, "command");
+  // A plugin's skill is inserted and resolved by its bare name too, so it
+  // shadows just like any other; only names that cannot collide survive.
+  assert.deepEqual(commands.map((item) => item.name), [...ALL_COMMANDS, "review"]);
+  assert.ok(commands.filter((item) => item.name !== "review").every((item) => item.source === "command"));
+});
+
 test("Plan is recognized and removed anywhere in the message", () => {
-  assert.deepEqual(parsePlanCommand("/plan", "command"), { prompt: "" });
-  assert.deepEqual(parsePlanCommand("investigate /PLAN this", "command"), {
+  assert.deepEqual(parseComposerCommand("/plan", "command"), { name: "plan", prompt: "" });
+  assert.deepEqual(parseComposerCommand("investigate /PLAN this", "command"), {
+    name: "plan",
     prompt: "investigate this",
   });
-  assert.deepEqual(parsePlanCommand("first\n/plan\nsecond /plan", "permission"), {
+  assert.deepEqual(parseComposerCommand("first\n/plan\nsecond /plan", "permission"), {
+    name: "plan",
     prompt: "first\nsecond",
   });
-  assert.equal(parsePlanCommand("/planner", "command"), null);
-  assert.equal(parsePlanCommand("https://example.com/plan", "command"), null);
+  assert.equal(parseComposerCommand("/planner", "command"), null);
+  assert.equal(parseComposerCommand("https://example.com/plan", "command"), null);
+});
+
+test("aliases run their command without being listed separately", () => {
+  const menu = commandsForHarness([], "command");
+  assert.deepEqual(menu.map((item) => item.name), ALL_COMMANDS);
+  assert.deepEqual(parseComposerCommand("/clear", null), { name: "new", prompt: "" });
+  assert.deepEqual(parseComposerCommand("/summarize", null), { name: "compact", prompt: "" });
+  assert.deepEqual(parseComposerCommand("  /CLEAR  ", null), { name: "new", prompt: "" });
+  assert.equal(parseComposerCommand("/cleared", null), null);
+  // The alias still finds its command in the menu.
+  assert.ok(commandMatchesQuery(menu.find((item) => item.name === "new"), "cle"));
+  assert.ok(!commandMatchesQuery(menu.find((item) => item.name === "copy"), "cle"));
+  assert.ok(!commandMatchesQuery({ name: "review", description: "", source: "user" }, "cle"));
+});
+
+test("Goal takes the rest of the message, but only when it leads", () => {
+  assert.deepEqual(parseComposerCommand("/goal ship the sweep", "command"), {
+    name: "goal",
+    prompt: "ship the sweep",
+  });
+  assert.deepEqual(parseComposerCommand("/goal", "command"), { name: "goal", prompt: "" });
+  assert.deepEqual(parseComposerCommand("/goal clear", "command"), { name: "goal", prompt: "clear" });
+  // Mid-sentence it is prose, like every other non-plan command.
+  assert.equal(parseComposerCommand("remind me what the /goal was", "command"), null);
+  assert.equal(parseComposerCommand("/goalie", "command"), null);
+  // A command named inside the goal is part of the goal, not a command.
+  assert.deepEqual(parseComposerCommand("/goal keep the /plan in sync", "command"), {
+    name: "goal",
+    prompt: "keep the /plan in sync",
+  });
+});
+
+test("only Plan composes with a prompt; the rest must be the whole message", () => {
+  assert.deepEqual(parseComposerCommand("/export", null), { name: "export", prompt: "" });
+  assert.equal(parseComposerCommand("/plan", null), null);
+  assert.equal(parseComposerCommand("/newer idea", "command"), null);
+  // Prose that merely mentions a command still reaches the agent.
+  for (const text of [
+    "what does /clear do?",
+    "the files under /export are stale",
+    "/copy this file for me",
+  ])
+    assert.equal(parseComposerCommand(text, "command"), null);
+  // Plan is the exception, and wins over a mention of another command.
+  assert.deepEqual(parseComposerCommand("/plan the /export flow", "command"), {
+    name: "plan",
+    prompt: "the /export flow",
+  });
 });
 
 test("slash context follows the caret anywhere in the message", () => {

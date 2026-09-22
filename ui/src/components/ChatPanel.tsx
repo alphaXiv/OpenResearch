@@ -15,7 +15,7 @@ import {
   getHarnessesQuery,
   getSkillsQuery,
 } from "../queries/settings";
-import { listChatSessionsQuery, getChatMessagesQuery } from "../queries/chat";
+import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery } from "../queries/chat";
 import { getProjectStarterPromptsQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
@@ -38,6 +38,7 @@ import {
   Globe,
   Gauge,
   HelpCircle,
+  Goal,
   Lightbulb,
   MessageSquareQuote,
   MoreHorizontal,
@@ -89,11 +90,14 @@ import {
   retryQueuedMessage,
   respondChat,
   selectChatBranch,
+  compactChatSession,
   runShellCommand,
   fmtDuration,
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
+  importNativeChat,
+  setChatSessionGoal,
   setChatSessionPlanMode,
   type FirstActionSurface,
   type ChatImageAttachment,
@@ -104,6 +108,7 @@ import {
   type Harness,
   type PromptAnswer,
   type RuntimeInfo,
+  type NativeChat,
   type SkillInfo,
   type StarterPrompt,
 } from "../api";
@@ -120,6 +125,10 @@ import {
   partsTailToolId,
   streamTailIsText,
   streamTailTool,
+  lastResponseText,
+  responseText,
+  transcriptFileName,
+  transcriptMarkdown,
 } from "../chatRendering";
 import { onChatEvent } from "../events";
 import {
@@ -161,14 +170,20 @@ import {
 import { ContextMeter } from "./ContextMeter";
 import { renderNote } from "./agentNote";
 import {
+  commandMatchesQuery,
   commandsForHarness,
   effectiveCommandPlanMode,
   insertSlashCommand,
-  parsePlanCommand,
+  isComposerCommand,
+  parseComposerCommand,
   removeSlashCommand,
+  resolveComposerCommand,
   slashCommandContext,
+  takesArgument,
+  type ComposerCommandName,
   type SlashCommandContext,
-} from "../planCommand";
+} from "../composerCommands";
+import { ResumeDialog } from "./ResumeDialog";
 import { bashCommand, withoutBashPrefix } from "../bashCommand";
 import { loadReadDemoSessions, markDemoSessionRead } from "../demoSessionState";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
@@ -1457,6 +1472,9 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     ["run_command", "bash"],
     ["agent", "task"],
     ["collabagenttoolcall", "subagent"],
+    // orx's own compaction marker reads as the agents' automatic one.
+    ["compacted", "contextcompaction"],
+    ["imported", "importedchat"],
     ["subagentactivity", "subagent"],
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
@@ -1748,10 +1766,17 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
+    case "importedchat":
+      return { kind: "project", label: m.activity_imported_chat() };
     case "contextcompaction":
       return {
         kind: "command",
-        label: m.activity_compacted_context(),
+        label: part.state?.status === "error"
+          ? m.activity_compacting_failed()
+          // A row left running (the host died mid-compaction) is not a success.
+          : part.state?.status === "running"
+            ? m.activity_compacting_context()
+            : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
       };
     default: {
@@ -2800,6 +2825,28 @@ function attachmentPartView(p: ChatPart): { src: string; isPdf: boolean; name: s
   return { src, isPdf, name };
 }
 
+async function copyToClipboard(text: string) {
+  try {
+    if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
+    await navigator.clipboard.writeText(text);
+    showAlert(m.common_copied(), "success");
+  } catch (error) {
+    showAlert(error instanceof Error ? error.message : String(error), "error");
+  }
+}
+
+function downloadMarkdown(fileName: string, markdown: string) {
+  const url = URL.createObjectURL(new Blob([markdown], { type: "text/markdown;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  // Safari ignores a detached anchor and cancels a download whose blob is revoked too early.
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /** The pager stays visible once a prompt has more than one version — hiding it
  * would leave no sign that the other versions exist. */
 function ForkControls({
@@ -2827,15 +2874,7 @@ function ForkControls({
 }) {
   const many = count > 1;
   const sentAt = new Date(createdAt);
-  const copy = async () => {
-    try {
-      if (!navigator.clipboard) throw new Error(m.file_tree_clipboard_unavailable());
-      await navigator.clipboard.writeText(text);
-      showAlert(m.common_copied(), "success");
-    } catch (error) {
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    }
-  };
+  const copy = () => copyToClipboard(text);
   return (
     <div
       className={`fork-controls flex items-center gap-0.5 transition-opacity duration-80 ease-standard ${
@@ -3063,6 +3102,7 @@ const Message = memo(function Message({
   const usageLimit = message.parts.find((part) => part.type === "tool" && isUsageLimitPart(part));
   const turnStatus = message.parts.find(isTurnStatusPart) ?? usageLimit;
   const regularParts = message.parts.filter((part) => part !== turnStatus && !(usageLimit && isUsageLimitPart(part)));
+  const copyText = predictTextTail && !message.completedAt ? "" : responseText(message);
   return (
     <div className="msg-assistant group/turn text-base leading-[1.62] text-text min-w-0">
       <AssistantTurn message={message} parts={regularParts} options={{
@@ -3087,6 +3127,18 @@ const Message = memo(function Message({
           recovering={recoveringTurnId === turnStatus.state?.input?.turnId}
           onRecover={onRecover}
         />
+      )}
+      {copyText && (
+        <div className="flex opacity-0 transition-opacity duration-80 ease-standard group-hover/turn:opacity-100 group-focus-within/turn:opacity-100">
+          <IconButton
+            size="small"
+            title={m.chat_copy_response()}
+            aria-label={m.chat_copy_response()}
+            onClick={() => void copyToClipboard(copyText)}
+          >
+            <Copy size={13} />
+          </IconButton>
+        </div>
       )}
     </div>
   );
@@ -4171,7 +4223,7 @@ export function ChatPanel({
   /** Demo run currently executing, for the monitor-it hint above the composer. */
   demoRunningRunId?: string | null;
   activeSessionId: string | null;
-  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean }) => void;
+  onActiveSessionChange: (sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => void;
   /** Database-backed selection used to seed new chat sessions. */
   preferredAgent: ModelSelection | null;
   onPreferredAgentChange: (selection: ModelSelection) => Promise<void>;
@@ -4180,6 +4232,8 @@ export function ChatPanel({
 }) {
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
+  const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
+  const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
@@ -4304,6 +4358,7 @@ export function ChatPanel({
   const stickToBottom = useRef(true);
   const [transcriptAtBottom, setTranscriptAtBottom] = useState(true);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const [resumeOpen, setResumeOpen] = useState(false);
   const dataSources = usePopover();
   const addTranscriptSelection = useCallback((selection: Pick<SelectionAction, "text" | "range">) => {
     annotationId.current += 1;
@@ -4317,6 +4372,7 @@ export function ChatPanel({
   useAnnotationHighlights(annotations);
 
   useEffect(() => {
+    setResumeOpen(false);
     transcriptSelection.dismiss();
   }, [activeId, projectId, transcriptSelection.dismiss]);
 
@@ -4326,6 +4382,7 @@ export function ChatPanel({
 
   const [skillIdx, setSkillIdx] = useState(0);
   const [skillMenuDismissed, setSkillMenuDismissed] = useState(false);
+  const [modelPickerRequest, setModelPickerRequest] = useState(0);
   const [composerCursor, setComposerCursor] = useState(0);
   // IME guard: mid-composition text can transiently look like a full command.
   const composingRef = useRef(false);
@@ -4333,13 +4390,19 @@ export function ChatPanel({
   // Only reachable while the menu is open, which needs a live slash context.
   function pickSkill(skill: SkillInfo) {
     if (!slashContext) return;
-    if (skill.source === "command" && skill.name === "plan") {
-      activatePlanCommand(draft, slashContext);
+    // Goal is the one command picked from the menu that inserts its token
+    // instead of running: the goal itself is typed after it.
+    if (
+      !pendingQuestion && skill.source === "command" && isComposerCommand(skill.name)
+      && skill.name !== "goal"
+    ) {
+      activateComposerCommand(skill.name, draft, slashContext);
       return;
     }
     // The command replaces the `/query` token in place, so the chip lands where
-    // it was typed and the rest of the message stays untouched.
-    const marginSpaces = skillMarginSpaces(skill.name, composerRef.current);
+    // it was typed and the rest of the message stays untouched. Only a skill
+    // chip is painted wider than its token, so only it reserves a margin.
+    const marginSpaces = skill.source === "command" ? 1 : skillMarginSpaces(skill.name, composerRef.current);
     const next = insertSlashCommand(draft, slashContext, skill.name, marginSpaces);
     setDraft(next.text);
     window.requestAnimationFrame(() => {
@@ -4471,11 +4534,7 @@ export function ChatPanel({
   const completions =
     slashToken === null
       ? []
-      : commands.filter(
-          (command) =>
-            command.name.startsWith(slashToken) ||
-            (command.plugin && `${command.plugin}:${command.name}`.toLowerCase().startsWith(slashToken)),
-        );
+      : commands.filter((command) => commandMatchesQuery(command, slashToken));
   const typingCommand =
     !bashMode &&
     slashToken !== null &&
@@ -4608,6 +4667,7 @@ export function ChatPanel({
       });
   };
   const setReasoningLevel = (id: string) => selectModel({ reasoningLevel: id });
+  const sessionGoal = openSession?.goal?.trim() || "";
   const planActive = composerSelection?.harness === "claude-code"
     ? composerSelection.permissionMode === "plan"
     : opts?.planActivation === "command"
@@ -4674,11 +4734,143 @@ export function ChatPanel({
     }
   }
 
-  function activatePlanCommand(text: string, context: SlashCommandContext) {
+  /** Returns whether the command took focus for itself (a picker or dialog). */
+  function runComposerCommand(name: ComposerCommandName, argument = ""): boolean {
+    switch (name) {
+      case "plan":
+        void togglePlanMode();
+        return false;
+      case "new":
+        startNewTask();
+        return false;
+      case "resume":
+        setResumeOpen(true);
+        return true;
+      case "model":
+        setModelPickerRequest((request) => request + 1);
+        return true;
+      case "compact":
+        void compactSession();
+        return false;
+      case "goal":
+        void setGoal(argument);
+        return false;
+      case "copy": {
+        const tail = messages.at(-1);
+        const streamingTail = busy && tail?.role === "assistant" && !tail.completedAt;
+        const text = lastResponseText(streamingTail ? messages.slice(0, -1) : messages);
+        if (text) void copyToClipboard(text);
+        else showAlert(m.chat_nothing_to_copy(), "info");
+        return false;
+      }
+      case "export": {
+        const title = openSession?.title?.trim() || m.chat_untitled();
+        const markdown = openSession
+          ? transcriptMarkdown(title, messages, {
+            user: m.chat_export_you(),
+            assistant: HARNESS_LABELS[openSession.harness],
+          })
+          : null;
+        if (markdown) downloadMarkdown(transcriptFileName(title), markdown);
+        else showAlert(m.chat_nothing_to_export(), "info");
+        return false;
+      }
+    }
+  }
+
+  /** Adopt a chat from an agent's own CLI into this project, then open it. */
+  async function importChat(chat: NativeChat) {
+    setSettingsError(null);
+    const visit = projectVisitRef.current;
+    try {
+      const session = await importNativeChatMutation.mutateAsync([projectId, chat]);
+      // The adopted chat is no longer one of the agent's unclaimed ones.
+      void queryClient.invalidateQueries({ queryKey: listNativeChatsQuery().queryKey });
+      if (projectVisitRef.current !== visit) return;
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      setSessionFilter("all");
+      onActiveSessionChange(session.id, { projectId: session.projectId });
+    } catch (err) {
+      if (projectVisitRef.current !== visit) return;
+      setSettingsError(m.chat_import_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  /** `/goal <text>` sets, `/goal clear` clears, and a bare `/goal` reports what
+   * the agent is currently working toward. */
+  async function setGoal(argument: string) {
+    const wanted = argument.trim();
+    if (!wanted) {
+      const goal = openSession?.goal?.trim();
+      showAlert(goal ? m.chat_goal_current({ goal: autoDir(goal) }) : m.chat_goal_none(), "info");
+      return;
+    }
+    const sourceScope = composerScopeRef.current;
+    const inSourceScope = () => composerScopeRef.current.activeId === sourceScope.activeId;
+    setSettingsError(null);
+    let sessionId = activeId;
+    // Declaring the goal before the first message is the natural moment for it,
+    // so an empty composer gets a session rather than losing the goal.
+    if (!sessionId) {
+      if (!activeHarness?.agentReady || !composerSelection) {
+        setSettingsError(m.chat_selected_harness_unavailable());
+        return;
+      }
+      try {
+        sessionId = (await openNewSession(
+          composerSelection,
+          effectiveCommandPlanMode(opts?.planActivation, undefined, planModeOverrideRef.current),
+        )).id;
+      } catch (err) {
+        setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+        return;
+      }
+    }
+    const clearing = /^(clear|none|off)$/i.test(wanted);
+    try {
+      const session = await queueSessionMutation(() =>
+        setChatSessionGoalMutation.mutateAsync([sessionId, clearing ? null : wanted]),
+      );
+      setSessions((current) => current.map((candidate) => (candidate.id === session.id ? session : candidate)));
+      showAlert(clearing ? m.chat_goal_cleared() : m.chat_goal_set(), "success");
+    } catch (err) {
+      if (!inSourceScope()) return;
+      setSettingsError(m.chat_goal_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  /** Compaction runs in the backend; its progress is the transcript row it
+   * publishes over SSE, so only a failure needs a toast. */
+  async function compactSession() {
+    const sessionId = activeId;
+    if (!sessionId) {
+      showAlert(m.chat_nothing_to_compact(), "info");
+      return;
+    }
+    if (busy) {
+      setSettingsError(m.chat_compact_busy());
+      return;
+    }
+    setSettingsError(null);
+    // Compacting unarchives the session, so the archived filter would hide it.
+    if (sessionFilter === "archived") setSessionFilter("active");
+    const sourceScope = composerScopeRef.current;
+    try {
+      // The row lands over SSE too; upserting the response paints it without
+      // waiting for the broadcast, as the `!` shell path does.
+      const { message } = await compactChatSession(sessionId);
+      dispatch({ type: "upsertMessage", sessionId, message });
+    } catch (err) {
+      if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
+      setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
+    }
+  }
+
+  function activateComposerCommand(name: ComposerCommandName, text: string, context: SlashCommandContext) {
     const next = removeSlashCommand(text, context);
     setDraft(next.text);
     setSkillMenuDismissed(true);
-    void togglePlanMode();
+    if (runComposerCommand(name)) return;
     window.requestAnimationFrame(() => {
       composerRef.current?.focus();
       composerRef.current?.setSelectionRange(next.cursor, next.cursor);
@@ -4909,8 +5101,23 @@ export function ChatPanel({
 
   // A pending question card owns the composer's text as a plain answer — no
   // command in it is ever expanded, so none of it is chipped either.
-  const knownCommand = (name: string) =>
-    !pendingQuestion && !bashMode && commands.some((command) => command.name === name);
+  const knownCommand = (name: string) => {
+    if (pendingQuestion || bashMode) return false;
+    const resolved = resolveComposerCommand(name);
+    const command = commands.find((candidate) => candidate.name === (resolved ?? name));
+    if (!command || command.source !== "command") return !!command;
+    // Chip a command only where it would run: plan composes with a prompt, the
+    // rest are whole-message commands and are otherwise ordinary prose.
+    if (resolved && takesArgument(resolved)) {
+      return resolved === "plan" || draft.trim().toLowerCase().startsWith(`/${name}`);
+    }
+    return draft.trim().toLowerCase() === `/${name}`;
+  };
+  /** Sent messages keep any command token as prose — it was never intercepted. */
+  const transcriptSkills = useMemo(
+    () => commands.filter((command) => command.source !== "command"),
+    [commands],
+  );
   // A submitted plan revision, until its replacement card arrives: hides the
   // outgoing card's strip so it never sits there looking actionable while
   // the model rewrites the plan (the transcript's Working… spinner is the
@@ -5080,19 +5287,25 @@ export function ChatPanel({
 
   /** `queue` (the ⌘/Ctrl+Enter chord) parks the message even on a harness that steers. */
   async function send({ queue = false }: { queue?: boolean } = {}) {
+    // Slash tokens stay in the wire form: the server resolves every selected
+    // skill and supplies this exact message as their shared request context.
+    const originalText = draft.trim();
+    const composerCommand = !pendingQuestion
+      ? parseComposerCommand(originalText, opts?.planActivation)
+      : null;
+    if (composerCommand && composerCommand.name !== "plan") {
+      setDraft(takesArgument(composerCommand.name) ? "" : composerCommand.prompt);
+      setSkillMenuDismissed(false);
+      runComposerCommand(composerCommand.name, composerCommand.prompt);
+      return;
+    }
     captureUiEvent({
       name: "first_action",
       surface: telemetrySurface,
       action: "typed_prompt",
     });
     if (preparingSend.current) return;
-    // Slash tokens stay in the wire form: the server resolves every selected
-    // skill and supplies this exact message as their shared request context.
-    const originalText = draft.trim();
-    const planCommand = !pendingQuestion
-      ? parsePlanCommand(originalText, opts?.planActivation)
-      : null;
-    const planRequested = !!planCommand;
+    const planRequested = !!composerCommand;
     const toggledPlanMode = !planActive;
     const independentPlanMode = effectiveCommandPlanMode(
       opts?.planActivation,
@@ -5102,7 +5315,7 @@ export function ChatPanel({
     const planPermissionMode = planRequested && activeHarness?.id === "claude-code"
       ? toggledPlanMode ? "plan" : "auto"
       : undefined;
-    const text = planCommand ? planCommand.prompt : originalText;
+    const text = composerCommand ? composerCommand.prompt : originalText;
     const pending = attachments;
     const pendingAnnotations = annotations;
     const wireAnnotations = pendingAnnotations.map((annotation) => ({
@@ -5986,7 +6199,7 @@ export function ChatPanel({
                   onOpenSubagent={openSubagent}
                   recoveringTurnId={recoveringTurnId}
                   onRecover={recoverFailedTurn}
-                  skills={commands}
+                  skills={transcriptSkills}
                 />
               </ChatImageScope>
               {busy && awaitingInput && (
@@ -6204,6 +6417,21 @@ export function ChatPanel({
                 onHover={setSkillIdx}
               />
             )}
+            {resumeOpen && (
+              <ResumeDialog
+                activeSessionId={activeId}
+                onClose={() => setResumeOpen(false)}
+                onResume={(session) => {
+                  setResumeOpen(false);
+                  setSessionFilter("all");
+                  onActiveSessionChange(session.id, { projectId: session.projectId });
+                }}
+                onImport={(chat) => {
+                  setResumeOpen(false);
+                  void importChat(chat);
+                }}
+              />
+            )}
             {annotations.length > 0 && (
               <ComposerAnnotations
                 annotations={annotations}
@@ -6293,17 +6521,24 @@ export function ChatPanel({
                   const v = e.target.value;
                   const cursor = e.target.selectionStart;
                   setComposerCursor(cursor);
-                  // `/plan` is the one command the composer consumes rather than
-                  // sends: it toggles the mode the moment the space lands. Not
-                  // while a question card is pending (its answer is a note, never
-                  // a command) and not mid-IME-composition, where the text can
-                  // transiently look complete.
+                  // Composer commands run rather than send: each fires the moment
+                  // its space lands. Not while a question card is pending (its
+                  // answer is a note, never a command) and not mid-IME-composition,
+                  // where the text can transiently look complete.
                   const completedCommand =
                     cursor > 0 && /\s/.test(v[cursor - 1]) && !pendingQuestion && !composingRef.current && bashCommand(v) === null
                       ? slashCommandContext(v, cursor - 1)
                       : null;
-                  if (completedCommand?.query === "plan" && opts?.planActivation) {
-                    activatePlanCommand(v, completedCommand);
+                  const completedName = completedCommand && resolveComposerCommand(completedCommand.query);
+                  const restOfDraft = completedCommand
+                    ? (v.slice(0, completedCommand.start) + v.slice(completedCommand.end)).trim()
+                    : "";
+                  if (
+                    completedCommand && completedName
+                    && (completedName === "plan" || (!takesArgument(completedName) && !restOfDraft))
+                    && commands.some((command) => command.name === completedName)
+                  ) {
+                    activateComposerCommand(completedName, v, completedCommand);
                     return;
                   }
                   setDraft(v);
@@ -6405,6 +6640,23 @@ export function ChatPanel({
               >
                 <Paperclip size={16} />
               </IconButton>
+              {sessionGoal && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  active
+                  className="group max-w-60"
+                  title={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  aria-label={m.chat_panel_clear_goal({ goal: autoDir(sessionGoal) })}
+                  onClick={() => void setGoal("clear")}
+                >
+                  <span className="relative size-4" aria-hidden="true">
+                    <Goal className="absolute inset-0 transition-opacity group-hover:opacity-0 group-focus-visible:opacity-0" size={16} strokeWidth={1.6} />
+                    <X className="absolute inset-0 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100" size={16} strokeWidth={1.8} />
+                  </span>
+                  <span className="truncate">{m.chat_panel_goal()}</span>
+                </Button>
+              )}
               {planActive && (
                 <Button
                   type="button"
@@ -6455,6 +6707,7 @@ export function ChatPanel({
                   defaultReasoningId={reasoning.defaultId}
                   onSelectReasoning={setReasoningLevel}
                   lockHarness={!!openSession}
+                  openRequest={modelPickerRequest}
                 />
                 <ContextMeter usage={openSession?.contextUsage} />
               </div>

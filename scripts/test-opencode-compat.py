@@ -119,8 +119,24 @@ def server(binary, root, generation, provider):
         process = subprocess.Popen([binary, 'serve', '--hostname', '127.0.0.1', '--port', str(port)] + (['--stdio'] if generation == 2 else []), env=env, cwd=root / 'project', stdout=output, stderr=output, stdin=subprocess.PIPE)
         try:
             url = f'http://127.0.0.1:{port}'
-            health = '/global/health' if generation == 1 else '/api/health'
-            wait_for(lambda: request(url + health), process, log)
+            # V2's readiness route moved: /api/health (<=2.0.3) -> /api/status
+            # (2.0.4-2.0.5) -> /api/info (2.0.6+). The SPA fallback can serve
+            # HTML with a 200 on unknown routes, so require a JSON `version`.
+            def healthy():
+                if generation == 1:
+                    return request(url + '/global/health')
+                last = None
+                for path in ['/api/info', '/api/status', '/api/health']:
+                    try:
+                        body = request(url + path)
+                    except (AssertionError, ValueError) as error:
+                        last = error
+                        continue
+                    if isinstance(body, dict) and isinstance(body.get('version'), str):
+                        return body
+                if last:
+                    raise last
+            wait_for(healthy, process, log)
             print(f'V{generation} ready: {version}', flush=True)
             if generation == 1:
                 original_sessions = request(url + '/session')
@@ -156,7 +172,9 @@ def messages(url, session):
 def prompt_v2(url, session, text, process, log):
     before = len(messages(url, session))
     request(f'{url}/api/session/{session}/prompt', 'POST', {'text': text})
-    return wait_for(lambda: (items if len(items) > before and items[-1]['type'] == 'assistant' and items[-1]['time'].get('completed') else None) if (items := messages(url, session)) else None, process, log)
+    # 2.0.6+ appends a synthetic {"type": "idle"} entry when a run finishes, so
+    # the completed assistant reply is not necessarily the last item.
+    return wait_for(lambda: next((m for m in messages(url, session)[before:] if m['type'] == 'assistant' and m['time'].get('completed')), None), process, log)
 
 
 def main():
@@ -202,7 +220,13 @@ def main():
             prompt_v2(url, session, 'continued fixture prompt', process, log)
             created = request(url + '/api/session', 'POST', {'title': 'new V2 fixture', 'location': {'directory': str(root / 'upgrade' / 'project')}})['data']['id']
             prompt_v2(url, created, 'new fixture prompt', process, log)
-            exported = request(f'{url}/api/session/{session}/export')['data']
+            # Export moved under /api/experimental when /api/status arrived
+            # (2.0.4+); the /api/health-era layout serves it at /api. The SPA
+            # fallback can answer the wrong prefix with HTML (ValueError).
+            try:
+                exported = request(f'{url}/api/experimental/session/{session}/export')['data']
+            except (AssertionError, ValueError):
+                exported = request(f'{url}/api/session/{session}/export')['data']
             assert exported['info']['id'] == session
             assert [message['id'] for message in exported['messages']] == [message['id'] for message in messages(url, session)]
             assert request(f'{url}/api/session/{session}/inbox') == {'data': []}

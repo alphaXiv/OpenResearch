@@ -696,6 +696,12 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
+            "/api/chat/sessions/{id}/compact",
+            post(compact_chat_session),
+        )
+        .route("/api/chat/native-sessions", get(list_native_chats))
+        .route("/api/chat/native-sessions/import", post(import_native_chat))
+        .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
         )
@@ -7547,14 +7553,22 @@ impl Drop for FillGuard {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionsQuery {
-    project_id: String,
+    project_id: Option<String>,
+    /// `all` is the composer's `/resume` picker, which spans every project.
+    /// Spelled out so a dropped `projectId` cannot silently widen the scope.
+    scope: Option<String>,
 }
 
 async fn list_chat_sessions(
     State(state): State<AppState>,
     Query(q): Query<SessionsQuery>,
 ) -> ApiResult {
-    let sessions = Store::open()?.list_chat_sessions_by_project(&q.project_id)?;
+    let store = Store::open()?;
+    let sessions = match (q.project_id.as_deref(), q.scope.as_deref()) {
+        (Some(project_id), _) => store.list_chat_sessions_by_project(project_id)?,
+        (None, Some("all")) => store.list_all_chat_sessions()?,
+        (None, _) => return Err(bad_request("projectId or scope=all is required")),
+    };
     let busy = state.chat.busy_sessions().await;
     let sessions: Vec<Value> = sessions
         .iter()
@@ -7628,12 +7642,86 @@ async fn create_chat_session(
         archived: false,
         context_usage_json: None,
         bootstrap_context: None,
+        goal: None,
         active_leaf_id: None,
         parent_session_id: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+/// Chats the user had in an agent's own CLI, for the composer's `/resume`
+/// picker. Reading them walks the agent's store, so it stays off the executor.
+async fn list_native_chats() -> ApiResult {
+    let chats = tokio::task::spawn_blocking(|| {
+        let owned = Store::open()?.native_session_ids()?;
+        Ok::<_, crate::error::Error>(local::native_chats::list(
+            &owned,
+            local::native_chats::LISTING_LIMIT,
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("native chat scan failed: {e}")))??;
+    let chats: Vec<Value> = chats
+        .iter()
+        .map(|chat| {
+            json!({
+                "harness": chat.harness,
+                "nativeId": chat.native_id,
+                "title": chat.title,
+                "cwd": chat.cwd,
+                "updatedAt": chat.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "chats": chats })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportNativeChatReq {
+    project_id: String,
+    harness: String,
+    native_id: String,
+    title: Option<String>,
+}
+
+/// Adopt one of those chats: a session bound to the agent's own id, with the
+/// transcript backfilled so it does not open blank. Turns continue in the
+/// agent's real home, since that is where the id resolves.
+async fn import_native_chat(
+    State(state): State<AppState>,
+    Json(req): Json<ImportNativeChatReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !local::native_chats::is_importable(&req.harness) {
+        return Err(bad_request("that agent's chats cannot be adopted"));
+    }
+    // As create does: a project whose delete is in flight takes no new sessions.
+    let _admission = state
+        .project_lifecycle
+        .admit(&req.project_id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let session = tokio::task::spawn_blocking(move || {
+        local::chat::import_native_chat(
+            &Store::open()?,
+            &req.project_id,
+            &req.harness,
+            &req.native_id,
+            req.title,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("import failed: {e}")))??;
+    let session = state
+        .chat
+        .emit_session(Some(session))
+        .await
+        .ok_or_else(|| not_found("chat session"))?;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))
@@ -7652,6 +7740,9 @@ struct UpdateChatSessionReq {
     title: Option<String>,
     plan_mode: Option<bool>,
     permission_mode: Option<String>,
+    /// Present-and-null clears the goal, which is why it is doubly wrapped.
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    goal: Option<Option<String>>,
 }
 
 async fn update_chat_session(
@@ -7680,6 +7771,15 @@ async fn update_chat_session(
         state
             .chat
             .set_plan_mode(&id, plan_mode)
+            .await?
+            .ok_or_else(|| not_found("chat session"))?
+    } else if let Some(goal) = req.goal {
+        let goal = goal
+            .map(|goal| goal.trim().to_string())
+            .filter(|goal| !goal.is_empty());
+        state
+            .chat
+            .set_goal(&id, goal.as_deref())
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(permission_mode) = req.permission_mode {
@@ -7779,6 +7879,28 @@ async fn run_shell_command(
     let message = state
         .chat
         .run_shell_command(&id, command, root)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({ "message": message })))
+}
+
+async fn compact_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_stopping(&state)?;
+    reject_if_moving(&state)?;
+    if state.chat.is_busy(&id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "session is busy".into()));
+    }
+    let probe = id.clone();
+    tokio::task::spawn_blocking(move || {
+        Store::open()?
+            .get_chat_session(&probe)?
+            .ok_or_else(|| not_found("chat session"))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("compact task failed: {e}")))??;
+    let message = state
+        .chat
+        .compact_session(&id)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(json!({ "message": message })))

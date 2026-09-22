@@ -1,7 +1,13 @@
 import { useEffect, useRef, type RefObject } from "react";
 
-const FOCUSABLE =
-  'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+// `tabindex="-1"` opts an element out of Tab, so the trap must skip it too —
+// otherwise its last "focusable" is one Tab never reaches and focus escapes.
+const FOCUSABLE = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]",
+].map((selector) => `${selector}:not([tabindex="-1"])`).join(", ");
 
 export function useDialogFocus(
   dialogRef: RefObject<HTMLElement | null>,

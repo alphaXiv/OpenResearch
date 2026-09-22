@@ -36,8 +36,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited,
-    ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
+    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -799,6 +799,10 @@ impl ClaudeCode {
     }
 }
 
+/// Compaction re-reads the whole conversation, so it needs more room than a
+/// control request but far less than a turn.
+const CLAUDE_COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
+
 #[async_trait]
 impl Harness for ClaudeCode {
     fn id(&self) -> &'static str {
@@ -811,6 +815,27 @@ impl Harness for ClaudeCode {
 
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    /// Claude compacts in place through its own `/compact`, keeping the session
+    /// id. Without a live child there is nothing to compact against, so the
+    /// shared fallback runs instead.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        if ctx
+            .host
+            .claude
+            .compact_session(&ctx.session_id, CLAUDE_COMPACT_TIMEOUT)
+            .await?
+        {
+            return Ok(CompactOutcome::Native);
+        }
+        if ctx.native_session_id.is_some() {
+            // The session is still resumable; summarizing would throw it away.
+            return Err(anyhow!(
+                "Claude Code is not running for this chat — send a message first, then compact"
+            ));
+        }
+        Ok(CompactOutcome::Fallback)
     }
 
     /// The resident child holds stdin open, so a second stream-json user
