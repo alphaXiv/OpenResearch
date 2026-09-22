@@ -130,8 +130,8 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
-    match tokio::time::timeout(AUTH_STATUS_TIMEOUT, super::detect::detect_spawn_output(cmd)).await {
-        Ok(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
+    match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
         // A timeout or a spawn failure: no evidence of anything, least of all a
         // credential conflict.
         _ => AuthProbe {
@@ -325,22 +325,19 @@ async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     prepare_env(&mut cmd);
-    let out =
-        match tokio::time::timeout(AUTH_STATUS_TIMEOUT, super::detect::detect_spawn_output(cmd))
-            .await
-        {
-            Ok(Ok(out)) => out,
-            _ => {
-                return (
-                    AuthProbe {
-                        state: HarnessAuthState::Unknown,
-                        method: None,
-                        credential_conflict: false,
-                    },
-                    false,
-                )
-            }
-        };
+    let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => out,
+        _ => {
+            return (
+                AuthProbe {
+                    state: HarnessAuthState::Unknown,
+                    method: None,
+                    credential_conflict: false,
+                },
+                false,
+            )
+        }
+    };
     let warned = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -369,7 +366,10 @@ async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
 /// back unparsed: the ultracode probe decides the parse, and detection runs
 /// both children concurrently.
 async fn claude_models_response(bin: PathBuf) -> Option<Value> {
-    let fut = async {
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
         let mut cmd = Command::new(&bin);
         cmd.args([
             "--print",
@@ -384,7 +384,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true);
-        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -454,11 +454,11 @@ async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
     }
     let login_evidence = has_oauth_credentials() || has_api_credential();
     let models = login_evidence.then(|| {
-        tokio::spawn(super::detect::timed_probe(
+        super::detect::spawn_timed_probe(
             "claude-code",
             "models",
             claude_models_response(bin.clone()),
-        ))
+        )
     });
     let (auth, ultracode) = super::detect::timed_probe(
         "claude-code",

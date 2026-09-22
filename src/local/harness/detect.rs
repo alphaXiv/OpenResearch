@@ -43,33 +43,60 @@ pub(crate) async fn detect_spawn_permit() -> tokio::sync::SemaphorePermit<'stati
         .expect("detect spawn semaphore never closes")
 }
 
-/// Run a detection child to completion. On Windows the `CreateProcess` inside
+/// Spawn `cmd` on the blocking pool under an already-held `permit`. The permit
+/// travels *into* the closure and comes back with the child: a caller dropped
+/// while `CreateProcess` is still mid-scan releases its lane when the spawn
+/// actually finishes, not when it gives up — the semaphore counts real
+/// children, and `kill_on_drop` reaps the process nobody waited for.
+pub(crate) async fn spawn_with_permit(
+    mut cmd: tokio::process::Command,
+    permit: tokio::sync::SemaphorePermit<'static>,
+) -> std::io::Result<(tokio::process::Child, tokio::sync::SemaphorePermit<'static>)> {
+    cmd.kill_on_drop(true);
+    tokio::task::spawn_blocking(move || cmd.spawn().map(|child| (child, permit))).await?
+}
+
+/// Run a detection child to completion under a caller-held `permit` — see
+/// [`spawn_with_permit`]. On Windows the `CreateProcess` inside
 /// `Command::spawn` blocks while the AV scans the binary — over a second for a
 /// node/bun CLI — so spawning on a runtime worker serializes every probe
-/// behind whichever scans are in flight. The blocking pool has threads to
+/// behind whichever scans are in flight; the blocking pool has threads to
 /// spare, so the spawn happens there and only the IO wait stays async. The
 /// permit is held for the child's whole run: the bound is on concurrent
-/// children, not just concurrent spawns.
-pub(crate) async fn detect_spawn_output(
+/// children, not just concurrent spawns. Callers with their own deadline
+/// acquire the permit first so queue time never spends it.
+pub(crate) async fn detect_spawn_output_with_permit(
     mut cmd: tokio::process::Command,
+    permit: tokio::sync::SemaphorePermit<'static>,
 ) -> std::io::Result<std::process::Output> {
-    let _permit = detect_spawn_permit().await;
     // `Command::output` implied these; `spawn` leaves them inherited.
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let child = tokio::task::spawn_blocking(move || cmd.spawn()).await??;
+    let (child, _permit) = spawn_with_permit(cmd, permit).await?;
     child.wait_with_output().await
 }
 
-/// Same reasoning as [`detect_spawn_output`], for callers that drive the
+/// [`detect_spawn_output_with_permit`] under a deadline. The permit is
+/// acquired before the clock starts: a queued probe reports `None` only when
+/// execution itself exceeded `within`, never because it waited for a lane.
+pub(crate) async fn detect_spawn_output_timed(
+    cmd: tokio::process::Command,
+    within: Duration,
+) -> Option<std::io::Result<std::process::Output>> {
+    let permit = detect_spawn_permit().await;
+    tokio::time::timeout(within, detect_spawn_output_with_permit(cmd, permit))
+        .await
+        .ok()
+}
+
+/// Same reasoning as [`spawn_with_permit`], for callers that drive the
 /// child's stdio themselves. The returned permit guards the caller's own IO
 /// loop — keep it alive until the child is reaped.
 pub(crate) async fn detect_spawn_child(
-    mut cmd: tokio::process::Command,
+    cmd: tokio::process::Command,
 ) -> std::io::Result<(tokio::process::Child, tokio::sync::SemaphorePermit<'static>)> {
     let permit = detect_spawn_permit().await;
-    let child = tokio::task::spawn_blocking(move || cmd.spawn()).await??;
-    Ok((child, permit))
+    spawn_with_permit(cmd, permit).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -483,6 +510,47 @@ pub(crate) fn detect_timing() -> bool {
     std::env::var_os("ORX_DETECT_TIMING").is_some()
 }
 
+// The catalog fill a probe belongs to, when it runs inside one. Scoped by
+// the fill task — one-off detects (`detect_harness`, refresh sweeps) run
+// outside it and their timings are never recorded, so a fill's analytics
+// payload can only carry its own probes. `tokio::spawn` does not inherit
+// task-locals, so speculative probes spawned mid-fill go through
+// `spawn_timed_probe`.
+tokio::task_local! {
+    static DETECT_FILL: uuid::Uuid;
+}
+
+/// Run `fut` inside `fill`'s timing scope — the catalog fill wraps its whole
+/// body so every probe it awaits (directly or through the detection stream)
+/// records against this fill.
+pub(crate) fn probe_timing_scope<F>(
+    fill: uuid::Uuid,
+    fut: F,
+) -> impl Future<Output = F::Output> + Send
+where
+    F: Future + Send,
+{
+    DETECT_FILL.scope(fill, fut)
+}
+
+/// Spawn a probe that still belongs to the ambient fill: `tokio::spawn` drops
+/// task-locals, so the scope is re-applied inside the spawned task.
+pub(crate) fn spawn_timed_probe<F>(
+    harness: &'static str,
+    probe: &'static str,
+    fut: F,
+) -> tokio::task::JoinHandle<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let fut = timed_probe(harness, probe, fut);
+    match DETECT_FILL.try_with(|fill| *fill) {
+        Ok(fill) => tokio::spawn(DETECT_FILL.scope(fill, fut)),
+        Err(_) => tokio::spawn(fut),
+    }
+}
+
 /// One probe's wall clock inside a detection pass, recorded for the
 /// `harness_detect_probe` analytics event. `probe` is a fixed label —
 /// `"select"`, `"spec"`, `"resolve"`, `"status"`, `"models"`,
@@ -492,46 +560,69 @@ pub(crate) struct ProbeTiming {
     pub(crate) harness: &'static str,
     pub(crate) probe: &'static str,
     pub(crate) ms: u64,
+    /// The catalog fill this probe ran under — attribution, not payload data.
+    pub(crate) fill: uuid::Uuid,
 }
 
-/// Timings recorded since the last [`take_probe_timings`]. The cap bounds the
-/// accumulation of one-off detects (`detect_harness`, refresh sweeps) that run
-/// with no fill to drain them; a real fill emits well under it.
+/// Timings recorded for the in-flight catalog fill. Only fill-scoped probes
+/// are recorded at all, so `rest` after a drain is residue from a fill that
+/// never collected (killed mid-pass) — bounded by the cap.
 static PROBE_TIMINGS: std::sync::Mutex<Vec<ProbeTiming>> = std::sync::Mutex::new(Vec::new());
 const MAX_PROBE_TIMINGS: usize = 64;
 
 /// Record one probe's wall clock. `timed_probe` calls this for every wrapped
-/// probe; `detect_one` uses it for the per-harness `"total"` row.
+/// probe; `detect_one` uses it for the per-harness `"total"` row. Probes
+/// outside a fill scope are not recorded.
 pub(crate) fn record_probe_timing(harness: &'static str, probe: &'static str, ms: u64) {
+    let Ok(fill) = DETECT_FILL.try_with(|fill| *fill) else {
+        return;
+    };
     let Ok(mut timings) = PROBE_TIMINGS.lock() else {
         return;
     };
     if timings.len() < MAX_PROBE_TIMINGS {
-        timings.push(ProbeTiming { harness, probe, ms });
+        timings.push(ProbeTiming {
+            harness,
+            probe,
+            ms,
+            fill,
+        });
     }
 }
 
-/// Drain the recorded probe timings. The catalog fill calls this at start —
-/// discarding strays from one-off detects — and again at end to collect the
-/// fill's own records for the analytics event.
-pub(crate) fn take_probe_timings() -> Vec<ProbeTiming> {
-    PROBE_TIMINGS
-        .lock()
-        .map(|mut timings| std::mem::take(&mut *timings))
-        .unwrap_or_default()
+/// Discard recorded timings — called when a fill starts so residue from a
+/// killed predecessor cannot be emitted under the new fill's id.
+pub(crate) fn clear_probe_timings() {
+    if let Ok(mut timings) = PROBE_TIMINGS.lock() {
+        timings.clear();
+    }
+}
+
+/// Drain the recorded probe timings belonging to `fill` — the catalog fill
+/// calls this at end to collect its own records for the analytics event,
+/// leaving any concurrent (or orphaned) records untouched.
+pub(crate) fn take_probe_timings(fill: uuid::Uuid) -> Vec<ProbeTiming> {
+    let Ok(mut timings) = PROBE_TIMINGS.lock() else {
+        return Vec::new();
+    };
+    let (mine, rest) = std::mem::take(&mut *timings)
+        .into_iter()
+        .partition(|timing| timing.fill == fill);
+    *timings = rest;
+    mine
 }
 
 /// Times a detection probe: records it for the catalog fill's telemetry and,
-/// under `ORX_DETECT_TIMING`, logs wall-clock start and end relative to
-/// process start so queueing behind other probes shows up as a late start,
-/// not just a long duration.
+/// under `ORX_DETECT_TIMING`, logs wall-clock start and end relative to the
+/// first instrumented probe so queueing behind other probes shows up as a
+/// late start, not just a long duration.
 pub(crate) async fn timed_probe<T>(
     harness: &'static str,
     probe: &'static str,
     fut: impl Future<Output = T>,
 ) -> T {
     let timing = detect_timing();
-    let t0 = timing.then(detect_epoch);
+    let start_ms = timing.then(|| detect_epoch().elapsed().as_millis());
     let t = std::time::Instant::now();
     let out = fut.await;
     let ms = t.elapsed().as_millis() as u64;
@@ -539,12 +630,14 @@ pub(crate) async fn timed_probe<T>(
     if timing {
         eprintln!(
             "orx detect: probe {harness} {probe} took {ms}ms (start {}ms)",
-            t0.unwrap().elapsed().as_millis(),
+            start_ms.unwrap_or(0),
         );
     }
     out
 }
 
+/// Epoch for `ORX_DETECT_TIMING` start offsets: the first instrumented probe
+/// of the process, not process start itself.
 fn detect_epoch() -> std::time::Instant {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     *EPOCH.get_or_init(std::time::Instant::now)
@@ -576,7 +669,9 @@ fn path_version(bin: &Path) -> Option<String> {
 #[cfg(windows)]
 fn pe_version(bin: &Path) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
-    use winapi::um::winver::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
     if !bin
         .file_name()
         .and_then(|n| n.to_str())
@@ -596,7 +691,7 @@ fn pe_version(bin: &Path) -> Option<String> {
         }
         // VS_FIXEDFILEINFO is ABI-frozen: dwFileVersionMS/LS sit at u32
         // offsets 2 and 3 (after dwSignature and dwStrucVersion).
-        let mut info: *mut winapi::ctypes::c_void = std::ptr::null_mut();
+        let mut info: *mut core::ffi::c_void = std::ptr::null_mut();
         let mut len = 0u32;
         let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
         if VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), &mut info, &mut len) == 0
@@ -622,29 +717,13 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
         return BinProbe::Answered(Some(version));
     }
-    let timing = detect_timing();
-    let queued = std::time::Instant::now();
-    let spawned = std::time::Instant::now();
-    let probe = probe_bin_cmd(bin).await;
-    if timing {
-        eprintln!(
-            "orx detect: probe {} queue={}ms run={}ms",
-            bin.display(),
-            (spawned - queued).as_millis(),
-            spawned.elapsed().as_millis()
-        );
-    }
-    probe
-}
-
-async fn probe_bin_cmd(bin: &Path) -> BinProbe {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let Ok(result) = tokio::time::timeout(VERSION_TIMEOUT, detect_spawn_output(cmd)).await else {
+    let Some(result) = detect_spawn_output_timed(cmd, VERSION_TIMEOUT).await else {
         return BinProbe::Unknown;
     };
     let out = match result {

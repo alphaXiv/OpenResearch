@@ -147,7 +147,10 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 /// caller falls back to the static table. Hidden catalog entries are skipped
 /// (the server already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
-    let fut = async {
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
         let mut cmd = Command::new(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
@@ -155,7 +158,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
             .stderr(Stdio::null())
             .kill_on_drop(true);
         prepare_env(&mut cmd);
-        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 

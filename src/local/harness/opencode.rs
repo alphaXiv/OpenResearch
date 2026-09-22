@@ -82,11 +82,11 @@ impl OpenCode {
             // is there, and a V2 install's real auth only answers through
             // the served API anyway.
             let speculated = (!snapshot).then(|| {
-                tokio::spawn(super::detect::timed_probe(
+                super::detect::spawn_timed_probe(
                     "opencode",
                     "models",
                     opencode_models(discovered.clone()),
-                ))
+                )
             });
             let resolved = if snapshot {
                 None

@@ -451,9 +451,8 @@ async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(AUTH_STATUS_TIMEOUT, super::detect::detect_spawn_output(cmd))
-        .await
-        .ok()?
+    let out = super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT)
+        .await?
         .ok()?;
     serde_json::from_slice(&out.stdout).ok()
 }
@@ -465,31 +464,29 @@ async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
 /// than racing (and usually aborting) a spawn the other harnesses' probes
 /// need the CPU for.
 async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInfo>>) {
-    let models = api_key("CURSOR_API_KEY").is_some().then(|| {
-        tokio::spawn(super::detect::timed_probe(
+    let status_probe = || {
+        super::detect::timed_probe(
             "cursor",
-            "models",
-            cursor_model_list(bin.clone()),
-        ))
-    });
-    let status = super::detect::timed_probe(
-        "cursor",
-        "status",
-        cursor_command_json(&bin, &["status", "--format", "json"]),
-    )
-    .await;
-    let authed =
-        status_logged_in(status.as_ref()) == Some(true) || api_key("CURSOR_API_KEY").is_some();
-    let models = match (models, authed) {
-        (Some(task), true) => task.await.ok().flatten(),
-        (Some(task), false) => {
-            task.abort();
-            None
-        }
-        (None, true) => {
-            super::detect::timed_probe("cursor", "models", cursor_model_list(bin)).await
-        }
-        (None, false) => None,
+            "status",
+            cursor_command_json(&bin, &["status", "--format", "json"]),
+        )
+    };
+    // An API key already proves auth, so the catalog child is never wasted —
+    // run both probes concurrently. Without one, `status` is the auth oracle
+    // and `models` only runs on a logged-in verdict: racing it would spend a
+    // multi-second child the signed-out answer aborts anyway.
+    if api_key("CURSOR_API_KEY").is_some() {
+        let (status, models) = tokio::join!(
+            status_probe(),
+            super::detect::timed_probe("cursor", "models", cursor_model_list(bin.clone())),
+        );
+        return (status, models);
+    }
+    let status = status_probe().await;
+    let models = if status_logged_in(status.as_ref()) == Some(true) {
+        super::detect::timed_probe("cursor", "models", cursor_model_list(bin.clone())).await
+    } else {
+        None
     };
     (status, models)
 }
@@ -503,9 +500,8 @@ async fn cursor_model_list(bin: PathBuf) -> Option<Vec<ModelInfo>> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(MODELS_TIMEOUT, super::detect::detect_spawn_output(cmd))
-        .await
-        .ok()?
+    let out = super::detect::detect_spawn_output_timed(cmd, MODELS_TIMEOUT)
+        .await?
         .ok()?;
     if !out.status.success() {
         return None;

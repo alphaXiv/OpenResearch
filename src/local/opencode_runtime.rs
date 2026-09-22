@@ -116,12 +116,9 @@ pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     crate::local::chat::prepare_env(&mut cmd);
     probe.configure(&mut cmd);
     cmd.arg("--version");
-    let output = tokio::time::timeout(
-        Duration::from_secs(15),
-        crate::local::harness::detect_spawn_output(cmd),
-    )
-    .await
-    .map_err(|_| anyhow!("OpenCode version check timed out"))??;
+    let output = crate::local::harness::detect_spawn_output_timed(cmd, Duration::from_secs(15))
+        .await
+        .ok_or_else(|| anyhow!("OpenCode version check timed out"))??;
     if !output.status.success() {
         return Err(anyhow!(
             "OpenCode version check failed: {}",

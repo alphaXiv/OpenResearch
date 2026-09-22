@@ -7205,6 +7205,16 @@ fn payload_is_provisional(payload: &Value) -> bool {
     })
 }
 
+/// The dashboard's onboarding gate (`agentReady && !catalogPending` on any
+/// entry) evaluated against a payload — what "a usable agent appeared" means.
+fn payload_has_ready_agent(payload: &Value) -> bool {
+    payload["harnesses"].as_array().is_some_and(|all| {
+        all.iter().any(|h| {
+            h["agentReady"].as_bool() == Some(true) && h["catalogPending"].as_bool() != Some(true)
+        })
+    })
+}
+
 /// Cursor's account lookup is a second child process deferred off the
 /// detection answer; it patches the cache entry it was scheduled against.
 fn spawn_cursor_account_details(
@@ -7272,13 +7282,13 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
     {
         return;
     }
-    tokio::spawn(async move {
+    tokio::spawn(local::harness::probe_timing_scope(fill_id, async move {
         let _fill = FillGuard(state.harness_fill_in_flight.clone());
         let probe_generation = state.claude.auth_snapshot().generation;
         let started = std::time::Instant::now();
-        // One-off detects (a refresh sweep, a claude re-probe) record into the
-        // same buffer — discard strays so the fill reports only its own.
-        let _ = local::harness::take_probe_timings();
+        // Residue from a fill that died mid-pass cannot be attributed — start
+        // clean so this fill's payload carries only its own probes.
+        local::harness::clear_probe_timings();
         // Commit each harness as its probes land: the onboarding gate is
         // per-entry (`agentReady && !catalogPending`), so a ready agent must
         // not wait for the slowest sibling's catalog child. The batch swap at
@@ -7287,12 +7297,19 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
         let mut stream = std::pin::pin!(local::harness::detect_harnesses_each());
         let mut ordered = Vec::new();
         // `first_ready_ms` answers the churn question directly: how far into
-        // the fill did a usable agent appear.
+        // the fill did a usable agent actually publish.
         let mut first_ready_ms = None;
         while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
-            if first_ready_ms.is_none() && info.agent_ready {
-                first_ready_ms = Some(started.elapsed().as_millis() as u64);
+            // A progressive claude entry settles shared auth *now*: reads
+            // overlay that state onto every non-pending entry, so a Ready
+            // probe left unobserved until fill end would be stamped back to
+            // Unknown on each answer — the stall this loop exists to remove.
+            if info.id == "claude-code" {
+                state
+                    .claude
+                    .observe_auth_state(info.auth_state, probe_generation);
             }
+            let mut published = false;
             {
                 let mut cache = state.harnesses.lock().await;
                 // Same guard as the final swap: a refresh or retry that
@@ -7303,11 +7320,29 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                             all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
                         }) {
                             *slot = json!(info);
+                            published = true;
                         }
                     }
                 }
             }
+            // A superseded fill publishes nothing and must not announce: the
+            // pass that owns the cache emits its own catalog events.
+            if !published {
+                ordered.push((index, info));
+                continue;
+            }
             state.chat.emit_event("harness.catalog", json!({}));
+            // For claude, "ready" means the overlay won't stamp it back down
+            // — its committed `agentReady` only stands once shared auth is
+            // Ready (the observation above).
+            if first_ready_ms.is_none()
+                && info.agent_ready
+                && (info.id != "claude-code"
+                    || state.claude.auth_snapshot().state
+                        == local::harness::HarnessAuthState::Ready)
+            {
+                first_ready_ms = Some(started.elapsed().as_millis() as u64);
+            }
             ordered.push((index, info));
         }
         ordered.sort_by_key(|(index, _)| *index);
@@ -7320,6 +7355,12 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
         // reader the snapshot was meant to unblock.
         let (mut payload, announce) =
             finish_harnesses_payload(&state, harnesses, probe_generation, false).await;
+        // Readiness can be *established* by the finish (a Ready shared-auth
+        // overlay retry that ran no stream probe). The post-finish payload is
+        // authoritative — overlay applied — so count it here.
+        if first_ready_ms.is_none() && payload_has_ready_agent(&payload) {
+            first_ready_ms = Some(started.elapsed().as_millis() as u64);
+        }
         // Emit before the ownership check below: a fill that loses the cache
         // race still ran real probes, and its timings are real data.
         crate::telemetry::harness::capture_detect(
@@ -7329,7 +7370,7 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
             first_ready_ms,
             installed,
             ready,
-            local::harness::take_probe_timings(),
+            local::harness::take_probe_timings(fill_id),
         );
         {
             let mut cache = state.harnesses.lock().await;
@@ -7346,7 +7387,7 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
         }
         state.chat.emit_event("harness.catalog", json!({}));
         emit_auth_announcement(&state, announce);
-    });
+    }));
 }
 
 /// Clears the single-flight flag however the fill task exits once polled —

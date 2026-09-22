@@ -255,9 +255,9 @@ async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(MODELS_TIMEOUT, super::detect::detect_spawn_output(cmd))
+    let out = super::detect::detect_spawn_output_timed(cmd, MODELS_TIMEOUT)
         .await
-        .map_err(|_| {
+        .ok_or_else(|| {
             anyhow!("Antigravity model discovery timed out. Re-check when connected.")
         })??;
     if !out.status.success() {
