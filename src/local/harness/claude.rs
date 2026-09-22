@@ -474,6 +474,9 @@ async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
         (Some(task), HarnessAuthState::Ready) => task.await.ok().flatten(),
         (Some(task), _) => {
             task.abort();
+            // Await teardown so the aborted probe's timing row lands in the
+            // fill's sink before the pass can drain it.
+            let _ = task.await;
             None
         }
         (None, HarnessAuthState::Ready) => {

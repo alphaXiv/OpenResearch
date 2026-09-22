@@ -132,6 +132,9 @@ impl OpenCode {
                             );
                         }
                         models_task.abort();
+                        // Await teardown so the aborted probe's timing row
+                        // lands in the fill's sink before the pass drains it.
+                        let _ = models_task.await;
                     }
                 }
             }
