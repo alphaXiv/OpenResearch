@@ -54,22 +54,33 @@ pub(crate) async fn spawn_with_permit(
 ) -> std::io::Result<(tokio::process::Child, tokio::sync::SemaphorePermit<'static>)> {
     cmd.kill_on_drop(true);
     tokio::task::spawn_blocking(move || {
-        // ETXTBSY is transient by construction: an exec racing a writer that
-        // has not closed yet — a just-written file, an installer replacing a
-        // binary in place. The window is milliseconds — wait out a few beats
-        // rather than report a healthy CLI as broken.
-        let mut retries = 3;
-        loop {
-            match cmd.spawn() {
-                Err(e) if e.kind() == ErrorKind::ExecutableFileBusy && retries > 0 => {
-                    retries -= 1;
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                result => return result.map(|child| (child, permit)),
-            }
-        }
+        spawn_retrying_busy(|| cmd.spawn()).map(|child| (child, permit))
     })
     .await?
+}
+
+/// `execve` reports ETXTBSY while the target inode has an open writer
+/// anywhere — a sibling fork still holding an inherited fd, a just-written
+/// file, an installer replacing the binary in place. The window is
+/// milliseconds; wait out ~0.8s of escalating beats rather than report a
+/// healthy binary as broken. Only `ExecutableFileBusy` retries: other kinds
+/// are either conclusive (NotFound/PermissionDenied) or mean real resource
+/// pressure a tight retry would worsen.
+pub(crate) fn spawn_retrying_busy<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut backoff = Duration::from_millis(25);
+    let mut retries = 5;
+    loop {
+        match spawn() {
+            Err(e) if e.kind() == ErrorKind::ExecutableFileBusy && retries > 0 => {
+                retries -= 1;
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(400));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Run a detection child to completion under a deadline. The permit is
