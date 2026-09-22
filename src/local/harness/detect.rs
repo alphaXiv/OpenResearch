@@ -53,7 +53,23 @@ pub(crate) async fn spawn_with_permit(
     permit: tokio::sync::SemaphorePermit<'static>,
 ) -> std::io::Result<(tokio::process::Child, tokio::sync::SemaphorePermit<'static>)> {
     cmd.kill_on_drop(true);
-    tokio::task::spawn_blocking(move || cmd.spawn().map(|child| (child, permit))).await?
+    tokio::task::spawn_blocking(move || {
+        // ETXTBSY is transient by construction: an exec racing a writer that
+        // has not closed yet — a just-written file, an installer replacing a
+        // binary in place. The window is milliseconds — wait out a few beats
+        // rather than report a healthy CLI as broken.
+        let mut retries = 3;
+        loop {
+            match cmd.spawn() {
+                Err(e) if e.kind() == ErrorKind::ExecutableFileBusy && retries > 0 => {
+                    retries -= 1;
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                result => return result.map(|child| (child, permit)),
+            }
+        }
+    })
+    .await?
 }
 
 /// Run a detection child to completion under a deadline. The permit is
