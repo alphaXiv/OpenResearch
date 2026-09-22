@@ -680,6 +680,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/chat/sessions/{id}/compact",
             post(compact_chat_session),
         )
+        .route("/api/chat/native-sessions", get(list_native_chats))
+        .route("/api/chat/native-sessions/import", post(import_native_chat))
         .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
@@ -7177,6 +7179,79 @@ async fn create_chat_session(
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+/// Chats the user had in an agent's own CLI, for the composer's `/resume`
+/// picker. Reading them walks the agent's store, so it stays off the executor.
+async fn list_native_chats() -> ApiResult {
+    let chats = tokio::task::spawn_blocking(|| {
+        let owned = Store::open()?.native_session_ids()?;
+        Ok::<_, crate::error::Error>(local::native_chats::list(
+            &owned,
+            local::native_chats::LISTING_LIMIT,
+        ))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("native chat scan failed: {e}")))??;
+    let chats: Vec<Value> = chats
+        .iter()
+        .map(|chat| {
+            json!({
+                "harness": chat.harness,
+                "nativeId": chat.native_id,
+                "title": chat.title,
+                "cwd": chat.cwd,
+                "updatedAt": chat.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "chats": chats })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportNativeChatReq {
+    project_id: String,
+    harness: String,
+    native_id: String,
+    title: Option<String>,
+}
+
+/// Adopt one of those chats: a session bound to the agent's own id, with the
+/// transcript backfilled so it does not open blank. Turns continue in the
+/// agent's real home, since that is where the id resolves.
+async fn import_native_chat(
+    State(state): State<AppState>,
+    Json(req): Json<ImportNativeChatReq>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    if !local::native_chats::is_importable(&req.harness) {
+        return Err(bad_request("that agent's chats cannot be adopted"));
+    }
+    // As create does: a project whose delete is in flight takes no new sessions.
+    let _admission = state
+        .project_lifecycle
+        .admit(&req.project_id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let session = tokio::task::spawn_blocking(move || {
+        local::chat::import_native_chat(
+            &Store::open()?,
+            &req.project_id,
+            &req.harness,
+            &req.native_id,
+            req.title,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("import failed: {e}")))??;
+    let session = state
+        .chat
+        .emit_session(Some(session))
+        .await
+        .ok_or_else(|| not_found("chat session"))?;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
     ))

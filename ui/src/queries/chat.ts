@@ -15,6 +15,13 @@ export const listChatSessionsQuery = (projectId: string) => queryOptions({
   staleTime: 30_000,
 });
 
+/** Scans the agents' own stores, so it is read once per picker open. */
+export const listNativeChatsQuery = () => queryOptions({
+  queryKey: workspaceKey("listNativeChats"),
+  queryFn: ({ signal }) => api.listNativeChats(signal),
+  staleTime: 0,
+});
+
 /** The `/resume` picker's one-shot list: no live merge, refetched each open. */
 export const listAllChatSessionsQuery = () => queryOptions({
   queryKey: workspaceKey("listAllChatSessions"),

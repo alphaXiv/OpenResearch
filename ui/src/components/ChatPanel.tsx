@@ -17,7 +17,7 @@ import {
   listRemoteSessionsQuery,
   getSkillsQuery,
 } from "../queries/settings";
-import { listChatSessionsQuery, getChatMessagesQuery } from "../queries/chat";
+import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery } from "../queries/chat";
 import { getProjectStarterPromptsQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
@@ -101,6 +101,7 @@ import {
   sendChatMessage,
   setChatSessionArchived,
   setChatSessionPermissionMode,
+  importNativeChat,
   setChatSessionGoal,
   setChatSessionPlanMode,
   type FirstActionSurface,
@@ -113,6 +114,7 @@ import {
   type Harness,
   type PromptAnswer,
   type RuntimeInfo,
+  type NativeChat,
   type SkillInfo,
   type StarterPrompt,
 } from "../api";
@@ -1479,6 +1481,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     ["collabagenttoolcall", "subagent"],
     // orx's own compaction marker reads as the agents' automatic one.
     ["compacted", "contextcompaction"],
+    ["imported", "importedchat"],
     ["subagentactivity", "subagent"],
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
@@ -1770,6 +1773,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
       return { kind: "agent", label: subagentLine(normalizedInput) };
     case "error":
       return { kind: "command", label: m.chat_panel_tool_failed() };
+    case "importedchat":
+      return { kind: "project", label: m.activity_imported_chat() };
     case "contextcompaction":
       return {
         kind: "command",
@@ -4353,6 +4358,7 @@ export function ChatPanel({
   const setChatSessionPermissionModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPermissionMode>) => setChatSessionPermissionMode(...args) });
   const setChatSessionPlanModeMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionPlanMode>) => setChatSessionPlanMode(...args) });
   const setChatSessionGoalMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionGoal>) => setChatSessionGoal(...args) });
+  const importNativeChatMutation = useMutation({ mutationFn: (args: Parameters<typeof importNativeChat>) => importNativeChat(...args) });
   const createChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createChatSession>) => createChatSession(...args) });
   const setChatSessionArchivedMutation = useMutation({ mutationFn: (args: Parameters<typeof setChatSessionArchived>) => setChatSessionArchived(...args) });
   const renameChatSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof renameChatSession>) => renameChatSession(...args) });
@@ -4848,6 +4854,24 @@ export function ChatPanel({
         else showAlert(m.chat_nothing_to_export(), "info");
         return false;
       }
+    }
+  }
+
+  /** Adopt a chat from an agent's own CLI into this project, then open it. */
+  async function importChat(chat: NativeChat) {
+    setSettingsError(null);
+    const visit = projectVisitRef.current;
+    try {
+      const session = await importNativeChatMutation.mutateAsync([projectId, chat]);
+      // The adopted chat is no longer one of the agent's unclaimed ones.
+      void queryClient.invalidateQueries({ queryKey: listNativeChatsQuery().queryKey });
+      if (projectVisitRef.current !== visit) return;
+      setSessions((current) => [session, ...current.filter((row) => row.id !== session.id)]);
+      setSessionFilter("all");
+      onActiveSessionChange(session.id, { projectId: session.projectId });
+    } catch (err) {
+      if (projectVisitRef.current !== visit) return;
+      setSettingsError(m.chat_import_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
     }
   }
 
@@ -6503,6 +6527,10 @@ export function ChatPanel({
                   setResumeOpen(false);
                   setSessionFilter("all");
                   onActiveSessionChange(session.id, { projectId: session.projectId });
+                }}
+                onImport={(chat) => {
+                  setResumeOpen(false);
+                  void importChat(chat);
                 }}
               />
             )}

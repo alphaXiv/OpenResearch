@@ -828,6 +828,15 @@ impl Store {
         Ok(self.conn.unchecked_transaction()?)
     }
 
+    /// `begin` that takes the write lock up front, so a check made inside it
+    /// cannot be raced by another writer between the check and the insert.
+    pub fn begin_immediate(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    }
+
     /// Coalesce the WAL back into the main `orx.db` file and truncate it, so a
     /// filesystem-level copy of `orx.db` alone captures all committed data.
     /// Best-effort — used before relocating the data dir. Errors are returned so
@@ -1972,6 +1981,26 @@ impl Store {
             params![id, json],
         )?;
         Ok(())
+    }
+
+    /// The session bound to an agent's own chat, if one was already adopted.
+    pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             ORDER BY created_at LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Native ids orx already has a session for, so the `/resume` picker can
+    /// offer each of the agent's own chats exactly once.
+    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
     }
 
     pub fn set_chat_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {

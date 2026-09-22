@@ -1867,6 +1867,27 @@ export const listChatSessions = (projectId: string, signal?: AbortSignal) =>
     signal,
   ).then((r) => r.sessions);
 
+/** A chat the user had in an agent's own CLI, which orx has no session for. */
+export interface NativeChat {
+  harness: HarnessId;
+  nativeId: string;
+  title: string | null;
+  cwd: string | null;
+  updatedAt: number;
+}
+
+export const listNativeChats = (signal?: AbortSignal) =>
+  get<{ chats: NativeChat[] }>("/api/chat/native-sessions", signal).then((r) => r.chats);
+
+/** Adopt one, as a session that resumes the agent's own chat. */
+export const importNativeChat = (projectId: string, chat: NativeChat) =>
+  post<{ session: ChatSession }>("/api/chat/native-sessions/import", {
+    projectId,
+    harness: chat.harness,
+    nativeId: chat.nativeId,
+    title: chat.title,
+  }).then((r) => r.session);
+
 /** Every project's sessions, newest first, for the composer's `/resume` picker. */
 export const listAllChatSessions = (signal?: AbortSignal) =>
   get<{ sessions: ChatSession[] }>("/api/chat/sessions?scope=all", signal).then((r) => r.sessions);

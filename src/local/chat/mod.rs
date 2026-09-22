@@ -1092,6 +1092,126 @@ pub struct WireMessage {
     pub parent_id: Option<String>,
 }
 
+/// The synthetic tool part that marks an adopted chat in the transcript.
+const IMPORTED_TOOL: &str = "imported";
+
+/// The adopted transcript as stored rows, ending in the marker that says the
+/// chat continues in the agent's own history. Every row records the native
+/// session, so a rewind or a branch switch resumes it instead of unbinding it.
+fn imported_rows(
+    session_id: &str,
+    native_id: &str,
+    messages: Vec<crate::local::native_chats::NativeMessage>,
+) -> Result<Vec<StoredChatMessage>> {
+    let mut rows: Vec<StoredChatMessage> = Vec::with_capacity(messages.len() + 1);
+    let mut parent_id = None;
+    for message in messages {
+        let id = format!("msg_{}", uuid::Uuid::new_v4());
+        rows.push(StoredChatMessage {
+            session_id: session_id.to_string(),
+            role: message.role.to_string(),
+            parts_json: serde_json::to_string(&[WirePart::text(
+                format!("{id}-text"),
+                message.text,
+            )])?,
+            created_at: message.created_at,
+            completed_at: Some(message.created_at),
+            parent_id: parent_id.replace(id.clone()),
+            base_native_session_id: Some(native_id.to_string()),
+            result_native_session_id: None,
+            id,
+        });
+    }
+    rows.push(StoredChatMessage {
+        id: format!("msg_{}", uuid::Uuid::new_v4()),
+        session_id: session_id.to_string(),
+        role: "assistant".into(),
+        parts_json: serde_json::to_string(&[WirePart::tool(
+            IMPORTED_TOOL,
+            IMPORTED_TOOL,
+            "completed",
+            None,
+        )])?,
+        created_at: now_ms(),
+        completed_at: Some(now_ms()),
+        parent_id,
+        base_native_session_id: Some(native_id.to_string()),
+        result_native_session_id: Some(native_id.to_string()),
+    });
+    Ok(rows)
+}
+
+/// Adopt a chat from an agent's own CLI: a session bound to its native id, with
+/// the transcript backfilled. The messages are a readable copy — the agent
+/// resumes from its own session, not from these.
+///
+/// Idempotent: the picker filters chats orx already owns, but a stale list (or
+/// a second window) must not end up with two sessions driving one native chat.
+pub fn import_native_chat(
+    store: &Store,
+    project_id: &str,
+    harness: &str,
+    native_id: &str,
+    title: Option<String>,
+) -> Result<StoredChatSession> {
+    if let Some(existing) = store.chat_session_for_native_id(native_id)? {
+        return Ok(existing);
+    }
+    let project = store
+        .get_local_project(project_id)?
+        .ok_or_else(|| anyhow!("project is gone"))?;
+    let messages = crate::local::native_chats::transcript(harness, native_id)?;
+    let title = title
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty());
+    let session = StoredChatSession {
+        id: format!("chat_{}", uuid::Uuid::new_v4()),
+        project_id: project.id.clone(),
+        harness: harness.to_string(),
+        native_session_id: Some(native_id.to_string()),
+        // Not the user's own words, but the closest source there is: it must
+        // not be replaced by the auto-titler on the first turn.
+        title_source: title.is_some().then(|| "user".to_string()),
+        title,
+        model: None,
+        service_tier: None,
+        permission_mode: None,
+        plan_mode: false,
+        plan_reset_pending: false,
+        reasoning_level: None,
+        archived: false,
+        context_usage_json: None,
+        bootstrap_context: None,
+        goal: None,
+        active_leaf_id: None,
+        parent_session_id: None,
+        created_at: now_ms(),
+        updated_at: now_ms(),
+    };
+    let rows = imported_rows(&session.id, native_id, messages)?;
+    let leaf = rows
+        .last()
+        .map(|row| row.id.clone())
+        .ok_or_else(|| anyhow!("that chat has nothing to adopt"))?;
+
+    // One immediate transaction: a half-written import owns the native id,
+    // which would hide the chat from the picker with no way to adopt it again,
+    // and the ownership check above has to hold until the row is in.
+    let tx = store.begin_immediate()?;
+    if let Some(existing) = store.chat_session_for_native_id(native_id)? {
+        return Ok(existing);
+    }
+    store.create_chat_session(&session)?;
+    for row in &rows {
+        store.upsert_chat_message(row)?;
+    }
+    store.set_chat_session_active_leaf(&session.id, Some(&leaf))?;
+    tx.commit()?;
+    store
+        .get_chat_session(&session.id)?
+        .ok_or_else(|| anyhow!("chat session is gone"))
+}
+
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
     let context_usage = s
         .context_usage_json
@@ -6006,7 +6126,10 @@ impl ChatHost {
     /// Takes the row rather than a `&Store`: `Store` is `!Sync`, so a `&Store`
     /// held across the await would make the spawned auto-title future
     /// non-`Send`. Callers do the read (propagating store errors).
-    async fn emit_session(&self, session: Option<StoredChatSession>) -> Option<StoredChatSession> {
+    pub(crate) async fn emit_session(
+        &self,
+        session: Option<StoredChatSession>,
+    ) -> Option<StoredChatSession> {
         let session = session?;
         let busy = self.is_busy(&session.id).await;
         self.emit(
@@ -8622,6 +8745,96 @@ mod cap_tests {
         assert_eq!(done.parts[0].state.as_ref().unwrap().status, "completed");
         // One row on the branch: a second would read as a new branch root.
         assert_eq!(store.list_chat_messages("session").unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_adopted_row_records_the_agents_session() {
+        let spoken = |role: &'static str, text: &str| crate::local::native_chats::NativeMessage {
+            role,
+            text: text.into(),
+            created_at: 1_700_000_000_000,
+        };
+        let rows = imported_rows(
+            "chat_1",
+            "native-1",
+            vec![spoken("user", "run it"), spoken("assistant", "done")],
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 3, "both messages plus the marker");
+        assert_eq!(rows[0].parent_id, None);
+        assert_eq!(rows[1].parent_id.as_deref(), Some(rows[0].id.as_str()));
+        assert_eq!(rows[2].parent_id.as_deref(), Some(rows[1].id.as_str()));
+        // The whole point: a rewind to the first row must resume the agent's
+        // own session rather than clear it.
+        assert!(rows
+            .iter()
+            .all(|row| row.base_native_session_id.as_deref() == Some("native-1")));
+        assert_eq!(
+            rows[2].result_native_session_id.as_deref(),
+            Some("native-1"),
+            "the leaf is what a branch switch reads",
+        );
+        assert_eq!(
+            rows[0].created_at, 1_700_000_000_000,
+            "kept when it was said"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_chat_is_only_adopted_once() {
+        let dir = std::env::temp_dir().join(format!("orx-import-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "proj_1".into(),
+                name: "Test".into(),
+                slug: "test".into(),
+                github_owner: "owner".into(),
+                github_repo: "repo".into(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: dir.join("repo").display().to_string(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        // No transcript on disk: the marker-only shape an emptied rollout gives.
+        let session = import_native_chat(&store, "proj_1", "claude-code", "native-1", None);
+        assert!(session.is_err(), "a chat orx cannot read is not adopted");
+
+        let adopted = StoredChatSession {
+            id: "chat_1".into(),
+            project_id: "proj_1".into(),
+            harness: "claude-code".into(),
+            native_session_id: Some("native-1".into()),
+            title: Some("Adopted".into()),
+            title_source: Some("user".into()),
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            active_leaf_id: None,
+            parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&adopted).unwrap();
+        // Adopting the same chat again returns the session that already owns
+        // it — two sessions driving one native chat would split the history.
+        let again = import_native_chat(&store, "proj_1", "claude-code", "native-1", None).unwrap();
+        assert_eq!(again.id, "chat_1");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
