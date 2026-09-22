@@ -22,7 +22,7 @@ test("a selected skill can be removed with its trailing composer spaces", () => 
   });
 });
 
-const ALL_COMMANDS = ["copy", "export", "model", "new", "plan", "resume"];
+const ALL_COMMANDS = ["compact", "copy", "export", "model", "new", "plan", "resume"];
 
 test("every harness gets the same commands ahead of its skills", () => {
   const skills = [{ name: "review", description: "Review", source: "user" }];
@@ -70,10 +70,11 @@ test("Plan is recognized and removed anywhere in the message", () => {
   assert.equal(parseComposerCommand("https://example.com/plan", "command"), null);
 });
 
-test("/clear is an accepted alias for /new without listing separately", () => {
+test("aliases run their command without being listed separately", () => {
   const menu = commandsForHarness([], "command");
   assert.deepEqual(menu.map((item) => item.name), ALL_COMMANDS);
   assert.deepEqual(parseComposerCommand("/clear", null), { name: "new", prompt: "" });
+  assert.deepEqual(parseComposerCommand("/summarize", null), { name: "compact", prompt: "" });
   assert.deepEqual(parseComposerCommand("  /CLEAR  ", null), { name: "new", prompt: "" });
   assert.equal(parseComposerCommand("/cleared", null), null);
   // The alias still finds its command in the menu.

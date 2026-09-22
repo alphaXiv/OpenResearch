@@ -2008,6 +2008,10 @@ export const sendChatMessage = (
   },
   );
 
+/** Compact a chat's context: natively where the agent can, else by summarizing. */
+export const compactChatSession = (sessionId: string) =>
+  post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/compact`, {});
+
 /** A composer `!` command, run in the session's checkout and recorded on its
  * transcript as a user-side exchange the next turn is told about. */
 export const runShellCommand = (sessionId: string, command: string) =>

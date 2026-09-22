@@ -89,6 +89,7 @@ import {
   retryQueuedMessage,
   respondChat,
   selectChatBranch,
+  compactChatSession,
   runShellCommand,
   fmtDuration,
   sendChatMessage,
@@ -1466,6 +1467,8 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     ["run_command", "bash"],
     ["agent", "task"],
     ["collabagenttoolcall", "subagent"],
+    // orx's own compaction marker reads as the agents' automatic one.
+    ["compacted", "contextcompaction"],
     ["subagentactivity", "subagent"],
   ]).get(baseTool) ?? baseTool;
   switch (normalizedTool) {
@@ -1760,7 +1763,12 @@ function computeToolActivity(part: ChatPart): ToolActivity {
     case "contextcompaction":
       return {
         kind: "command",
-        label: m.activity_compacted_context(),
+        label: part.state?.status === "error"
+          ? m.activity_compacting_failed()
+          // A row left running (the host died mid-compaction) is not a success.
+          : part.state?.status === "running"
+            ? m.activity_compacting_context()
+            : m.activity_compacted_context(),
         progressLabel: m.activity_compacting_context(),
       };
     default: {
@@ -4725,6 +4733,9 @@ export function ChatPanel({
       case "model":
         setModelPickerRequest((request) => request + 1);
         return true;
+      case "compact":
+        void compactSession();
+        return false;
       case "copy": {
         const tail = messages.at(-1);
         const streamingTail = busy && tail?.role === "assistant" && !tail.completedAt;
@@ -4745,6 +4756,33 @@ export function ChatPanel({
         else showAlert(m.chat_nothing_to_export(), "info");
         return false;
       }
+    }
+  }
+
+  /** Compaction runs in the backend; its progress is the transcript row it
+   * publishes over SSE, so only a failure needs a toast. */
+  async function compactSession() {
+    const sessionId = activeId;
+    if (!sessionId) {
+      showAlert(m.chat_nothing_to_compact(), "info");
+      return;
+    }
+    if (busy) {
+      setSettingsError(m.chat_compact_busy());
+      return;
+    }
+    setSettingsError(null);
+    // Compacting unarchives the session, so the archived filter would hide it.
+    if (sessionFilter === "archived") setSessionFilter("active");
+    const sourceScope = composerScopeRef.current;
+    try {
+      // The row lands over SSE too; upserting the response paints it without
+      // waiting for the broadcast, as the `!` shell path does.
+      const { message } = await compactChatSession(sessionId);
+      dispatch({ type: "upsertMessage", sessionId, message });
+    } catch (err) {
+      if (composerScopeRef.current.activeId !== sourceScope.activeId) return;
+      setSettingsError(m.chat_compact_failed({ error: ltr(err instanceof Error ? err.message : String(err)) }));
     }
   }
 

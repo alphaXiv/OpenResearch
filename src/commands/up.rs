@@ -695,6 +695,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
         .route(
+            "/api/chat/sessions/{id}/compact",
+            post(compact_chat_session),
+        )
+        .route(
             "/api/chat/sessions/{id}/turns/{turnId}/recover",
             post(recover_chat_turn),
         )
@@ -7754,6 +7758,28 @@ async fn run_shell_command(
     let message = state
         .chat
         .run_shell_command(&id, command, root)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(Json(json!({ "message": message })))
+}
+
+async fn compact_chat_session(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_stopping(&state)?;
+    reject_if_moving(&state)?;
+    if state.chat.is_busy(&id).await {
+        return Err(ApiError(StatusCode::CONFLICT, "session is busy".into()));
+    }
+    let probe = id.clone();
+    tokio::task::spawn_blocking(move || {
+        Store::open()?
+            .get_chat_session(&probe)?
+            .ok_or_else(|| not_found("chat session"))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("compact task failed: {e}")))??;
+    let message = state
+        .chat
+        .compact_session(&id)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(json!({ "message": message })))

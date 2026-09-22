@@ -38,7 +38,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
+    TurnResult, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -47,7 +48,7 @@ use crate::local::chat::{
 };
 use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
-use crate::local::opencode::{find_opencode, ResolvedBinary};
+use crate::local::opencode::{find_opencode, ResolvedBinary, SummarizeOutcome};
 
 const OPENCODE_REINSTALL: &str =
     "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
@@ -391,6 +392,28 @@ impl Harness for OpenCode {
 
     fn supports_chat(&self) -> bool {
         true
+    }
+
+    /// opencode compacts through its own summarize endpoint, which needs a live
+    /// server and a native session; without either, the shared fallback runs.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(native_id) = ctx.native_session_id.as_deref() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        // A live session is still resumable, so a failure to compact it in
+        // place is reported rather than traded for a summary of its transcript.
+        match ctx
+            .host
+            .opencode
+            .summarize(&ctx.session_id, native_id, ctx.model.as_deref())
+            .await?
+        {
+            SummarizeOutcome::Compacted => Ok(CompactOutcome::Native),
+            SummarizeOutcome::NoServer => Err(anyhow!(
+                "OpenCode is not running for this chat — send a message first, then compact"
+            )),
+            SummarizeOutcome::NoModel => Ok(CompactOutcome::Fallback),
+        }
     }
 
     async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {

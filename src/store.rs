@@ -1973,6 +1973,28 @@ impl Store {
         Ok(())
     }
 
+    /// Cleared after a compaction: the pre-compaction total would otherwise be
+    /// inherited by the next turn and keep the meter pinned high.
+    pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET context_usage_json = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_bootstrap_context(
+        &self,
+        id: &str,
+        context: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET bootstrap_context = ?2 WHERE id = ?1",
+            params![id, context],
+        )?;
+        Ok(())
+    }
+
     pub fn set_chat_session_permission_mode(&self, id: &str, mode: &str) -> Result<()> {
         self.set_chat_session_permission_mode_value(id, Some(mode))
     }
