@@ -198,7 +198,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
+import { Button, IconButton, LoadingRow, MenuItem, showAlert, Spinner } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -6110,26 +6110,26 @@ export function ChatPanel({
               <span>{projectName}</span>
             </div>
             {starterLoading && (
-              <div
-                className={STARTER_GRID_CLASS}
-                role="status"
-                aria-live="polite"
-                aria-label={m.chat_panel_starter_generating()}
-                aria-busy="true"
-              >
-                {STARTER_ICONS.map((Icon, index) => (
-                  <div
-                    key={index}
-                    className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
-                  >
-                    <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
-                      <Icon size={17} />
-                      <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
-                    </span>
-                    <span className="h-3 w-4/5 rounded bg-surface" />
-                  </div>
-                ))}
-              </div>
+              <>
+                <div className={STARTER_GRID_CLASS} aria-hidden="true">
+                  {STARTER_ICONS.map((Icon, index) => (
+                    <div
+                      key={index}
+                      className={`flex min-h-22 animate-pulse flex-col items-start justify-center gap-2.5 rounded-xl border bg-background px-5 py-4 ${STARTER_TONES[index].box}`}
+                    >
+                      <span className={`flex w-full items-center gap-2.5 ${STARTER_TONES[index].icon}`}>
+                        <Icon size={17} />
+                        <span className="h-3.5 w-2/5 rounded bg-surface-bright" />
+                      </span>
+                      <span className="h-3 w-4/5 rounded bg-surface" />
+                    </div>
+                  ))}
+                </div>
+                <LoadingRow className="mt-3" role="status">
+                  <Spinner />
+                  <span>{m.chat_panel_starter_generating()}</span>
+                </LoadingRow>
+              </>
             )}
             {starterPrompts && starterPrompts.length > 0 && (
               <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
