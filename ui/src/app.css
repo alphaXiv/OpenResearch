@@ -21,6 +21,10 @@
   unicode-bidi: isolate;
 }
 
+.xterm {
+  color-scheme: dark;
+}
+
 @keyframes or-pulse {
   50% {
     opacity: 0.35;

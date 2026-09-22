@@ -246,7 +246,7 @@
   "onboarding_choose_one_or_more": "یک یا چند مورد را انتخاب کنید.",
   "onboarding_consolidate_your_research": "پژوهش خود را یکپارچه کنید",
   "onboarding_continue": "ادامه",
-  "onboarding_detecting_claude_code_codex_open_code": "در حال شناسایی Claude Code، Codex، OpenCode و Cursor…",
+  "onboarding_detecting_claude_code_codex_open_code": "در حال شناسایی Claude Code، Codex، OpenCode و Cursor و Antigravity…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "مثلاً روی یادگیری تقویتی کم‌نمونه برای پس‌آموزش LLM با تمرکز بر روش‌های بدون مدل پاداش کار می‌کنم.",
   "onboarding_everything_stays_local": "همه‌چیز محلی می‌ماند",
   "onboarding_get_started": "شروع",
@@ -1212,5 +1212,13 @@
   "harness_setup_install_preview": "برای دانلود و نصب {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_update_preview": "برای به‌روزرسانی {agent} روی رایانه خود، دستور زیر را تأیید کنید.",
   "harness_setup_approve_run": "تأیید و اجرا",
-  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر"
+  "onboarding_choose_another_agent": "انتخاب یک عامل برنامه‌نویسی دیگر",
+  "image_zoom_out": "کوچک‌نمایی",
+  "image_zoom_in": "بزرگ‌نمایی",
+  "image_zoom_reset": "بازنشانی بزرگ‌نمایی برای جا شدن",
+  "ssh_default_host": "میزبان پیش‌فرض SSH",
+  "ssh_run_in": "اجرا در",
+  "ssh_direct_host": "مستقیماً روی میزبان",
+  "ssh_existing_container": "کانتینر موجود",
+  "ssh_container_reference": "نام یا شناسهٔ کانتینر"
 }

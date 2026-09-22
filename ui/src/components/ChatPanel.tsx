@@ -13,8 +13,6 @@ import { useChatState } from "../queries/chatStore";
 
 import {
   getHarnessesQuery,
-  getSshHostsQuery,
-  listRemoteSessionsQuery,
   getSkillsQuery,
 } from "../queries/settings";
 import { listChatSessionsQuery, getChatMessagesQuery, listNativeChatsQuery } from "../queries/chat";
@@ -22,7 +20,6 @@ import { getProjectStarterPromptsQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
 import { useLocale } from "../locale";
-import { getThemePreference } from "../theme";
 import {
   ArrowDown,
   ArrowUpRight,
@@ -58,7 +55,6 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { createPortal } from "react-dom";
 import {
   memo,
   useCallback,
@@ -85,7 +81,6 @@ import {
   DEMO_SEEDED_LEAF_IDS,
   forkChatTurn,
   fmtNumber,
-  createRemoteSession,
   interruptChat,
   reasoningFor,
   recoverChatTurn,
@@ -110,7 +105,6 @@ import {
   type ChatPart,
   type ChatPrompt,
   type ChatSession,
-  type ChatTextAnnotation,
   type Harness,
   type PromptAnswer,
   type RuntimeInfo,
@@ -144,6 +138,13 @@ import {
   retryStatusLabel,
 } from "../chatRecovery";
 import {
+  composerStashContent,
+  EMPTY_COMPOSER_STASH,
+  type ComposerAnnotation,
+  type ComposerAttachment,
+  type ComposerStash,
+} from "../composerStash";
+import {
   containsShellGlob,
   orxArgsMatch,
   orxArgv,
@@ -153,14 +154,12 @@ import {
 } from "../orxCommand";
 import { LitSourceLogo, parseOrxLit, paperUrl } from "./LitSourceLogo";
 import { LitSourcesList } from "./LitSourcesPicker";
-import { Md } from "./Md";
+import { ChatImageScope, Md } from "./Md";
 import { PlanStrip } from "./PlanStrip";
 import { SETTINGS_NAV, type SettingsTab } from "./SettingsPage";
 import { SkillMenu } from "./SkillMenu";
 import { ComposerSkillChips, MessageWithChips, skillMarginSpaces } from "./SkillChips";
-import { SshConfigDialog } from "./SshConfigDialog";
-import { RemoteIcon } from "./RemoteIcon";
-import { RemoteStatus } from "./RemoteStatus";
+import { WorkspaceConnection } from "./WorkspaceConnection";
 import {
   defaultSelection,
   HARNESS_LABELS,
@@ -199,8 +198,7 @@ import {
   shouldRecoverLegacyMath,
   tableMarkdown,
 } from "./annotationMarkdown";
-import { Button, IconButton, Input, MenuItem, showAlert, Spinner } from "./ui";
-import { useDialogFocus } from "./useDialogFocus";
+import { Button, IconButton, MenuItem, showAlert, Spinner } from "./ui";
 import { PaperTitle } from "./PaperTitle";
 
 const TOOL_LINE_CLASS_NAME = "tool-line flex-1 min-w-0 line-clamp-2 break-words text-base leading-6";
@@ -210,11 +208,6 @@ const TOOL_TARGET_INSPECTION_LIMIT = 1_024;
 const TOOL_OUTPUT_SCAN_LIMIT = 20_000;
 const SELECTION_ACTION_GAP_PX = 8;
 const CHAT_ANNOTATION_HIGHLIGHT_NAME = "chat-annotations";
-
-interface ComposerAnnotation extends ChatTextAnnotation {
-  id: string;
-  range?: Range;
-}
 
 interface SelectionAction {
   text: string;
@@ -4151,124 +4144,6 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
-function RemoteHostDialog({
-  onClose,
-  onConfigureSsh,
-}: {
-  onClose: () => void;
-  onConfigureSsh: () => void;
-}) {
-  const createRemoteSessionMutation = useMutation({ mutationFn: (args: Parameters<typeof createRemoteSession>) => createRemoteSession(...args) });
-
-  const hostsQuery = useQuery(getSshHostsQuery());
-  const sessionsQuery = useQuery(listRemoteSessionsQuery());
-  const hosts = hostsQuery.data ?? null;
-  const sessions = sessionsQuery.data ?? [];
-  const [query, setQuery] = useState("");
-  const loadError = !hosts ? hostsQuery.error?.message ?? sessionsQuery.error?.message ?? null : null;
-  const [openingHost, setOpeningHost] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
-
-  useDialogFocus(dialogRef, onClose);
-
-  async function openRemote(host: string) {
-    const remoteWindow = window.open("/remote-launch", "_blank");
-    if (!remoteWindow) {
-      showAlert(m.remote_popup_blocked(), "error");
-      return;
-    }
-    setOpeningHost(host);
-    try {
-      const session = await createRemoteSessionMutation.mutateAsync([host, {
-        theme: getThemePreference(),
-        locale: getLocale(),
-      }]);
-      remoteWindow.location.replace(session.gatewayUrl);
-      onClose();
-    } catch (error) {
-      remoteWindow.close();
-      showAlert(error instanceof Error ? error.message : String(error), "error");
-    } finally {
-      setOpeningHost(null);
-    }
-  }
-
-  const filteredHosts = hosts?.filter((host) =>
-    host.host.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
-  );
-  const sessionByHost = new Map(sessions.map((session) => [session.host, session]));
-
-  return createPortal(
-    <div
-      className="fixed inset-0 z-200 flex items-center justify-center bg-modal-backdrop p-5"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div
-        ref={dialogRef}
-        className="relative flex h-[min(42rem,calc(100vh-2.5rem))] w-160 max-w-full flex-col overflow-hidden rounded-xl border border-border bg-background shadow-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="remote-host-dialog-title"
-        tabIndex={-1}
-      >
-        <IconButton className="absolute end-3.5 top-3.5" aria-label={m.remote_dialog_close()} onClick={onClose}>
-          <X size={16} />
-        </IconButton>
-        <div className="shrink-0 px-6 pt-5 pb-4 pe-14">
-          <h2 id="remote-host-dialog-title" className="m-0 text-xl font-medium">{m.remote_dialog_title()}</h2>
-          <p className="mt-2 mb-0 text-sm leading-normal text-subtext">{m.remote_dialog_description()}</p>
-          <Input
-            data-initial-focus
-            className="mt-4"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={m.remote_search_hosts()}
-            aria-label={m.remote_search_hosts()}
-          />
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto border-t border-border-variant p-2">
-          {loadError ? (
-            <p className="m-3 text-sm text-accent-red">{loadError}</p>
-          ) : hosts === null ? (
-            <div className="flex items-center gap-2 p-3 text-sm text-subtext"><Spinner /> {m.settings_page_reading_ssh_config()}</div>
-          ) : filteredHosts?.length === 0 ? (
-            <p className="m-3 text-sm text-subtext">{m.remote_no_matching_hosts()}</p>
-          ) : (
-            filteredHosts?.map((host) => {
-              const session = sessionByHost.get(host.host);
-              return (
-                <Button
-                  key={host.host}
-                  variant="ghost"
-                  className="w-full justify-start text-base font-normal"
-                  disabled={openingHost === host.host}
-                  onClick={() => void openRemote(host.host)}
-                >
-                  <span className="min-w-0 flex-1 truncate text-start">{host.host}</span>
-                  {openingHost === host.host ? (
-                    <Spinner />
-                  ) : session ? (
-                    <span className="text-sm text-subtext">{m.remote_open()}</span>
-                  ) : null}
-                </Button>
-              );
-            })
-          )}
-        </div>
-        <div className="shrink-0 border-t border-border-variant p-2">
-          <Button variant="ghost" className="w-full justify-start text-base font-normal" onClick={onConfigureSsh}>
-            <SlidersHorizontal size={15} />
-            {m.ssh_configure_hosts()}
-          </Button>
-        </div>
-      </div>
-    </div>,
-    document.body,
-  );
-}
-
 export function ChatPanel({
   projectId,
   projectName,
@@ -4379,8 +4254,6 @@ export function ChatPanel({
       return next;
     });
   }, [sessionsOptions]);
-  const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
-  const [sshConfigOpen, setSshConfigOpen] = useState(false);
   const activeId = activeSessionId;
   const onActiveSessionChangeRef = useRef(onActiveSessionChange);
   onActiveSessionChangeRef.current = onActiveSessionChange;
@@ -4400,10 +4273,45 @@ export function ChatPanel({
     composerScopeRef.current = { projectId, activeId, mainView };
   }
   // Pasted/dropped/uploaded attachments waiting in the composer, as data URLs.
-  const [attachments, setAttachments] = useState<
-    { dataUrl: string; mediaType: string; name?: string; size: number }[]
-  >([]);
+  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // Unsent composer content belongs to the scope it was typed in — stash on
+  // the way out, restore on return, so a draft can't bleed into another chat.
+  const stashKey = activeId ?? "new";
+  const composerStashRef = useRef(new Map<string, ComposerStash>());
+  const composerLiveRef = useRef(EMPTY_COMPOSER_STASH);
+  composerLiveRef.current = { draft, attachments, annotations };
+  // On offer until the user has sent anything in the demo: a send either adds
+  // a session or moves a recorded session's leaf off its seeded message. The
+  // nudge anchors to the first scope that had it — seeding it in every scope
+  // would read as the draft bleeding across chats.
+  const composerPrefillOffer =
+    projectId === DEMO_PROJECT_ID &&
+      sessions.length > 0 &&
+      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
+      ? DEMO_RUN_EXPERIMENT_PROMPT
+      : null;
+  const prefillScopeRef = useRef<string | null>(null);
+  if (composerPrefillOffer !== null && prefillScopeRef.current === null && activeId !== null) {
+    prefillScopeRef.current = stashKey;
+  }
+  const composerPrefill = stashKey === prefillScopeRef.current ? composerPrefillOffer : null;
+  // Layout effect: the restore must land before paint or the outgoing chat's
+  // draft flashes for a frame inside the incoming one.
+  useLayoutEffect(() => {
+    const restored = composerStashRef.current.get(stashKey) ?? EMPTY_COMPOSER_STASH;
+    // StrictMode double-invokes: the cleanup must see the restored value, not
+    // the pre-restore render's.
+    composerLiveRef.current = restored;
+    setDraft(restored.draft);
+    setAttachments(restored.attachments);
+    setAnnotations(restored.annotations);
+    return () => {
+      const stashed = composerStashContent(composerLiveRef.current, composerPrefill);
+      if (stashed) composerStashRef.current.set(stashKey, stashed);
+      else composerStashRef.current.delete(stashKey);
+    };
+  }, [stashKey, composerPrefill]);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const settingsMutationTail = useRef<Promise<void>>(Promise.resolve());
   const settingsMutationSeq = useRef(0);
@@ -4464,7 +4372,6 @@ export function ChatPanel({
   useAnnotationHighlights(annotations);
 
   useEffect(() => {
-    setAnnotations([]);
     setResumeOpen(false);
     transcriptSelection.dismiss();
   }, [activeId, projectId, transcriptSelection.dismiss]);
@@ -4546,13 +4453,26 @@ export function ChatPanel({
         continue;
       }
       total += file.size;
+      const scope = activeId;
       const reader = new FileReader();
       reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setAttachments((cur) => [
-          ...cur,
-          { dataUrl, mediaType: file.type, name: file.name, size: file.size },
-        ]);
+        const attachment = {
+          dataUrl: reader.result as string,
+          mediaType: file.type,
+          name: file.name,
+          size: file.size,
+        };
+        // The decode is async — if the composer moved on, the file belongs to
+        // the scope it was pasted into, not whatever chat is now showing.
+        if (composerScopeRef.current.activeId === scope) {
+          setAttachments((cur) => [...cur, attachment]);
+          return;
+        }
+        const stash = composerStashRef.current.get(scope ?? "new") ?? EMPTY_COMPOSER_STASH;
+        composerStashRef.current.set(scope ?? "new", {
+          ...stash,
+          attachments: [...stash.attachments, attachment],
+        });
       };
       reader.readAsDataURL(file);
     }
@@ -4637,6 +4557,7 @@ export function ChatPanel({
   const composerModel =
     rawSelection &&
       activeHarness &&
+      !activeHarness.catalogPending &&
       activeHarness.models.length > 0 &&
       !activeHarness.models.some((model) => model.id === rawSelection.model)
       ? activeHarness.models[0].id
@@ -5002,10 +4923,8 @@ export function ChatPanel({
         )
         : new Set(),
     );
-    setDraft("");
     setDemoHintDismissed(false);
     setDemoRunHintDismissed(false);
-    setAttachments([]);
     setTitleReveals(new Map());
     seenTitles.current = new Map();
     void syncSessionList();
@@ -5312,15 +5231,9 @@ export function ChatPanel({
       setComposerCursor(prompt.length);
     });
   };
-  // On offer until the user has sent anything in the demo: a send either adds
-  // a session or moves a recorded session's leaf off its seeded message.
-  const composerPrefill =
-    projectId === DEMO_PROJECT_ID &&
-      sessions.length > 0 &&
-      sessions.every((session) => DEMO_SEEDED_LEAF_IDS[session.id] === session.activeLeafId)
-      ? DEMO_RUN_EXPERIMENT_PROMPT
-      : null;
   // Seeds without taking focus; focus may still belong to the welcome dialog.
+  // Declared after the stash-restore effect so `current` below is the scope's
+  // just-restored draft.
   useEffect(() => {
     if (!composerPrefill) return;
     setDraft((current) => current || composerPrefill);
@@ -5576,6 +5489,13 @@ export function ChatPanel({
     }
     let sid = activeId;
     try {
+      // Clear before the first await — once the scope can move, a stash
+      // cleanup must never see the sent text still in the composer. Failure
+      // paths below restore it via restoreComposer().
+      setDraft((current) => current === draft ? "" : current);
+      setAttachments((current) => current === pending ? [] : current);
+      setAnnotations((current) => (current === pendingAnnotations ? [] : current));
+      setAttachError(null);
       preparingSend.current = true;
       try {
         if (!sid) {
@@ -5594,12 +5514,6 @@ export function ChatPanel({
         preparingSend.current = false;
       }
       if (!isCurrentScope(sessionsOptions.queryKey)) return;
-      if (inSourceScope()) {
-        setDraft((current) => current === draft ? "" : current);
-        setAttachments((current) => current === pending ? [] : current);
-        setAnnotations((current) => current === pendingAnnotations ? [] : current);
-        setAttachError(null);
-      }
       dispatch({
         type: "optimisticUser",
         sessionId: sid,
@@ -5908,9 +5822,16 @@ export function ChatPanel({
    * and the cached transcript. Used on delete (ours or another dashboard's). */
   function forgetSession(sessionId: string) {
     removeCachedSession(sessionId);
+    composerStashRef.current.delete(sessionId);
+    if (prefillScopeRef.current === sessionId) prefillScopeRef.current = null;
     if (composerScopeRef.current.projectId === projectId
       && composerScopeRef.current.activeId === sessionId
       && composerScopeRef.current.mainView === "chat") {
+      // The session is gone — its composer dies with it. Cleared in the same
+      // batch as the navigation so the stash cleanup can't resurrect the key.
+      setDraft("");
+      setAttachments([]);
+      setAnnotations([]);
       onActiveSessionChangeRef.current(null, { replace: true });
     }
     setUnreadSessionIds((current) => {
@@ -6107,38 +6028,7 @@ export function ChatPanel({
           </div>
         )}
       </div>
-      {runtime.kind === "ssh" ? (
-        <RemoteStatus runtime={runtime} />
-      ) : (
-        <div className="relative shrink-0 border-t border-border">
-          <div className="flex items-center gap-1.5 py-2 ps-1 pe-2.5">
-            <IconButton size="small" aria-label={m.remote_dialog_title()} aria-haspopup="dialog" onClick={() => setRemoteDialogOpen(true)}>
-              <RemoteIcon size={14} className="shrink-0" />
-            </IconButton>
-            <span className="flex min-w-0 flex-col gap-1 text-start text-text">
-              <span className="truncate text-sm leading-tight">{m.projects_local()}</span>
-              <span className="truncate text-xs leading-tight text-subtext">OpenResearch {ltr(runtime.version)}</span>
-            </span>
-          </div>
-        </div>
-      )}
-      {remoteDialogOpen && (
-        <RemoteHostDialog
-          onClose={() => setRemoteDialogOpen(false)}
-          onConfigureSsh={() => {
-            setRemoteDialogOpen(false);
-            setSshConfigOpen(true);
-          }}
-        />
-      )}
-      {sshConfigOpen && (
-        <SshConfigDialog
-          onClose={() => {
-            setSshConfigOpen(false);
-            setRemoteDialogOpen(true);
-          }}
-        />
-      )}
+      <WorkspaceConnection runtime={runtime} />
     </aside>
   );
 
@@ -6285,31 +6175,33 @@ export function ChatPanel({
             }}
           >
             <div className="chat-thread-inner max-w-readable my-0 mx-auto pt-4 px-4 pb-8 flex flex-col gap-4" ref={threadInnerRef}>
-              <Transcript
-                key={activeId}
-                scrollRef={threadRef}
-                scrollToEndRef={scrollToEndRef}
-                stickToBottom={stickToBottom}
-                onPinToBottom={pinTranscriptToBottom}
-                messages={messages}
-                allMessages={allMessages}
-                canFork={canFork}
-                onFork={forkTurn}
-                onSelectFork={selectBranch}
-                busy={busy}
-                onOpenFile={openFileInSession}
-                onOpenRun={onOpenRun}
-                onOpenSpawnedSession={openSpawnedSession}
-                runExperimentName={runExperimentName}
-                onOpenExperiment={onOpenExperiment}
-                experimentName={experimentName}
-                onRespond={respond}
-                onOpenPlan={openPlan}
-                onOpenSubagent={openSubagent}
-                recoveringTurnId={recoveringTurnId}
-                onRecover={recoverFailedTurn}
-                skills={transcriptSkills}
-              />
+              <ChatImageScope projectId={projectId} sessionId={activeId}>
+                <Transcript
+                  key={activeId}
+                  scrollRef={threadRef}
+                  scrollToEndRef={scrollToEndRef}
+                  stickToBottom={stickToBottom}
+                  onPinToBottom={pinTranscriptToBottom}
+                  messages={messages}
+                  allMessages={allMessages}
+                  canFork={canFork}
+                  onFork={forkTurn}
+                  onSelectFork={selectBranch}
+                  busy={busy}
+                  onOpenFile={openFileInSession}
+                  onOpenRun={onOpenRun}
+                  onOpenSpawnedSession={openSpawnedSession}
+                  runExperimentName={runExperimentName}
+                  onOpenExperiment={onOpenExperiment}
+                  experimentName={experimentName}
+                  onRespond={respond}
+                  onOpenPlan={openPlan}
+                  onOpenSubagent={openSubagent}
+                  recoveringTurnId={recoveringTurnId}
+                  onRecover={recoverFailedTurn}
+                  skills={transcriptSkills}
+                />
+              </ChatImageScope>
               {busy && awaitingInput && (
                 <div className="flex items-center gap-2 text-subtext text-sm pt-0.5 px-0 pb-2 italic">{m.chat_panel_waiting_for_your_input()}</div>
               )}
@@ -6507,8 +6399,14 @@ export function ChatPanel({
           <div className={`composer-box relative flex flex-col border ${bashActive ? "border-accent-amber" : "border-border"} rounded-lg bg-background shadow-elevated`} data-onboarding="composer">
             {activeHarness && !activeHarness.agentReady && (
               <div className="composer-harness-warning py-2 px-3 text-subtext text-sm leading-normal border-b border-b-border-variant [&_strong]:text-accent-amber [&_strong]:font-medium [&_code]:font-mono [&_code]:text-text">
-                <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
-                {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : m.chat_recheck_setup()}
+                {activeHarness.catalogPending ? (
+                  <span>{activeHarness.name} — {m.onboarding_checking()}</span>
+                ) : (
+                  <>
+                    <strong>{activeHarness.name} {m.chat_panel_is_unavailable()}</strong>{" "}
+                    {activeHarness.agentNote ? renderNote(activeHarness.agentNote) : m.chat_recheck_setup()}
+                  </>
+                )}
               </div>
             )}
             {skillMenuOpen && (

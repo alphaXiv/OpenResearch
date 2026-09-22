@@ -51,3 +51,23 @@ export function resolveMarkdownTarget(
 export function markdownTargetUrl(url: string, target: MarkdownTarget): string {
   return `${url}${target.query ? `&${target.query}` : ""}${target.hash}`;
 }
+
+export function isWindowsDrivePath(src: string): boolean {
+  return /^[a-z]:[\\/]/i.test(src);
+}
+
+export function chatImageTarget(src: string): (Pick<MarkdownTarget, "path" | "hash"> & { source: "absolute" | "artifact" | "checkout" }) | null {
+  const windows = isWindowsDrivePath(src);
+  if (!windows && isExternalMarkdownTarget(src)) return null;
+  const resolved = resolveMarkdownTarget("", windows ? src.replaceAll("\\", "/") : src, true);
+  if (!resolved) return null;
+  // Local-image queries must not override the selected file or session.
+  const target = { path: resolved.path, hash: resolved.hash };
+  if (target.path.startsWith("/") || target.path.startsWith("~/") || windows) {
+    return { ...target, source: "absolute" };
+  }
+  if (target.path.startsWith("artifacts/")) {
+    return { ...target, path: target.path.slice("artifacts/".length), source: "artifact" };
+  }
+  return { ...target, source: "checkout" };
+}

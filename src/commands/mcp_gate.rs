@@ -182,3 +182,111 @@ async fn relay(http: &reqwest::Client, url: &str, body: Value) -> Result<Value> 
     }
     resp.json::<Value>().await.map_err(|e| anyhow!("{e}"))
 }
+
+pub async fn run_antigravity() -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut input = String::new();
+    tokio::io::stdin().read_to_string(&mut input).await?;
+    let decision = antigravity_decision(&input).await.unwrap_or_else(|error| {
+        json!({"decision": "deny", "reason": format!("OpenResearch approval bridge unavailable: {error}")})
+    });
+    println!("{decision}");
+    Ok(())
+}
+
+async fn antigravity_decision(input: &str) -> Result<Value> {
+    if std::env::var("ORX_AGY_GATE").as_deref() == Ok("bypass") {
+        return Ok(json!({"decision": "allow"}));
+    }
+    let payload: Value = serde_json::from_str(input)?;
+    let name = payload
+        .pointer("/toolCall/name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow!("missing tool name"))?;
+    let args = payload
+        .pointer("/toolCall/args")
+        .ok_or_else(|| anyhow!("missing tool arguments"))?;
+    let env = GateEnv::from_env()?;
+    if workspace_read(name, args, &payload) {
+        return Ok(json!({"decision": "allow"}));
+    }
+    let (tool, input) = crate::local::harness::antigravity::normalize_tool(name, Some(args));
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    let decision = relay(
+        &http,
+        &format!("http://127.0.0.1:{}/api/internal/permissions", env.up_port),
+        json!({"sessionId":env.session_id,"token":env.token,"toolName":tool,"toolInput":input}),
+    )
+    .await?;
+    Ok(match decision.get("behavior").and_then(Value::as_str) {
+        Some("allow") => json!({"decision":"allow"}),
+        _ => {
+            json!({"decision":"deny", "reason":decision.get("message").and_then(Value::as_str).unwrap_or("Action denied")})
+        }
+    })
+}
+
+fn workspace_read(name: &str, args: &Value, payload: &Value) -> bool {
+    let key = match name {
+        "view_file" => "AbsolutePath",
+        "list_dir" => "DirectoryPath",
+        "grep_search" => "SearchPath",
+        "find_by_name" => "SearchDirectory",
+        _ => return false,
+    };
+    let Some(path) = args
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|path| std::fs::canonicalize(path).ok())
+    else {
+        return false;
+    };
+    payload
+        .get("workspacePaths")
+        .and_then(Value::as_array)
+        .is_some_and(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(|root| std::fs::canonicalize(root).ok())
+                .any(|root| path.starts_with(root))
+        })
+}
+
+#[cfg(test)]
+mod antigravity_tests {
+    use super::*;
+
+    #[test]
+    fn only_known_reads_inside_the_workspace_skip_approval() {
+        let root = std::env::current_dir().unwrap();
+        let payload = json!({"workspacePaths":[root]});
+        assert!(workspace_read(
+            "view_file",
+            &json!({"AbsolutePath":root.join("Cargo.toml")}),
+            &payload
+        ));
+        assert!(!workspace_read(
+            "view_file",
+            &json!({"AbsolutePath":"/etc/passwd"}),
+            &payload
+        ));
+        assert!(!workspace_read(
+            "run_command",
+            &json!({"AbsolutePath":root}),
+            &payload
+        ));
+        assert!(!workspace_read("view_file", &json!({}), &payload));
+    }
+
+    #[tokio::test]
+    async fn bypass_env_var_allows_immediately() {
+        std::env::set_var("ORX_AGY_GATE", "bypass");
+        let res = antigravity_decision("invalid-json").await.unwrap();
+        assert_eq!(res["decision"], "allow");
+        std::env::remove_var("ORX_AGY_GATE");
+    }
+}

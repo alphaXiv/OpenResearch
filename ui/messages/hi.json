@@ -246,7 +246,7 @@
   "onboarding_choose_one_or_more": "एक या अधिक चुनें।",
   "onboarding_consolidate_your_research": "अपने शोध को एक जगह लाएं",
   "onboarding_continue": "जारी रखें",
-  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor पहचाने जा रहे हैं…",
+  "onboarding_detecting_claude_code_codex_open_code": "Claude Code, Codex, OpenCode, Cursor, Google Antigravity पहचाने जा रहे हैं…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "जैसे: मैं LLM पोस्ट-ट्रेनिंग के लिए सैंपल-एफ़िशिएंट RL पर काम करता/करती हूँ, रिवॉर्ड-मॉडल-फ्री तरीकों पर ध्यान केंद्रित करते हुए।",
   "onboarding_everything_stays_local": "सब कुछ लोकल ही रहता है",
   "onboarding_get_started": "शुरू करें",
@@ -1212,5 +1212,13 @@
   "harness_setup_install_preview": "अपने कंप्यूटर पर {agent} डाउनलोड और इंस्टॉल करने के लिए नीचे दी गई कमांड को स्वीकार करें।",
   "harness_setup_update_preview": "अपने कंप्यूटर पर {agent} अपडेट करने के लिए नीचे दी गई कमांड को स्वीकार करें।",
   "harness_setup_approve_run": "स्वीकार करें और चलाएं",
-  "onboarding_choose_another_agent": "दूसरा कोडिंग एजेंट चुनें"
+  "onboarding_choose_another_agent": "दूसरा कोडिंग एजेंट चुनें",
+  "image_zoom_out": "ज़ूम आउट",
+  "image_zoom_in": "ज़ूम इन",
+  "image_zoom_reset": "फ़िट करने के लिए ज़ूम रीसेट करें",
+  "ssh_default_host": "डिफ़ॉल्ट SSH होस्ट",
+  "ssh_run_in": "यहाँ चलाएँ",
+  "ssh_direct_host": "सीधे होस्ट पर",
+  "ssh_existing_container": "मौजूदा कंटेनर",
+  "ssh_container_reference": "कंटेनर का नाम या ID"
 }
