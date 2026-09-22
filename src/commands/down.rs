@@ -262,6 +262,7 @@ fn send_signal(pid: u32, force: bool) {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn is_orx_up_cmdline(args: &[String]) -> Option<Option<u16>> {
     if args.is_empty() {
         return None;
@@ -382,7 +383,7 @@ fn scan_ps_targets(target_port: Option<u16>, all: bool, targets: &mut Vec<Target
 }
 
 #[cfg(windows)]
-fn scan_windows_targets(target_port: Option<u16>, all: bool, targets: &mut Vec<TargetProcess>) {
+fn scan_windows_targets(target_port: Option<u16>, _all: bool, targets: &mut Vec<TargetProcess>) {
     let my_pid = std::process::id();
     let output = std::process::Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
