@@ -3208,9 +3208,6 @@ struct OpenProjectFileReq {
     session_id: Option<String>,
 }
 
-/// Open a checkout file in the machine's default app for its type (the user's
-/// editor for source files). Resolves the same worktree/clone the reader uses
-/// and confirms the file is inside it before handing the path to the OS opener.
 /// Validates a checkout-relative request path and resolves it to the
 /// canonicalized absolute path, confined to the checkout root — shared by the
 /// routes that hand a file to an OS action on this machine. `verb` names the
@@ -3240,6 +3237,9 @@ fn confined_checkout_file(
     Ok(full)
 }
 
+/// Open a checkout file in the machine's default app for its type (the user's
+/// editor for source files). Resolves the same worktree/clone the reader uses
+/// and confirms the file is inside it before handing the path to the OS opener.
 async fn open_project_file(
     Path(id): Path<String>,
     Json(req): Json<OpenProjectFileReq>,

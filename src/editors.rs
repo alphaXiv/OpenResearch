@@ -1,4 +1,5 @@
-//! Open a file in the machine's default app for its type.
+//! Open a file in the machine's default app for its type, or reveal it in the
+//! file manager.
 //!
 //! Local-only: `orx up` runs on the user's own machine, so the API process can
 //! hand a file to the OS opener, which routes it to whatever the user has set as
@@ -60,15 +61,18 @@ fn reveal_command(path: &std::path::Path) -> Command {
     #[cfg(target_os = "windows")]
     let cmd = {
         // `explorer /select,"<path>"` opens the folder with the file selected.
-        // explorer tokenizes its own command line on commas, so the path is
-        // quoted; an OsString keeps names that aren't valid UTF-16 intact.
-        // Still one argv element — no cmd.exe reparse, so metacharacters can't
-        // inject.
+        // explorer reparses its own command line — commas split parameters and
+        // it does not understand backslash-escaped quotes — so the path must
+        // reach it verbatim: quoted (comma-safe) and appended with raw_arg
+        // (Command::arg would emit \" escapes explorer rejects). NTFS forbids
+        // '"' in names, so the canonicalized path can't break out of the
+        // quotes.
+        use std::os::windows::process::CommandExt;
         let mut c = Command::new("explorer.exe");
         let mut arg = std::ffi::OsString::from("/select,\"");
         arg.push(path);
         arg.push("\"");
-        c.arg(arg);
+        c.raw_arg(arg);
         c
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
