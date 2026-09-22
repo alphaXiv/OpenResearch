@@ -59,10 +59,10 @@ pub(crate) async fn spawn_with_permit(
     .await?
 }
 
-/// `execve` reports ETXTBSY while the target inode has an open writer
-/// anywhere — a sibling fork still holding an inherited fd, a just-written
-/// file, an installer replacing the binary in place. The window is
-/// milliseconds; wait out ~0.8s of escalating beats rather than report a
+/// On Unix, `execve` reports ETXTBSY while the target inode has an open
+/// writer anywhere — a sibling fork still holding an inherited fd, a
+/// just-written file, an installer replacing the binary in place. The window
+/// is milliseconds; wait out ~0.8s of escalating beats rather than report a
 /// healthy binary as broken. Only `ExecutableFileBusy` retries: other kinds
 /// are either conclusive (NotFound/PermissionDenied) or mean real resource
 /// pressure a tight retry would worsen.
@@ -76,7 +76,7 @@ pub(crate) fn spawn_retrying_busy<T>(
             Err(e) if e.kind() == ErrorKind::ExecutableFileBusy && retries > 0 => {
                 retries -= 1;
                 std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(Duration::from_millis(400));
+                backoff *= 2;
             }
             result => return result,
         }
@@ -885,6 +885,39 @@ mod tests {
     fn resolve_symlinks_keeps_unresolvable_path() {
         let missing = PathBuf::from("/nonexistent/orx-detect-test/codex");
         assert_eq!(resolve_symlinks(missing.clone()), missing);
+    }
+
+    #[test]
+    fn spawn_retrying_busy_retries_only_busy_errors() {
+        // A writer that lets go inside the budget recovers.
+        let mut calls = 0;
+        let out = spawn_retrying_busy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(ErrorKind::ExecutableFileBusy.into())
+            } else {
+                Ok(calls)
+            }
+        });
+        assert!(matches!(out, Ok(3)));
+
+        // One that outlasts it surfaces the last error: 1 try + 5 retries.
+        let mut calls = 0;
+        let out: std::io::Result<()> = spawn_retrying_busy(|| {
+            calls += 1;
+            Err(ErrorKind::ExecutableFileBusy.into())
+        });
+        assert_eq!(calls, 6);
+        assert!(matches!(out, Err(e) if e.kind() == ErrorKind::ExecutableFileBusy));
+
+        // Conclusive failures are not retried.
+        let mut calls = 0;
+        let out: std::io::Result<()> = spawn_retrying_busy(|| {
+            calls += 1;
+            Err(ErrorKind::PermissionDenied.into())
+        });
+        assert_eq!(calls, 1);
+        assert!(matches!(out, Err(e) if e.kind() == ErrorKind::PermissionDenied));
     }
 
     #[cfg(unix)]
