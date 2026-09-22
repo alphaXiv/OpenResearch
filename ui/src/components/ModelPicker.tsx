@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Zap } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   fmtNumber,
@@ -21,7 +21,7 @@ import {
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
 
-import { MenuItem } from "./ui";
+import { IconButton, MenuItem } from "./ui";
 import { cn } from "./ui/cn";
 
 import { LocalModelSetup } from "./LocalModelSetup";
@@ -45,6 +45,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   cursor: "Cursor",
+  antigravity: "Google Antigravity",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -104,6 +105,7 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
 export function ModelPicker({
   value,
   onSelect,
+  onOpenSettings,
   permissionChoices = [],
   defaultPermissionId,
   onSelectPermission,
@@ -115,6 +117,7 @@ export function ModelPicker({
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
+  onOpenSettings: () => void;
   permissionChoices?: OptionChoice[];
   defaultPermissionId?: string | null;
   onSelectPermission?: (id: string) => void;
@@ -157,7 +160,7 @@ export function ModelPicker({
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor") models = models.slice(0, 5);
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -252,18 +255,32 @@ export function ModelPicker({
   );
 
   const submenuHeader = (title: string) => (
-    <button
-      ref={submenuHeaderRef}
-      type="button"
-      className="model-submenu-header flex w-full items-center gap-2 border-0 border-b border-solid border-b-border-variant bg-transparent px-2 py-2 text-start text-sm font-medium text-text hover:bg-surface"
-      onClick={() => {
-        setPage("root");
-        setFilter("");
-      }}
-    >
-      <ChevronLeft size={15} />
-      {title}
-    </button>
+    <div className="flex shrink-0 items-center border-b border-border-variant px-1 py-1">
+      <IconButton
+        ref={submenuHeaderRef}
+        type="button"
+        size="small"
+        className="model-submenu-header"
+        aria-label={m.plan_strip_back()}
+        onClick={() => {
+          setPage("root");
+          setFilter("");
+        }}
+      >
+        <ChevronLeft size={15} />
+      </IconButton>
+      <span className="min-w-0 flex-1 text-sm font-medium text-text">{title}</span>
+      {page === "models" && (
+        <IconButton
+          type="button"
+          size="small"
+          aria-label={m.settings_page_harnesses()}
+          onClick={() => { close(); onOpenSettings(); }}
+        >
+          <Settings size={15} aria-hidden="true" />
+        </IconButton>
+      )}
+    </div>
   );
 
   const choiceList = (
@@ -356,13 +373,13 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> {m.model_picker_unavailable()}
+                          {harness.catalogPending ? m.onboarding_checking() : <><Lock size={10} /> {m.model_picker_unavailable()}</>}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
+                        {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>

@@ -849,7 +849,7 @@ mod tests {
         let db = data.join("agents/opencode/opencode.db");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let connection = rusqlite::Connection::open(&db).unwrap();
-        connection.execute_batch("CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE project (id TEXT, worktree TEXT); CREATE TABLE message (text TEXT); INSERT INTO session VALUES ('unrelated', '/unrelated'); INSERT INTO message VALUES ('original history');").unwrap();
+        connection.execute_batch("CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE project (id TEXT, worktree TEXT); CREATE TABLE message (id TEXT, session_id TEXT, data TEXT, text TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT); INSERT INTO session VALUES ('unrelated', '/unrelated'); INSERT INTO message (text) VALUES ('original history');").unwrap();
         connection
             .execute(
                 "INSERT INTO session VALUES ('native', ?1)",

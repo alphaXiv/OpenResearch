@@ -1,7 +1,7 @@
 import type { ExperimentView } from "./components/DetailDrawer";
 import type { CodeView } from "./components/CodeTab";
 import type { WorktreeView } from "./components/WorktreeTab";
-import { DEMO_MAIN_SESSION_ID, DEMO_FIGURE_SESSION_ID, DEMO_LITERATURE_SESSION_ID, DEMO_OVERVIEW_ARTIFACT } from "./api";
+import { DEMO_MAIN_SESSION_ID, DEMO_FIGURE_SESSION_ID, DEMO_LITERATURE_SESSION_ID } from "./api";
 import type { Pane, TaskWorkspace } from "./workspaceState";
 
 export function tabPane(tab: RightTab, runId?: string | null): Pane {
@@ -29,6 +29,7 @@ export function paneTab(pane: Pane): RightTab {
 export function rememberWorkspace(state: RightPaneSessionState, scroll: TaskWorkspace["scroll"], sourceModes: TaskWorkspace["sourceModes"]): TaskWorkspace {
   const home: RightTab[] = [];
   if (state.filesTabOpen) home.push("files");
+  if (state.terminalTabOpen) home.push("terminal");
   if (state.artifactsTabOpen) home.push("artifacts");
   if (state.experimentsTabOpen) home.push("experiments");
   const content = [...state.expTabs, ...state.fileTabs, ...state.planTabs, ...state.subagentTabs, ...state.codeTabs];
@@ -65,6 +66,7 @@ export function restoreWorkspace(saved: TaskWorkspace | undefined, pane: Pane | 
       if (tab === "experiments") state.experimentsTabOpen = true;
       if (tab === "files") state.filesTabOpen = true;
       if (tab === "artifacts") state.artifactsTabOpen = true;
+      if (tab === "terminal") state.terminalTabOpen = true;
       continue;
     }
     if ("code" in tab) { tab.toggled = new Set(saved?.expanded[rightTabKey(tab)] ?? []); state.codeTabs.push(tab); }
@@ -185,6 +187,7 @@ export type RightTab =
   | "experiments"
   | "files"
   | "artifacts"
+  | "terminal"
   | ExpViewDef
   | FileViewDef
   | PlanViewDef
@@ -220,6 +223,7 @@ export interface RightPaneSessionState {
   experimentsTabOpen: boolean;
   filesTabOpen: boolean;
   artifactsTabOpen: boolean;
+  terminalTabOpen: boolean;
   expTabs: ExpViewDef[];
   fileTabs: FileViewDef[];
   planTabs: PlanViewDef[];
@@ -240,7 +244,7 @@ export interface RightPaneSessionState {
 
 export function initialRightPaneSessionState(
   sessionId?: string,
-  openDemoOverview = false,
+  firstDemoOpen = false,
 ): RightPaneSessionState {
   const initial: RightPaneSessionState = {
     rightTab: "experiments",
@@ -248,6 +252,7 @@ export function initialRightPaneSessionState(
     experimentsTabOpen: false,
     filesTabOpen: false,
     artifactsTabOpen: false,
+    terminalTabOpen: false,
     expTabs: [],
     fileTabs: [],
     planTabs: [],
@@ -263,21 +268,15 @@ export function initialRightPaneSessionState(
     panelMax: false,
     treeViewport: null,
   };
-  if (sessionId === DEMO_MAIN_SESSION_ID && openDemoOverview) {
-    const demoOverviewTab: FileViewDef = {
-      path: DEMO_OVERVIEW_ARTIFACT,
-      source: "artifacts",
-    };
-    // First demo open leads with the experiments tab so the idle follow-ups
-    // are visible next to the prefilled prompt that runs one of them.
+  if (sessionId === DEMO_MAIN_SESSION_ID && firstDemoOpen) {
+    // First demo open shows only the experiments tab so the idle follow-ups
+    // sit next to the prefilled prompt that runs one of them.
     const experimentsTab: RightTab = "experiments";
     return {
       ...initial,
       rightTab: experimentsTab,
-      tabHistory: [demoOverviewTab, experimentsTab],
+      tabHistory: [experimentsTab],
       experimentsTabOpen: true,
-      fileTabs: [demoOverviewTab],
-      contentTabOrder: [rightTabKey(demoOverviewTab)],
       panelOpen: true,
     };
   }
@@ -313,8 +312,8 @@ export function initialRightPaneSessionState(
   return initial;
 }
 
-export function defaultTaskWorkspace(sessionId: string | undefined, openDemoOverview: boolean): TaskWorkspace | undefined {
-  const state = initialRightPaneSessionState(sessionId, openDemoOverview);
+export function defaultTaskWorkspace(sessionId: string | undefined, firstDemoOpen: boolean): TaskWorkspace | undefined {
+  const state = initialRightPaneSessionState(sessionId, firstDemoOpen);
   return state.panelOpen ? rememberWorkspace(state, {}, {}) : undefined;
 }
 
@@ -333,6 +332,7 @@ export function applyPane(state: RightPaneSessionState, pane: Pane | undefined):
   if (typeof tab === "string") {
     if (tab === "files") next.filesTabOpen = true;
     else if (tab === "artifacts") next.artifactsTabOpen = true;
+    else if (tab === "terminal") next.terminalTabOpen = true;
     else next.experimentsTabOpen = true;
   } else {
     if ("path" in tab) next.fileTabs = update(state.fileTabs, tab);

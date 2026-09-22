@@ -28,6 +28,7 @@ import {
   type TaskWorkspace,
 } from "./workspaceState";
 import { getRememberedGlobalWorkspace, globalWorkspaceWriter } from "./workspacePersistence";
+import { PANEL_MIN_WIDTH, initialPanelWidth, panelMaxWidth } from "./panelLayout";
 import {
   type ExpViewDef,
   sameExpTab,
@@ -82,7 +83,6 @@ import {
   cancelRun,
   DEMO_MAIN_SESSION_ID,
   DEMO_OVERVIEW_ARTIFACT,
-  DEMO_RUN_EXPERIMENT_PROMPT,
   captureUiEvent,
   isDemoProjectId,
   type FirstAction,
@@ -96,6 +96,8 @@ import {
   type UiState,
 } from "./api";
 import { WorkspaceTools } from "./components/WorkspaceTools";
+import { ProjectTerminal } from "./components/ProjectTerminal";
+import { isWindowsDrivePath } from "./markdownTarget";
 import { ChatPanel, findPartById, spawnRowTitle } from "./components/ChatPanel";
 import { usePopover } from "./components/ModelPicker";
 import { SubagentTab } from "./components/SubagentTab";
@@ -161,7 +163,7 @@ function parseFilePath(
   }
   // A home-anchored path (`~` or `~/…`) is disk, never a repo file — the backend
   // expands the `~`, so hand it over verbatim.
-  if (path === "~" || path.startsWith("~/")) return { path, source: "abs" };
+  if (path === "~" || path.startsWith("~/") || isWindowsDrivePath(path)) return { path, source: "abs" };
   // `path` relative to `base` (`""` when equal), else null. macOS symlinks
   // `/tmp`→`/private/tmp` and `/var`→`/private/var`, so an agent-inlined path
   // and the stored dir can differ only by that prefix — strip it on both sides.
@@ -221,31 +223,13 @@ function fileBranchLabel(tab: FileViewDef, baselineBranch?: string): string | un
 
 type ExperimentsView = "tree" | "table";
 
-/** Floating panel sizing: keep both the panel and the chat column usable. */
-const PANEL_MIN_WIDTH = 360;
 const PANEL_MARGIN = 10;
 const WORKSPACE_CARD_MIN_WIDTH = 1448; // 1420px content plus the body’s 14px gutters.
-// Space the rest of the layout needs beside the panel: the 272px rail, the
-// chat column's minimum, and the gutters/margins between the three columns
-// (app-body padding 14×2, rail inner margin 14, end-pane inner margin 14).
-const RAIL_WIDTH = 272;
-const CHAT_MIN_SPACE = 380;
-const LAYOUT_CHROME = RAIL_WIDTH + 14 * 4;
 // Once a drag pushes the panel past its usable max by this much, it snaps to
 // fullscreen — a bit of resistance you have to overcome deliberately.
 const FULLSCREEN_SNAP_SLOP = 80;
 // Inward drag needed before snapping back to the last non-fullscreen width.
 const FULLSCREEN_RESTORE_DRAG = 48;
-
-/** The widest the floating panel can be while leaving the rail + chat usable. */
-function panelMaxWidth(): number {
-  return Math.max(PANEL_MIN_WIDTH, window.innerWidth - LAYOUT_CHROME - CHAT_MIN_SPACE);
-}
-
-function initialPanelWidth(): number {
-  const max = panelMaxWidth();
-  return Math.max(PANEL_MIN_WIDTH, Math.min(760, max, Math.round(window.innerWidth * 0.4)));
-}
 
 function upsert<T extends { id: string }>(list: T[], item: T): T[] {
   const i = list.findIndex((x) => x.id === item.id);
@@ -397,6 +381,9 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const [experimentsTabOpen, setExperimentsTabOpen] = useState(false);
   const [filesTabOpen, setFilesTabOpen] = useState(false);
   const [artifactsTabOpen, setArtifactsTabOpen] = useState(false);
+  const [terminalTabOpen, setTerminalTabOpen] = useState(false);
+  // Which checkout has a live shell; a restored-but-unselected tab spawns nothing until selected.
+  const [terminalStartedFor, setTerminalStartedFor] = useState<string | null>(null);
   const [expTabs, setExpTabs] = useState<ExpViewDef[]>([]);
   const [fileTabs, setFileTabs] = useState<FileViewDef[]>([]);
   const fileScrollPositionsRef = useRef(new Map<string, FileScrollPosition>());
@@ -597,6 +584,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     experimentsTabOpen,
     filesTabOpen,
     artifactsTabOpen,
+    terminalTabOpen,
     expTabs,
     fileTabs,
     planTabs,
@@ -611,7 +599,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     panelOpen,
     panelMax,
     treeViewport,
-  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, expTabs, fileTabs, planTabs, subagentTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
+  }), [rightTab, tabHistory, experimentsTabOpen, filesTabOpen, artifactsTabOpen, terminalTabOpen, expTabs, fileTabs, planTabs, subagentTabs, codeTabs, contentTabOrder, previewTab, filesView, filesToggled, selectedRunId, scope, panelOpen, panelMax, treeViewport]);
   currentRightPaneStateRef.current = rightPaneState;
   const getFileScroll = useCallback(() => Object.fromEntries(fileScrollPositionsRef.current), []);
   const scrollSaveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -626,6 +614,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     setExperimentsTabOpen(state.experimentsTabOpen);
     setFilesTabOpen(state.filesTabOpen);
     setArtifactsTabOpen(state.artifactsTabOpen);
+    setTerminalTabOpen(state.terminalTabOpen);
     setExpTabs(state.expTabs);
     setFileTabs(state.fileTabs);
     setPlanTabs((current) => current === state.planTabs ? current : state.planTabs.map((tab) => ({ ...tab, plan: current.find((item) => item.sessionId === tab.sessionId && item.promptId === tab.promptId)?.plan ?? "" })));
@@ -651,7 +640,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [setContentTabOrder, setPreviewTab]);
   const { ready: workspaceReady, loaded: workspaceLoaded, error: workspaceError, retry: retryWorkspace, capture: captureWorkspace, workspace: workspaceRef } = useProjectWorkspace({
     projectId: uiState && sessions !== null && (destination?.kind !== "task" || !activeSessionId || sessions.includes(activeSessionId)) ? projectId : null, taskKey: activeSessionId ?? "new", location: location.href, pane,
-    isTask: destination?.kind === "task", demoOverview: uiState?.tourCompleted === false, state: rightPaneState,
+    isTask: destination?.kind === "task", firstDemoOpen: uiState?.tourCompleted === false, state: rightPaneState,
     apply: applyWorkspace, getScroll: getFileScroll,
     sourceModes: sourceModesRef.current, revision: metadataRevision,
   });
@@ -697,6 +686,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [location.href, uiState, workspaceReady, railOpen, panelWidth, view]);
   const onboarded = uiState?.onboardingCompleted ?? false;
   const [demoWelcomeOpen, setDemoWelcomeOpen] = useState(false);
+  const [demoRunningRunId, setDemoRunningRunId] = useState<string | null>(null);
+  const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const openDemoWelcome = useCallback(() => setDemoWelcomeOpen(true), []);
   const closeDemoWelcome = useCallback(async (choice: "explore_demo" | "create_project" | "dismiss") => {
     const firstClose = tourCompletedRef.current === false;
@@ -704,6 +695,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     if (firstClose) captureUiEvent({ name: "demo_welcome_choice", choice });
     setUiState((current) => current && { ...current, tourCompleted: saved.tourCompleted });
     setDemoWelcomeOpen(false);
+    if (choice === "explore_demo") setComposerFocusNonce((n) => n + 1);
   }, []);
   const createProjectFromDemoWelcome = useCallback(async () => {
     await closeDemoWelcome("create_project");
@@ -841,6 +833,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         }
         runsBaselineReadyRef.current = true;
         setRunDataReady(true);
+        if (isDemoProjectId(baselineProjectId)) {
+          setDemoRunningRunId((current) =>
+            loadedRuns.some((run) => run.id === current && run.status === "running")
+              ? current
+              : loadedRuns.find((run) => run.status === "running")?.id ?? null,
+          );
+        }
         if (shouldAutoOpen) openExperimentsTab(true);
       })
       .catch(() => {
@@ -867,6 +866,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     selectRightTab("artifacts");
   }, [selectRightTab]);
 
+  const openTerminalTab = useCallback(() => {
+    setTerminalTabOpen(true);
+    selectRightTab("terminal");
+  }, [selectRightTab]);
+  const terminalKey = activeSessionId ?? (projectId ? `project:${projectId}` : null);
+  useEffect(() => {
+    if (!panelOpen) setTerminalStartedFor(null);
+    else if (rightTab === "terminal") setTerminalStartedFor(terminalKey);
+    else setTerminalStartedFor((current) => (current === terminalKey ? current : null));
+  }, [panelOpen, rightTab, terminalKey]);
+
   // Live store updates.
   useOrxEvents({
     onReconnect: () => {
@@ -887,6 +897,12 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
       if (previous && previous.updatedAt > run.updatedAt) return;
       observedRunsRef.current.set(run.id, run);
       liveRunIdsRef.current.add(run.id);
+      if (isDemoProjectId(run.projectId)) {
+        setDemoRunningRunId((current) => {
+          if (run.status === "running") return current ?? run.id;
+          return current === run.id ? null : current;
+        });
+      }
       if (run.status !== "running" || previous?.status === "running") return;
       const baselineRun = baselineRunsRef.current.get(run.id);
       const newSinceBaseline =
@@ -1306,9 +1322,13 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   }, [selectRightTab]);
 
   const closeHomeTab = useCallback(
-    (tab: "experiments" | "files" | "artifacts") => {
+    (tab: "experiments" | "files" | "artifacts" | "terminal") => {
       if (tab === "experiments") setExperimentsTabOpen(false);
       else if (tab === "files") setFilesTabOpen(false);
+      else if (tab === "terminal") {
+        setTerminalTabOpen(false);
+        setTerminalStartedFor(null);
+      }
       else setArtifactsTabOpen(false);
       forgetRightTab(tab, rightTab === tab);
     },
@@ -1586,13 +1606,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             experimentName={experimentName}
             onOpenPlan={openPlanTab}
             onOpenSubagent={openSubagentTab}
-            composerPrefill={
-              activeProject &&
-                isDemoProjectId(activeProject.id) &&
-                uiState?.tourCompleted === false
-                ? DEMO_RUN_EXPERIMENT_PROMPT
-                : null
-            }
+            composerFocusNonce={composerFocusNonce}
+            demoRunningRunId={demoRunningRunId}
             runtime={runtime}
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
@@ -1624,13 +1639,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             runs={runs}
             onOpenExperiment={(id, runId) => openExperimentTab(id, "overview", "preview", runId)}
             rightOffset={panelOpen ? panelWidth + 28 : undefined}
-            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments") ? rightTab : null}
+            activeView={panelOpen && (rightTab === "files" || rightTab === "artifacts" || rightTab === "experiments" || rightTab === "terminal") ? rightTab : null}
             projectId={activeProject.id}
             onCompute={() => selectMainView("compute")}
             sessionId={activeSessionId}
             busy={sessionsQuery.data?.some((session) => session.id === activeSessionId && session.busy) ?? false}
             onChanges={() => { setFilesView("changes"); openWorktreeTab(); }}
             onFiles={() => { setFilesView("files"); openWorktreeTab(); }}
+            onTerminal={openTerminalTab}
             onArtifacts={openArtifactsTab}
             onExperiments={() => openExperimentsTab()}
           />
@@ -1656,6 +1672,15 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     icon={<FolderOpen size={12} className="shrink-0" />}
                     onSelect={() => selectRightTab("files")}
                     onClose={() => closeHomeTab("files")}
+                  />
+                )}
+                {terminalTabOpen && (
+                  <ClosableTab
+                    active={rightTab === "terminal"}
+                    label={m.workspace_terminal()}
+                    icon={<Terminal size={12} className="shrink-0" />}
+                    onSelect={() => selectRightTab("terminal")}
+                    onClose={() => closeHomeTab("terminal")}
                   />
                 )}
                 {artifactsTabOpen && (
@@ -1698,7 +1723,8 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                 </IconButton>
               </div>
             </div>
-            {!workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
+            {/* The terminal body is the standalone TabBody after this chain. */}
+            {rightTab === "terminal" && terminalTabOpen ? null : !workspaceReady || ((pane?.kind === "experiment" || pane?.kind === "code") && !experimentDataReady) || (pane?.kind === "experiment" && pane.runId && !runDataReady) ? (
               <TabBody><Spinner /></TabBody>
             ) : (expTab && (!tabExperiment || (selectedRunId && !runs.some((run) => run.id === selectedRunId && run.experimentId === expTab.id))))
               || (requestedCodeTab && !codeExperiment)
@@ -1962,6 +1988,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
               </TabBody>
             ) : subagentTab ? (
               <SubagentTab
+                projectId={projectId}
                 // Remount per spawn part so the seed + subscription reset cleanly.
                 key={subagentTab.spawnPartId}
                 sessionId={subagentTab.sessionId}
@@ -2046,6 +2073,17 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
                     }
                   />
                 )}
+              </TabBody>
+            )}
+            {/* Hidden rather than unmounted so the shell survives tab switches within the panel. */}
+            {terminalTabOpen && terminalStartedFor !== null && terminalStartedFor === terminalKey && activeProject && (
+              <TabBody className={rightTab === "terminal" ? undefined : "hidden"}>
+                <ProjectTerminal
+                  key={terminalKey}
+                  projectId={activeProject.id}
+                  sessionId={activeSessionId}
+                  active={rightTab === "terminal"}
+                />
               </TabBody>
             )}
           </aside>

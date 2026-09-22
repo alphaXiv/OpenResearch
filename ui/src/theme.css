@@ -43,6 +43,7 @@
   --color-skill-blue-subtle: var(--skill-blue-subtle);
   --color-skill-blue-slash: var(--skill-blue-slash);
   --color-terminal: var(--term-bg);
+  --color-terminal-app: var(--term-app-bg);
   --color-hover-faint: color-mix(in oklab, var(--text) 3%, transparent);
   --color-divider-faint: color-mix(in oklab, var(--text) 6%, transparent);
   --color-divider-subtle: color-mix(in oklab, var(--text) 7%, transparent);
@@ -60,6 +61,7 @@
   --color-danger-hover: color-mix(in oklab, var(--accent-red) 8%, transparent);
   --color-danger-active: color-mix(in oklab, var(--accent-red) 14%, transparent);
   --color-plan-caret: color-mix(in oklab, var(--base) 35%, var(--text));
+  --color-image-backdrop: rgb(29 27 26 / 85%);
   --color-modal-backdrop: rgb(29 27 26 / 42%);
   --color-modal-backdrop-light: rgb(29 27 26 / 40%);
   --color-diff-selection: color-mix(in oklab, var(--surface) 76%, var(--primary));
@@ -157,6 +159,27 @@
   --term-bg: #1a1a1a;
   --term-foreground: #e6e1e0;
   --term-selection: #2c3441;
+  /* Terminals that follow the app theme (settings sign-in) instead of staying dark. */
+  --term-app-bg: #fdfbfb;
+  --term-app-foreground: #1d1b1a;
+  --term-app-selection: #e9e2d8;
+  /* Light-theme ANSI palette; the dark theme keeps xterm's defaults. */
+  --term-app-ansi-black: #1d1b1a;
+  --term-app-ansi-red: #c0392b;
+  --term-app-ansi-green: #3d8b37;
+  --term-app-ansi-yellow: #b26a00;
+  --term-app-ansi-blue: #2a6fcb;
+  --term-app-ansi-magenta: #8e44ad;
+  --term-app-ansi-cyan: #1a8a7a;
+  --term-app-ansi-white: #8f8a85;
+  --term-app-ansi-bright-black: #6b6663;
+  --term-app-ansi-bright-red: #d94654;
+  --term-app-ansi-bright-green: #5eb64c;
+  --term-app-ansi-bright-yellow: #da9100;
+  --term-app-ansi-bright-blue: #3a8dff;
+  --term-app-ansi-bright-magenta: #9c5cff;
+  --term-app-ansi-bright-cyan: #209a84;
+  --term-app-ansi-bright-white: #1d1b1a;
   --tool-shimmer: color-mix(in srgb, var(--text) 58%, var(--subtext));
   --editor-selection: color-mix(in oklab, var(--primary) 22%, transparent);
   /* Shared reading width for chat, markdown, and plan surfaces. */
@@ -211,6 +234,10 @@
 
   --dots-muted: #2a2523;
   --dots-strong: #555555;
+
+  --term-app-bg: #141110;
+  --term-app-foreground: #e6e1e0;
+  --term-app-selection: #2c3441;
 
   --syntax-comment: #7f848e;
   --syntax-text: #abb2bf;

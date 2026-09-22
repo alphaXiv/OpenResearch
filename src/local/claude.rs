@@ -527,6 +527,7 @@ async fn spawn_client(spec: &SpawnSpec, auth_generation: u64) -> Result<Arc<Clau
             let token = spec.chat.mint_gate_token(
                 &spec.session_id,
                 spec.config.permission_mode == Some(PermissionMode::Plan),
+                spec.config.permission_mode == Some(PermissionMode::Bypass),
             );
             match write_mcp_config(&spec.repo, port, &spec.session_id, &token) {
                 Ok(path) => {

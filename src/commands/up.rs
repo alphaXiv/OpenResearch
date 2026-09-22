@@ -45,6 +45,8 @@ use crate::updates;
 use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 use crate::{browser, UpArgs};
 
+mod harness_setup;
+
 pub async fn run(args: UpArgs) -> Result<()> {
     let port = args.port;
     let persistent_host = args.remote_host;
@@ -112,6 +114,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
         project_lifecycle: Arc::new(ProjectLifecycle::default()),
         project_creation_lock: Arc::new(tokio::sync::Mutex::new(())),
         publication_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        harness_fill_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_move_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         data_dir_gate: Arc::new(tokio::sync::Mutex::new(())),
         remote_sessions: crate::commands::up_remote::RemoteSessionManager::new(),
@@ -146,14 +149,24 @@ pub async fn run(args: UpArgs) -> Result<()> {
         });
     }
 
-    spawn_agent_preflight();
+    spawn_agent_preflight(state.clone());
+    // A fresh install's demo worktree takes ~15 sequential git spawns — build
+    // it while the onboarding screen is up instead of inside the confirm click.
+    // On Windows those spawns run at idle priority (see `demo::prewarm`) so
+    // they only take cores the catalog fill's probes leave free. The data-dir
+    // gate keeps it from racing a mid-flight directory move.
+    if !persistent_host {
+        let move_in_progress = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::task::spawn_blocking(move || local::demo::prewarm(move_in_progress, gate));
+    }
     // Deliver explicitly registered run wake-ups once their chat becomes idle.
     tokio::spawn(local::chat::watch_runs(
         state.chat.clone(),
         state.data_dir_move_in_progress.clone(),
         state.data_dir_gate.clone(),
     ));
-    spawn_claude_auth_monitor(state.chat.clone(), claude.clone(), state.harnesses.clone());
+    spawn_claude_auth_monitor(state.chat.clone(), claude.clone());
     spawn_background_tasks(remote_auth.is_none());
     let live_events = state.chat.clone();
     local::overleaf_live::set_event_sink(Box::new(move |name, data| {
@@ -314,6 +327,9 @@ struct AppState {
     project_lifecycle: Arc<ProjectLifecycle>,
     project_creation_lock: Arc<tokio::sync::Mutex<()>>,
     publication_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Single-flight guard for the background catalog fill: without it every
+    /// expired read would start its own full detection sweep.
+    harness_fill_in_flight: Arc<std::sync::atomic::AtomicBool>,
     /// Set while a data-dir move is running. New chat turns and run launches
     /// check it and refuse (409) so nothing starts writing the store mid-move —
     /// closing the window between the move's in-flight check and its completion.
@@ -538,6 +554,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
                 .delete(delete_artifact),
         )
         .route("/api/projects/{id}/files/file", get(serve_artifact))
+        .route("/api/projects/{id}/terminal", get(project_terminal))
         .route("/api/events", get(events))
         .route("/api/settings/hf", get(hf_settings).post(set_hf_token))
         .route(
@@ -590,7 +607,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/projects/{id}/ui-state",
             get(project_ui_state).post(set_project_ui_state),
         )
-        .route("/api/settings/ssh", get(ssh_settings))
+        .route(
+            "/api/settings/ssh",
+            get(ssh_settings).post(save_ssh_settings),
+        )
+        .route("/api/settings/ssh/default", post(save_ssh_default))
         .route("/api/settings/ssh/master", get(ssh_master_status))
         .route("/api/settings/ssh/preflight", post(ssh_preflight))
         .route("/api/settings/ssh/connect", get(ssh_connect))
@@ -623,6 +644,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/settings/local", get(local_machine_settings))
         .route("/api/settings/openresearch", get(openresearch_settings))
         .route("/api/settings/openresearch/login", get(openresearch_login))
+        .route("/api/settings/commands/run", get(run_settings_command))
         .route(
             "/api/settings/openresearch/ssh-key",
             get(openresearch_ssh_key),
@@ -632,6 +654,11 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/harnesses/setup/commands",
+            get(harness_setup::commands),
+        )
+        .route("/api/harnesses/setup", get(harness_setup::connect))
         .route(
             "/api/local-models",
             get(list_local_models).post(connect_local_model),
@@ -757,6 +784,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/ssh/connect"
             | "/api/settings/openresearch/ssh-key"
             | "/api/settings/openresearch/login"
+            | "/api/settings/commands/run"
+            | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
         || (path.starts_with("/api/projects/")
             && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
@@ -1918,6 +1947,9 @@ struct CreateRunReq {
     backend: Option<String>,
     flavor: Option<String>,
     host: Option<String>,
+    container: Option<String>,
+    #[serde(default)]
+    no_container: bool,
     manifest: Option<String>,
     image: Option<String>,
     timeout: Option<String>,
@@ -1995,6 +2027,8 @@ pub(crate) async fn submit_run_via_up(
         backend: args.backend.clone(),
         flavor: args.flavor.clone(),
         host: args.host.clone(),
+        container: args.container.clone(),
+        no_container: args.no_container,
         manifest: args.manifest.clone(),
         image: args.image.clone(),
         timeout: args.timeout.clone(),
@@ -2059,6 +2093,8 @@ async fn create_run(State(state): State<AppState>, Json(req): Json<CreateRunReq>
         flavor,
         org: req.org,
         host: req.host,
+        container: req.container,
+        no_container: req.no_container,
         manifest: req.manifest,
         image: req.image,
         timeout: req.timeout,
@@ -2361,7 +2397,8 @@ struct StarterPromptsQuery {
 
 /// Four starter prompts for the empty chat, written by a model that has read
 /// the project (paper, README, code). Slow on a cache miss — one headless
-/// model call — so the UI shows a placeholder while it waits.
+/// model call — so the UI shows a placeholder while it waits. A blank project
+/// is flagged instead so the UI shows its pre-written prompts.
 async fn project_starter_prompts(
     Path(id): Path<String>,
     Query(q): Query<StarterPromptsQuery>,
@@ -2383,23 +2420,24 @@ async fn project_starter_prompts(
         .filter(|h| local::harness::is_chat_harness(h));
     // Past "getting started" or no chat harness named: nothing to offer
     // (empty), as opposed to a harness that could not answer (null).
-    let prompts = match harness {
-        Some(harness) if experiment_count == 0 => {
-            let locale = q.locale.as_deref().unwrap_or("en");
-            let agent = local::starter::Agent {
-                harness: harness.to_string(),
-                model: q
-                    .model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|m| !m.is_empty())
-                    .map(String::from),
-            };
-            local::starter::prompts(&project, &agent, locale).await
-        }
-        _ => Some(Vec::new()),
+    let Some(harness) = harness.filter(|_| experiment_count == 0) else {
+        return Ok(Json(json!({ "prompts": [], "blank": false })));
     };
-    Ok(Json(json!({ "prompts": prompts })))
+    let locale = q.locale.as_deref().unwrap_or("en");
+    let agent = local::starter::Agent {
+        harness: harness.to_string(),
+        model: q
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(String::from),
+    };
+    let (prompts, blank) = match local::starter::prompts(&project, &agent, locale).await {
+        local::starter::Starter::Blank => (Some(Vec::new()), true),
+        local::starter::Starter::Generated(prompts) => (prompts, false),
+    };
+    Ok(Json(json!({ "prompts": prompts, "blank": blank })))
 }
 
 /// Live uncommitted changes in the project's clone (the agent's working
@@ -4282,35 +4320,57 @@ fn spawn_background_tasks(check_updates: bool) {
     });
 }
 
-/// Startup summary of detected coding agents. Never blocks.
-fn spawn_agent_preflight() {
-    tokio::spawn(async {
-        let harnesses = local::harness::detect_harnesses().await;
-        let line: Vec<String> = harnesses
-            .iter()
+/// Startup summary of detected coding agents. Never blocks. It goes through
+/// the same locked cache path as `/api/harnesses`, so the dashboard's first
+/// call serves the preflight result instead of launching a second sweep.
+fn spawn_agent_preflight(state: AppState) {
+    tokio::spawn(async move {
+        let payload = harnesses_payload(&state, &HarnessQuery::default()).await;
+        let line: Vec<String> = payload["harnesses"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .map(|h| {
-                if h.agent_ready {
-                    match &h.account {
-                        Some(acct) => format!("{} ✓ ({acct})", h.name),
-                        None => format!("{} ✓", h.name),
+                let name = h["name"].as_str().unwrap_or("agent");
+                if h["agentReady"].as_bool() == Some(true) {
+                    match h["account"].as_str() {
+                        Some(acct) => format!("{name} ✓ ({acct})"),
+                        None => format!("{name} ✓"),
                     }
-                } else if h.install_broken {
-                    format!("{} — installed but failed to run", h.name)
-                } else if h.installed {
+                } else if h["installBroken"].as_bool() == Some(true) {
+                    format!("{name} — installed but failed to run")
+                } else if h["catalogPending"].as_bool() == Some(true) {
+                    format!("{name} — checking…")
+                } else if h["installed"].as_bool() == Some(true) {
                     format!(
-                        "{} — {}",
-                        h.name,
-                        h.agent_note.as_deref().unwrap_or("not ready")
+                        "{name} — {}",
+                        h["agentNote"].as_str().unwrap_or("not ready")
                     )
                 } else {
-                    format!("{} — not installed", h.name)
+                    format!("{name} — not installed")
                 }
             })
             .collect();
         eprintln!("orx up: agents: {}", line.join(" · "));
-        if !harnesses.iter().any(|h| h.agent_ready) {
+        // The provisional pass can't vouch for readiness — this detached task
+        // waits out the catalog fill before deciding there's really nothing
+        // usable, so the warning reflects the settled answer.
+        let mut settled = payload;
+        for _ in 0..45 {
+            if !payload_is_provisional(&settled) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            settled = harnesses_payload(&state, &HarnessQuery::default()).await;
+        }
+        let any_ready = settled["harnesses"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|h| h["agentReady"].as_bool() == Some(true)));
+        // Still provisional after 45s means the fill never converged — stay
+        // silent rather than guess "nothing ready" from clamped entries.
+        if !payload_is_provisional(&settled) && !any_ready {
             eprintln!(
-                "orx up: warning: no coding agent ready — install Claude Code, Codex, OpenCode or Cursor, then connect a local model or sign in."
+                "orx up: warning: no coding agent ready — install Claude Code, Codex, OpenCode, Cursor or Antigravity, then connect a local model or sign in."
             );
         }
     });
@@ -4318,12 +4378,11 @@ fn spawn_agent_preflight() {
 
 /// A signed-out harness is the only state that needs polling. Normal turns and
 /// healthy idle sessions do no auth work; this loop merely notices a login the
-/// user completed separately and wakes the UI immediately.
-fn spawn_claude_auth_monitor(
-    chat: Arc<ChatHost>,
-    claude: Arc<local::claude::ClaudeHost>,
-    harnesses: Arc<tokio::sync::Mutex<Option<(std::time::Instant, Value)>>>,
-) {
+/// user completed separately and wakes the UI immediately. The cache is left
+/// alone: served payloads get the live auth snapshot overlaid on the way out,
+/// the ready-claude gate re-detects a promoted login, and a wholesale clear
+/// here used to discard in-flight catalog fills on every flap.
+fn spawn_claude_auth_monitor(chat: Arc<ChatHost>, claude: Arc<local::claude::ClaudeHost>) {
     tokio::spawn(async move {
         let mut delay = Duration::from_secs(5);
         let mut observed_generation = claude.auth_snapshot().generation;
@@ -4332,7 +4391,6 @@ fn spawn_claude_auth_monitor(
             let before = claude.auth_snapshot();
             if before.generation != observed_generation {
                 observed_generation = before.generation;
-                *harnesses.lock().await = None;
                 if claude.claim_auth_announcement(before.generation) {
                     chat.emit_event(
                         "harness.auth",
@@ -4355,7 +4413,6 @@ fn spawn_claude_auth_monitor(
             let after = claude.auth_snapshot();
             if after.generation != observed_generation {
                 observed_generation = after.generation;
-                *harnesses.lock().await = None;
                 if claude.claim_auth_announcement(after.generation) {
                     chat.emit_event(
                         "harness.auth",
@@ -5514,17 +5571,44 @@ pub(crate) async fn ssh_connect_to_target(
     ws.on_upgrade(move |socket| ssh_connect_socket(socket, host, req.backend, target))
 }
 
+const DEFAULT_PTY_SIZE: PtySize = PtySize {
+    rows: 24,
+    cols: 80,
+    pixel_width: 0,
+    pixel_height: 0,
+};
+
 fn start_pty(program: &str, args: Vec<String>) -> Result<PtySession> {
+    start_pty_with_env(program, args, &[], DEFAULT_PTY_SIZE, None)
+}
+
+fn start_pty_with_env(
+    program: &str,
+    args: Vec<String>,
+    env: &[(&str, std::ffi::OsString)],
+    size: PtySize,
+    cwd: Option<&std::path::Path>,
+) -> Result<PtySession> {
     use std::io::{Read as _, Write as _};
 
-    let pair = native_pty_system().openpty(PtySize {
-        rows: 24,
-        cols: 80,
-        pixel_width: 0,
-        pixel_height: 0,
-    })?;
+    let pair = native_pty_system().openpty(size)?;
     let mut command = CommandBuilder::new(program);
     command.args(args);
+    // App mode never puts the imported shell env into the process env, so a
+    // child sees launchd's PATH and config dirs unless they are exported here.
+    if let Some(path) = local::shell_env::search_path() {
+        command.env("PATH", path);
+    }
+    local::shell_env::export_to(|key, value| command.env(key, value));
+    command.env("TERM", "xterm-256color");
+    command.env_remove("NO_COLOR");
+    command.env_remove("FORCE_COLOR");
+    if let Some(cwd) = cwd {
+        command.cwd(cwd);
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
 
@@ -5627,7 +5711,8 @@ async fn ssh_connect_socket(
             return;
         }
     };
-    let Some(status) = relay_pty(&mut socket, session).await else {
+    let mut size = DEFAULT_PTY_SIZE;
+    let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
         return;
     };
 
@@ -5675,9 +5760,26 @@ async fn ssh_connect_socket(
     }
 }
 
+/// Record a client resize message in `size`; false when it is not one.
+fn apply_resize(size: &mut PtySize, text: &str) -> bool {
+    match serde_json::from_str(text) {
+        Ok(SshTerminalInput::Resize { cols, rows }) if cols > 0 && rows > 0 => {
+            size.rows = rows;
+            size.cols = cols;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Relay one PTY session; `size` follows the client's resizes so a session
+/// started afterwards can open at the terminal's real dimensions.
 async fn relay_pty(
     socket: &mut WebSocket,
     session: PtySession,
+    mut output: Option<&mut String>,
+    size: &mut PtySize,
+    completed: Option<fn(&str) -> bool>,
 ) -> Option<std::result::Result<portable_pty::ExitStatus, String>> {
     let PtySession {
         master,
@@ -5694,8 +5796,14 @@ async fn relay_pty(
         tokio::select! {
             event = events.recv() => match event {
                 Some(PtyEvent::Output(bytes)) => {
+                    if let Some(output) = output.as_deref_mut() { harness_setup::append_output(output, &bytes); }
                     if socket.send(Message::Binary(bytes.into())).await.is_err() {
                         return None;
+                    }
+                    if let (Some(completed), Some(output)) = (completed, output.as_deref()) {
+                        if completed(output) {
+                            return Some(Ok(portable_pty::ExitStatus::with_exit_code(0)));
+                        }
                     }
                 }
                 Some(PtyEvent::Eof) => {} // EOF alone is not the child's exit status.
@@ -5712,15 +5820,8 @@ async fn relay_pty(
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(SshTerminalInput::Resize { cols, rows }) = serde_json::from_str(&text) {
-                        if cols > 0 && rows > 0 {
-                            let _ = master.resize(PtySize {
-                                rows,
-                                cols,
-                                pixel_width: 0,
-                                pixel_height: 0,
-                            });
-                        }
+                    if apply_resize(size, &text) {
+                        let _ = master.resize(*size);
                     }
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => return None,
@@ -5735,6 +5836,9 @@ async fn relay_pty(
     {
         match event {
             PtyEvent::Output(bytes) => {
+                if let Some(output) = output.as_deref_mut() {
+                    harness_setup::append_output(output, &bytes);
+                }
                 if socket.send(Message::Binary(bytes.into())).await.is_err() {
                     return None;
                 }
@@ -5744,6 +5848,87 @@ async fn relay_pty(
     }
 
     Some(status)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectTerminalReq {
+    session_id: Option<String>,
+}
+
+async fn project_terminal(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Path(id): Path<String>,
+    Query(req): Query<ProjectTerminalReq>,
+) -> Response {
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
+    ws.on_upgrade(move |mut socket| async move {
+        let mut size = DEFAULT_PTY_SIZE;
+        let started = tokio::task::spawn_blocking(move || {
+            let root = project_terminal_root(&id, req.session_id.as_deref())?;
+            let (shell, args) = interactive_shell();
+            start_pty_with_env(&shell, args, &[], size, Some(&root))
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|result| result);
+        let session = match started {
+            Ok(session) => session,
+            Err(error) => {
+                send_terminal_error(&mut socket, error).await;
+                return;
+            }
+        };
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+            return;
+        };
+        match status {
+            Ok(status) => {
+                let message = json!({ "type": "exit", "code": status.exit_code() });
+                let _ = socket.send(Message::Text(message.to_string().into())).await;
+            }
+            Err(error) => send_terminal_error(&mut socket, anyhow!(error)).await,
+        }
+    })
+}
+
+/// The session worktree or, without a session, the project clone.
+fn project_terminal_root(project_id: &str, session_id: Option<&str>) -> Result<std::path::PathBuf> {
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(project_id)?
+        .ok_or_else(|| anyhow!("project not found"))?;
+    let session_id = session_id.map(str::trim).filter(|s| !s.is_empty());
+    let root = match session_id {
+        Some(session_id) => {
+            let session = store
+                .get_chat_session(session_id)?
+                .filter(|session| session.project_id == project.id)
+                .ok_or_else(|| anyhow!("chat session not found"))?;
+            session_checkout_root(&store, &project, &session.id)
+        }
+        None => resolve_checkout_root(&store, &project, None).map(|(root, _)| root),
+    };
+    root.map_err(|ApiError(_, message)| anyhow!(message))
+}
+
+/// The worktree the harness will create on its first turn, so a command run
+/// before any message acts on the same checkout the agent sees.
+fn session_checkout_root(
+    store: &Store,
+    project: &local::model::LocalProject,
+    session_id: &str,
+) -> std::result::Result<std::path::PathBuf, ApiError> {
+    match local::git::ensure_session_worktree(project, session_id) {
+        Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
+        Err(error) => {
+            eprintln!("orx up: session worktree unavailable, using the clone: {error}");
+            resolve_checkout_root(store, project, Some(session_id)).map(|(root, _)| root)
+        }
+    }
 }
 
 async fn openresearch_login(headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -5759,39 +5944,159 @@ async fn openresearch_terminal(
     ws: WebSocketUpgrade,
     args: Vec<String>,
 ) -> Response {
-    if !same_origin(&headers) {
-        return ApiError(
-            StatusCode::FORBIDDEN,
-            "Login terminal origin rejected".into(),
-        )
-        .into_response();
+    let program = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().into_owned())
+        .map_err(anyhow::Error::from);
+    command_terminal(&headers, ws, program, args, false).await
+}
+
+/// Commands the settings page may run, keyed by the exact note text. The
+/// loopback and origin guards are the security boundary (the session ends in
+/// the user's shell anyway); this list only keeps the button honest.
+const SETTINGS_COMMANDS: &[(&str, &[&str])] = &[
+    ("gh auth login", &["gh", "auth", "login"]),
+    ("hf auth login", &["hf", "auth", "login"]),
+    ("claude auth status", &["claude", "auth", "status"]),
+];
+
+fn settings_command(command: &str) -> Option<&'static [&'static str]> {
+    SETTINGS_COMMANDS
+        .iter()
+        .find(|(text, _)| *text == command)
+        .map(|(_, argv)| *argv)
+}
+
+#[derive(Deserialize)]
+struct RunSettingsCommandReq {
+    command: String,
+}
+
+async fn run_settings_command(
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+    Query(req): Query<RunSettingsCommandReq>,
+) -> Response {
+    // Before the allowlist reply, so a cross-origin page learns nothing.
+    if let Some(rejected) = reject_cross_origin(&headers) {
+        return rejected;
+    }
+    let Some(argv) = settings_command(req.command.trim()) else {
+        return bad_request("command is not runnable from settings").into_response();
+    };
+    let program = local::shell_env::find_on_path(argv[0])
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| anyhow!("{} is not installed", argv[0]));
+    let args = argv[1..].iter().map(|arg| arg.to_string()).collect();
+    command_terminal(&headers, ws, program, args, true).await
+}
+
+/// The user's interactive login shell, so follow-up commands see the PATH a
+/// fresh terminal would (an installer that just added `~/.local/bin`, say).
+fn interactive_shell() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+        (shell, Vec::new())
+    } else {
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        (shell, vec!["-i".to_string(), "-l".to_string()])
+    }
+}
+
+fn reject_cross_origin(headers: &HeaderMap) -> Option<Response> {
+    (!same_origin(headers))
+        .then(|| ApiError(StatusCode::FORBIDDEN, "Terminal origin rejected".into()).into_response())
+}
+
+/// Run `program` in a PTY relayed over the websocket. With `shell_after`, a
+/// command that ran is followed by the user's interactive shell in the same
+/// terminal, at the size the client last reported.
+async fn command_terminal(
+    headers: &HeaderMap,
+    ws: WebSocketUpgrade,
+    program: Result<String>,
+    args: Vec<String>,
+    shell_after: bool,
+) -> Response {
+    if let Some(rejected) = reject_cross_origin(headers) {
+        return rejected;
     }
     ws.on_upgrade(move |mut socket| async move {
+        let mut size = DEFAULT_PTY_SIZE;
+        let started = match program {
+            Ok(program) => spawn_pty(program, args, Vec::new(), size).await,
+            Err(error) => Err(error),
+        };
+        let session = match started {
+            Ok(session) => session,
+            Err(error) => {
+                send_terminal_error(&mut socket, error).await;
+                return;
+            }
+        };
+        let Some(status) = relay_pty(&mut socket, session, None, &mut size, None).await else {
+            return;
+        };
         let result = async {
-            let session = tokio::task::spawn_blocking(move || {
-                let exe = std::env::current_exe()?;
-                start_pty(&exe.to_string_lossy(), args)
-            })
-            .await??;
-            let Some(status) = relay_pty(&mut socket, session).await else {
-                return Ok::<_, anyhow::Error>(None);
-            };
             let status = status.map_err(|error| anyhow!(error))?;
             anyhow::ensure!(
                 status.success(),
                 "Command exited with code {}",
                 status.exit_code()
             );
-            Ok(Some(()))
+            Ok::<_, anyhow::Error>(())
         }
         .await;
         let message = match result {
-            Ok(Some(())) => json!({ "type": "complete" }),
-            Ok(None) => return,
+            Ok(()) => json!({ "type": "complete" }),
             Err(error) => json!({ "type": "error", "error": error.to_string() }),
         };
-        let _ = socket.send(Message::Text(message.to_string().into())).await;
+        if socket
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .is_err()
+            || !shell_after
+        {
+            return;
+        }
+        continue_in_shell(&mut socket, &mut size, Vec::new()).await;
     })
+}
+
+/// Hand the terminal to the user's interactive shell, with any env the command
+/// before it needed (OpenCode's isolated store), so follow-ups land in the
+/// same place.
+async fn continue_in_shell(
+    socket: &mut WebSocket,
+    size: &mut PtySize,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+) {
+    let (shell, args) = interactive_shell();
+    match spawn_pty(shell, args, env, *size).await {
+        Ok(session) => {
+            relay_pty(socket, session, None, size, None).await;
+        }
+        Err(error) => send_terminal_error(socket, error).await,
+    }
+}
+
+async fn spawn_pty(
+    program: String,
+    args: Vec<String>,
+    env: Vec<(&'static str, std::ffi::OsString)>,
+    size: PtySize,
+) -> Result<PtySession> {
+    tokio::task::spawn_blocking(move || start_pty_with_env(&program, args, &env, size, None))
+        .await?
+}
+
+async fn send_terminal_error(socket: &mut WebSocket, error: anyhow::Error) {
+    let _ = socket
+        .send(Message::Text(
+            json!({ "type": "error", "error": error.to_string() })
+                .to_string()
+                .into(),
+        ))
+        .await;
 }
 
 /// Concrete Host entries from `~/.ssh/config` (wildcard patterns skipped) —
@@ -5846,6 +6151,16 @@ fn list_ssh_hosts() -> Vec<Value> {
 async fn ssh_settings() -> ApiResult {
     tokio::task::spawn_blocking(|| {
         let mut hosts = list_ssh_hosts();
+        let settings = crate::config::ssh_settings()?;
+        for host in &mut hosts {
+            let options = host
+                .get("host")
+                .and_then(Value::as_str)
+                .and_then(|host| settings.hosts.get(host))
+                .cloned()
+                .unwrap_or_default();
+            host["container"] = json!(options.container);
+        }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
         let tests: HashMap<String, SshHostTest> = Store::open()
@@ -5867,10 +6182,50 @@ async fn ssh_settings() -> ApiResult {
             };
             h["lastTest"] = json!(t);
         }
-        Ok(Json(json!({ "hosts": hosts })))
+        Ok(Json(
+            json!({ "hosts": hosts, "defaultHost": settings.default_host }),
+        ))
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("ssh task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SaveSshSettingsReq {
+    host: String,
+    container: Option<String>,
+}
+
+async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
+    let host = req.host.trim().to_string();
+    require_configured_ssh_host(&host)?;
+    let options = crate::config::SshHostSettings {
+        container: req.container,
+    };
+    crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
+    blocking_api(move || {
+        crate::config::set_ssh_host(host, options)?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+struct SaveSshDefaultReq {
+    host: Option<String>,
+}
+
+async fn save_ssh_default(Json(req): Json<SaveSshDefaultReq>) -> ApiResult {
+    let host = req.host.map(|host| host.trim().to_string());
+    if let Some(host) = &host {
+        require_configured_ssh_host(host)?;
+    }
+    blocking_api(move || {
+        crate::config::set_ssh_default(host)?;
+        Ok(Json(json!({"ok": true})))
+    })
+    .await
 }
 
 fn ssh_config_path() -> Result<std::path::PathBuf> {
@@ -5951,6 +6306,7 @@ async fn save_ssh_config(Json(req): Json<SaveSshConfigReq>) -> ApiResult {
 #[derive(Deserialize)]
 struct SshPreflightReq {
     host: String,
+    container: Option<String>,
 }
 
 async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
@@ -5958,8 +6314,14 @@ async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    let running =
-        crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?;
+    // A missing master is meaningful only on platforms that support multiplexing.
+    // Windows opens a new SSH connection for each command; reporting false here
+    // makes a successful preflight immediately look disconnected in the dashboard.
+    let running = if cfg!(unix) {
+        Some(crate::jobs::ssh::master_is_running(&crate::jobs::ssh::SshTarget::alias(host)).await?)
+    } else {
+        None
+    };
     Ok(Json(json!({ "running": running })))
 }
 
@@ -5969,7 +6331,27 @@ async fn ssh_preflight(Json(req): Json<SshPreflightReq>) -> ApiResult {
     if host.is_empty() {
         return Err(bad_request("host is required"));
     }
-    Ok(Json(json!(run_ssh_host_preflight(host).await)))
+    require_configured_ssh_host(&host)?;
+    if let Some(reference) = &req.container {
+        crate::jobs::ssh::validate_container_reference(reference).map_err(bad_request)?;
+    }
+    let test = run_ssh_host_preflight(host.clone()).await;
+    let container = if let Some(reference) = req.container {
+        let result = crate::jobs::ssh::resolve_container(
+            &crate::jobs::ssh::SshTarget::alias(&host),
+            &reference,
+        )
+        .await;
+        Some(
+            json!({"reference": reference, "ready": result.is_ok(), "error": result.err().map(|error| error.to_string())}),
+        )
+    } else {
+        None
+    };
+    let mut result =
+        serde_json::to_value(test).map_err(|error| ApiError::from(anyhow!("{error}")))?;
+    result["container"] = json!(container);
+    Ok(Json(result))
 }
 
 fn require_configured_ssh_host(host: &str) -> Result<(), ApiError> {
@@ -6621,7 +7003,11 @@ async fn remove_local_model(State(state): State<AppState>, Path(id): Path<String
 
 const HARNESS_CACHE_TTL: Duration = Duration::from_secs(60);
 
-#[derive(Deserialize)]
+/// Minimum age before a still-pending or promotion-blocked entry may re-arm a
+/// catalog fill — bounds how often a non-converging state can buy a sweep.
+const FILL_RETRY_FLOOR: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize, Default)]
 struct HarnessQuery {
     refresh: Option<u8>,
     retry: Option<u8>,
@@ -6642,6 +7028,19 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
     if entry_install_broken(claude) {
         return;
     }
+    // A provisional entry is never overlaid: the shared state would stamp an
+    // auth verdict (or a "sign in" note) the fill is about to settle, under a
+    // card that reads "checking" anyway.
+    if claude.get("catalogPending").and_then(Value::as_bool) == Some(true) {
+        return;
+    }
+    // The snapshot only carries a state, so its generic note would overwrite the
+    // credential-conflict diagnosis with "run `claude auth status`" — advice for
+    // a state the conflict already explains, and the repair the user needs.
+    let needs_config_repair = claude
+        .get("needsConfigRepair")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     claude["authState"] = json!(snapshot.state);
     if snapshot.state == local::harness::HarnessAuthState::Ready {
         return;
@@ -6654,6 +7053,9 @@ fn overlay_claude_auth(payload: &mut Value, snapshot: local::claude::AuthSnapsho
         object.remove("account");
         object.remove("org");
         object.remove("plan");
+    }
+    if needs_config_repair {
+        return;
     }
     claude["agentNote"] = json!(if snapshot.runtime_rejected {
         local::harness::claude::auth_recovery_note()
@@ -6702,16 +7104,11 @@ fn payload_has_ready_claude(payload: &Value) -> bool {
         == Some(true)
 }
 
-fn ready_claude_entry(payload: &Value) -> Option<Value> {
-    payload
-        .get("harnesses")?
-        .as_array()?
-        .iter()
-        .find(|h| {
-            h.get("id").and_then(Value::as_str) == Some("claude-code")
-                && h.get("agentReady").and_then(Value::as_bool) == Some(true)
-        })
-        .cloned()
+fn claude_entry_pending(payload: &Value) -> bool {
+    claude_entry(payload)
+        .and_then(|claude| claude.get("catalogPending"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn replace_claude_entry(payload: &mut Value, replacement: Value) {
@@ -6730,34 +7127,135 @@ async fn list_harnesses(
     State(state): State<AppState>,
     Query(q): Query<HarnessQuery>,
 ) -> Json<Value> {
+    Json(harnesses_payload(&state, &q).await)
+}
+
+/// The shared detection path behind `GET /api/harnesses` and the startup
+/// preflight: the snapshot pass runs under the cache lock, so whoever arrives
+/// first does the probing and everyone else in the TTL window reads the same
+/// entry — no duplicate sweep at boot. `refresh=1` and the background fill
+/// detect before taking the lock, so a slow probe never stalls a reader.
+///
+/// A plain request answers with the snapshot pass — install/auth/readiness,
+/// without the model-catalog children that made cold calls take seconds — and
+/// a background fill replaces the entry with the full catalog, then tells the
+/// dashboard to re-read it. `refresh=1` still runs the full probe inline: an
+/// explicit re-check wants the real answer, and the UI shows its own spinner.
+async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
+    // `retry` only escalates to a full detect when it actually cleared a
+    // runtime rejection — a bare retry is an ordinary cached read.
+    let retried = q.retry == Some(1) && state.claude.clear_runtime_rejection();
+    if q.refresh == Some(1) || retried {
+        // An explicit re-check detects outside the cache lock: a full sweep
+        // takes seconds and must not stall every ordinary read queued behind
+        // it. Last writer wins — concurrent refreshes may duplicate a sweep.
+        let probe_generation = state.claude.auth_snapshot().generation;
+        let harnesses = local::harness::detect_harnesses().await;
+        let (mut payload, announce) =
+            finish_harnesses_payload(state, harnesses, probe_generation, false).await;
+        let cached_at = std::time::Instant::now();
+        spawn_cursor_account_details(state, &mut payload, cached_at);
+        *state.harnesses.lock().await = Some((cached_at, payload.clone()));
+        emit_auth_announcement(state, announce);
+        return payload;
+    }
     let mut cache = state.harnesses.lock().await;
-    if q.retry == Some(1) && state.claude.clear_runtime_rejection() {
-        *cache = None;
-    }
-    let prior_ready_claude = cache
-        .as_ref()
-        .map(|(_, payload)| payload)
-        .and_then(ready_claude_entry);
-    if q.refresh != Some(1) {
-        if let Some((at, payload)) = cache.as_ref() {
-            if at.elapsed() < HARNESS_CACHE_TTL {
-                let snapshot = state.claude.auth_snapshot();
-                if snapshot.state != local::harness::HarnessAuthState::Ready
-                    || payload_has_ready_claude(payload)
-                {
-                    let mut payload = payload.clone();
-                    overlay_claude_auth(&mut payload, snapshot);
-                    return Json(payload);
-                }
-            }
+    if let Some((at, payload)) = cache.as_ref() {
+        let auth = state.claude.auth_snapshot();
+        // Stale-while-revalidate serves the last answer while a fill
+        // refreshes it — re-snapshotting on every TTL tick would flap
+        // every card back to "checking". A provisional entry also asks
+        // for a fill: the single-flight flag makes that idempotent, and
+        // it re-arms a fill that lost the `snapshot_at` race so a
+        // provisional payload can't sit unanswered for a whole TTL. The
+        // same covers a live-verified login promotion (shared auth says
+        // Ready but the payload's claude isn't).
+        let promotable = auth.state == local::harness::HarnessAuthState::Ready
+            && !payload_has_ready_claude(payload);
+        // Provisional/promotable re-arms carry a floor: a state that cannot
+        // converge (e.g. Ready auth over a broken install) must not buy a
+        // full sweep on every read.
+        let wants_fill = payload_is_provisional(payload) || promotable;
+        if at.elapsed() >= HARNESS_CACHE_TTL || (wants_fill && at.elapsed() >= FILL_RETRY_FLOOR) {
+            spawn_catalog_fill(state.clone(), *at, uuid::Uuid::new_v4());
         }
+        let mut out = payload.clone();
+        overlay_claude_auth(&mut out, auth);
+        return out;
     }
+    seed_harnesses_locked(state, &mut cache).await
+}
+
+/// The spawn-free snapshot → provisional cache → background fill sequence,
+/// shared by the first `/api/harnesses` request and the startup seed. The
+/// boot call starts the fill's heavyweight probes during the user's first
+/// page load instead of inside it — each spawn costs seconds on Windows, so
+/// where the clock starts is most of the difference. Caller holds the
+/// `harnesses` lock.
+async fn seed_harnesses_locked(
+    state: &AppState,
+    cache: &mut Option<(std::time::Instant, Value)>,
+) -> Value {
     let probe_generation = state.claude.auth_snapshot().generation;
-    let harnesses = local::harness::detect_harnesses().await;
+    let started = std::time::Instant::now();
+    let harnesses = local::harness::detect_harnesses_snapshot().await;
+    let installed = harnesses.iter().filter(|h| h.installed).count();
+    // The snapshot row and the fill it seeds share one fillId so a boot's two
+    // passes join on it.
+    let fill_id = uuid::Uuid::new_v4();
+    let snapshot_ms = started.elapsed().as_millis() as u64;
+    let (mut payload, _) = finish_harnesses_payload(state, harnesses, probe_generation, true).await;
+    let cached_at = std::time::Instant::now();
+    spawn_cursor_account_details(state, &mut payload, cached_at);
+    *cache = Some((cached_at, payload.clone()));
+    // Off the lock-held request path and off a runtime worker: settings
+    // load + outbox persist are sync IO on the same filesystems this pass
+    // exists to stop blocking on.
+    tokio::task::spawn_blocking(move || {
+        crate::telemetry::harness::capture_detect(
+            fill_id,
+            "snapshot",
+            snapshot_ms,
+            None,
+            installed,
+            0,
+            Vec::new(),
+        );
+    });
+    spawn_catalog_fill(state.clone(), cached_at, fill_id);
+    payload
+}
+
+/// The post-detection half of the harness answer: reconcile the result with
+/// the ClaudeHost's tracked auth state, then overlay and report. Shared by
+/// the snapshot and full passes, and by the background catalog fill.
+///
+/// `provisional` marks a snapshot answer. A snapshot's claude auth is still
+/// worth adopting when it is conclusive — a signed-out credential store, or
+/// the fallback probe's live verdict — so shared state does not lag what the
+/// file evidence already proved. Two outcomes are not conclusive: `Unknown`
+/// is a guess, and an oauth-method `Ready` skipped the minimum-version gate
+/// (the snapshot never ran `--version`), so both wait for the fill. The
+/// first-install telemetry capture is likewise restricted to completed
+/// answers.
+/// The returned `Option` is a claimed auth announcement: the caller emits it
+/// only after committing the payload, so a discarded pass never sends the
+/// dashboard on a `refresh=1` sweep for results nobody will see.
+async fn finish_harnesses_payload(
+    state: &AppState,
+    harnesses: Vec<local::harness::HarnessInfo>,
+    probe_generation: u64,
+    provisional: bool,
+) -> (Value, Option<local::claude::AuthSnapshot>) {
     if let Some(claude) = harnesses.iter().find(|h| h.id == "claude-code") {
-        state
-            .claude
-            .observe_auth_state(claude.auth_state, probe_generation);
+        let adoptable = claude.auth_state != local::harness::HarnessAuthState::Unknown
+            && !(claude.auth_state == local::harness::HarnessAuthState::Ready
+                && claude.auth_method == Some("oauth"));
+        if !provisional || adoptable {
+            state
+                .claude
+                .observe_auth_state(claude.auth_state, probe_generation);
+        }
     }
     let mut payload = json!({ "harnesses": harnesses });
     let mut snapshot = state.claude.auth_snapshot();
@@ -6769,12 +7267,15 @@ async fn list_harnesses(
         state.claude.defer_auth_verification(snapshot.generation);
         snapshot = state.claude.auth_snapshot();
     }
+    // The pending check keeps this off a snapshot's card: the in-flight fill
+    // answers definitively, so an inline re-probe would just repeat its work.
+    // (A snapshot claude can be Ready-but-not-ready here because `detect_one`
+    // clamps `agent_ready` on every provisional entry.)
     if snapshot.state == local::harness::HarnessAuthState::Ready
         && !payload_has_ready_claude(&payload)
+        && !claude_entry_pending(&payload)
     {
-        if let Some(prior) = prior_ready_claude {
-            replace_claude_entry(&mut payload, prior);
-        } else if let Some(retry) = local::harness::detect_harness("claude-code").await {
+        if let Some(retry) = local::harness::detect_harness("claude-code").await {
             state
                 .claude
                 .observe_auth_state(retry.auth_state, snapshot.generation);
@@ -6790,15 +7291,257 @@ async fn list_harnesses(
             snapshot = state.claude.auth_snapshot();
         }
     }
-    if state.claude.claim_auth_announcement(snapshot.generation) {
-        state.chat.emit_event(
-            "harness.auth",
-            json!({ "harness": "claude-code", "authState": snapshot.state }),
-        );
-    }
+    // A provisional pass must not announce: `harness.auth` makes the dashboard
+    // call `refreshHarnesses(true)`, an inline full sweep — the stall this
+    // whole design exists to remove — fired by the snapshot's own adoption.
+    // A real pass hands its auth snapshot back unclaimed; the caller claims at
+    // emit time, after the payload commits, so a pass that loses the cache
+    // race never burns a generation it can't announce.
+    let announce = (!provisional).then_some(snapshot);
     overlay_claude_auth(&mut payload, snapshot);
-    *cache = Some((std::time::Instant::now(), payload.clone()));
-    Json(payload)
+    if !provisional {
+        crate::telemetry::harness::capture_initial(&payload);
+    }
+    (payload, announce)
+}
+
+/// Emit `harness.auth` for a generation this pass is entitled to announce.
+/// The claim happens here — not in `finish_harnesses_payload` — so the
+/// generation is only consumed when the event actually goes out.
+fn emit_auth_announcement(state: &AppState, announce: Option<local::claude::AuthSnapshot>) {
+    if let Some(snap) = announce {
+        if state.claude.claim_auth_announcement(snap.generation) {
+            state.chat.emit_event(
+                "harness.auth",
+                json!({ "harness": "claude-code", "authState": snap.state }),
+            );
+        }
+    }
+}
+
+/// True while any entry still waits on the background catalog fill.
+fn payload_is_provisional(payload: &Value) -> bool {
+    payload["harnesses"].as_array().is_some_and(|all| {
+        all.iter()
+            .any(|h| h["catalogPending"].as_bool() == Some(true))
+    })
+}
+
+/// Cursor's account lookup is a second child process deferred off the
+/// detection answer; it patches the cache entry it was scheduled against.
+fn spawn_cursor_account_details(
+    state: &AppState,
+    payload: &mut Value,
+    cached_at: std::time::Instant,
+) {
+    // A provisional cursor entry keeps its lookup for the fill: spawning
+    // `<binPath> about` here would put a child process on the path that exists
+    // to avoid them — and the snapshot's binPath is only a first-candidate
+    // guess.
+    let cursor = payload["harnesses"].as_array_mut().and_then(|items| {
+        items.iter_mut().find(|h| {
+            h["id"] == "cursor"
+                && h["authenticated"] == true
+                && h["catalogPending"].as_bool() != Some(true)
+        })
+    });
+    if let Some(cursor) = cursor {
+        if let Some(bin) = cursor["binPath"].as_str().map(std::path::PathBuf::from) {
+            cursor["accountLoading"] = json!(true);
+            let cache = state.harnesses.clone();
+            tokio::spawn(async move {
+                let details = local::harness::cursor::account_details(&bin).await;
+                let mut cache = cache.lock().await;
+                let Some((at, payload)) = cache.as_mut() else {
+                    return;
+                };
+                // A newer detection owns its own account lookup.
+                if *at != cached_at {
+                    return;
+                }
+                let Some(cursor) = payload["harnesses"]
+                    .as_array_mut()
+                    .and_then(|items| items.iter_mut().find(|h| h["id"] == "cursor"))
+                else {
+                    return;
+                };
+                cursor["accountLoading"] = json!(false);
+                if let Some(details) = details {
+                    for (source, target) in [("userEmail", "account"), ("subscriptionTier", "plan")]
+                    {
+                        if let Some(value) =
+                            details[source].as_str().filter(|value| !value.is_empty())
+                        {
+                            cursor[target] = json!(value);
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Complete the catalog a snapshot answer deferred: the full sweep runs off
+/// the request path, replaces the cache entry it was scheduled against, and
+/// the `harness.catalog` event tells the dashboard to re-read it. `snapshot_at`
+/// guards the swap — a refresh or retry that landed in between owns the cache.
+/// One fill at a time: expired reads each ask for one, but a second sweep
+/// would only lose the `snapshot_at` race and throw its probes away.
+fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id: uuid::Uuid) {
+    if state
+        .harness_fill_in_flight
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let probe_timings = local::harness::ProbeTimingSink::default();
+    tokio::spawn(local::harness::probe_timing_scope(
+        probe_timings.clone(),
+        async move {
+            let _fill = FillGuard(state.harness_fill_in_flight.clone());
+            let probe_generation = state.claude.auth_snapshot().generation;
+            let started = std::time::Instant::now();
+            // Commit each harness as its probes land: the onboarding gate is
+            // per-entry (`agentReady && !catalogPending`), so a ready agent must
+            // not wait for the slowest sibling's catalog child. The batch swap at
+            // the end still applies the cross-entry reconciliation
+            // (`finish_harnesses_payload`) to the complete set.
+            let mut stream = std::pin::pin!(local::harness::detect_harnesses_each());
+            let mut ordered = Vec::new();
+            // `first_ready_ms` answers the churn question directly: how far into
+            // the fill did a usable agent actually publish.
+            let mut first_ready_ms = None;
+            while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
+                // A progressive claude entry settles shared auth *now*: reads
+                // overlay that state onto every non-pending entry, so a Ready
+                // probe left unobserved until fill end would be stamped back to
+                // Unknown on each answer — the stall this loop exists to remove.
+                if info.id == "claude-code" {
+                    state
+                        .claude
+                        .observe_auth_state(info.auth_state, probe_generation);
+                }
+                let mut published = false;
+                {
+                    let mut cache = state.harnesses.lock().await;
+                    // Same guard as the final swap: a refresh or retry that
+                    // landed in between owns the cache.
+                    if let Some((at, payload)) = cache.as_mut() {
+                        if *at == snapshot_at {
+                            if let Some(slot) =
+                                payload["harnesses"].as_array_mut().and_then(|all| {
+                                    all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                                })
+                            {
+                                *slot = json!(info);
+                                published = true;
+                            }
+                        }
+                    }
+                }
+                // A superseded fill publishes nothing and must not announce: the
+                // pass that owns the cache emits its own catalog events.
+                if !published {
+                    ordered.push((index, info));
+                    continue;
+                }
+                state.chat.emit_event("harness.catalog", json!({}));
+                // For claude, "ready" means the overlay won't stamp it back down
+                // — its committed `agentReady` only stands once shared auth is
+                // Ready (the observation above).
+                if first_ready_ms.is_none()
+                    && info.agent_ready
+                    && (info.id != "claude-code"
+                        || state.claude.auth_snapshot().state
+                            == local::harness::HarnessAuthState::Ready)
+                {
+                    first_ready_ms = Some(started.elapsed().as_millis() as u64);
+                }
+                ordered.push((index, info));
+            }
+            ordered.sort_by_key(|(index, _)| *index);
+            let harnesses: Vec<local::harness::HarnessInfo> =
+                ordered.into_iter().map(|(_, info)| info).collect();
+            // Finish before touching the cache: the Claude re-probe inside can
+            // cost a child process, and holding the lock across it stalls every
+            // reader the snapshot was meant to unblock.
+            let (mut payload, announce) =
+                finish_harnesses_payload(&state, harnesses, probe_generation, false).await;
+            // The reconciled payload is authoritative — overlay applied — so
+            // readiness is counted from it, not the raw probes.
+            let installed = payload["harnesses"]
+                .as_array()
+                .map(|all| all.iter().filter(|h| h["installed"] == true).count())
+                .unwrap_or(0);
+            let ready = payload["harnesses"]
+                .as_array()
+                .map(|all| {
+                    all.iter()
+                        .filter(|h| h["agentReady"] == true && h["catalogPending"] != true)
+                        .count()
+                })
+                .unwrap_or(0);
+            let committed = {
+                let mut cache = state.harnesses.lock().await;
+                // A refresh or retry that landed in between owns the cache. No
+                // event: clients holding a provisional payload already poll it at
+                // 1 Hz, and the discarded pass must not announce auth it never
+                // committed.
+                if !matches!(cache.as_ref(), Some((at, _)) if *at == snapshot_at) {
+                    false
+                } else {
+                    // Readiness can be *established* by the finish (a Ready
+                    // shared-auth retry that ran no stream probe) — count it, but
+                    // only once publication is confirmed: a superseded fill
+                    // reports its probe timings with no invented readiness mark.
+                    if first_ready_ms.is_none() && ready > 0 {
+                        first_ready_ms = Some(started.elapsed().as_millis() as u64);
+                    }
+                    let filled_at = std::time::Instant::now();
+                    spawn_cursor_account_details(&state, &mut payload, filled_at);
+                    *cache = Some((filled_at, payload));
+                    true
+                }
+            };
+            // Emit regardless of the race outcome: a fill that lost it still ran
+            // real probes, and its timings are real data. Settings load +
+            // outbox persist are sync IO — keep them off the runtime workers.
+            let timings = std::mem::take(
+                &mut *probe_timings
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tokio::task::spawn_blocking(move || {
+                crate::telemetry::harness::capture_detect(
+                    fill_id,
+                    "full",
+                    duration_ms,
+                    first_ready_ms,
+                    installed,
+                    ready,
+                    timings,
+                );
+            });
+            if !committed {
+                return;
+            }
+            state.chat.emit_event("harness.catalog", json!({}));
+            emit_auth_announcement(&state, announce);
+        },
+    ));
+}
+
+/// Clears the single-flight flag however the fill task exits once polled —
+/// including the superseded-swap early return and a dropped future. (A task
+/// dropped before its first poll leaks the flag, but that only happens at
+/// runtime shutdown, where no fill will ever be wanted again.)
+struct FillGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for FillGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 // --- chat --------------------------------------------------------------------
@@ -7031,15 +7774,7 @@ async fn run_shell_command(
         let project = store
             .get_local_project(&session.project_id)?
             .ok_or_else(|| not_found("project"))?;
-        // The worktree the harness will create on its first turn, so a command
-        // run before any message acts on the same checkout the agent sees.
-        match local::git::ensure_session_worktree(&project, &session.id) {
-            Ok(dir) => Ok(crate::paths::canonicalize(&dir).unwrap_or(dir)),
-            Err(error) => {
-                eprintln!("orx up: session worktree unavailable, using the clone: {error}");
-                resolve_checkout_root(&store, &project, Some(&session_id)).map(|(root, _)| root)
-            }
-        }
+        session_checkout_root(&store, &project, &session.id)
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("shell task failed: {e}")))??;
@@ -7766,6 +8501,35 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 mod tests {
     use super::*;
 
+    #[test]
+    fn harness_payload_predicates_read_the_wire_shape() {
+        let provisional = json!({
+            "harnesses": [
+                {"id": "claude-code", "agentReady": false, "catalogPending": true},
+                {"id": "codex", "agentReady": false},
+            ]
+        });
+        assert!(payload_is_provisional(&provisional));
+        assert!(claude_entry_pending(&provisional));
+        assert!(!payload_has_ready_claude(&provisional));
+
+        let filled = json!({
+            "harnesses": [
+                {"id": "claude-code", "agentReady": true},
+                {"id": "codex", "agentReady": false},
+            ]
+        });
+        assert!(!payload_is_provisional(&filled));
+        assert!(!claude_entry_pending(&filled));
+        assert!(payload_has_ready_claude(&filled));
+
+        // `catalogPending` is skip-serialized when false — its absence must
+        // read as settled, not pending.
+        let no_claude = json!({ "harnesses": [{"id": "codex", "agentReady": false}] });
+        assert!(!payload_is_provisional(&no_claude));
+        assert!(!claude_entry_pending(&no_claude));
+    }
+
     #[tokio::test]
     async fn closed_dashboard_releases_idle_chat_receiver() {
         let (sender, receiver) = tokio::sync::broadcast::channel(1);
@@ -7854,6 +8618,7 @@ mod tests {
             "/api/settings/ssh/connect",
             "/api/settings/openresearch/login",
             "/api/settings/openresearch/ssh-key",
+            "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
         ] {
@@ -7900,6 +8665,18 @@ mod tests {
             serde_json::from_str(r#"{"type":"resize","cols":120,"rows":40}"#).unwrap();
         let SshTerminalInput::Resize { cols, rows } = input;
         assert_eq!((cols, rows), (120, 40));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_ssh_master_status_is_not_a_disconnection() {
+        let response = ssh_master_status(Query(SshPreflightReq {
+            host: "unused-host".into(),
+            container: None,
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        assert!(response.0["running"].is_null());
     }
 
     #[test]
@@ -7965,6 +8742,32 @@ mod tests {
         })
         .await
         .expect("cancelled PTY did not exit");
+    }
+
+    #[test]
+    fn client_resizes_update_the_tracked_size_only_when_valid() {
+        let mut size = DEFAULT_PTY_SIZE;
+        assert!(apply_resize(
+            &mut size,
+            r#"{"type":"resize","cols":111,"rows":33}"#
+        ));
+        assert_eq!((size.cols, size.rows), (111, 33));
+        assert!(!apply_resize(
+            &mut size,
+            r#"{"type":"resize","cols":0,"rows":9}"#
+        ));
+        assert!(!apply_resize(&mut size, "not json"));
+        assert_eq!((size.cols, size.rows), (111, 33));
+    }
+
+    #[test]
+    fn settings_commands_are_an_exact_allowlist() {
+        assert_eq!(
+            settings_command("gh auth login"),
+            Some(&["gh", "auth", "login"][..])
+        );
+        assert_eq!(settings_command("gh auth login; rm -rf ~"), None);
+        assert_eq!(settings_command("gh"), None);
     }
 
     #[tokio::test]
@@ -8124,6 +8927,8 @@ mod tests {
             backend: Some("local".into()),
             flavor: None,
             host: None,
+            container: None,
+            no_container: false,
             manifest: None,
             image: None,
             timeout: None,

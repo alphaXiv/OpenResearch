@@ -4,7 +4,7 @@ import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useMemo, useRef } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, Terminal } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -12,19 +12,20 @@ import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator } from "./ui";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onArtifacts, onExperiments }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
   onOpenExperiment: (id: string, runId: string) => void;
   rightOffset?: number;
-  activeView: "files" | "artifacts" | "experiments" | null;
+  activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
   projectId: string;
   onCompute: () => void;
   sessionId: string | null;
   busy: boolean;
   onChanges: () => void;
   onFiles: () => void;
+  onTerminal: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
 }) {
@@ -34,6 +35,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   const computeLabel = defaultBackend ? TARGET_LABELS[defaultBackend]() : compute.isPending ? "…" : compute.isError ? m.model_picker_unavailable() : m.settings_not_set();
   const items = [
     { id: "files", label: m.app_files(), Icon: FolderOpen, onClick: onFiles },
+    { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
   ];
@@ -50,7 +52,7 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
       ) : (
         <nav aria-label={m.workspace_tools_heading()} className="workspace-tools-card flex w-60 flex-col gap-0.5 rounded-xl border border-border bg-background px-1.5 py-2 shadow-elevated">
           <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_tools_heading()}</h2>
-          {items.filter((item) => item.id !== "files").map(({ id, label: itemLabel, Icon, onClick }) => (
+          {items.filter((item) => item.id !== "files" && item.id !== "terminal").map(({ id, label: itemLabel, Icon, onClick }) => (
             <MenuItem key={id} className="min-h-7 py-1"
               data-onboarding={id === "artifacts" ? "nav-artifacts" : undefined}
               onClick={onClick}>
@@ -70,6 +72,9 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
             <h2 className="m-0 px-2 pt-1 pb-2 text-sm font-normal text-subtext">{m.workspace_this_worktree()}</h2>
             <MenuItem className="min-h-7 py-1" onClick={onFiles}>
               <span className="flex items-center gap-4"><FolderOpen size={15} />{m.app_files()}</span>
+            </MenuItem>
+            <MenuItem className="min-h-7 py-1" onClick={onTerminal}>
+              <span className="flex items-center gap-4"><Terminal size={15} />{m.workspace_terminal()}</span>
             </MenuItem>
             {sessionId && <ChatBranch key={sessionId} sessionId={sessionId} busy={busy} onChanges={onChanges} />}
             {experimentRows.length > 0 && (

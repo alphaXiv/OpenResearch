@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{anyhow, Result};
 
+#[path = "opencode_db.rs"]
+pub mod opencode_database;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeStore {
     Isolated,
@@ -39,11 +42,12 @@ fn home_dir() -> PathBuf {
 pub fn opencode_db(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/opencode/opencode.db"),
-        NativeStore::Legacy => user_env_path("OPENCODE_DB").unwrap_or_else(|| {
-            user_env_path("XDG_DATA_HOME")
+        NativeStore::Legacy => {
+            let data = user_env_path("XDG_DATA_HOME")
                 .unwrap_or_else(|| home_dir().join(".local/share"))
-                .join("opencode/opencode.db")
-        }),
+                .join("opencode");
+            data.join(user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")))
+        }
     }
 }
 
@@ -91,11 +95,7 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
         if store == NativeStore::Legacy && db == isolated {
             continue;
         }
-        let found = match opencode_has_session(&db, native_id) {
-            Ok(found) => found,
-            Err(_) if store == NativeStore::Legacy => false,
-            Err(error) => return Err(error),
-        };
+        let found = opencode_has_session(&db, native_id)?;
         if found {
             return Ok(Some(NativeSessionLocation { store, path: db }));
         }
@@ -106,6 +106,7 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
 pub(crate) struct OpenCodeRelocation {
     database: PathBuf,
     sessions: Vec<(String, String)>,
+    v2_sessions: Vec<(String, String)>,
     projects: Vec<(String, String)>,
 }
 
@@ -119,6 +120,7 @@ impl OpenCodeRelocation {
         let transaction = connection.transaction()?;
         for (table, column, paths) in [
             ("session", "directory", self.sessions),
+            ("session_v2", "directory", self.v2_sessions),
             ("project", "worktree", self.projects),
         ] {
             for (old, new) in paths {
@@ -147,10 +149,12 @@ pub(crate) fn opencode_relocation(
     let mut changes = OpenCodeRelocation {
         database: database.to_path_buf(),
         sessions: Vec::new(),
+        v2_sessions: Vec::new(),
         projects: Vec::new(),
     };
     for (table, column, paths) in [
         ("session", "directory", &mut changes.sessions),
+        ("session_v2", "directory", &mut changes.v2_sessions),
         ("project", "worktree", &mut changes.projects),
     ] {
         let exists: bool = connection.query_row(
@@ -170,24 +174,14 @@ pub(crate) fn opencode_relocation(
             }
         }
     }
-    Ok((!changes.sessions.is_empty() || !changes.projects.is_empty()).then_some(changes))
+    Ok((!changes.sessions.is_empty()
+        || !changes.v2_sessions.is_empty()
+        || !changes.projects.is_empty())
+    .then_some(changes))
 }
 
 pub(crate) fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
-    match std::fs::metadata(db) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    }
-    let connection =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    match connection.query_row("SELECT 1 FROM session WHERE id = ?1", [native_id], |_| {
-        Ok(())
-    }) {
-        Ok(()) => Ok(true),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-        Err(error) => Err(error.into()),
-    }
+    opencode_database::has_session(db, native_id)
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
@@ -739,7 +733,7 @@ mod tests {
         let db = root.join("opencode.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection
-            .execute_batch("CREATE TABLE session (id TEXT); INSERT INTO session VALUES ('id');")
+            .execute_batch("CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE message (id TEXT, session_id TEXT, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT); INSERT INTO session VALUES ('id', '/tmp');")
             .unwrap();
         assert!(opencode_has_session(&db, "id").unwrap());
         assert!(!opencode_has_session(&db, "missing").unwrap());

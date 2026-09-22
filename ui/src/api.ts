@@ -24,6 +24,12 @@ export const DEMO_EXPERIMENT_LABELS: Record<string, string> = {
   [DEMO_LITERATURE_SESSION_ID]: "literature",
 };
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
+/** Leaf message each recorded demo session is seeded with; a send moves it. */
+export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
+  [DEMO_MAIN_SESSION_ID]: "msg_demo_nanochat_assistant_v1",
+  [DEMO_FIGURE_SESSION_ID]: "msg_demo_nanochat_figures_assistant_v1",
+  [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
+};
 export const DEMO_RUN_EXPERIMENT_PROMPT =
   "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
 
@@ -311,17 +317,20 @@ export const resolvePaper = (id: string, signal?: AbortSignal) =>
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
-/** One suggested opening message for the empty chat, written by a model that
- *  read the project. */
+/** One suggested opening message for the empty chat: written by a model that
+ *  read the project, or pre-written when the project is blank. */
 export interface StarterPrompt {
   title: string;
   prompt: string;
 }
 
 export interface ProjectStarterPrompts {
-  /** Empty when the project already has experiments; null when the harness
-   *  could not answer. */
+  /** Empty when the project already has experiments or is blank; null when
+   *  the harness could not answer. */
   prompts: StarterPrompt[] | null;
+  /** The project has nothing to read yet, so the UI offers its pre-written
+   *  prompts instead of model-generated ones. */
+  blank: boolean;
 }
 
 /** Start generating starter prompts for a project that is about to be created,
@@ -956,6 +965,7 @@ export const moveDataDir = (path: string) =>
   post<{ started: boolean }>("/api/settings/data-dir/move", { path });
 
 export interface SshHost {
+  container?: string | null;
   host: string;
   hostname?: string;
   user?: string;
@@ -965,8 +975,16 @@ export interface SshHost {
   lastTest?: SshPreflight;
 }
 
-export const getSshHosts = (signal?: AbortSignal) =>
-  get<{ hosts: SshHost[] }>("/api/settings/ssh", signal).then((r) => r.hosts);
+export interface SshSettings { hosts: SshHost[]; defaultHost: string | null }
+export const getSshSettings = (signal?: AbortSignal) => get<SshSettings>("/api/settings/ssh", signal);
+export const saveSshHost = (body: { host: string; container: string | null }) =>
+  post<{ ok: boolean }>("/api/settings/ssh", body);
+export const saveSshDefault = (host: string | null) => post<{ ok: boolean }>("/api/settings/ssh/default", { host });
+export interface SshExecutionPreflight extends SshPreflight {
+  container: { reference: string; ready: boolean; error: string | null } | null;
+}
+export const testSshExecution = (host: string, container: string | null) =>
+  post<SshExecutionPreflight>("/api/settings/ssh/preflight", { host, container });
 
 export interface SshConfigFile {
   path: string;
@@ -979,7 +997,7 @@ export const saveSshConfig = (content: string, previousContent: string) =>
   put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
 
 export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
+  get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
 
 export type RemoteSessionStatus =
   | "connecting"
@@ -1466,7 +1484,7 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
 export interface HarnessModel {
   id: string;
@@ -1634,17 +1652,39 @@ export interface Harness {
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
   authMethod?: "oauth" | "apiKey" | "local";
+  accountLoading?: boolean;
   account?: string;
   org?: string;
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** Setup is blocked by something no install/update/login command repairs —
+   * an environment credential overriding the saved login, a database the CLI
+   * will not open. `agentNote` carries the repair; offer no setup button. */
+  needsConfigRepair?: boolean;
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
+  /** A snapshot answer whose model catalog is still filling in the
+   * background — `models` is the static placeholder until `harness.catalog`
+   * arrives and a plain re-read swaps in the real list. */
+  catalogPending?: boolean;
   models: HarnessModel[];
   options: HarnessOptions;
 }
+
+export interface HarnessSetupCommands {
+  install: string;
+  /** The vendor bootstrap URL an install note quotes; `install` runs the
+   * platform's own installer, which on Windows is a PowerShell script. */
+  installUrl?: string;
+  login: string;
+  update: string;
+  requiresNpm: boolean;
+}
+
+export const getHarnessSetupCommands = (signal?: AbortSignal) =>
+  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
 
 export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();
@@ -1847,6 +1887,7 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   busy: boolean;
+  activeLeafId: string | null;
   contextUsage?: ContextUsage;
 }
 
@@ -2107,7 +2148,13 @@ export function backendDetail(backend: Run["backend"]): string {
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
   // Ray's namespace is the whole Jobs URL — too long for a badge.
   if (backendKind(backend) === "ray_job") return "";
-  if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
+  if (typeof backend.namespace === "string" && backend.namespace) {
+    const container = backend.sshContainer;
+    if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {
+      return `${backend.namespace} / ${container.reference}`;
+    }
+    return backend.namespace;
+  }
   return "";
 }
 

@@ -1,5 +1,21 @@
 import type { ChatMessage, ChatPart, ChatSession } from "./api";
 
+export function pendingQuestionId(
+  messages: ChatMessage[],
+  harness: ChatSession["harness"] | undefined,
+  busy: boolean,
+): string | null {
+  if (harness !== "claude-code" && harness !== "codex" && harness !== "opencode") return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    for (const part of messages[i].parts) {
+      if (part.type !== "prompt" || part.prompt?.resolved || part.prompt?.kind !== "question") continue;
+      if (part.prompt.nativeId && !busy) return null;
+      return part.id;
+    }
+  }
+  return null;
+}
+
 /** Whether a part paints anything in the transcript. */
 export function partIsVisible(part: ChatPart, activePermissionId?: string | null): boolean {
   // The persisted marker still delimits stopped turns for history consumers.

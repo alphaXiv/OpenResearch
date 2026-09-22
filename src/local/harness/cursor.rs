@@ -20,12 +20,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 use super::detect::{
-    api_key, nonempty_str, probe_bin, read_json, resolve_symlinks, title_case, HarnessAuthState,
-    HarnessInfo, ModelInfo,
+    api_key, nonempty_str, read_json, resolve_symlinks, title_case, HarnessAuthState, HarnessInfo,
+    ModelInfo,
 };
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
@@ -49,6 +49,96 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct Cursor;
 
+impl Cursor {
+    /// `snapshot` skips `cursor_model_list` and reports the static fallback
+    /// table as pending; the account-details lookup stays deferred either way.
+    /// It also skips the `--version` and `agent status` spawns — install is
+    /// discovery alone, and auth reads `CURSOR_API_KEY` instead of asking the
+    /// CLI (`authInfo` feeds `account` only; it survives `agent logout`).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
+        let mut info = HarnessInfo::new(self.id(), self.name());
+        let mut spec = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "cursor",
+                find_cursor,
+                find_cursor_working(),
+            )
+            .await;
+        } else {
+            // A shim that resolves to a bundled node entry is already proven
+            // installed — the versions-dir name is the version, so selection
+            // needs no `--version` spawn at all. Only an unresolvable shim
+            // (or a plain binary) falls back to the probe sweep. The PATH/dir
+            // scan itself costs seconds under load, so the pick the snapshot
+            // pass remembered is tried before `cursor_candidates()` runs.
+            let mut candidates: Option<Vec<PathBuf>> = None;
+            let shim_pick = super::detect::remembered_bin("cursor")
+                .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
+                .or_else(|| {
+                    let discovered = cursor_candidates();
+                    let pick = super::detect::selected_bin("cursor", discovered.clone())
+                        .and_then(|b| bundled_launch(&b).map(|l| (b, l)))
+                        .or_else(|| {
+                            discovered
+                                .iter()
+                                .find_map(|c| bundled_launch(c).map(|l| (c.clone(), l)))
+                        });
+                    candidates = Some(discovered);
+                    pick
+                });
+            let (selected, probes) = match shim_pick {
+                Some((bin, launch)) => {
+                    super::detect::remember_selected("cursor", &bin);
+                    let probes = cursor_spec_probes(bin.clone()).await;
+                    (
+                        Some((bin, super::detect::BinProbe::Answered(launch.version))),
+                        Some(probes),
+                    )
+                }
+                None => {
+                    super::detect::select_and_speculate(
+                        "cursor",
+                        candidates.unwrap_or_else(cursor_candidates),
+                        None,
+                        cursor_spec_probes,
+                    )
+                    .await
+                }
+            };
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            spec = probes;
+        }
+        let (status, models) = spec.unwrap_or((None, None));
+        if info.installed && !info.install_broken {
+            apply_auth(&mut info, status.as_ref());
+        }
+
+        // A recorded `authInfo` email is deliberately not promoted to
+        // `authenticated` — `agent logout` leaves it behind; it feeds
+        // `account` only.
+        info.agent_ready = info.ready();
+        if info.agent_ready {
+            info = info.with_models(models.unwrap_or_else(fallback_models));
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(CURSOR_REINSTALL));
+        } else if info.installed {
+            info.agent_note =
+                Some("Sign in with `agent login`, then re-check this harness.".to_string());
+        } else {
+            info.agent_note = Some(
+                "Install Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then sign in with `agent login`."
+                    .to_string(),
+            );
+        }
+        Some(info)
+    }
+}
+
 #[async_trait]
 impl Harness for Cursor {
     fn id(&self) -> &'static str {
@@ -64,43 +154,11 @@ impl Harness for Cursor {
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
-        let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some(bin) = find_cursor() {
-            info.record_bin(&bin, probe_bin(&bin).await);
-        }
-        if info.installed && !info.install_broken {
-            let bin = info.bin_path.as_deref().map(Path::new);
-            let (status, about) = match bin {
-                Some(bin) => {
-                    tokio::join!(
-                        cursor_command_json(bin, &["status", "--format", "json"]),
-                        cursor_command_json(bin, &["about", "--format", "json"])
-                    )
-                }
-                None => (None, None),
-            };
-            apply_auth(&mut info, status.as_ref(), about.as_ref());
-        }
+        self.detect_at(false).await
+    }
 
-        info.agent_ready = info.ready();
-        if info.agent_ready {
-            let models = match info.bin_path.as_deref().map(Path::new) {
-                Some(bin) => cursor_model_list(bin).await,
-                None => None,
-            };
-            info = info.with_models(models.unwrap_or_else(fallback_models));
-        } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(CURSOR_REINSTALL));
-        } else if info.installed {
-            info.agent_note =
-                Some("Sign in with `agent login`, then re-check this harness.".to_string());
-        } else {
-            info.agent_note = Some(
-                "Install Cursor CLI with `curl https://cursor.com/install -fsS | bash`, then sign in with `agent login`."
-                    .to_string(),
-            );
-        }
-        Some(info)
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -182,20 +240,60 @@ impl Harness for Cursor {
     }
 }
 
-/// `cursor-agent` on PATH, else an `agent` binary that is actually Cursor, else
-/// the installer drop under `~/.local/bin`. `agent` is a generic name, so a
-/// hit is only accepted when the path (or the symlink it resolves to) names
-/// Cursor.
-pub(crate) fn find_cursor() -> Option<PathBuf> {
-    find_on_path("cursor-agent")
-        .or_else(|| find_on_path("agent").filter(|path| looks_like_cursor(path)))
-        .or_else(|| {
-            let home = dirs::home_dir()?;
-            let local = home.join(".local").join("bin");
-            find_in_dir(&local, "cursor-agent")
-                .or_else(|| find_in_dir(&local, "agent").filter(|path| looks_like_cursor(path)))
-        })
+/// `cursor-agent` on PATH, then an `agent` binary that is actually Cursor, then
+/// the platform's installer drop locations, in preference order. `agent` is a
+/// generic name, so a hit is only accepted when the path (or the symlink it
+/// resolves to) names Cursor.
+fn cursor_candidates() -> Vec<PathBuf> {
+    let drop_dirs: Vec<PathBuf> = dirs::home_dir()
+        .map(|home| home.join(".local").join("bin"))
+        .into_iter()
+        .chain(
+            cfg!(windows)
+                .then(dirs::data_local_dir)
+                .flatten()
+                .map(|dir| dir.join("cursor-agent")),
+        )
+        .collect();
+    let mut cursor_agents: Vec<PathBuf> = find_on_path("cursor-agent").into_iter().collect();
+    let mut agents: Vec<PathBuf> = Vec::new();
+    for dir in drop_dirs {
+        cursor_agents.extend(find_in_dir(&dir, "cursor-agent"));
+        agents.extend(find_in_dir(&dir, "agent"));
+    }
+    agents.extend(find_on_path("agent"));
+    // `agent` is the installer's alias binary in the same directory — where a
+    // `cursor-agent` sibling exists, probing both doubles the sweep.
+    let canon = |dir: &Path| crate::paths::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let homes: std::collections::HashSet<PathBuf> = cursor_agents
+        .iter()
+        .filter_map(|path| path.parent())
+        .map(canon)
+        .collect();
+    cursor_agents
+        .into_iter()
+        .chain(agents.into_iter().filter(|path| {
+            looks_like_cursor(path)
+                && !path
+                    .parent()
+                    .map(canon)
+                    .is_some_and(|dir| homes.contains(&dir))
+        }))
         .map(resolve_symlinks)
+        .collect()
+}
+
+/// The executable detection selected, else the first candidate — sync callers
+/// cannot probe, and must not spawn a launcher detection already skipped.
+pub(crate) fn find_cursor() -> Option<PathBuf> {
+    super::detect::selected_bin("cursor", cursor_candidates())
+}
+
+/// The first candidate that actually runs. The official installer leaves an
+/// earlier launcher on PATH whose versions directory it removed; that stale
+/// copy must not hide the install that just succeeded.
+pub(super) async fn find_cursor_working() -> Option<(PathBuf, super::detect::BinProbe)> {
+    super::detect::select_working("cursor", cursor_candidates(), None).await
 }
 
 fn looks_like_cursor(path: &Path) -> bool {
@@ -204,44 +302,148 @@ fn looks_like_cursor(path: &Path) -> bool {
         || crate::paths::canonicalize(path).is_ok_and(|real| mentions_cursor(&real))
 }
 
-fn apply_auth(info: &mut HarnessInfo, status: Option<&Value>, about: Option<&Value>) {
-    let api = api_key("CURSOR_API_KEY");
-    let logged_in = status
-        .and_then(|value| {
-            value
-                .get("isAuthenticated")
-                .and_then(Value::as_bool)
-                .or_else(|| {
-                    value
-                        .get("status")
-                        .and_then(Value::as_str)
-                        .map(|status| status.eq_ignore_ascii_case("authenticated"))
-                })
+/// The real entry point a Windows `cursor-agent.cmd` delegates to. The shim
+/// spawns cmd → powershell → node just to resolve a `versions/` dir — two
+/// extra processes on every probe — so detection resolves that chain itself
+/// and spawns `node.exe index.js` directly. `version` is the versions-dir
+/// name, which is the same string `--version` prints, so a resolved shim
+/// needs no version probe either.
+struct BundledLaunch {
+    node: PathBuf,
+    index: PathBuf,
+    version: Option<String>,
+}
+
+/// Resolve a cursor-agent `.cmd` shim to its bundled node entry, mirroring
+/// `cursor-agent.ps1`: a `node.exe`/`index.js` next to the script wins; else
+/// the newest `versions/<date>-<hash>` dir. Returns `None` for non-shim
+/// binaries and stale launchers whose versions dir is gone.
+fn bundled_launch(bin: &Path) -> Option<BundledLaunch> {
+    if bin
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_none_or(|e| !e.eq_ignore_ascii_case("cmd"))
+    {
+        return None;
+    }
+    let dir = bin.parent()?;
+    let node = dir.join("node.exe");
+    let index = dir.join("index.js");
+    if node.exists() && index.exists() {
+        return Some(BundledLaunch {
+            node,
+            index,
+            version: None,
+        });
+    }
+    let best = std::fs::read_dir(dir.join("versions"))
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            version_dir_key(&name).map(|key| (key, name, entry.path()))
         })
-        .unwrap_or(false);
+        .max_by_key(|(key, _, _)| *key)?;
+    let node = best.2.join("node.exe");
+    let index = best.2.join("index.js");
+    (node.exists() && index.exists()).then_some(BundledLaunch {
+        node,
+        index,
+        version: Some(best.1),
+    })
+}
+
+/// `YYYY.MM.DD(-HH-MM-SS)?-<hex>` → a sortable key, matching the version-dir
+/// naming `cursor-agent.ps1` parses (its sort key is the padded date; the
+/// optional timestamp only breaks same-day ties here).
+fn version_dir_key(name: &str) -> Option<(u64, u64)> {
+    let (head, hash) = name.rsplit_once('-')?;
+    if hash.is_empty()
+        || !hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut parts = head.split('-');
+    let mut date = parts.next()?.split('.');
+    let y: u64 = date.next()?.parse().ok()?;
+    let m: u64 = date.next()?.parse().ok()?;
+    let d: u64 = date.next()?.parse().ok()?;
+    if date.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let time: u64 = match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(mi), Some(s), None) => format!("{}{}{}", h, mi, s).parse().ok()?,
+        (None, None, None, None) => 0,
+        _ => return None,
+    };
+    Some((y * 10000 + m * 100 + d, time))
+}
+
+/// The command to spawn for a candidate — the bundled node entry when the
+/// shim resolves, else the candidate itself. Mirrors the shim's own env:
+/// `NODE_COMPILE_CACHE` (its reason for existing — node startup is the
+/// dominant probe cost) and `CURSOR_INVOKED_AS`.
+fn cursor_command(bin: &Path) -> Command {
+    if let Some(launch) = bundled_launch(bin) {
+        let mut cmd = Command::new(launch.node);
+        cmd.arg(launch.index);
+        if let Some(name) = bin.file_name() {
+            cmd.env("CURSOR_INVOKED_AS", name);
+        }
+        if let Some(local) = dirs::data_local_dir() {
+            cmd.env("NODE_COMPILE_CACHE", local.join("cursor-compile-cache"));
+        }
+        return cmd;
+    }
+    Command::new(bin)
+}
+
+/// The `status` payload's login verdict, in either shape the CLI reports.
+fn status_logged_in(status: Option<&Value>) -> Option<bool> {
+    status.and_then(|value| {
+        value
+            .get("isAuthenticated")
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                value
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .map(|status| status.eq_ignore_ascii_case("authenticated"))
+            })
+    })
+}
+
+fn apply_auth(info: &mut HarnessInfo, status: Option<&Value>) {
+    let api = api_key("CURSOR_API_KEY");
+    let logged_in = status_logged_in(status);
     if api.is_some() {
         info.authenticated = true;
         info.auth_state = HarnessAuthState::Ready;
         info.auth_method = Some("apiKey");
-    } else if logged_in {
+    } else if logged_in == Some(true) {
         info.authenticated = true;
         info.auth_state = HarnessAuthState::Ready;
         info.auth_method = Some("oauth");
-    } else if info.installed && !info.install_broken {
+    } else if logged_in == Some(false) && info.installed && !info.install_broken {
         info.auth_state = HarnessAuthState::NeedsLogin;
     }
 
     let cfg = read_json(native_store::cursor_home(NativeStore::Legacy).join("cli-config.json"));
-    info.account = nonempty_str(about.unwrap_or(&Value::Null), "userEmail").or_else(|| {
-        cfg.as_ref()
-            .and_then(|cfg| cfg.get("authInfo"))
-            .and_then(|auth| nonempty_str(auth, "email"))
-    });
-    info.plan = nonempty_str(about.unwrap_or(&Value::Null), "subscriptionTier");
+    info.account = cfg
+        .as_ref()
+        .and_then(|cfg| cfg.get("authInfo"))
+        .and_then(|auth| nonempty_str(auth, "email"));
+}
+
+pub(crate) async fn account_details(bin: &Path) -> Option<Value> {
+    cursor_command_json(bin, &["about", "--format", "json"]).await
 }
 
 async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
-    let mut cmd = Command::new(bin);
+    let mut cmd = cursor_command(bin);
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -249,15 +451,43 @@ async fn cursor_command_json(bin: &Path, args: &[&str]) -> Option<Value> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output())
-        .await
-        .ok()?
+    let out = super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT)
+        .await?
         .ok()?;
     serde_json::from_slice(&out.stdout).ok()
 }
 
-async fn cursor_model_list(bin: &Path) -> Option<Vec<ModelInfo>> {
-    let mut cmd = Command::new(bin);
+/// The Full pass's probes on one binary. An API key already proves auth, so
+/// `status` and the multi-second `models` catalog child run concurrently.
+/// Without one, `status` is the auth oracle and `models` only runs on a
+/// logged-in verdict — racing it would spend a spawn the other harnesses'
+/// probes need the CPU for.
+async fn cursor_spec_probes(bin: PathBuf) -> (Option<Value>, Option<Vec<ModelInfo>>) {
+    let status_probe = || {
+        super::detect::timed_probe(
+            "cursor",
+            "status",
+            cursor_command_json(&bin, &["status", "--format", "json"]),
+        )
+    };
+    if api_key("CURSOR_API_KEY").is_some() {
+        let (status, models) = tokio::join!(
+            status_probe(),
+            super::detect::timed_probe("cursor", "models", cursor_model_list(bin.clone())),
+        );
+        return (status, models);
+    }
+    let status = status_probe().await;
+    let models = if status_logged_in(status.as_ref()) == Some(true) {
+        super::detect::timed_probe("cursor", "models", cursor_model_list(bin.clone())).await
+    } else {
+        None
+    };
+    (status, models)
+}
+
+async fn cursor_model_list(bin: PathBuf) -> Option<Vec<ModelInfo>> {
+    let mut cmd = cursor_command(&bin);
     cmd.args(["models"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -265,9 +495,8 @@ async fn cursor_model_list(bin: &Path) -> Option<Vec<ModelInfo>> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(MODELS_TIMEOUT, cmd.output())
-        .await
-        .ok()?
+    let out = super::detect::detect_spawn_output_timed(cmd, MODELS_TIMEOUT)
+        .await?
         .ok()?;
     if !out.status.success() {
         return None;
@@ -359,8 +588,7 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     } else if matches!(request.quality, OneShotQuality::Cheap) {
         cmd.args(["--model", "auto"]);
     }
-    cmd.arg(&message)
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -374,15 +602,31 @@ async fn cursor_one_shot(bin: &Path, request: OneShot<'_>) -> Option<String> {
     cmd.env("CURSOR_CONFIG_DIR", &cursor_home);
     cmd.env("CURSOR_DATA_DIR", &cursor_home);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(request.timeout, cmd.output())
-        .await
-        .ok()?
-        .ok()?;
+    let out = tokio::time::timeout(request.timeout, async {
+        let mut child = cmd.spawn().ok()?;
+        send_prompt(&mut child, &message).await.ok()?;
+        child.wait_with_output().await.ok()
+    })
+    .await
+    .ok()??;
     if !out.status.success() {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!text.is_empty()).then_some(text)
+}
+
+async fn send_prompt(child: &mut tokio::process::Child, prompt: &str) -> Result<()> {
+    // Windows batch launchers reject multiline argv; Cursor accepts the prompt on stdin.
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+    let result = tokio::time::timeout(TURN_WATCHDOG, stdin.write_all(prompt.as_bytes()))
+        .await
+        .map_err(|_| anyhow!("Cursor timed out reading its prompt"))?;
+    match result {
+        // The normal exit path preserves Cursor's diagnostic when it rejects the request early.
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result.map_err(Into::into),
+    }
 }
 
 fn first_turn_prompt(text: &str) -> String {
@@ -464,9 +708,8 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         cmd.args(["--resume", native_id]);
     }
     let log_name = format!("cursor-{}", uuid::Uuid::new_v4());
-    cmd.arg(&prompt)
-        .current_dir(&repo)
-        .stdin(Stdio::null())
+    cmd.current_dir(&repo)
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(harness_log(&log_name)?))
         .kill_on_drop(true);
@@ -486,6 +729,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
             return Err(anyhow!("Could not spawn {}: {}", bin.display(), error));
         }
     };
+    send_prompt(&mut child, &prompt).await?;
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
     let mut lines = BufReader::new(stdout).lines();
     let mut state = TurnState::default();
@@ -872,6 +1116,66 @@ fn plan_card(parts: &[WirePart], assistant_id: &str, errored: bool) -> Option<Wi
 mod tests {
     use super::*;
     use crate::local::chat::TurnCtx;
+
+    #[tokio::test]
+    async fn prompt_pipe_preserves_multiline_text_and_closes_for_the_launcher() {
+        let root = std::env::temp_dir().join(format!("orx-cursor-stdin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut command = if cfg!(windows) {
+            let launcher = root.join("cursor-agent.cmd");
+            std::fs::write(
+                &launcher,
+                format!(
+                    "@\"{}\" -c cat\r\n",
+                    crate::local::bash::program().to_string_lossy()
+                ),
+            )
+            .unwrap();
+            Command::new(launcher)
+        } else {
+            Command::new("cat")
+        };
+        let prompt = "First line\nSecond line: \"quoted\" & 100% é\n";
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        send_prompt(&mut child, prompt).await.unwrap();
+        let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), prompt);
+    }
+
+    #[tokio::test]
+    async fn early_exit_keeps_the_child_status_instead_of_a_broken_pipe_error() {
+        let mut command = if cfg!(windows) {
+            let mut command = Command::new("cmd.exe");
+            command.args(["/C", "exit 23"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "exit 23"]);
+            command
+        };
+        let mut child = command
+            .stdin(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        let status = child.wait().await.unwrap();
+        child.stdin = stdin;
+        send_prompt(&mut child, &"prompt\n".repeat(65536))
+            .await
+            .unwrap();
+        assert_eq!(status.code(), Some(23));
+    }
 
     fn fold(events: &[Value]) -> (TurnCtx, TurnState) {
         let mut ctx = TurnCtx::test_stub();

@@ -138,7 +138,7 @@ export function DemoWelcomeModal({
             onClick={() => run(() => onClose("explore_demo"))}
             disabled={saving}
           >
-            {saving ? m.common_saving() : m.tour_explore_demo()}
+            {saving ? m.common_saving() : m.tour_run_demo_experiment()}
           </Button>
         </div>
       </div>

@@ -99,6 +99,22 @@ export function onHarnessAuth(fn: HarnessAuthListener): () => void {
   };
 }
 
+// `harness.catalog` fires when the background fill has replaced a snapshot
+// answer's placeholder models with the real catalog — re-read, don't re-probe.
+type HarnessCatalogListener = () => void;
+const harnessCatalogListeners = new Set<HarnessCatalogListener>();
+
+export function onHarnessCatalog(fn: HarnessCatalogListener): () => void {
+  harnessCatalogListeners.add(fn);
+  return () => {
+    harnessCatalogListeners.delete(fn);
+  };
+}
+
+function emitHarnessCatalog() {
+  harnessCatalogListeners.forEach((fn) => fn());
+}
+
 function emitHarnessAuth(ev: HarnessAuthEvent) {
   harnessAuthListeners.forEach((fn) => fn(ev));
 }
@@ -337,6 +353,7 @@ export function useOrxEventStream(handlers: OrxEventHandlers) {
         const d = parse<HarnessAuthEvent>(e as MessageEvent);
         if (d?.harness && d.authState) emitHarnessAuth(d);
       });
+      es.addEventListener("harness.catalog", () => emitHarnessCatalog());
       es.addEventListener("datadir.move.progress", (e) => {
         const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
           e as MessageEvent,

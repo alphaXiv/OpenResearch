@@ -20,6 +20,8 @@
 //!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
+pub(crate) mod harness;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -105,6 +107,8 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
@@ -166,6 +170,8 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    #[serde(default)]
+    harness_snapshot: Option<harness::InitialSnapshot>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -313,6 +319,33 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
 
 fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
+}
+
+pub(crate) fn ssh_settings() -> crate::error::Result<crate::config::SshSettings> {
+    let raw = match std::fs::read_to_string(settings_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: Settings = serde_json::from_str(&raw)
+        .map_err(|error| crate::error::anyhow!("Cannot read SSH settings: {error}"))?;
+    for options in settings.ssh.hosts.values() {
+        crate::jobs::ssh::validate_host_options(options)?;
+    }
+    Ok(settings.ssh)
+}
+
+pub(crate) fn set_ssh_host(
+    host: String,
+    options: crate::config::SshHostSettings,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        settings.ssh.hosts.insert(host, options);
+    })
+}
+
+pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.ssh.default_host = host)
 }
 
 fn outbox_dir() -> PathBuf {
@@ -1040,7 +1073,7 @@ impl TelemetrySession {
 pub(crate) const ONBOARDING_STEPS: [&str; 3] = ["welcome", "environment", "profile"];
 pub(crate) const WELCOME_CHOICES: [&str; 3] = ["explore_demo", "create_project", "dismiss"];
 pub(crate) const DEMO_EXPERIMENT_KINDS: [&str; 2] = ["curated", "run"];
-/// Starter prompts are model-generated, so only the slot position is stable.
+/// Starter prompts are usually model-generated, so only the slot position is stable.
 /// The upper bound is headroom — the UI renders whatever the model returns.
 pub(crate) const STARTER_SLOTS: std::ops::RangeInclusive<u8> = 1..=8;
 pub(crate) const FIRST_ACTION_SURFACES: [&str; 2] = ["demo", "project"];
@@ -1431,6 +1464,42 @@ mod tests {
         assert!(disabled_lit_sources().is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ssh_settings_preserve_siblings_and_reject_corrupt_config() {
+        use crate::config::SshHostSettings;
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-ssh-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert!(ssh_settings().unwrap().hosts.is_empty());
+        set_persisted_disabled(true).unwrap();
+        let options = SshHostSettings {
+            container: Some("research".into()),
+        };
+        set_ssh_host("lab".into(), options.clone()).unwrap();
+        set_ssh_default(Some("lab".into())).unwrap();
+        set_compute_default(Some("ssh".into()), None).unwrap();
+        let settings = ssh_settings().unwrap();
+        assert_eq!(settings.default_host.as_deref(), Some("lab"));
+        assert_eq!(settings.hosts["lab"], options);
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        set_ssh_host("lab".into(), SshHostSettings::default()).unwrap();
+        set_ssh_default(None).unwrap();
+        assert_eq!(
+            ssh_settings().unwrap().hosts["lab"],
+            SshHostSettings::default()
+        );
+        for raw in [
+            r#"{"ssh":null}"#,
+            r#"{"ssh":{"hosts":{"lab":{"container":""}}}}"#,
+            r#"{"ssh":{"hosts":[]}}"#,
+            "{",
+        ] {
+            std::fs::write(settings_path(), raw).unwrap();
+            assert!(ssh_settings().is_err(), "{raw}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -1883,7 +1952,13 @@ mod tests {
     #[ignore = "release workflow production contract gate"]
     async fn production_contract_is_accepted() {
         assert_eq!(build_channel(), "production");
+        harness::assert_production_contract().await;
         let payloads = [
+            build_payload(
+                "harness_setup",
+                "cli-release-contract-test",
+                json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":"opencode","action":"install","trigger":"automatic","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+            ),
             build_payload(
                 "command",
                 "cli-release-contract-test",
@@ -2111,6 +2186,8 @@ mod tests {
         assert!(environment_disabled_reason().is_some());
 
         let session = TelemetrySession::start(Some("up"));
+        harness::capture_initial(&json!({"harnesses":[]}));
+        harness::SetupAttempt::new("opencode", "install", "automatic");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
         capture_project_created(true, Some(ProjectCreationMode::Blank));
