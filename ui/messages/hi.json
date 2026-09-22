@@ -988,7 +988,7 @@
   "settings_clean": "साफ़",
   "settings_has_changes": "बदलाव हैं",
   "settings_not_initialized": "शुरू नहीं किया गया",
-  "settings_use_existing_github_repository": "जब आपका कनेक्टेड खाता इसमें लिख सकता है तो ऑटोमैटिक प्रयोग-ब्रांच पुश के लिए इस रिपॉज़िटरी का इस्तेमाल करें। नहीं तो, OpenResearch सहयोग के लिए एक अलग निजी रिपॉज़िटरी बनाता है।",
+  "settings_use_existing_github_repository": "प्रयोग शाखाओं को स्वचालित रूप से पुश करने के लिए इस रिपॉज़िटरी का उपयोग करें। जुड़े हुए GitHub खाते के पास लिखने की अनुमति होनी चाहिए।",
   "settings_create_private_github_repository": "एक निजी रिपॉज़िटरी बनाएं और सहयोगी दृश्यता के लिए प्रयोग ब्रांच अपने आप पुश करें।",
   "settings_make_default": "डिफ़ॉल्ट बनाएं",
   "storage_source_env": "ORX_DATA_DIR एनवायरनमेंट वेरिएबल",
@@ -1220,5 +1220,9 @@
   "ssh_run_in": "यहाँ चलाएँ",
   "ssh_direct_host": "सीधे होस्ट पर",
   "ssh_existing_container": "मौजूदा कंटेनर",
-  "ssh_container_reference": "कंटेनर का नाम या ID"
+  "ssh_container_reference": "कंटेनर का नाम या ID",
+  "repository_edit": "संपादित करें",
+  "repository_target": "GitHub रिपॉज़िटरी URL या owner/repo",
+  "repository_connect_description": "बेसलाइन और प्रयोग शाखाओं को इस रिपॉज़िटरी में पुश करें और स्वचालित सिंक चालू करें। मौजूदा रिपॉज़िटरी और असंबंधित रिमोट सुरक्षित रहते हैं। इतिहास में टकराव होने पर रिमोट कमिट को बदले बिना कनेक्शन रुक जाएगा।",
+  "repository_connect_and_sync": "जोड़ें और सिंक करें"
 }

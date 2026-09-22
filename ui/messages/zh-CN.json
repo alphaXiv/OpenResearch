@@ -982,7 +982,7 @@
   "settings_clean": "无更改",
   "settings_has_changes": "有更改",
   "settings_not_initialized": "尚未初始化",
-  "settings_use_existing_github_repository": "当已连接的账户有写入权限时，使用此仓库自动推送实验分支。否则，OpenResearch 会另建一个私有仓库用于协作。",
+  "settings_use_existing_github_repository": "使用此仓库自动推送实验分支。当前连接的 GitHub 账号必须具有写入权限。",
   "settings_create_private_github_repository": "创建私有仓库，并自动推送实验分支以便协作者查看。",
   "settings_make_default": "设为默认值",
   "storage_source_env": "ORX_DATA_DIR 环境变量",
@@ -1220,5 +1220,9 @@
   "ssh_run_in": "运行位置",
   "ssh_direct_host": "直接在主机上",
   "ssh_existing_container": "现有容器",
-  "ssh_container_reference": "容器名称或 ID"
+  "ssh_container_reference": "容器名称或 ID",
+  "repository_edit": "编辑",
+  "repository_target": "GitHub 仓库 URL 或 owner/repo",
+  "repository_connect_description": "将基线和实验分支推送至此仓库并开启自动同步。保留现有仓库和无关远程地址。如果历史存在冲突，将停止连接，不会覆盖远程提交。",
+  "repository_connect_and_sync": "连接并同步"
 }

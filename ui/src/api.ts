@@ -1426,6 +1426,11 @@ export const initializeProjectGit = (projectId: string) =>
 export const enableProjectGithub = (projectId: string) =>
   post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github`);
 
+export const connectProjectGithub = (projectId: string, repository: string) =>
+  post<{ project: Project; git: ProjectGitStatus }>(
+    `/api/projects/${projectId}/github/repository`, { repository },
+  );
+
 export const disableProjectGithub = (projectId: string) =>
   post<{ project: Project; git: ProjectGitStatus }>(`/api/projects/${projectId}/github/disable`);
 

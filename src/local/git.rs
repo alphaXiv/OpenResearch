@@ -1694,6 +1694,36 @@ pub fn add_github_remote(repo_path: &Path, owner: &str, repo: &str) -> Result<()
     Ok(())
 }
 
+/// Publish to an explicitly selected target before changing any remote or project binding.
+pub fn push_selected_repository(
+    repo_path: &Path,
+    baseline_branch: &str,
+    owner: &str,
+    repo: &str,
+) -> Result<()> {
+    push_publication_to(
+        repo_path,
+        baseline_branch,
+        &format!("https://github.com/{owner}/{repo}.git"),
+    )
+}
+
+fn push_publication_to(repo_path: &Path, baseline_branch: &str, target: &str) -> Result<()> {
+    let branches = local_branches(repo_path)?;
+    if !branches.iter().any(|branch| branch == baseline_branch) {
+        return Err(anyhow!("The project's baseline branch is missing."));
+    }
+    let refs = branches
+        .iter()
+        .filter(|branch| *branch == baseline_branch || branch.starts_with("orx/"))
+        .map(|branch| format!("refs/heads/{branch}:refs/heads/{branch}"))
+        .collect::<Vec<_>>();
+    // Atomic, non-forced updates: one divergent branch must reject the entire handoff.
+    let mut args = vec!["--atomic", "--", target];
+    args.extend(refs.iter().map(String::as_str));
+    push(repo_path, &args)
+}
+
 pub fn push_all(repo_path: &Path, baseline_branch: &str, owner: &str, repo: &str) -> Result<()> {
     let remote = publication_remote(repo_path, owner, repo)?;
     let mut branches = local_branches(repo_path)?
@@ -2448,6 +2478,117 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create parent");
         }
         std::fs::write(path, contents).expect("write file");
+    }
+
+    #[test]
+    fn selected_publication_is_atomic_and_preserves_remotes() {
+        let source = temp_repo();
+        let target = source.join("destination.git");
+        run(&source, &["init", "--bare", target.to_str().unwrap()]);
+        run(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/old/source.git",
+            ],
+        );
+        run(&source, &["branch", "orx/experiment"]);
+        run(&source, &["branch", "personal"]);
+        let before = remotes(&source).unwrap();
+        push_publication_to(&source, "main", target.to_str().unwrap()).unwrap();
+        assert_eq!(
+            run(&target, &["rev-parse", "main"]),
+            run(&source, &["rev-parse", "main"])
+        );
+        assert_eq!(
+            run(&target, &["rev-parse", "orx/experiment"]),
+            run(&source, &["rev-parse", "orx/experiment"])
+        );
+        assert!(git(
+            Some(&target),
+            &["rev-parse", "--verify", "refs/heads/personal"]
+        )
+        .is_err());
+        assert_eq!(remotes(&source).unwrap(), before);
+
+        // A conflicting experiment rejects even the otherwise valid new main commit.
+        run(&source, &["checkout", "-q", "orx/experiment"]);
+        run(
+            &source,
+            &["commit", "--allow-empty", "-qm", "remote-only experiment"],
+        );
+        run(
+            &source,
+            &["push", target.to_str().unwrap(), "orx/experiment"],
+        );
+        run(&source, &["checkout", "-q", "main"]);
+        let remote_main = run(&target, &["rev-parse", "main"]);
+        run(&source, &["commit", "--allow-empty", "-qm", "local change"]);
+        run(&source, &["branch", "-f", "orx/experiment", "main"]);
+        assert!(push_publication_to(&source, "main", target.to_str().unwrap()).is_err());
+        assert_eq!(run(&target, &["rev-parse", "main"]), remote_main);
+        assert_eq!(remotes(&source).unwrap(), before);
+        assert!(push_publication_to(&source, "missing", target.to_str().unwrap()).is_err());
+        let _ = std::fs::remove_dir_all(source);
+    }
+
+    #[test]
+    fn replacing_github_remote_keeps_existing_destinations() {
+        let source = temp_repo();
+        run(
+            &source,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/source/repo.git",
+            ],
+        );
+        run(
+            &source,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://github.com/upstream/repo.git",
+            ],
+        );
+        add_github_remote(&source, "old", "repo").unwrap();
+        add_github_remote(&source, "chosen", "repo").unwrap();
+        assert_eq!(
+            run(&source, &["remote", "get-url", "origin"]),
+            "https://github.com/source/repo.git"
+        );
+        assert_eq!(
+            run(&source, &["remote", "get-url", "upstream"]),
+            "https://github.com/upstream/repo.git"
+        );
+        assert_eq!(
+            run(&source, &["remote", "get-url", "upstream-2"]),
+            "https://github.com/old/repo.git"
+        );
+        assert_eq!(
+            publication_remote(&source, "chosen", "repo").unwrap(),
+            "github"
+        );
+        // A stale push URL must not redirect future automatic pushes.
+        run(
+            &source,
+            &[
+                "remote",
+                "set-url",
+                "--push",
+                "github",
+                "https://github.com/wrong/repo.git",
+            ],
+        );
+        add_github_remote(&source, "chosen", "repo").unwrap();
+        assert!(remote_matches_publication(
+            &source, "github", "chosen", "repo"
+        ));
+        let _ = std::fs::remove_dir_all(source);
     }
 
     #[test]
