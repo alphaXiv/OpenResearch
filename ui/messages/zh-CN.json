@@ -1221,8 +1221,7 @@
   "ssh_direct_host": "直接在主机上",
   "ssh_existing_container": "现有容器",
   "ssh_container_reference": "容器名称或 ID",
-  "repository_change": "更换仓库",
-  "repository_connect_existing": "连接已有仓库",
+  "repository_edit": "编辑",
   "repository_target": "GitHub 仓库 URL 或 owner/repo",
   "repository_connect_description": "将基线和实验分支推送至此仓库并开启自动同步。保留现有仓库和无关远程地址。如果历史存在冲突，将停止连接，不会覆盖远程提交。",
   "repository_connect_and_sync": "连接并同步"

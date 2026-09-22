@@ -1221,8 +1221,7 @@
   "ssh_direct_host": "Servidor directamente",
   "ssh_existing_container": "Contenedor existente",
   "ssh_container_reference": "Nombre o ID del contenedor",
-  "repository_change": "Cambiar repositorio",
-  "repository_connect_existing": "Conectar repositorio existente",
+  "repository_edit": "Editar",
   "repository_target": "URL de GitHub o propietario/repositorio",
   "repository_connect_description": "Envía las ramas base y de experimentos a este repositorio y activa la sincronización automática. Se conservan los repositorios existentes y los remotos no relacionados. Los conflictos de historial detendrán la conexión sin sobrescribir commits remotos.",
   "repository_connect_and_sync": "Conectar y sincronizar"

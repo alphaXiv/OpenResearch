@@ -3277,7 +3277,17 @@ function GitTab({
             <h3>GitHub</h3>
             <div className={KV_CLASS_NAME}>
               <span className="k">{m.settings_page_authentication()}</span><span className="v"><Badge variant={status.github.authenticated ? "success" : status.github.ghInstalled ? "warning" : "error"}>{status.github.authenticated ? m.settings_connected_via_github_cli() : m.settings_not_connected()}</Badge></span>
-              <span className="k">{m.settings_page_project()}</span><span className="v">{hasGithubRepository ? <><span>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <Badge>{m.settings_page_syncing_off()}</Badge>}</> : <Badge>{m.settings_page_local_only()}</Badge>}</span>
+              <span className="k">{m.settings_page_project()}</span>
+              <span className="v">
+                {hasGithubRepository ? <><span>{status.github.owner}/{status.github.repo}</span>{!status.github.enabled && <Badge>{m.settings_page_syncing_off()}</Badge>}</> : <Badge>{m.settings_page_local_only()}</Badge>}
+                {status.github.authenticated && (
+                  <Button variant="ghost" size="small" disabled={saving || repositoryFormOpen} onClick={() => {
+                    setRepository(hasGithubRepository ? `${status.github.owner}/${status.github.repo}` : "");
+                    setError(null);
+                    setRepositoryFormOpen(true);
+                  }}>{m.repository_edit()}</Button>
+                )}
+              </span>
               {status.github.enabled && <><span className="k">{m.settings_page_sync()}</span><span className="v">{status.github.syncStatus}</span></>}
             </div>
             {!status.github.authenticated && (
@@ -3310,33 +3320,23 @@ function GitTab({
                 </div>
               </>
             )}
-            {status.github.authenticated && (
+            {status.github.authenticated && repositoryFormOpen && (
               <div className="mt-3.5 pt-3.5 border-t border-border-variant">
-                {!repositoryFormOpen ? (
-                  <Button disabled={saving} onClick={() => {
-                    setRepository(hasGithubRepository ? `${status.github.owner}/${status.github.repo}` : "");
-                    setError(null);
-                    setRepositoryFormOpen(true);
-                  }}>
-                    {hasGithubRepository ? m.repository_change() : m.repository_connect_existing()}
-                  </Button>
-                ) : (
-                  <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void connectRepository(); }}>
-                    <label className="flex flex-col gap-1 text-sm">
-                      {m.repository_target()}
-                      <Input autoFocus value={repository} onChange={(event) => setRepository(event.target.value)}
-                        placeholder="owner/repo" disabled={saving} required />
-                    </label>
-                    <p className="m-0 text-sm text-subtext">{m.repository_connect_description()}</p>
-                    {error && <div role="alert" className="text-sm text-accent-red">{syncErrorMessage(error)}</div>}
-                    <div className="flex gap-2">
-                      <Button type="submit" variant="primary" disabled={saving || !repository.trim()}>
-                        {saving ? m.repository_enabling() : m.repository_connect_and_sync()}
-                      </Button>
-                      <Button type="button" disabled={saving} onClick={() => { setRepositoryFormOpen(false); setError(null); }}>{m.settings_page_cancel()}</Button>
-                    </div>
-                  </form>
-                )}
+                <form className="flex flex-col gap-3" onSubmit={(event) => { event.preventDefault(); void connectRepository(); }}>
+                  <label className="flex flex-col gap-1 text-sm">
+                    {m.repository_target()}
+                    <Input autoFocus value={repository} onChange={(event) => setRepository(event.target.value)}
+                      placeholder="owner/repo" disabled={saving} required />
+                  </label>
+                  <p className="m-0 text-sm text-subtext">{m.repository_connect_description()}</p>
+                  {error && <div role="alert" className="text-sm text-accent-red">{syncErrorMessage(error)}</div>}
+                  <div className="flex gap-2">
+                    <Button type="submit" variant="primary" disabled={saving || !repository.trim()}>
+                      {saving ? m.repository_enabling() : m.repository_connect_and_sync()}
+                    </Button>
+                    <Button type="button" disabled={saving} onClick={() => { setRepositoryFormOpen(false); setError(null); }}>{m.settings_page_cancel()}</Button>
+                  </div>
+                </form>
               </div>
             )}
           </div>

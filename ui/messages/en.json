@@ -1221,8 +1221,7 @@
   "ssh_direct_host": "Direct host",
   "ssh_existing_container": "Existing container",
   "ssh_container_reference": "Container name or ID",
-  "repository_change": "Change repository",
-  "repository_connect_existing": "Connect existing repository",
+  "repository_edit": "Edit",
   "repository_target": "GitHub repository URL or owner/repo",
   "repository_connect_description": "Push the baseline and experiment branches to this repository and enable automatic syncing. Existing repositories and unrelated remotes are kept. Conflicting history will stop the connection without overwriting remote commits.",
   "repository_connect_and_sync": "Connect and sync"
