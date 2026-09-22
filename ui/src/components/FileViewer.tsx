@@ -434,11 +434,13 @@ export function FileViewer({
   );
   const osActionBlocker = remote
     ? m.file_viewer_os_action_local_only()
-    : gitRef
-      ? m.file_viewer_os_action_committed_version({ branch: ltr(gitRef) })
-      : onDisk
-        ? null
-        : m.file_viewer_os_action_not_on_disk();
+    : data?.notFound
+      ? m.file_viewer_not_found()
+      : gitRef
+        ? m.file_viewer_os_action_committed_version({ branch: ltr(gitRef) })
+        : onDisk
+          ? null
+          : m.file_viewer_os_action_not_on_disk();
   const reload = useCallback(() => {
     if (!bufferSession.saving) setNonce((value) => value + 1);
   }, [bufferSession]);
@@ -622,6 +624,7 @@ export function FileViewer({
               data-tip={osActionBlocker ?? openEditor.error ?? m.file_viewer_open_in_default_editor()}
               data-tip-align="end"
               aria-label={m.file_viewer_open_in_default_editor()}
+              aria-description={osActionBlocker ?? undefined}
               disabled={openEditor.busy || osActionBlocker != null}
               onClick={() => void openEditor.trigger()}
             >
@@ -632,6 +635,7 @@ export function FileViewer({
               data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
               data-tip-align="end"
               aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-description={osActionBlocker ?? undefined}
               disabled={revealManager.busy || osActionBlocker != null}
               onClick={() => void revealManager.trigger()}
             >

@@ -187,7 +187,7 @@
   "file_viewer_html_preview": "HTML المعروض: {name}",
   "file_viewer_loading": "جارٍ التحميل…",
   "file_viewer_open_in_default_editor": "فتح في المحرر الافتراضي",
-  "file_viewer_os_action_committed_version": "نسخة محفوظة من {branch}، ليست على القرص",
+  "file_viewer_os_action_committed_version": "نسخة مودعة من {branch}، ليست على القرص",
   "file_viewer_os_action_local_only": "فقط للمشاريع على هذا الكمبيوتر",
   "file_viewer_os_action_not_on_disk": "فقط لملفات مجلد المشروع",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "تم سحب نسخة Overleaf من هذا الملف بينما كانت لديك تعديلات غير محفوظة، لذا ما تراه لم يعد مطابقًا لما هو على القرص. الحفظ الآن يرسل هذه المسودة إلى Overleaf بدلًا من ذلك.",
