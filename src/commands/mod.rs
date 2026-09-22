@@ -21,6 +21,7 @@ pub mod compute;
 pub mod create_experiment;
 pub mod delete;
 pub mod discover;
+pub mod down;
 pub mod exp;
 mod file_serve;
 pub mod install_cli;

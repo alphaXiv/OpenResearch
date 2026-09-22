@@ -145,6 +145,9 @@ enum Command {
     /// JSON/SSE API over the local store, and the opencode agent proxy.
     Up(UpArgs),
 
+    /// Stop the local autoresearch dashboard server.
+    Down(DownArgs),
+
     /// Turn anonymous usage analytics on or off, or show current status.
     Telemetry(TelemetryArgs),
 
@@ -553,7 +556,7 @@ pub struct SuperviseArgs {
     pub run_id: String,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct UpArgs {
     /// Port to bind on 127.0.0.1. With `--remote`, the local presentation port.
     #[arg(long, default_value_t = 4791)]
@@ -569,6 +572,9 @@ pub struct UpArgs {
     /// Don't open the dashboard in the browser on startup.
     #[arg(long)]
     pub no_browser: bool,
+    /// Run the server detached in the background so the terminal/SSH session does not have to remain active.
+    #[arg(long, short = 'd')]
+    pub detach: bool,
     /// Don't spawn the opencode agent on startup (for tests).
     #[arg(long)]
     pub no_agent: bool,
@@ -578,6 +584,22 @@ pub struct UpArgs {
     /// Internal persistent dashboard/agent-host mode.
     #[arg(long, hide = true)]
     pub remote_host: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DownArgs {
+    /// Port of the dashboard server to shut down (default 4791).
+    #[arg(long)]
+    pub port: Option<u16>,
+    /// Stop a remote dashboard server over SSH (host alias or user@host).
+    #[arg(long, value_name = "HOST")]
+    pub remote: Option<String>,
+    /// Force terminate immediately without waiting for graceful shutdown.
+    #[arg(long, short = 'f')]
+    pub force: bool,
+    /// Stop all running orx up dashboard instances across all ports.
+    #[arg(long)]
+    pub all: bool,
 }
 
 #[derive(Args, Clone, Debug)]
@@ -1039,6 +1061,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Serve(_) => "serve",
         Command::Supervise(_) => "supervise",
         Command::Up(_) => "up",
+        Command::Down(_) => "down",
         Command::Telemetry(_) => "telemetry",
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
@@ -1092,6 +1115,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
             Some(host) => commands::up_remote::run(&host, args).await,
             None => commands::up::run(args).await,
         },
+        Command::Down(args) => commands::down::run(args).await,
         Command::Telemetry(args) => commands::telemetry::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
@@ -1112,6 +1136,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Paper(_)
             | Command::Version(_)
             | Command::Delete(_)
+            | Command::Down(_)
             | Command::Telemetry(_)
             | Command::PlanGate
             | Command::McpGate
@@ -1133,6 +1158,41 @@ mod cli_tests {
             Cli::parse_from(["orx", "up"]).command,
             Some(Command::Up(args)) if args.remote.is_none()
         ));
+    }
+
+    #[test]
+    fn up_detach_flags_parse() {
+        for flag in ["-d", "--detach"] {
+            let cli = Cli::try_parse_from(["orx", "up", flag]).unwrap();
+            let Some(Command::Up(args)) = cli.command else {
+                panic!("expected up command for {flag}");
+            };
+            assert!(args.detach);
+        }
+    }
+
+    #[test]
+    fn down_command_parses_options() {
+        let cli = Cli::try_parse_from(["orx", "down"]).unwrap();
+        let Some(Command::Down(args)) = cli.command else {
+            panic!("expected down command");
+        };
+        assert_eq!(args.port, None);
+        assert_eq!(args.remote, None);
+        assert!(!args.force);
+        assert!(!args.all);
+
+        let cli = Cli::try_parse_from([
+            "orx", "down", "--port", "5001", "--remote", "my-host", "-f", "--all",
+        ])
+        .unwrap();
+        let Some(Command::Down(args)) = cli.command else {
+            panic!("expected down command");
+        };
+        assert_eq!(args.port, Some(5001));
+        assert_eq!(args.remote.as_deref(), Some("my-host"));
+        assert!(args.force);
+        assert!(args.all);
     }
 
     #[test]
