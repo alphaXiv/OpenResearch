@@ -7607,6 +7607,7 @@ async fn create_chat_session(
         archived: false,
         context_usage_json: None,
         bootstrap_context: None,
+        goal: None,
         active_leaf_id: None,
         parent_session_id: None,
         created_at: now_ms(),
@@ -7631,6 +7632,9 @@ struct UpdateChatSessionReq {
     title: Option<String>,
     plan_mode: Option<bool>,
     permission_mode: Option<String>,
+    /// Present-and-null clears the goal, which is why it is doubly wrapped.
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    goal: Option<Option<String>>,
 }
 
 async fn update_chat_session(
@@ -7659,6 +7663,15 @@ async fn update_chat_session(
         state
             .chat
             .set_plan_mode(&id, plan_mode)
+            .await?
+            .ok_or_else(|| not_found("chat session"))?
+    } else if let Some(goal) = req.goal {
+        let goal = goal
+            .map(|goal| goal.trim().to_string())
+            .filter(|goal| !goal.is_empty());
+        state
+            .chat
+            .set_goal(&id, goal.as_deref())
             .await?
             .ok_or_else(|| not_found("chat session"))?
     } else if let Some(permission_mode) = req.permission_mode {

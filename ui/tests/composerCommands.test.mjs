@@ -22,7 +22,7 @@ test("a selected skill can be removed with its trailing composer spaces", () => 
   });
 });
 
-const ALL_COMMANDS = ["compact", "copy", "export", "model", "new", "plan", "resume"];
+const ALL_COMMANDS = ["compact", "copy", "export", "goal", "model", "new", "plan", "resume"];
 
 test("every harness gets the same commands ahead of its skills", () => {
   const skills = [{ name: "review", description: "Review", source: "user" }];
@@ -81,6 +81,23 @@ test("aliases run their command without being listed separately", () => {
   assert.ok(commandMatchesQuery(menu.find((item) => item.name === "new"), "cle"));
   assert.ok(!commandMatchesQuery(menu.find((item) => item.name === "copy"), "cle"));
   assert.ok(!commandMatchesQuery({ name: "review", description: "", source: "user" }, "cle"));
+});
+
+test("Goal takes the rest of the message, but only when it leads", () => {
+  assert.deepEqual(parseComposerCommand("/goal ship the sweep", "command"), {
+    name: "goal",
+    prompt: "ship the sweep",
+  });
+  assert.deepEqual(parseComposerCommand("/goal", "command"), { name: "goal", prompt: "" });
+  assert.deepEqual(parseComposerCommand("/goal clear", "command"), { name: "goal", prompt: "clear" });
+  // Mid-sentence it is prose, like every other non-plan command.
+  assert.equal(parseComposerCommand("remind me what the /goal was", "command"), null);
+  assert.equal(parseComposerCommand("/goalie", "command"), null);
+  // A command named inside the goal is part of the goal, not a command.
+  assert.deepEqual(parseComposerCommand("/goal keep the /plan in sync", "command"), {
+    name: "goal",
+    prompt: "keep the /plan in sync",
+  });
 });
 
 test("only Plan composes with a prompt; the rest must be the whole message", () => {

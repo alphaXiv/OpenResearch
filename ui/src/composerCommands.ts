@@ -10,12 +10,13 @@ export function commandLabel(skill: SkillInfo): string {
 }
 
 /** Built-in commands the dashboard runs instead of sending, same on every harness. */
-export const COMPOSER_COMMANDS = ["plan", "new", "resume", "model", "compact", "copy", "export"] as const;
+export const COMPOSER_COMMANDS = ["plan", "goal", "new", "resume", "model", "compact", "copy", "export"] as const;
 
 export type ComposerCommandName = (typeof COMPOSER_COMMANDS)[number];
 
 const COMMAND_DESCRIPTIONS: Record<ComposerCommandName, () => string> = {
   plan: () => m.plan_command_description(),
+  goal: () => m.goal_command_description(),
   new: () => m.new_command_description(),
   resume: () => m.resume_command_description(),
   model: () => m.model_command_description(),
@@ -171,20 +172,29 @@ export function commandsForHarness(
   });
 }
 
-/** The command a typed message runs instead of sending, minus its token.
- *
- * Plan composes with a prompt, so its token is taken from anywhere in the
- * message. The rest are whole-message commands: prose that merely mentions
- * `/export` or asks what `/clear` does must still reach the agent. */
+/** Commands that read the rest of the message: Plan as the prompt to plan,
+ * Goal as the goal to keep. The rest run only as a whole message, so prose
+ * mentioning `/export` or asking what `/clear` does still reaches the agent. */
+export function takesArgument(name: ComposerCommandName): boolean {
+  return name === "plan" || name === "goal";
+}
+
+/** The command a typed message runs instead of sending, minus its token. */
 export function parseComposerCommand(
   text: string,
   planActivation: "permission" | "command" | null | undefined,
 ): { name: ComposerCommandName; prompt: string } | null {
-  for (const name of availableCommands(planActivation)) {
+  for (const name of availableCommands(planActivation).sort((a, b) => Number(a === "plan") - Number(b === "plan"))) {
     const spellings = [name, ...aliasesOf(name)].join("|");
     if (name === "plan") {
       const token = new RegExp(`(^|\\s)\\/(?:${spellings})(?=\\s|$)`, "gi");
       if (token.test(text)) return { name, prompt: text.replace(token, "").trim() };
+    } else if (name === "goal") {
+      // Anchored: a goal is what follows the token, so `/goal` must lead.
+      const token = new RegExp(`^\\/(?:${spellings})(?=\\s|$)`, "i");
+      if (token.test(text.trim())) {
+        return { name, prompt: text.trim().replace(token, "").trim() };
+      }
     } else if (new RegExp(`^\\/(?:${spellings})$`, "i").test(text.trim())) {
       return { name, prompt: "" };
     }
