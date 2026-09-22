@@ -22,6 +22,7 @@ import {
   ExternalLink,
   FileOutput,
   FileText,
+  FolderOpen,
   GitBranch,
   X,
 } from "lucide-react";
@@ -32,6 +33,7 @@ import {
   FileChangedError,
   openFileInEditor,
   projectFileUrl,
+  revealFileInManager,
   saveProjectFile,
   type ArtifactEntry,
 } from "../api";
@@ -120,6 +122,24 @@ function CopyableCommand({ command }: { command: string }) {
       </IconButton>
     </div>
   );
+}
+
+/** Busy/error state for a detached OS file action; failures surface as a tooltip. */
+function useOsFileAction(run: () => Promise<unknown>) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trigger = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, trigger };
 }
 
 export function FileViewer({
@@ -404,21 +424,23 @@ export function FileViewer({
     else await save();
   };
 
-  const [openingEditor, setOpeningEditor] = useState(false);
-  const [editorError, setEditorError] = useState<string | null>(null);
   // Hand the file to the OS, which opens it in the user's default app for the
   // type (their editor for source files) — no picker.
-  const openInEditor = async () => {
-    setOpeningEditor(true);
-    setEditorError(null);
-    try {
-      await openFileInEditor(projectId, filePath, { sessionId });
-    } catch (e) {
-      setEditorError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setOpeningEditor(false);
-    }
-  };
+  const openEditor = useOsFileAction(() =>
+    openFileInEditor(projectId, filePath, { sessionId }),
+  );
+  const revealManager = useOsFileAction(() =>
+    revealFileInManager(projectId, filePath, { sessionId }),
+  );
+  const osActionBlocker = remote
+    ? m.file_viewer_os_action_local_only()
+    : data?.notFound
+      ? m.file_viewer_not_found()
+      : gitRef
+        ? m.file_viewer_os_action_committed_version({ branch: ltr(gitRef) })
+        : onDisk
+          ? null
+          : m.file_viewer_os_action_not_on_disk();
   const reload = useCallback(() => {
     if (!bufferSession.saving) setNonce((value) => value + 1);
   }, [bufferSession]);
@@ -595,17 +617,31 @@ export function FileViewer({
             <Code size={13} />
           </IconButton>
         )}
-        {onDisk && !remote && (
-          <IconButton
-            size="small"
-            data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_open_in_default_editor()}
-            disabled={openingEditor}
-            onClick={() => void openInEditor()}
-          >
-            {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
-          </IconButton>
+        {data != null && (
+          <>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? openEditor.error ?? m.file_viewer_open_in_default_editor()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_open_in_default_editor()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={openEditor.busy || osActionBlocker != null}
+              onClick={() => void openEditor.trigger()}
+            >
+              {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
+            </IconButton>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={revealManager.busy || osActionBlocker != null}
+              onClick={() => void revealManager.trigger()}
+            >
+              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
+            </IconButton>
+          </>
         )}
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be

@@ -506,6 +506,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         )
         .route("/api/projects/{id}/file/raw", get(project_raw_file))
         .route("/api/projects/{id}/file/open", post(open_project_file))
+        .route("/api/projects/{id}/file/reveal", post(reveal_project_file))
         .route("/api/projects/{id}/file/latex", post(compile_project_latex))
         .route("/api/latex/engine", get(latex_engine))
         .route(
@@ -792,7 +793,8 @@ fn remote_route_forbidden(path: &str) -> bool {
             | "/api/settings/commands/run"
             | "/api/harnesses/setup"
     ) || path.starts_with("/api/remote/")
-        || (path.starts_with("/api/projects/") && path.ends_with("/file/open"))
+        || (path.starts_with("/api/projects/")
+            && (path.ends_with("/file/open") || path.ends_with("/file/reveal")))
 }
 
 fn is_remote_callback_route(method: &Method, path: &str) -> bool {
@@ -3212,6 +3214,32 @@ struct OpenProjectFileReq {
     session_id: Option<String>,
 }
 
+/// Canonical path of a checkout-relative file, confined to the checkout root.
+fn confined_checkout_file(
+    id: &str,
+    req: &OpenProjectFileReq,
+    verb: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let (_, rel_path) = validated_project_file_path(&req.path)?;
+    if touches_git_dir(&rel_path) {
+        return Err(bad_request(format!("cannot {verb} files under .git")));
+    }
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(id)?
+        .ok_or_else(|| not_found("project"))?;
+    let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+    let full = match crate::paths::canonicalize(root.join(&rel_path)) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+        Err(e) => return Err(ApiError::from(anyhow!("{verb} failed: {e}"))),
+    };
+    if !full.starts_with(&root) {
+        return Err(bad_request("path escapes repository"));
+    }
+    Ok(full)
+}
+
 /// Open a checkout file in the machine's default app for its type (the user's
 /// editor for source files). Resolves the same worktree/clone the reader uses
 /// and confirms the file is inside it before handing the path to the OS opener.
@@ -3220,28 +3248,26 @@ async fn open_project_file(
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let (_, rel_path) = validated_project_file_path(&req.path)?;
-        if touches_git_dir(&rel_path) {
-            return Err(bad_request("cannot open files under .git"));
-        }
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
-            Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
-            Err(e) => return Err(ApiError::from(anyhow!("open failed: {e}"))),
-        };
-        if !full.starts_with(&root) {
-            return Err(bad_request("path escapes repository"));
-        }
+        let full = confined_checkout_file(&id, &req, "open")?;
         if full.is_dir() {
             return Err(bad_request("path is a directory"));
         }
         crate::editors::open_in_default_app(&full)
             .map_err(|e| ApiError::from(anyhow!("could not open file: {e}")))?;
+        Ok(Json(json!({ "ok": true })))
+    })
+    .await
+}
+
+/// Reveal a checkout file in the OS file manager; unlike open, directories are allowed.
+async fn reveal_project_file(
+    Path(id): Path<String>,
+    Json(req): Json<OpenProjectFileReq>,
+) -> ApiResult {
+    blocking_api(move || {
+        let full = confined_checkout_file(&id, &req, "reveal")?;
+        crate::editors::reveal_in_file_manager(&full)
+            .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
     })
     .await
@@ -8708,6 +8734,7 @@ mod tests {
             "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
+            "/api/projects/p1/file/reveal",
         ] {
             assert!(remote_route_forbidden(path), "{path}");
         }

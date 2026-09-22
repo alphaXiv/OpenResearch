@@ -80,7 +80,7 @@ export function invalidateWrite(url: string, scope: ReturnType<typeof workspaceS
   if (!isCurrentScope(scope)) return;
   const invalidate = (families: readonly string[], target = scope, predicate?: QueryFilters["predicate"]) => invalidateFamilies(families, target, predicate, true);
   const path = url.split("?")[0];
-  if (/\/(ui-state|open|prewarm|validate|preflight)$/.test(path)) return;
+  if (/\/(ui-state|open|reveal|prewarm|validate|preflight)$/.test(path)) return;
   const setting = /^\/api\/settings\/([^/]+)/.exec(path)?.[1];
   if (setting) { invalidate(settingsFamilies[setting] ?? [], scope); return; }
   if (path.startsWith("/api/local-models") && !/\/(discover|check)$/.test(path)) { invalidate(["getLocalModels", "getHarnesses"], scope); return; }
