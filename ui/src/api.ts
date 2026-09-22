@@ -1376,6 +1376,7 @@ export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
   biorxiv: boolean;
+  pubmed: boolean;
 }
 
 export const getLitSources = (signal?: AbortSignal) =>

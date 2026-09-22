@@ -111,7 +111,7 @@ Method:
 pub const CATALOG: &[Skill] = &[
     Skill {
         name: "lit-review",
-        description: "Multi-hop literature review across alphaXiv, OpenAlex, and bioRxiv",
+        description: "Multi-hop literature review across alphaXiv, OpenAlex, bioRxiv, and PubMed",
         template: LIT_REVIEW_TEMPLATE,
         empty_request: "(none given — ask the user what topic to review before searching)",
     },

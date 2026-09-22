@@ -58,6 +58,8 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 
 # File identity for Windows' hard-link fallback (native_store.rs); already in the tree via walkdir.
 same-file = "1.0"
+# PubMed efetch serves abstracts only as XML.
+roxmltree = "0.21"
 
 [target.'cfg(unix)'.dependencies]
 # Free-space pre-check for the data-dir move (statvfs). Already in the tree

@@ -5414,6 +5414,7 @@ fn lit_sources_json() -> Value {
         "alphaxiv": enabled(crate::LitSource::Alphaxiv.as_str()),
         "openalex": enabled(crate::LitSource::Openalex.as_str()),
         "biorxiv": enabled(crate::LitSource::Biorxiv.as_str()),
+        "pubmed": enabled(crate::LitSource::Pubmed.as_str()),
     })
 }
 
@@ -5428,6 +5429,7 @@ struct SetLitSourcesReq {
     alphaxiv: bool,
     openalex: bool,
     biorxiv: bool,
+    pubmed: bool,
 }
 
 async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResult {
@@ -5437,6 +5439,7 @@ async fn set_lit_sources_settings(Json(req): Json<SetLitSourcesReq>) -> ApiResul
             (req.alphaxiv, crate::LitSource::Alphaxiv),
             (req.openalex, crate::LitSource::Openalex),
             (req.biorxiv, crate::LitSource::Biorxiv),
+            (req.pubmed, crate::LitSource::Pubmed),
         ] {
             if !enabled {
                 disabled.push(source.as_str().to_string());

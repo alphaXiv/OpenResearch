@@ -46,6 +46,20 @@ pub fn biorxiv_api_url() -> String {
     std::env::var("BIORXIV_API_URL").unwrap_or_else(|_| "https://api.biorxiv.org".to_string())
 }
 
+/// Base URL for NCBI E-utilities (PubMed search and records). Public, no
+/// token. Backs PubMed discovery and `orx paper <pmid>`. Override with
+/// `PUBMED_API_URL`.
+pub fn pubmed_api_url() -> String {
+    std::env::var("PUBMED_API_URL")
+        .unwrap_or_else(|_| "https://eutils.ncbi.nlm.nih.gov/entrez/eutils".to_string())
+}
+
+/// Contact address sent to NCBI as `email=` alongside `tool=orx`, which NCBI
+/// asks E-utilities clients to include. Override with `NCBI_EMAIL`.
+pub fn ncbi_email() -> String {
+    std::env::var("NCBI_EMAIL").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
+}
+
 /// Contact address sent to OpenAlex as `mailto=` to enter its faster "polite
 /// pool". OpenAlex asks API users to identify themselves this way. Override with
 /// `OPENALEX_MAILTO`.
