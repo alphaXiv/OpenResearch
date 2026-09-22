@@ -155,7 +155,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
             .stderr(Stdio::null())
             .kill_on_drop(true);
         prepare_env(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -513,7 +513,9 @@ impl Codex {
     /// and auth is already a file read (`auth.json` / `config.toml`).
     async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        super::detect::record_selected(&mut info, snapshot, find_codex, find_codex_working()).await;
+        // The config/auth file reads run before selection: they cost nothing
+        // and their answer decides whether the app-server catalog child is
+        // worth spawning at all.
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
@@ -550,6 +552,50 @@ impl Codex {
             }
         }
 
+        // The `model/list` handshake is only spawned where the auth evidence
+        // already says it can run — and for a custom provider, only when its
+        // config declares a catalog the bundled first-party one can't
+        // answer for. Either way it runs concurrently with the `--version`
+        // sweep instead of behind it.
+        let want_catalog = !snapshot
+            && info.authenticated
+            && custom_provider
+                .as_ref()
+                .is_none_or(|provider| provider.has_model_catalog);
+        let mut catalog = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "codex",
+                find_codex,
+                find_codex_working(),
+            )
+            .await;
+        } else {
+            let effort = configured_effort.clone();
+            let (selected, probed) = super::detect::select_and_speculate(
+                "codex",
+                codex_candidates(),
+                None,
+                move |bin| {
+                    let effort = effort.clone();
+                    async move {
+                        if want_catalog {
+                            codex_model_list(&bin, effort.as_deref()).await
+                        } else {
+                            None
+                        }
+                    }
+                },
+            )
+            .await;
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            catalog = probed.flatten();
+        }
+
         if info.installed && !info.install_broken {
             info.auth_state = if info.authenticated {
                 super::HarnessAuthState::Ready
@@ -564,38 +610,20 @@ impl Codex {
         }
         info.agent_ready = info.ready();
         if info.agent_ready {
-            // Only the Full pass may spawn the catalog probes.
-            let probe_bin = info
-                .bin_path
-                .as_deref()
-                .map(Path::new)
-                .filter(|_| !snapshot);
-            // A custom provider's bundled first-party catalog is meaningless,
-            // so probe only when its config declares an explicit catalog.
-            let custom_catalog = match (custom_provider.as_ref(), probe_bin) {
-                (Some(provider), Some(bin)) if provider.has_model_catalog => {
-                    codex_model_list(bin, configured_effort.as_deref()).await
-                }
-                _ => None,
-            };
+            let catalog_answered = catalog.is_some();
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
                 Some(configured_model) => {
-                    info =
-                        info.with_models(custom_provider_models(configured_model, custom_catalog))
+                    info = info.with_models(custom_provider_models(configured_model, catalog))
                 }
                 None => {
-                    // First-party account: ask the installed CLI for its own
-                    // catalog (models + per-model efforts, the data codex's TUI
-                    // picker renders). The static table only covers a codex too
-                    // old to answer `model/list`.
-                    let models = match probe_bin {
-                        Some(bin) => codex_model_list(bin, configured_effort.as_deref()).await,
-                        None => None,
-                    };
-                    info = info.with_models(models.unwrap_or_else(|| {
+                    // First-party account: the speculated `model/list` answer
+                    // is codex's own catalog (models + per-model efforts, the
+                    // data its TUI picker renders). The static table covers a
+                    // codex too old to answer — and the snapshot pass.
+                    info = info.with_models(catalog.unwrap_or_else(|| {
                         CODEX_MODELS
                             .iter()
                             .map(|(id, levels)| ModelInfo::new(*id).with_reasoning(levels))
@@ -605,11 +633,22 @@ impl Codex {
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
-            // thread resume).
-            // `turn/steer` is an app-server method, so this must follow the
-            // dispatch predicate rather than the version alone. The snapshot
-            // leaves it off — the capability spawn is deferred to the fill.
-            info.supports_steering = !snapshot && runs_app_server().await;
+            // thread resume). `turn/steer` is an app-server method, so this
+            // follows the dispatch predicate rather than the version alone.
+            // Detection already holds the evidence — the probed version, or a
+            // completed `model/list` handshake — so seeding the capability
+            // cell costs no extra spawn. The snapshot leaves it off.
+            let supported = !snapshot
+                && app_server_supported(Some(
+                    catalog_answered
+                        || info
+                            .version
+                            .as_deref()
+                            .and_then(parse_version)
+                            .is_some_and(|v| v >= MIN_APP_SERVER_VERSION),
+                ))
+                .await;
+            info.supports_steering = !codex_exec_forced() && supported;
             let too_old = info
                 .version
                 .as_deref()
@@ -960,30 +999,39 @@ fn installed_plugin_skills_dirs(home: &Path, inventory: &Value) -> Vec<(String, 
 /// live spike). Older CLIs take the exec fallback below.
 const MIN_APP_SERVER_VERSION: (u64, u64, u64) = (0, 144, 0);
 
+/// ORX_CODEX_EXEC pins turns to the legacy exec path ("0"/empty don't count).
+fn codex_exec_forced() -> bool {
+    std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Whether a turn will run over the app-server: a supported codex, unless
-/// ORX_CODEX_EXEC forces the legacy exec path ("0"/empty don't count).
+/// ORX_CODEX_EXEC forces the legacy exec path.
 /// Capability reporting reads the same answer, so the composer can't offer
 /// app-server-only features the exec path lacks.
 async fn runs_app_server() -> bool {
-    let force_exec = std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0");
-    !force_exec && app_server_supported().await
+    !codex_exec_forced() && app_server_supported(None).await
 }
 
 /// Whether the installed codex speaks the validated app-server protocol.
 /// Probed once per process (a codex upgrade mid-run takes an `orx up` restart
-/// to notice — acceptable).
-async fn app_server_supported() -> bool {
+/// to notice — acceptable). A caller that already holds the evidence —
+/// detection's probed version, or a completed `model/list` handshake — passes
+/// it as `known` and the cell seeds without paying another `--version` child.
+async fn app_server_supported(known: Option<bool>) -> bool {
     static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
     *SUPPORTED
-        .get_or_init(|| async {
-            let Some(bin) = find_codex() else {
-                return false;
-            };
-            bin_version(&bin)
-                .await
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v >= MIN_APP_SERVER_VERSION)
+        .get_or_init(|| async move {
+            match known {
+                Some(known) => known,
+                None => match find_codex() {
+                    Some(bin) => bin_version(&bin)
+                        .await
+                        .as_deref()
+                        .and_then(parse_version)
+                        .is_some_and(|v| v >= MIN_APP_SERVER_VERSION),
+                    None => false,
+                },
+            }
         })
         .await
 }

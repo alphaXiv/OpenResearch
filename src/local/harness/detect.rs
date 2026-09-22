@@ -15,6 +15,63 @@ use serde_json::Value;
 
 pub(super) const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Bound on simultaneous detection children. Every probe below is a CLI
+/// spawn — cheap on Unix, but on Windows each costs seconds, and a fill that
+/// fires a dozen at once thrashes (AV scans, node bootstrap) enough that the
+/// probes then take *longer* than running a few at a time. A handful of lanes
+/// keeps the longest chains overlapped without the measured free-for-all
+/// slowdown. `ORX_DETECT_MAX_SPAWNS` overrides the default for tuning.
+fn detect_spawn() -> &'static tokio::sync::Semaphore {
+    static SPAWN: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    SPAWN.get_or_init(|| {
+        let lanes = std::env::var("ORX_DETECT_MAX_SPAWNS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(8);
+        tokio::sync::Semaphore::new(lanes)
+    })
+}
+
+/// A permit bounding simultaneous detection children — see [`detect_spawn`].
+/// Acquired *before* a probe's own timeout so queue time never counts as
+/// spawn time (which would misreport a queued probe as a hung one).
+pub(crate) async fn detect_spawn_permit() -> tokio::sync::SemaphorePermit<'static> {
+    detect_spawn()
+        .acquire()
+        .await
+        .expect("detect spawn semaphore never closes")
+}
+
+/// Run a detection child to completion. On Windows the `CreateProcess` inside
+/// `Command::spawn` blocks while the AV scans the binary — over a second for a
+/// node/bun CLI — so spawning on a runtime worker serializes every probe
+/// behind whichever scans are in flight. The blocking pool has threads to
+/// spare, so the spawn happens there and only the IO wait stays async. The
+/// permit is held for the child's whole run: the bound is on concurrent
+/// children, not just concurrent spawns.
+pub(crate) async fn detect_spawn_output(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<std::process::Output> {
+    let _permit = detect_spawn_permit().await;
+    // `Command::output` implied these; `spawn` leaves them inherited.
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = tokio::task::spawn_blocking(move || cmd.spawn()).await??;
+    child.wait_with_output().await
+}
+
+/// Same reasoning as [`detect_spawn_output`], for callers that drive the
+/// child's stdio themselves. The returned permit guards the caller's own IO
+/// loop — keep it alive until the child is reaped.
+pub(crate) async fn detect_spawn_child(
+    mut cmd: tokio::process::Command,
+) -> std::io::Result<(tokio::process::Child, tokio::sync::SemaphorePermit<'static>)> {
+    let permit = detect_spawn_permit().await;
+    let child = tokio::task::spawn_blocking(move || cmd.spawn()).await??;
+    Ok((child, permit))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HarnessAuthState {
@@ -246,26 +303,38 @@ pub(super) async fn select_working(
     // The sync `find_*` callers cannot probe; publishing the choice keeps them
     // on the verified binary instead of the first PATH hit it skipped.
     if let Some((path, _)) = &selected {
-        selected_bins()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(key, path.clone());
+        remember_selected(key, path);
     }
     selected
+}
+
+/// Remember the binary a detection pass picked — see `select_working`.
+pub(super) fn remember_selected(key: &'static str, path: &Path) {
+    selected_bins()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key, path.to_path_buf());
 }
 
 /// The executable the last detection pass selected for `key`, else the first
 /// candidate. A selection that no longer exists or has dropped out of discovery
 /// is stale and ignored.
 pub(super) fn selected_bin(key: &str, candidates: Vec<PathBuf>) -> Option<PathBuf> {
-    let selected = selected_bins()
+    remembered_bin(key)
+        .filter(|path| candidates.contains(path))
+        .or_else(|| candidates.into_iter().next())
+}
+
+/// The selection the last pass remembered for `key`, if it still exists —
+/// without re-running discovery. Lets a later pass trust the pick cheaply when
+/// validating it against the candidate list is itself expensive.
+pub(super) fn remembered_bin(key: &str) -> Option<PathBuf> {
+    selected_bins()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(key)
-        .cloned();
-    selected
-        .filter(|path| path.exists() && candidates.contains(path))
-        .or_else(|| candidates.into_iter().next())
+        .cloned()
+        .filter(|path| path.exists())
 }
 
 fn selected_bins() -> &'static std::sync::Mutex<std::collections::HashMap<&'static str, PathBuf>> {
@@ -308,11 +377,69 @@ async fn select_working_from(
 }
 
 /// Discovery order, one entry per path. `Vec::dedup` drops only *adjacent*
-/// repeats, so a non-adjacent `~/.local/bin` hit would be probed twice.
-pub(crate) fn unique(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+/// repeats, and on Windows the same binary reached through two PATH spellings
+/// (`system32` vs `System32`) is not a repeat at all — the canonicalized key
+/// is what dedupes, or one install eats two multi-second `--version` spawns.
+pub(crate) fn unique(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
-    candidates.retain(|path| seen.insert(path.clone()));
-    candidates
+    let mut out = Vec::with_capacity(candidates.len());
+    for path in candidates {
+        let key = crate::paths::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+/// Full-pass binary selection overlapped with speculative probes on the
+/// binary discovery already prefers (`selected_bin`: the remembered pick,
+/// else the first candidate). The catalog/auth children run concurrently
+/// with the `--version` sweep instead of behind it — each spawn costs
+/// seconds on Windows, and serializing them made the fill the sum of every
+/// probe rather than the slowest one. When selection lands on a different
+/// binary (a stale first candidate), the probes re-run on the winner; a
+/// failed selection discards the speculation.
+pub(super) async fn select_and_speculate<F, Fut, Out>(
+    key: &'static str,
+    candidates: Vec<PathBuf>,
+    minimum: Option<(u64, u64, u64)>,
+    probes: F,
+) -> (Option<(PathBuf, BinProbe)>, Option<Out>)
+where
+    F: Fn(PathBuf) -> Fut,
+    Fut: Future<Output = Out>,
+{
+    let spec_bin = selected_bin(key, candidates.clone());
+    let speculated = spec_bin.clone().map(&probes);
+    let (selected, speculated) = tokio::join!(
+        timed_probe(key, "select", select_working(key, candidates, minimum)),
+        async move {
+            match speculated {
+                Some(fut) => Some(timed_probe(key, "spec", fut).await),
+                None => None,
+            }
+        },
+    );
+    match selected {
+        Some((bin, probe)) => {
+            let hit = spec_bin.as_ref() == Some(&bin);
+            if detect_timing() {
+                eprintln!(
+                    "orx detect: {key} spec {} (spec={:?} selected={:?})",
+                    if hit { "hit" } else { "miss" },
+                    spec_bin,
+                    bin
+                );
+            }
+            let out = match speculated.filter(|_| hit) {
+                Some(out) => Some(out),
+                None => Some(probes(bin.clone()).await),
+            };
+            (Some((bin, probe)), out)
+        }
+        None => (None, None),
+    }
 }
 
 /// Binary selection shared by every `detect_at`: the snapshot pass answers
@@ -322,15 +449,17 @@ pub(crate) fn unique(mut candidates: Vec<PathBuf>) -> Vec<PathBuf> {
 pub(super) async fn record_selected(
     info: &mut HarnessInfo,
     snapshot: bool,
+    key: &'static str,
     discover: impl FnOnce() -> Option<PathBuf>,
     working: impl Future<Output = Option<(PathBuf, BinProbe)>>,
 ) {
     let selected = if snapshot {
         discover().map(|bin| (bin, BinProbe::Unknown))
     } else {
-        working.await
+        timed_probe(key, "select", working).await
     };
     if let Some((bin, probe)) = selected {
+        remember_selected(key, &bin);
         info.record_bin(&bin, probe);
     }
 }
@@ -349,15 +478,173 @@ pub(super) enum BinProbe {
     Unknown,
 }
 
+/// Whether `ORX_DETECT_TIMING` per-probe logging is on.
+pub(crate) fn detect_timing() -> bool {
+    std::env::var_os("ORX_DETECT_TIMING").is_some()
+}
+
+/// One probe's wall clock inside a detection pass, recorded for the
+/// `harness_detect_probe` analytics event. `probe` is a fixed label —
+/// `"select"`, `"spec"`, `"resolve"`, `"status"`, `"models"`,
+/// `"auth+ultracode"`, or `"total"` for the per-harness pass total — never a
+/// path or other machine-local value.
+pub(crate) struct ProbeTiming {
+    pub(crate) harness: &'static str,
+    pub(crate) probe: &'static str,
+    pub(crate) ms: u64,
+}
+
+/// Timings recorded since the last [`take_probe_timings`]. The cap bounds the
+/// accumulation of one-off detects (`detect_harness`, refresh sweeps) that run
+/// with no fill to drain them; a real fill emits well under it.
+static PROBE_TIMINGS: std::sync::Mutex<Vec<ProbeTiming>> = std::sync::Mutex::new(Vec::new());
+const MAX_PROBE_TIMINGS: usize = 64;
+
+/// Record one probe's wall clock. `timed_probe` calls this for every wrapped
+/// probe; `detect_one` uses it for the per-harness `"total"` row.
+pub(crate) fn record_probe_timing(harness: &'static str, probe: &'static str, ms: u64) {
+    let Ok(mut timings) = PROBE_TIMINGS.lock() else {
+        return;
+    };
+    if timings.len() < MAX_PROBE_TIMINGS {
+        timings.push(ProbeTiming { harness, probe, ms });
+    }
+}
+
+/// Drain the recorded probe timings. The catalog fill calls this at start —
+/// discarding strays from one-off detects — and again at end to collect the
+/// fill's own records for the analytics event.
+pub(crate) fn take_probe_timings() -> Vec<ProbeTiming> {
+    PROBE_TIMINGS
+        .lock()
+        .map(|mut timings| std::mem::take(&mut *timings))
+        .unwrap_or_default()
+}
+
+/// Times a detection probe: records it for the catalog fill's telemetry and,
+/// under `ORX_DETECT_TIMING`, logs wall-clock start and end relative to
+/// process start so queueing behind other probes shows up as a late start,
+/// not just a long duration.
+pub(crate) async fn timed_probe<T>(
+    harness: &'static str,
+    probe: &'static str,
+    fut: impl Future<Output = T>,
+) -> T {
+    let timing = detect_timing();
+    let t0 = timing.then(detect_epoch);
+    let t = std::time::Instant::now();
+    let out = fut.await;
+    let ms = t.elapsed().as_millis() as u64;
+    record_probe_timing(harness, probe, ms);
+    if timing {
+        eprintln!(
+            "orx detect: probe {harness} {probe} took {ms}ms (start {}ms)",
+            t0.unwrap().elapsed().as_millis(),
+        );
+    }
+    out
+}
+
+fn detect_epoch() -> std::time::Instant {
+    static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(std::time::Instant::now)
+}
+
+/// A version recoverable from the install path alone, where packaging bakes
+/// it into a directory name — codex's standalone layout is
+/// `releases/<semver>-<target-triple>/bin/codex.exe`, so the `<triple>` is
+/// what follows the semver. Skipping the `--version` child saves a
+/// multi-second spawn on Windows; the trade-off is no exec check, which the
+/// speculative probes still supply on authenticated installs.
+fn path_version(bin: &Path) -> Option<String> {
+    let bin_dir = bin.parent()?.file_name()?.to_str()?;
+    if !bin_dir.eq_ignore_ascii_case("bin") {
+        return None;
+    }
+    let release = bin.parent()?.parent()?.file_name()?.to_str()?;
+    let (version, _triple) = release.split_once('-')?;
+    semver::Version::parse(version).ok()?;
+    Some(version.to_string())
+}
+
+/// The PE version resource of a binary whose publisher is known to stamp it —
+/// claude's native installer writes `FileVersion = 2.1.x.y`, matching what
+/// `--version` prints. Reading it needs no child process; on Windows each of
+/// those pays a multi-second Defender scan. Deliberately narrow: codex ships
+/// no version resource, and opencode's resource describes the embedded Bun
+/// runtime, not opencode — those keep their exec check.
+#[cfg(windows)]
+fn pe_version(bin: &Path) -> Option<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::winver::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
+    if !bin
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().starts_with("claude"))
+    {
+        return None;
+    }
+    let wide: Vec<u16> = bin.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let size = GetFileVersionInfoSizeW(wide.as_ptr(), std::ptr::null_mut());
+        if size == 0 {
+            return None;
+        }
+        let mut data = vec![0u8; size as usize];
+        if GetFileVersionInfoW(wide.as_ptr(), 0, size, data.as_mut_ptr().cast()) == 0 {
+            return None;
+        }
+        // VS_FIXEDFILEINFO is ABI-frozen: dwFileVersionMS/LS sit at u32
+        // offsets 2 and 3 (after dwSignature and dwStrucVersion).
+        let mut info: *mut winapi::ctypes::c_void = std::ptr::null_mut();
+        let mut len = 0u32;
+        let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
+        if VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), &mut info, &mut len) == 0
+            || info.is_null()
+            || (len as usize) < 4 * 4
+        {
+            return None;
+        }
+        let info = info as *const u32;
+        let ms = std::ptr::read_unaligned(info.add(2));
+        let ls = std::ptr::read_unaligned(info.add(3));
+        Some(format!("{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16))
+    }
+}
+
+#[cfg(not(windows))]
+fn pe_version(_bin: &Path) -> Option<String> {
+    None
+}
+
 /// `<bin> --version`, with a timeout (node CLIs can be slow).
 pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
+    if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
+        return BinProbe::Answered(Some(version));
+    }
+    let timing = detect_timing();
+    let queued = std::time::Instant::now();
+    let spawned = std::time::Instant::now();
+    let probe = probe_bin_cmd(bin).await;
+    if timing {
+        eprintln!(
+            "orx detect: probe {} queue={}ms run={}ms",
+            bin.display(),
+            (spawned - queued).as_millis(),
+            spawned.elapsed().as_millis()
+        );
+    }
+    probe
+}
+
+async fn probe_bin_cmd(bin: &Path) -> BinProbe {
     let mut cmd = tokio::process::Command::new(bin);
     cmd.arg("--version").stdin(std::process::Stdio::null());
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.
     crate::local::chat::prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let Ok(result) = tokio::time::timeout(VERSION_TIMEOUT, cmd.output()).await else {
+    let Ok(result) = tokio::time::timeout(VERSION_TIMEOUT, detect_spawn_output(cmd)).await else {
         return BinProbe::Unknown;
     };
     let out = match result {

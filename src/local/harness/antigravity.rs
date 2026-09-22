@@ -46,7 +46,14 @@ impl Antigravity {
     /// the background full pass.
     async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        super::detect::record_selected(&mut info, snapshot, find_agy, find_agy_working()).await;
+        super::detect::record_selected(
+            &mut info,
+            snapshot,
+            "antigravity",
+            find_agy,
+            find_agy_working(),
+        )
+        .await;
         // Nothing else about an installed agy is cheap to verify — `detect_one`
         // marks the snapshot answer pending. A missing install still falls
         // through to pick up its note.
@@ -55,7 +62,8 @@ impl Antigravity {
         }
         if info.installed && !info.install_broken {
             if let Some(bin) = info.bin_path.as_deref().map(Path::new) {
-                match agy_model_list(bin).await {
+                match super::detect::timed_probe("antigravity", "models", agy_model_list(bin)).await
+                {
                     Ok(models) => {
                         info.authenticated = true;
                         info.auth_state = HarnessAuthState::Ready;
@@ -247,7 +255,7 @@ async fn agy_model_list(bin: &Path) -> Result<Vec<ModelInfo>> {
         .kill_on_drop(true);
     prepare_env(&mut cmd);
     cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(MODELS_TIMEOUT, cmd.output())
+    let out = tokio::time::timeout(MODELS_TIMEOUT, super::detect::detect_spawn_output(cmd))
         .await
         .map_err(|_| {
             anyhow!("Antigravity model discovery timed out. Re-check when connected.")

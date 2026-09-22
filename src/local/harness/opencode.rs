@@ -72,16 +72,33 @@ impl OpenCode {
         let bin = find_opencode().ok();
         let mut resolved_binary = None;
         if let Some(discovered) = &bin {
-            // Resolves across every discovery candidate, so a stale launcher
-            // first on PATH does not hide the install that actually works.
-            // The snapshot skips the resolution spawns entirely — discovery
-            // already proves the file is there, and a V2 install's real auth
-            // only answers through the served API anyway — so the optimistic
-            // readiness below is its answer and the fill supplies the truth.
+            // The catalog children launch on the discovered binary while
+            // `resolve_binary` probes every candidate — each spawn costs
+            // seconds on Windows, and sequencing the catalog behind the
+            // version sweep made the fill their sum. A resolution landing on
+            // a different binary (a stale first candidate) re-runs the probes
+            // on the winner; a V2 verdict never needs them. The snapshot
+            // skips the spawns entirely — discovery already proves the file
+            // is there, and a V2 install's real auth only answers through
+            // the served API anyway.
+            let speculated = (!snapshot).then(|| {
+                tokio::spawn(super::detect::timed_probe(
+                    "opencode",
+                    "models",
+                    opencode_models(discovered.clone()),
+                ))
+            });
             let resolved = if snapshot {
                 None
             } else {
-                Some(crate::local::opencode::resolve_binary().await)
+                Some(
+                    super::detect::timed_probe(
+                        "opencode",
+                        "resolve",
+                        crate::local::opencode::resolve_binary(),
+                    )
+                    .await,
+                )
             };
             let (bin, probe) = match resolved.as_ref() {
                 Some(Ok(binary)) => (
@@ -94,6 +111,30 @@ impl OpenCode {
                 None => (discovered.clone(), BinProbe::Unknown),
             };
             info.record_bin(&bin, probe);
+            // The speculation only stands when resolution picked the binary
+            // it ran against — anything else cuts the child loose
+            // (kill_on_drop reaps it) and the winner is probed below.
+            let mut spec_out = None;
+            if let Some(models_task) = speculated {
+                match resolved.as_ref() {
+                    Some(Ok(binary))
+                        if binary.protocol != crate::local::opencode::Protocol::V2
+                            && binary.path == *discovered =>
+                    {
+                        spec_out = Some(models_task.await);
+                    }
+                    other => {
+                        if std::env::var_os("ORX_DETECT_TIMING").is_some() {
+                            eprintln!(
+                                "orx detect: opencode spec miss (resolved={:?} spec={:?})",
+                                other.map(|r| r.as_ref().map(|b| b.path.clone())),
+                                discovered
+                            );
+                        }
+                        models_task.abort();
+                    }
+                }
+            }
             if let Some(Ok(binary)) = resolved {
                 if binary.protocol == crate::local::opencode::Protocol::V2 {
                     return Some(v2::detect(binary, info).await);
@@ -135,18 +176,21 @@ impl OpenCode {
             }
             // A binary that failed `--version` has no catalog to give either.
             if let Some(binary) = resolved_binary.as_ref().filter(|_| !snapshot) {
-                let (catalog, resolved) = tokio::join!(
-                    opencode_models(binary),
-                    run_models(binary, &["debug", "config", "--pure"])
-                );
-                (models, public_models) = catalog;
-                config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
-                    Some(config) => config,
-                    None => Value::Null,
+                (models, public_models) = match spec_out {
+                    Some(catalog) => catalog.ok().unwrap_or_default(),
+                    // Resolution picked a different binary than the
+                    // speculation ran on — rare enough to simply re-probe.
+                    None => opencode_models(binary.path.clone()).await,
                 };
+                // `debug config --pure` answers the same fields this pass
+                // consumes (provider gates, local providers, the default
+                // model) — project/plugin layers are off under `--pure` and
+                // the child runs from the home dir anyway — so the file read
+                // stands in for a multi-second spawn.
+                config = snapshot_config();
             } else if snapshot {
-                // `debug config` resolves project/plugin layers but costs a
-                // child process; the snapshot reads the config file directly.
+                // `debug config` costs a child process; the snapshot reads
+                // the config file directly.
                 config = snapshot_config();
             }
         }
@@ -683,8 +727,8 @@ async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String>
 /// Falls back to the plain `opencode models` id list if `--verbose` is
 /// unavailable or unparseable, so an older/newer opencode still yields models
 /// (just without per-model variants).
-async fn opencode_models(binary: &ResolvedBinary) -> (Vec<super::ModelInfo>, HashSet<String>) {
-    let verbose = run_models(binary, &["models", "--verbose"]).await;
+async fn opencode_models(bin: PathBuf) -> (Vec<super::ModelInfo>, HashSet<String>) {
+    let verbose = run_models(bin.clone(), &["models", "--verbose"]).await;
     if let Some(out) = &verbose {
         let parsed = parse_verbose_models(out);
         if !parsed.is_empty() {
@@ -695,7 +739,7 @@ async fn opencode_models(binary: &ResolvedBinary) -> (Vec<super::ModelInfo>, Has
             return (parsed, public);
         }
     }
-    let Some(plain) = run_models(binary, &["models"]).await else {
+    let Some(plain) = run_models(bin, &["models"]).await else {
         return (Vec::new(), HashSet::new());
     };
     (
@@ -760,7 +804,8 @@ async fn opencode_child(
     // Stateless V1 calls must not race chat startup when initializing its database.
     cmd.env("OPENCODE_DB", ":memory:");
     cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
-        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -770,7 +815,7 @@ async fn opencode_child(
         // The task owns the lease until the child is reaped, even if its caller is cancelled.
         let _lease = lease;
         binary.check_unchanged().ok()?;
-        let mut child = cmd.spawn().ok()?;
+        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
         let mut stdout = child.stdout.take()?;
         let mut stderr = child.stderr.take()?;
         let output = tokio::spawn(async move {
@@ -806,16 +851,38 @@ async fn opencode_child(
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
 /// File redirection avoids the truncated piped config output reported in #307.
-async fn run_models(binary: &ResolvedBinary, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(&binary.path);
+/// Takes a bare path rather than `ResolvedBinary` so detection can spawn the
+/// catalog children before resolution settles — a binary swapped mid-detect
+/// just answers as whatever it now is, and the next pass re-verifies.
+async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
-    cmd.env("OPENCODE_DB", ":memory:").env("NO_COLOR", "1");
-    binary.check_unchanged().ok()?;
+    cmd.env("OPENCODE_DB", ":memory:")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        // The probe runs from the home dir, so project-layer discovery is
+        // already empty — skipping the scan outright is ~1s off the child's
+        // startup (measured on Windows).
+        .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        // Serve the catalog bundled into the binary instead of refreshing
+        // models.dev — ~1.2s off a cold first-install run, and opencode
+        // refreshes its own cache on the next real launch anyway.
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+        // Nothing the catalog probe prints depends on plugins, LSP servers,
+        // the claude-code bridge, or terminal chrome — each disabled piece is
+        // startup work the child skips (~0.8s combined on Windows).
+        .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1")
+        .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1")
+        .env("OPENCODE_DISABLE_CLAUDE_CODE", "1")
+        .env("OPENCODE_DISABLE_PRUNE", "1")
+        .env("OPENCODE_DISABLE_AUTOCOMPACT", "1")
+        .env("OPENCODE_DISABLE_TERMINAL_TITLE", "1")
+        .env("NO_COLOR", "1");
     let path = std::env::temp_dir().join(format!("orx-opencode-stdout-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -825,11 +892,19 @@ async fn run_models(binary: &ResolvedBinary, args: &[&str]) -> Option<String> {
         options.mode(0o600);
     }
     cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
-    let status = tokio::time::timeout(Duration::from_secs(20), cmd.status()).await;
+    let status = {
+        let spawned = super::detect::detect_spawn_child(cmd).await;
+        match spawned {
+            Ok((mut child, _permit)) => tokio::time::timeout(Duration::from_secs(20), child.wait())
+                .await
+                .map(|done| done.ok()),
+            Err(_) => Ok(None),
+        }
+    };
     let stdout = std::fs::read(&path).ok();
     std::fs::remove_file(&path).ok();
     let stdout = stdout?;
-    matches!(status, Ok(Ok(status)) if status.success())
+    matches!(status, Ok(Some(status)) if status.success())
         .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 
@@ -2598,7 +2673,9 @@ opencode/unknown
         let binary = crate::local::opencode::resolve_binary_at(script.clone())
             .await
             .unwrap();
-        let out = run_models(&binary, &[]).await.expect("child output");
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
         // macOS reports the write-only descriptor mode through /dev/stdout.
         assert!(
             out.starts_with("-rw-------") || out.starts_with("--w-------"),
@@ -2620,7 +2697,9 @@ opencode/unknown
         let binary = crate::local::opencode::resolve_binary_at(script.clone())
             .await
             .unwrap();
-        let out = run_models(&binary, &[]).await.expect("child output");
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
         assert_eq!(out.len(), 70_000);
         assert!(
             out.ends_with("0000006999"),

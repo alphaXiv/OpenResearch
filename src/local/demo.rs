@@ -192,6 +192,19 @@ pub fn complete_onboarding(selection: DemoSelection) -> Result<DemoCompletion> {
     seed_at(&store, &data_root, &repo, selection)
 }
 
+thread_local! {
+    /// Set on `prewarm`'s blocking thread: its git children run at idle
+    /// priority on Windows so the demo build only takes cores the catalog
+    /// fill's probes and real user work leave free.
+    static BACKGROUND_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Raised when the onboarding confirm path reaches for the demo install. A
+/// click that lands mid-prewarm makes its remaining git children run at
+/// normal priority, so the lock wait is only the rest of the build at full
+/// speed rather than at yield priority.
+static FOREGROUND_WANTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Build the embedded demo worktree off the request path while the onboarding
 /// screen is up. `seed_at` only writes its store rows once the user confirms,
 /// so a fresh install's "Get started" click stops paying the ~15 sequential
@@ -206,6 +219,7 @@ pub fn prewarm(
     move_in_progress: std::sync::Arc<std::sync::atomic::AtomicBool>,
     data_dir_gate: std::sync::Arc<tokio::sync::Mutex<()>>,
 ) {
+    BACKGROUND_BUILD.with(|flag| flag.set(true));
     // A move sets its flag before awaiting the gate, so a set flag here (or a
     // contended lock) means a move owns the data dir — skip the warm-up and
     // let `seed_at` cover the confirm path. The flag is checked again under
@@ -345,6 +359,7 @@ fn seed_at(
     repo: &Path,
     selection: DemoSelection,
 ) -> Result<DemoCompletion> {
+    FOREGROUND_WANTED.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Some(project) = store.get_local_project(PROJECT_ID)? {
         if !same_path(&project.repo_path, repo)
             || project.github_owner != OWNER
@@ -1575,6 +1590,15 @@ fn commit(repo: &Path, message: &str) -> Result<()> {
 
 fn git(dir: &Path, args: &[&str]) -> Result<String> {
     let mut command = Command::new("git");
+    // The prewarm's children yield to the catalog fill and to foreground work;
+    // a click landing mid-build flips the rest back to normal priority.
+    #[cfg(windows)]
+    if BACKGROUND_BUILD.with(|flag| flag.get())
+        && !FOREGROUND_WANTED.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(windows_sys::Win32::System::Threading::IDLE_PRIORITY_CLASS);
+    }
     for name in [
         "GIT_DIR",
         "GIT_WORK_TREE",

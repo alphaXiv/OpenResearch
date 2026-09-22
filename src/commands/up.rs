@@ -152,7 +152,9 @@ pub async fn run(args: UpArgs) -> Result<()> {
     spawn_agent_preflight(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
     // it while the onboarding screen is up instead of inside the confirm click.
-    // The data-dir gate keeps it from racing a mid-flight directory move.
+    // On Windows those spawns run at idle priority (see `demo::prewarm`) so
+    // they only take cores the catalog fill's probes leave free. The data-dir
+    // gate keeps it from racing a mid-flight directory move.
     if !persistent_host {
         let move_in_progress = state.data_dir_move_in_progress.clone();
         let gate = state.data_dir_gate.clone();
@@ -7058,19 +7060,47 @@ async fn harnesses_payload(state: &AppState, q: &HarnessQuery) -> Value {
         // full sweep on every read.
         let wants_fill = payload_is_provisional(payload) || promotable;
         if at.elapsed() >= HARNESS_CACHE_TTL || (wants_fill && at.elapsed() >= FILL_RETRY_FLOOR) {
-            spawn_catalog_fill(state.clone(), *at);
+            spawn_catalog_fill(state.clone(), *at, uuid::Uuid::new_v4());
         }
         let mut out = payload.clone();
         overlay_claude_auth(&mut out, auth);
         return out;
     }
+    seed_harnesses_locked(state, &mut cache).await
+}
+
+/// The spawn-free snapshot → provisional cache → background fill sequence,
+/// shared by the first `/api/harnesses` request and the startup seed. The
+/// boot call starts the fill's heavyweight probes during the user's first
+/// page load instead of inside it — each spawn costs seconds on Windows, so
+/// where the clock starts is most of the difference. Caller holds the
+/// `harnesses` lock.
+async fn seed_harnesses_locked(
+    state: &AppState,
+    cache: &mut Option<(std::time::Instant, Value)>,
+) -> Value {
     let probe_generation = state.claude.auth_snapshot().generation;
+    let started = std::time::Instant::now();
     let harnesses = local::harness::detect_harnesses_snapshot().await;
+    let installed = harnesses.iter().filter(|h| h.installed).count();
+    // The snapshot row and the fill it seeds share one fillId so a boot's two
+    // passes join on it.
+    let fill_id = uuid::Uuid::new_v4();
+    let snapshot_ms = started.elapsed().as_millis() as u64;
     let (mut payload, _) = finish_harnesses_payload(state, harnesses, probe_generation, true).await;
     let cached_at = std::time::Instant::now();
     spawn_cursor_account_details(state, &mut payload, cached_at);
     *cache = Some((cached_at, payload.clone()));
-    spawn_catalog_fill(state.clone(), cached_at);
+    crate::telemetry::harness::capture_detect(
+        fill_id,
+        "snapshot",
+        snapshot_ms,
+        None,
+        installed,
+        0,
+        Vec::new(),
+    );
+    spawn_catalog_fill(state.clone(), cached_at, fill_id);
     payload
 }
 
@@ -7235,7 +7265,7 @@ fn spawn_cursor_account_details(
 /// guards the swap — a refresh or retry that landed in between owns the cache.
 /// One fill at a time: expired reads each ask for one, but a second sweep
 /// would only lose the `snapshot_at` race and throw its probes away.
-fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant) {
+fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id: uuid::Uuid) {
     if state
         .harness_fill_in_flight
         .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -7245,12 +7275,62 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant) {
     tokio::spawn(async move {
         let _fill = FillGuard(state.harness_fill_in_flight.clone());
         let probe_generation = state.claude.auth_snapshot().generation;
-        let harnesses = local::harness::detect_harnesses().await;
+        let started = std::time::Instant::now();
+        // One-off detects (a refresh sweep, a claude re-probe) record into the
+        // same buffer — discard strays so the fill reports only its own.
+        let _ = local::harness::take_probe_timings();
+        // Commit each harness as its probes land: the onboarding gate is
+        // per-entry (`agentReady && !catalogPending`), so a ready agent must
+        // not wait for the slowest sibling's catalog child. The batch swap at
+        // the end still applies the cross-entry reconciliation
+        // (`finish_harnesses_payload`) to the complete set.
+        let mut stream = std::pin::pin!(local::harness::detect_harnesses_each());
+        let mut ordered = Vec::new();
+        // `first_ready_ms` answers the churn question directly: how far into
+        // the fill did a usable agent appear.
+        let mut first_ready_ms = None;
+        while let Some((index, info)) = futures::StreamExt::next(&mut stream).await {
+            if first_ready_ms.is_none() && info.agent_ready {
+                first_ready_ms = Some(started.elapsed().as_millis() as u64);
+            }
+            {
+                let mut cache = state.harnesses.lock().await;
+                // Same guard as the final swap: a refresh or retry that
+                // landed in between owns the cache.
+                if let Some((at, payload)) = cache.as_mut() {
+                    if *at == snapshot_at {
+                        if let Some(slot) = payload["harnesses"].as_array_mut().and_then(|all| {
+                            all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                        }) {
+                            *slot = json!(info);
+                        }
+                    }
+                }
+            }
+            state.chat.emit_event("harness.catalog", json!({}));
+            ordered.push((index, info));
+        }
+        ordered.sort_by_key(|(index, _)| *index);
+        let harnesses: Vec<local::harness::HarnessInfo> =
+            ordered.into_iter().map(|(_, info)| info).collect();
+        let installed = harnesses.iter().filter(|h| h.installed).count();
+        let ready = harnesses.iter().filter(|h| h.agent_ready).count();
         // Finish before touching the cache: the Claude re-probe inside can
         // cost a child process, and holding the lock across it stalls every
         // reader the snapshot was meant to unblock.
         let (mut payload, announce) =
             finish_harnesses_payload(&state, harnesses, probe_generation, false).await;
+        // Emit before the ownership check below: a fill that loses the cache
+        // race still ran real probes, and its timings are real data.
+        crate::telemetry::harness::capture_detect(
+            fill_id,
+            "full",
+            started.elapsed().as_millis() as u64,
+            first_ready_ms,
+            installed,
+            ready,
+            local::harness::take_probe_timings(),
+        );
         {
             let mut cache = state.harnesses.lock().await;
             // A refresh or retry that landed in between owns the cache. No

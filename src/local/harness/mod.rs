@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
 use crate::error::Result;
 use crate::local::chat::{
@@ -41,7 +42,9 @@ use crate::local::chat::{
 use crate::store::Store;
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
-pub(crate) use detect::unique as unique_bins;
+pub(crate) use detect::{
+    detect_spawn_output, take_probe_timings, unique as unique_bins, ProbeTiming,
+};
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
@@ -545,11 +548,26 @@ pub fn is_chat_harness(id: &str) -> bool {
 }
 
 async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo> {
+    let timing = detect::detect_timing();
+    let start = std::time::Instant::now();
     let detected = if snapshot {
         harness.detect_snapshot().await
     } else {
         harness.detect().await
     };
+    // The per-harness wall clock joins the fill's probe timings as the
+    // `"total"` row — the snapshot pass is covered by its own pass event.
+    if !snapshot {
+        detect::record_probe_timing(harness.id(), "total", start.elapsed().as_millis() as u64);
+    }
+    if timing {
+        eprintln!(
+            "orx detect: {} ({}): {}ms",
+            harness.id(),
+            if snapshot { "snapshot" } else { "full" },
+            start.elapsed().as_millis()
+        );
+    }
     detected.map(|mut info| {
         // A snapshot answer for an installed harness is provisional by
         // definition: its install/auth evidence is file-based and the model
@@ -589,6 +607,22 @@ pub async fn detect_harnesses() -> Vec<HarnessInfo> {
     detect_all(false).await
 }
 
+/// The full pass, yielding each harness as its own probes finish instead of
+/// in a batch. Callers that can commit entries individually unblock a ready
+/// agent on its own clock rather than the slowest sibling's — the onboarding
+/// gate is per-entry (`agentReady && !catalogPending`), so the catalog fill
+/// should not be. Items carry the harness's registry index so the caller can
+/// restore registry order for the final payload.
+pub fn detect_harnesses_each() -> impl futures::Stream<Item = (usize, HarnessInfo)> {
+    registry()
+        .into_iter()
+        .filter(|h| h.supports_chat())
+        .enumerate()
+        .map(|(i, h)| async move { detect_one(h.as_ref(), false).await.map(|info| (i, info)) })
+        .collect::<futures::stream::FuturesUnordered<_>>()
+        .filter_map(std::future::ready)
+}
+
 /// The snapshot pass of [`detect_harnesses`]: readiness without the model
 /// catalogs, so a cold `/api/harnesses` answers in the time the *fastest*
 /// probes take instead of the slowest catalog. Entries that still owe a
@@ -598,11 +632,10 @@ pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
 }
 
 async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
-    let harnesses: Vec<Box<dyn Harness>> = registry()
+    let futures = registry()
         .into_iter()
         .filter(|h| h.supports_chat())
-        .collect();
-    let futures = harnesses.iter().map(|h| detect_one(h.as_ref(), snapshot));
+        .map(|h| async move { detect_one(h.as_ref(), snapshot).await });
     futures::future::join_all(futures)
         .await
         .into_iter()
