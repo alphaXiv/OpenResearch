@@ -1192,10 +1192,5 @@
   "ssh_run_in": "यहाँ चलाएँ",
   "ssh_direct_host": "सीधे होस्ट पर",
   "ssh_existing_container": "मौजूदा कंटेनर",
-  "ssh_container_reference": "कंटेनर का नाम या ID",
-  "ssh_setup_command": "सेटअप कमांड (वैकल्पिक)",
-  "ssh_setup_help": "हर प्रयोग से पहले एक बार चलता है। परीक्षण कनेक्शन और आवश्यक टूल जाँचता है; यह कमांड नहीं चलाता।",
-  "ssh_execution_saved": "SSH निष्पादन सेटिंग सहेजी गईं।",
-  "ssh_execution_ready": "कनेक्शन और आवश्यक टूल तैयार हैं।",
-  "ssh_test_execution": "कनेक्शन जाँचें"
+  "ssh_container_reference": "कंटेनर का नाम या ID"
 }

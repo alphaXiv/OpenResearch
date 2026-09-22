@@ -109,14 +109,22 @@ pub async fn submit_local_ssh_with_source(
         script,
         env,
         container: container.clone(),
-        setup_command: launch.setup_command.clone(),
     })
     .await;
     match submission {
-        Err(error) if container.is_some() => {
-            eprintln!("SSH launch response failed for run {run_id}: {error}. Reconciling the saved container handle.");
+        Err(error) if container.is_some() && error.is::<ssh::LaunchUncertain>() => {
+            eprintln!("SSH launch response failed for run {run_id}: {error:#}. Reconciling the saved container handle.");
         }
-        Err(error) => return Err(error),
+        Err(error) => {
+            store.update_status(
+                &run_id,
+                crate::store::RunStatus::Failed,
+                Some(now_ms()),
+                None,
+            )?;
+            store.set_result_markdown(&run_id, &format!("Compute submission failed: {error:#}"))?;
+            return Err(error);
+        }
         Ok(_) if container.is_none() => {
             if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
                 let _ = ssh::cancel_job(&target, &remote_dir, None).await;

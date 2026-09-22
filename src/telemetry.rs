@@ -1476,7 +1476,6 @@ mod tests {
         set_persisted_disabled(true).unwrap();
         let options = SshHostSettings {
             container: Some("research".into()),
-            setup_command: Some("source activate\nconda activate research".into()),
         };
         set_ssh_host("lab".into(), options.clone()).unwrap();
         set_ssh_default(Some("lab".into())).unwrap();

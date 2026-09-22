@@ -68,16 +68,6 @@ async fn inspection(target: &SshTarget, reference: &str) -> Result<Option<Inspec
     }
 }
 
-pub(super) async fn same_target(
-    target: &SshTarget,
-    reference: &str,
-    container: &ContainerRun,
-) -> Result<bool> {
-    Ok(inspection(target, reference)
-        .await?
-        .is_some_and(|found| found.id == container.id && found.started_at == container.started_at))
-}
-
 pub async fn resolve(target: &SshTarget, reference: &str) -> Result<ContainerRun> {
     validate_reference(reference)?;
     let found = inspection(target, reference)
@@ -183,12 +173,7 @@ group_alive() {
 }
 "#;
 
-pub(super) fn inner_script(
-    container: &ContainerRun,
-    exports: &str,
-    setup: Option<&str>,
-    script: &str,
-) -> String {
+pub(super) fn inner_script(container: &ContainerRun, exports: &str, script: &str) -> String {
     let dir = sh_quote(&container.run_dir);
     format!(
         r#"#!/usr/bin/env bash
@@ -201,14 +186,10 @@ mv identity.tmp identity
 (
 set -eo pipefail
 {exports}
-cd {dir}/repo
-{setup}
-cd {dir}
 {script}
 )
 exit "$?"
-"#,
-        setup = setup.unwrap_or("")
+"#
     )
 }
 
@@ -314,6 +295,15 @@ else echo DEAD; fi
             let final_state = super::inspect_host_job(target, dir).await?;
             if final_state.stage != "RUNNING" {
                 return Ok(final_state);
+            }
+            let waited = ssh_run(target, &format!(r#"d="$HOME/{dir}"; umask 077; if [ ! -f "$d/completion_wait" ]; then date +%s > "$d/completion_wait.tmp" && mv "$d/completion_wait.tmp" "$d/completion_wait"; fi; echo "$(( $(date +%s) - $(cat "$d/completion_wait") ))""#), None).await?;
+            if waited.trim().parse::<i64>()? >= 30 {
+                let final_state = super::inspect_host_job(target, dir).await?;
+                if final_state.stage != "RUNNING" {
+                    return Ok(final_state);
+                }
+                super::cancel_job(target, dir, None).await?;
+                return Ok(failed("The container experiment ended, but the SSH launcher did not record its exit status within 30 seconds.".into()));
             }
             Ok(JobState {
                 stage: "RUNNING".into(),

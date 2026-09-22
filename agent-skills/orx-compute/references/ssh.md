@@ -10,27 +10,19 @@ orx exp run <expId> --backend ssh --host lab --container research
 orx exp run <expId> --backend ssh --host lab --no-container
 ```
 
-Machine-local SSH settings can save a container name or ID and an optional
-setup command for each host. A saved default SSH host lets launches omit `--host`.
+Machine-local SSH settings can save a container name or ID for each host.
+A saved default SSH host lets launches omit `--host`.
 These defaults apply only to SSH experiments; dashboards, terminals and coding
 agents still connect directly to the host.
 
 - Omitted container selection uses the host's saved target. `--container`
   overrides it; `--no-container` explicitly runs on the host. The flags conflict.
-- Setup belongs to the saved target. Changing the container for one launch does
-  not inherit that target's setup. Selecting the same target keeps its setup.
-- Setup runs once after synced environment exports, inside the staged repository.
-  Its shell environment persists into the experiment (including Conda activation).
-  A failed setup fails the run; its output appears in the normal log. Control
-  operations and Test never execute setup. The fixed run command starts from the
-  staged repository even when setup changes directory.
 
-Example setup:
-
-```bash
-source /opt/conda/etc/profile.d/conda.sh
-conda activate research
-```
+Keep environment preparation in the project's committed setup/run scripts and
+invoke them through the fixed run command, just as with other backends. For
+example, a committed `run.sh` can source Conda, activate the environment, and
+then run the experiment. Those paths must exist in the selected execution
+environment (host or container). There is no separate SSH setup command.
 
 The SSH host needs Bash and tar. Container execution also requires host Docker
 access and an already running, unpaused Linux container with Bash, tar, working

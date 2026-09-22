@@ -1192,10 +1192,5 @@
   "ssh_run_in": "Ejecutar en",
   "ssh_direct_host": "Servidor directamente",
   "ssh_existing_container": "Contenedor existente",
-  "ssh_container_reference": "Nombre o ID del contenedor",
-  "ssh_setup_command": "Comando de preparación (opcional)",
-  "ssh_setup_help": "Se ejecuta una vez antes de cada experimento. La prueba comprueba la conexión y las herramientas necesarias; no ejecuta este comando.",
-  "ssh_execution_saved": "Configuración de ejecución SSH guardada.",
-  "ssh_execution_ready": "La conexión y las herramientas necesarias están listas.",
-  "ssh_test_execution": "Probar conexión"
+  "ssh_container_reference": "Nombre o ID del contenedor"
 }

@@ -6,7 +6,6 @@ async fn prepare(
     target: &SshTarget,
     reference: Option<&str>,
     command: &str,
-    setup: Option<&str>,
 ) -> (String, SshJobSpec) {
     let id = uuid::Uuid::new_v4().to_string();
     let container = match reference {
@@ -15,6 +14,11 @@ async fn prepare(
     };
     let temp = crate::local::git::TemporaryDirectory::new("orx-container-test").unwrap();
     std::fs::write(temp.path().join("source.txt"), "snapshot").unwrap();
+    std::fs::write(
+        temp.path().join("run.sh"),
+        format!("set -eo pipefail\n{command}\n"),
+    )
+    .unwrap();
     let archive = temp.path().join("source.tar");
     assert!(std::process::Command::new("tar")
         .arg("-cf")
@@ -22,6 +26,7 @@ async fn prepare(
         .arg("-C")
         .arg(temp.path())
         .arg("source.txt")
+        .arg("run.sh")
         .status()
         .unwrap()
         .success());
@@ -31,13 +36,12 @@ async fn prepare(
     let spec = SshJobSpec {
         target: target.clone(),
         run_id: id,
-        script: crate::compute::staged_script(command),
+        script: crate::compute::staged_script("bash run.sh"),
         env: HashMap::from([(
             "ORX_TEST_SECRET".into(),
             "quote' and $literal\nsecond line".into(),
         )]),
         container,
-        setup_command: setup.map(str::to_string),
     };
     (dir, spec)
 }
@@ -46,9 +50,8 @@ async fn launch(
     target: &SshTarget,
     reference: Option<&str>,
     command: &str,
-    setup: Option<&str>,
 ) -> (String, Option<ContainerRun>) {
-    let (dir, spec) = prepare(target, reference, command, setup).await;
+    let (dir, spec) = prepare(target, reference, command).await;
     ssh::run_job(&spec).await.unwrap();
     (dir, spec.container)
 }
@@ -102,11 +105,6 @@ async fn ssh_container_lifecycle() {
         std::env::var("ORX_SSH_TEST_KEY").expect("fixture key"),
     ]);
     let base = resolve(&target, &reference).await.unwrap();
-    assert!(same_target(&target, &reference, &base).await.unwrap());
-    assert!(same_target(&target, &base.id[..12], &base).await.unwrap());
-    assert!(!same_target(&target, "missing-container", &base)
-        .await
-        .unwrap());
     ssh_run(
         &target,
         &base.exec("/opt/conda/bin/conda create -y -n research --offline"),
@@ -114,8 +112,8 @@ async fn ssh_container_lifecycle() {
     )
     .await
     .unwrap();
-    let setup = "source /opt/conda/etc/profile.d/conda.sh\nconda activate research\nprintf 'setup:%s\\n' \"$CONDA_DEFAULT_ENV\"\nexport HOME=/tmp; cd /tmp";
-    let (dir, container) = launch(&target, Some(&reference), "cat source.txt; printf '%s\\n' \"$ORX_TEST_SECRET\" \"$PYTHONUNBUFFERED\" \"$CONDA_DEFAULT_ENV\"; echo early; sleep 2; echo late", Some(setup)).await;
+    let setup = "source /opt/conda/etc/profile.d/conda.sh\nconda activate research\nprintf 'setup:%s\\n' \"$CONDA_DEFAULT_ENV\"";
+    let (dir, container) = launch(&target, Some(&reference), &format!("{setup}\ncat source.txt; printf '%s\\n' \"$ORX_TEST_SECRET\" \"$PYTHONUNBUFFERED\" \"$CONDA_DEFAULT_ENV\"; echo early; sleep 2; echo late")).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let early = logs(&target, &dir).await;
     assert!(
@@ -138,8 +136,7 @@ async fn ssh_container_lifecycle() {
         .await
         .unwrap();
     for code in [7, 125, 126, 127] {
-        let (dir, container) =
-            launch(&target, Some(&reference), &format!("exit {code}"), None).await;
+        let (dir, container) = launch(&target, Some(&reference), &format!("exit {code}")).await;
         let state = terminal(&target, &dir, container.as_ref()).await;
         assert_eq!(
             state.message.as_deref(),
@@ -149,8 +146,7 @@ async fn ssh_container_lifecycle() {
     let (dir, container) = launch(
         &target,
         Some(&reference),
-        "echo SHOULD_NOT_RUN",
-        Some("echo SETUP_FAILED; false"),
+        "echo SETUP_FAILED; false; echo SHOULD_NOT_RUN",
     )
     .await;
     assert_eq!(
@@ -161,8 +157,7 @@ async fn ssh_container_lifecycle() {
     let (dir, _) = launch(
         &target,
         None,
-        "cat source.txt; echo DIRECT",
-        Some("export HOME=/tmp; cd /tmp"),
+        "cat source.txt; export HOME=/tmp; cd /tmp; echo DIRECT",
     )
     .await;
     assert_eq!(terminal(&target, &dir, None).await.stage, "COMPLETED");
@@ -172,7 +167,6 @@ async fn ssh_container_lifecycle() {
         &target,
         Some(&reference),
         "trap '' TERM; (trap '' TERM; sleep 300) & wait",
-        None,
     )
     .await;
     let container = container.unwrap();
@@ -244,12 +238,15 @@ async fn ssh_container_lifecycle() {
     );
     base.require_running(&target).await.unwrap();
 
-    let (dir, spec) = prepare(&target, Some(&reference), "echo ONCE; sleep 1", None).await;
+    let (dir, spec) = prepare(&target, Some(&reference), "echo ONCE; sleep 1").await;
     ssh_run(&target, "touch /tmp/drop-launch-ack", None)
         .await
         .unwrap();
     assert!(
-        ssh::run_job(&spec).await.is_err(),
+        ssh::run_job(&spec)
+            .await
+            .unwrap_err()
+            .is::<ssh::LaunchUncertain>(),
         "fixture must drop the launch acknowledgement"
     );
     let container = spec.container;
@@ -260,7 +257,53 @@ async fn ssh_container_lifecycle() {
         "COMPLETED"
     );
     assert_eq!(logs(&target, &dir).await.matches("ONCE").count(), 1);
-    let (dir, container) = launch(&target, Some(&reference), "sleep 300", None).await;
+    let (dir, spec) = prepare(&target, Some(&reference), "echo NEVER_LAUNCHED").await;
+    ssh_run(
+        &target,
+        &spec.container.as_ref().unwrap().exec(&format!(
+            "mkdir {}",
+            sh_quote(&format!(
+                "{}/run.sh",
+                spec.container.as_ref().unwrap().run_dir
+            ))
+        )),
+        None,
+    )
+    .await
+    .unwrap();
+    let error = ssh::run_job(&spec).await.unwrap_err();
+    assert!(
+        !error.is::<ssh::LaunchUncertain>(),
+        "script upload failure is not a lost acknowledgement"
+    );
+    assert!(!logs(&target, &dir).await.contains("NEVER_LAUNCHED"));
+
+    let (dir, container) = launch(&target, Some(&reference), "true").await;
+    let container = container.unwrap();
+    assert_eq!(
+        terminal(&target, &dir, Some(&container)).await.stage,
+        "COMPLETED"
+    );
+    ssh_run(&target, &format!("cd \"$HOME/{dir}\"; rm exit_code; setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! > pid"), None).await.unwrap();
+    assert_eq!(
+        inspect(&target, &dir, &container).await.unwrap().stage,
+        "RUNNING"
+    );
+    ssh_run(
+        &target,
+        &format!("echo 0 > \"$HOME/{dir}/completion_wait\""),
+        None,
+    )
+    .await
+    .unwrap();
+    let state = inspect(&target, &dir, &container).await.unwrap();
+    assert_eq!(state.stage, "ERROR");
+    assert!(state
+        .message
+        .unwrap()
+        .contains("did not record its exit status"));
+
+    let (dir, container) = launch(&target, Some(&reference), "sleep 300").await;
     let container = container.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     ssh_run(
@@ -320,7 +363,7 @@ async fn ssh_container_lifecycle() {
         "ERROR"
     );
 
-    let (dir, container) = launch(&target, Some(&reference), "sleep 300", None).await;
+    let (dir, container) = launch(&target, Some(&reference), "sleep 300").await;
     let container = container.unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     let identity = sh_quote(&format!("{}/identity", container.run_dir));
@@ -351,8 +394,7 @@ async fn ssh_container_lifecycle() {
     .unwrap();
     supervisor_restart(&target, &reference, port).await;
     for action in ["stop", "restart", "rm -f"] {
-        let (dir, container) =
-            launch(&target, Some(&reference), "echo SURVIVES; sleep 300", None).await;
+        let (dir, container) = launch(&target, Some(&reference), "echo SURVIVES; sleep 300").await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         ssh_run(
             &target,
@@ -430,13 +472,7 @@ async fn supervisor_restart(target: &SshTarget, reference: &str, port: u16) {
             chat_session_id: None,
         })
         .unwrap();
-    let (dir, container) = launch(
-        target,
-        Some(reference),
-        "echo ONCE; sleep 8; echo AFTER",
-        None,
-    )
-    .await;
+    let (dir, container) = launch(target, Some(reference), "echo ONCE; sleep 8; echo AFTER").await;
     let id = dir.rsplit('/').next().unwrap();
     let descriptor = serde_json::json!({"kind":"ssh_job","namespace":"fixture","jobId":dir,"sshContainer":container});
     store

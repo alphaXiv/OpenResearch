@@ -1192,10 +1192,5 @@
   "ssh_run_in": "运行位置",
   "ssh_direct_host": "直接在主机上",
   "ssh_existing_container": "现有容器",
-  "ssh_container_reference": "容器名称或 ID",
-  "ssh_setup_command": "初始化命令（可选）",
-  "ssh_setup_help": "在每次实验前执行一次。测试仅检查连接和必需工具，不执行此命令。",
-  "ssh_execution_saved": "SSH 执行设置已保存。",
-  "ssh_execution_ready": "连接和必需工具已就绪。",
-  "ssh_test_execution": "测试连接"
+  "ssh_container_reference": "容器名称或 ID"
 }

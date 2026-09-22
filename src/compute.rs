@@ -943,42 +943,27 @@ mod tests {
                     "lab".into(),
                     SshHostSettings {
                         container: Some("research".into()),
-                        setup_command: Some("activate".into()),
                     },
                 ),
-                (
-                    "direct".into(),
-                    SshHostSettings {
-                        container: None,
-                        setup_command: Some("host-setup".into()),
-                    },
-                ),
+                ("direct".into(), SshHostSettings { container: None }),
             ]),
         };
         let mut args = tinker_args();
         args.backend = Some("ssh".into());
-        for (host, container, no_container, expected_host, expected_container, setup) in [
-            (None, None, false, "lab", Some("research"), Some("activate")),
+        for (host, container, no_container, expected_host, expected_container) in [
+            (None, None, false, "lab", Some("research")),
             (
                 Some("lab"),
                 Some("research"),
                 false,
                 "lab",
                 Some("research"),
-                Some("activate"),
             ),
-            (None, Some("other"), false, "lab", Some("other"), None),
-            (None, Some("none"), false, "lab", Some("none"), None),
-            (None, None, true, "lab", None, None),
-            (
-                Some("direct"),
-                None,
-                true,
-                "direct",
-                None,
-                Some("host-setup"),
-            ),
-            (Some("unknown"), None, false, "unknown", None, None),
+            (None, Some("other"), false, "lab", Some("other")),
+            (None, Some("none"), false, "lab", Some("none")),
+            (None, None, true, "lab", None),
+            (Some("direct"), None, true, "direct", None),
+            (Some("unknown"), None, false, "unknown", None),
         ] {
             args.host = host.map(str::to_string);
             args.container = container.map(str::to_string);
@@ -987,7 +972,6 @@ mod tests {
             let (host, options) = crate::jobs::ssh::resolve_options(&args, &settings).unwrap();
             assert_eq!(host, expected_host);
             assert_eq!(options.container.as_deref(), expected_container);
-            assert_eq!(options.setup_command.as_deref(), setup);
         }
         args.host = None;
         assert!(crate::jobs::ssh::resolve_options(&args, &SshSettings::default()).is_err());

@@ -73,20 +73,12 @@ fn prepare_control_dir() -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct ResolvedLaunch {
     pub target: SshTarget,
-    pub setup_command: Option<String>,
     pub container: Option<ContainerRun>,
 }
 
 pub fn validate_host_options(options: &crate::config::SshHostSettings) -> Result<()> {
     if let Some(reference) = &options.container {
         validate_container_reference(reference)?;
-    }
-    if options
-        .setup_command
-        .as_ref()
-        .is_some_and(|command| command.contains('\0'))
-    {
-        return Err(anyhow!("Setup command cannot contain NUL."));
     }
     Ok(())
 }
@@ -110,25 +102,14 @@ pub fn resolve_options(
     } else {
         args.container.clone().or_else(|| saved.container.clone())
     };
-    let setup_command = (container == saved.container)
-        .then_some(saved.setup_command)
-        .flatten();
-    let options = crate::config::SshHostSettings {
-        container,
-        setup_command,
-    };
+    let options = crate::config::SshHostSettings { container };
     validate_host_options(&options)?;
     Ok((host, options))
 }
 
 pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> {
-    if args.flavor.is_some() || args.image.is_some() {
-        return Err(anyhow!(
-            "SSH does not support --flavor or --image; use --host and optionally --container."
-        ));
-    }
     let settings = crate::config::ssh_settings()?;
-    let (host, mut options) = resolve_options(args, &settings)?;
+    let (host, options) = resolve_options(args, &settings)?;
     let target = SshTarget::alias(&host);
     let host_check = preflight(&target).await;
     if !host_check.reachable || !host_check.tools_found {
@@ -143,20 +124,7 @@ pub async fn resolve_launch(args: &crate::ExpRunArgs) -> Result<ResolvedLaunch> 
         Some(reference) => Some(container::resolve(&target, &reference).await?),
         None => None,
     };
-    if options.setup_command.is_none() {
-        if let (Some(container), Some(saved)) = (&container, settings.hosts.get(&host)) {
-            if let (Some(reference), Some(setup)) = (&saved.container, &saved.setup_command) {
-                if container::same_target(&target, reference, container).await? {
-                    options.setup_command = Some(setup.clone());
-                }
-            }
-        }
-    }
-    Ok(ResolvedLaunch {
-        target,
-        container,
-        setup_command: options.setup_command,
-    })
+    Ok(ResolvedLaunch { target, container })
 }
 
 /// An ssh endpoint. The classic ssh backend connects by `~/.ssh/config` alias
@@ -513,8 +481,18 @@ pub struct SshJobSpec {
     /// Exported inside run.sh on the remote (tokens, synced env).
     pub env: HashMap<String, String>,
     pub container: Option<ContainerRun>,
-    pub setup_command: Option<String>,
 }
+
+#[derive(Debug)]
+pub struct LaunchUncertain;
+
+impl std::fmt::Display for LaunchUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SSH launch acknowledgement failed")
+    }
+}
+
+impl std::error::Error for LaunchUncertain {}
 
 /// Submit the job: write run.sh, launch it detached, record its pid. Returns
 /// the remote run dir (relative to `$HOME`) — the reattach handle.
@@ -528,24 +506,13 @@ pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
         .join("\n");
     let run_sh = if let Some(container) = &spec.container {
         container.require_running(&spec.target).await?;
-        let inner = container::inner_script(
-            container,
-            &exports,
-            spec.setup_command.as_deref(),
-            &spec.script,
-        );
+        let inner = container::inner_script(container, &exports, &spec.script);
         container::upload_script(&spec.target, container, &inner).await?;
         container::host_script(&dir, container)
     } else {
-        let script = match &spec.setup_command {
-            Some(setup) => format!(
-                "set -eo pipefail; cd repo;\n{setup}\ncd \"$orx_run_dir\"; {}",
-                spec.script
-            ),
-            None => spec.script.clone(),
-        };
+        let script = &spec.script;
         // A payload exit must leave the outer shell alive to record its status.
-        format!("#!/usr/bin/env bash\ncd \"$HOME/{dir}\" || exit 97\nreadonly orx_run_dir=\"$PWD\"\n(\n{exports}\n{script}\n) > log 2>&1\necho $? > exit_code\n")
+        format!("#!/usr/bin/env bash\ncd \"$HOME/{dir}\" || exit 97\n(\n{exports}\n{script}\n) > log 2>&1\necho $? > exit_code\n")
     };
 
     // Create the dir (owner-only) and write run.sh from stdin.
@@ -560,7 +527,9 @@ pub async fn run_job(spec: &SshJobSpec) -> Result<String> {
     } else {
         format!("cd \"$HOME/{dir}\" && if command -v setsid >/dev/null 2>&1; then setsid bash run.sh </dev/null >/dev/null 2>&1 & else nohup bash run.sh </dev/null >/dev/null 2>&1 & fi; echo $! > pid")
     };
-    ssh_run(&spec.target, &launch, None).await?;
+    ssh_run(&spec.target, &launch, None)
+        .await
+        .map_err(|error| error.context(LaunchUncertain))?;
     Ok(dir)
 }
 

@@ -1192,10 +1192,5 @@
   "ssh_run_in": "Run in",
   "ssh_direct_host": "Direct host",
   "ssh_existing_container": "Existing container",
-  "ssh_container_reference": "Container name or ID",
-  "ssh_setup_command": "Setup command (optional)",
-  "ssh_setup_help": "Runs once before each experiment. Test checks connectivity and required tools; it does not execute this command.",
-  "ssh_execution_saved": "SSH execution settings saved.",
-  "ssh_execution_ready": "Connection and required tools are ready.",
-  "ssh_test_execution": "Test connection"
+  "ssh_container_reference": "Container name or ID"
 }

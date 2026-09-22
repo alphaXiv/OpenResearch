@@ -6092,7 +6092,6 @@ async fn ssh_settings() -> ApiResult {
                 .cloned()
                 .unwrap_or_default();
             host["container"] = json!(options.container);
-            host["setupCommand"] = json!(options.setup_command);
         }
         // Best-effort, like the preflight write: a store hiccup shouldn't take
         // out the host listing — hosts just render as never tested.
@@ -6128,7 +6127,6 @@ async fn ssh_settings() -> ApiResult {
 struct SaveSshSettingsReq {
     host: String,
     container: Option<String>,
-    setup_command: Option<String>,
 }
 
 async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
@@ -6136,9 +6134,6 @@ async fn save_ssh_settings(Json(req): Json<SaveSshSettingsReq>) -> ApiResult {
     require_configured_ssh_host(&host)?;
     let options = crate::config::SshHostSettings {
         container: req.container,
-        setup_command: req
-            .setup_command
-            .filter(|command| !command.trim().is_empty()),
     };
     crate::jobs::ssh::validate_host_options(&options).map_err(bad_request)?;
     blocking_api(move || {

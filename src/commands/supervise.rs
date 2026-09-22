@@ -881,7 +881,6 @@ async fn run_openresearch(
             }
             match ssh::run_job(&ssh::SshJobSpec {
                 container: None,
-                setup_command: None,
                 target: target.clone(),
                 run_id: run_id.clone(),
                 script: script.clone(),

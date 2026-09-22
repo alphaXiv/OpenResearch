@@ -954,7 +954,6 @@ export const moveDataDir = (path: string) =>
 
 export interface SshHost {
   container?: string | null;
-  setupCommand?: string | null;
   host: string;
   hostname?: string;
   user?: string;
@@ -966,7 +965,7 @@ export interface SshHost {
 
 export interface SshSettings { hosts: SshHost[]; defaultHost: string | null }
 export const getSshSettings = (signal?: AbortSignal) => get<SshSettings>("/api/settings/ssh", signal);
-export const saveSshHost = (body: { host: string; container: string | null; setupCommand: string | null }) =>
+export const saveSshHost = (body: { host: string; container: string | null }) =>
   post<{ ok: boolean }>("/api/settings/ssh", body);
 export const saveSshDefault = (host: string | null) => post<{ ok: boolean }>("/api/settings/ssh/default", { host });
 export interface SshExecutionPreflight extends SshPreflight {
