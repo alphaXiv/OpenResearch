@@ -987,7 +987,7 @@
   "settings_clean": "نظيف",
   "settings_has_changes": "به تغييرات",
   "settings_not_initialized": "غير مهيّأ",
-  "settings_use_existing_github_repository": "استخدم هذا المستودع لرفع فروع التجارب تلقائيًا عندما يملك حسابك المتصل صلاحية الكتابة فيه. وإلا، ينشئ OpenResearch مستودعًا خاصًا منفصلًا للتعاون.",
+  "settings_use_existing_github_repository": "استخدم هذا المستودع لدفع فروع التجارب تلقائيًا. يجب أن يمتلك حساب GitHub المتصل صلاحية الكتابة.",
   "settings_create_private_github_repository": "أنشئ مستودعًا خاصًا وارفع فروع التجارب تلقائيًا ليطّلع عليها المتعاونون.",
   "settings_make_default": "جعله افتراضيًا",
   "storage_source_env": "متغيّر البيئة ORX_DATA_DIR",

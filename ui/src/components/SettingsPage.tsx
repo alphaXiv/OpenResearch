@@ -3328,11 +3328,12 @@ function GitTab({
                         placeholder="owner/repo" disabled={saving} required />
                     </label>
                     <p className="m-0 text-sm text-subtext">{m.repository_connect_description()}</p>
+                    {error && <div role="alert" className="text-sm text-accent-red">{syncErrorMessage(error)}</div>}
                     <div className="flex gap-2">
                       <Button type="submit" variant="primary" disabled={saving || !repository.trim()}>
                         {saving ? m.repository_enabling() : m.repository_connect_and_sync()}
                       </Button>
-                      <Button type="button" disabled={saving} onClick={() => setRepositoryFormOpen(false)}>{m.settings_page_cancel()}</Button>
+                      <Button type="button" disabled={saving} onClick={() => { setRepositoryFormOpen(false); setError(null); }}>{m.settings_page_cancel()}</Button>
                     </div>
                   </form>
                 )}
@@ -3340,7 +3341,7 @@ function GitTab({
             )}
           </div>
           <OverleafCard />
-          {error && <div className="error">{syncErrorMessage(error)}</div>}
+          {error && !repositoryFormOpen && <div role="alert" className="error">{syncErrorMessage(error)}</div>}
         </>
       )}
       {defaultPromptOpen && (

@@ -988,7 +988,7 @@
   "settings_clean": "clean",
   "settings_has_changes": "has changes",
   "settings_not_initialized": "not initialized",
-  "settings_use_existing_github_repository": "Use this repository for automatic experiment-branch pushes when your connected account can write to it. Otherwise, OpenResearch creates a separate private repository for collaboration.",
+  "settings_use_existing_github_repository": "Use this repository for automatic experiment-branch pushes. Your connected GitHub account must have write access.",
   "settings_create_private_github_repository": "Create a private repository and automatically push experiment branches for collaborator visibility.",
   "settings_make_default": "Make default",
   "storage_source_env": "ORX_DATA_DIR environment variable",

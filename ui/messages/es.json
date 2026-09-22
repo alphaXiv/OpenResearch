@@ -988,7 +988,7 @@
   "settings_clean": "sin cambios",
   "settings_has_changes": "con cambios",
   "settings_not_initialized": "sin inicializar",
-  "settings_use_existing_github_repository": "Usar este repositorio para subir automáticamente las ramas de los experimentos si tu cuenta conectada tiene permiso de escritura. Si no, OpenResearch crea un repositorio privado aparte para colaborar.",
+  "settings_use_existing_github_repository": "Usa este repositorio para enviar automáticamente las ramas de experimentos. Tu cuenta de GitHub conectada debe tener acceso de escritura.",
   "settings_create_private_github_repository": "Crear un repositorio privado y subir automáticamente las ramas de los experimentos para que las vean tus colaboradores.",
   "settings_make_default": "Establecer como predeterminado",
   "storage_source_env": "variable de entorno ORX_DATA_DIR",

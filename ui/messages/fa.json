@@ -982,7 +982,7 @@
   "settings_clean": "بدون تغییر",
   "settings_has_changes": "دارای تغییر",
   "settings_not_initialized": "راه‌اندازی نشده",
-  "settings_use_existing_github_repository": "اگر حساب متصل اجازهٔ نوشتن داشته باشد، شاخه‌های آزمایش خودکار به این مخزن پوش می‌شوند. در غیر این صورت OpenResearch یک مخزن خصوصی جداگانه برای همکاری می‌سازد.",
+  "settings_use_existing_github_repository": "از این مخزن برای ارسال خودکار شاخه‌های آزمایش استفاده کنید. حساب GitHub متصل باید دسترسی نوشتن داشته باشد.",
   "settings_create_private_github_repository": "یک مخزن خصوصی بسازید و شاخه‌های آزمایش را برای مشاهدهٔ همکاران به‌طور خودکار پوش کنید.",
   "settings_make_default": "پیش‌فرض شود",
   "storage_source_env": "متغیر محیطی ORX_DATA_DIR",

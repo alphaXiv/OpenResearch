@@ -982,7 +982,7 @@
   "settings_clean": "无更改",
   "settings_has_changes": "有更改",
   "settings_not_initialized": "尚未初始化",
-  "settings_use_existing_github_repository": "当已连接的账户有写入权限时，使用此仓库自动推送实验分支。否则，OpenResearch 会另建一个私有仓库用于协作。",
+  "settings_use_existing_github_repository": "使用此仓库自动推送实验分支。当前连接的 GitHub 账号必须具有写入权限。",
   "settings_create_private_github_repository": "创建私有仓库，并自动推送实验分支以便协作者查看。",
   "settings_make_default": "设为默认值",
   "storage_source_env": "ORX_DATA_DIR 环境变量",
