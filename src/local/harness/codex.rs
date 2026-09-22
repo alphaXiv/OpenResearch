@@ -637,26 +637,23 @@ impl Codex {
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
             // thread resume). `turn/steer` is an app-server method, so this
-            // follows the dispatch predicate rather than the version alone.
-            // Detection already holds the evidence — the probed version, or a
-            // completed `model/list` handshake — so seeding the capability
-            // cell costs no extra spawn. The snapshot leaves it off.
+            // follows the dispatch predicate rather than the version alone —
+            // but a completed `model/list` handshake only proves the catalog
+            // method answered, not that the turn protocol is whole, so an
+            // explicitly too-old version still vetoes. Detection already
+            // holds the evidence — the probed version, or the handshake — so
+            // seeding the capability cell costs no extra spawn. The snapshot
+            // leaves it off.
+            let parsed = info.version.as_deref().and_then(parse_version);
+            let too_old = parsed.is_some_and(|v| v < MIN_APP_SERVER_VERSION);
             let supported = !snapshot
                 && app_server_supported(Some(
-                    catalog_answered
-                        || info
-                            .version
-                            .as_deref()
-                            .and_then(parse_version)
-                            .is_some_and(|v| v >= MIN_APP_SERVER_VERSION),
+                    !too_old
+                        && (catalog_answered
+                            || parsed.is_some_and(|v| v >= MIN_APP_SERVER_VERSION)),
                 ))
                 .await;
             info.supports_steering = !codex_exec_forced() && supported;
-            let too_old = info
-                .version
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v < MIN_APP_SERVER_VERSION);
             if too_old {
                 info.agent_note = Some(
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),

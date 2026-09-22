@@ -191,8 +191,9 @@ impl OpenCode {
                 // `opencode.jsonc` or a `.json` carrying comments — which
                 // opencode accepts and a `Null` here would silently drop
                 // (configured local providers would vanish).
-                config = snapshot_config();
-                if unresolved_config_source() {
+                let unresolved;
+                (config, unresolved) = snapshot_config();
+                if unresolved {
                     if let Some(text) = super::detect::timed_probe(
                         "opencode",
                         "config",
@@ -207,7 +208,7 @@ impl OpenCode {
             } else if snapshot {
                 // `debug config` costs a child process; the snapshot reads
                 // the config file directly.
-                config = snapshot_config();
+                config = snapshot_config().0;
             }
         }
         apply_configured_labels(&mut models, &config);
@@ -497,83 +498,62 @@ fn opencode_auth_path() -> Option<PathBuf> {
 }
 
 /// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
-/// the file `OPENCODE_CONFIG` points at, else the stock
-/// `~/.config/opencode/opencode.json`. `debug config --pure` additionally
-/// merges project and plugin layers, but it costs a child process — the
-/// snapshot settles for the file and the full pass re-reads it properly.
+/// the file `OPENCODE_CONFIG` points at, else `opencode.json` under
+/// `OPENCODE_CONFIG_DIR` or the stock `~/.config/opencode`. `debug config
+/// --pure` additionally merges project and plugin layers, but it costs a
+/// child process — the snapshot settles for the file and the full pass
+/// re-reads it properly.
 ///
 /// One merge the file read must not skip: orx's own connected local models,
 /// which `local_models::prepare_env` folds into `OPENCODE_CONFIG_CONTENT` for
 /// every spawned CLI — and inline content shadows the file entirely, so a
 /// connections-only user sees exactly those providers and nothing else.
-fn snapshot_config() -> Value {
+///
+/// Returns the config plus whether a source exists the strict parse could
+/// not honor (`.jsonc`, comments) — a cue for the full pass to ask the CLI.
+fn snapshot_config() -> (Value, bool) {
     let connections = crate::local::local_models::read().unwrap_or_default();
+    // `true` when a config source exists that the strict file read cannot
+    // honor — opencode accepts `.jsonc` and comments, which parse as `Null`
+    // here and would silently drop configured providers. The full pass
+    // resolves those with `debug config --pure`.
+    let mut unresolved = false;
     let mut config = if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
     {
         // The env var overrides the file entirely — present-but-unparseable
-        // means "no usable config", not "fall through to the file".
-        serde_json::from_str::<Value>(&content.to_string_lossy()).unwrap_or(Value::Null)
+        // means "no usable config", not "fall through to the file" — but its
+        // comments still outrun the strict parse.
+        let parsed = serde_json::from_str::<Value>(&content.to_string_lossy());
+        unresolved = parsed.is_err();
+        parsed.unwrap_or(Value::Null)
     } else if !connections.is_empty() {
         // The spawned CLI would get inline content built from the connections
         // alone; the file never enters the picture.
         json!({})
-    } else {
-        let path = crate::local::shell_env::var("OPENCODE_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                super::xdg_config_home()
-                    .join("opencode")
-                    .join("opencode.json")
-            });
-        std::fs::read_to_string(path)
+    } else if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
+        let path = PathBuf::from(custom);
+        let parsed = std::fs::read_to_string(&path)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or(Value::Null)
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        unresolved = path.exists() && parsed.is_none();
+        parsed.unwrap_or(Value::Null)
+    } else {
+        let dir = crate::local::shell_env::var("OPENCODE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| super::xdg_config_home().join("opencode"));
+        let json = dir.join("opencode.json");
+        let parsed = std::fs::read_to_string(&json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        // opencode honors a sibling `.jsonc` alongside — and comments inside
+        // — `.json`; either outruns what the file read can claim to cover.
+        unresolved = dir.join("opencode.jsonc").exists() || (json.exists() && parsed.is_none());
+        parsed.unwrap_or(Value::Null)
     };
     if !connections.is_empty() && config.is_object() {
         let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
     }
-    config
-}
-
-/// A config source the snapshot's strict file read cannot honor: an
-/// `OPENCODE_CONFIG` target or `opencode.json` that fails strict JSON
-/// (comments make opencode's own parser fine with it), or a sibling
-/// `opencode.jsonc`. The full pass resolves these with the CLI's own
-/// `debug config --pure` rather than silently dropping the user's provider
-/// config.
-fn unresolved_config_source() -> bool {
-    if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT") {
-        // Inline content is authoritative — the file never enters the
-        // picture — but comments in it still outrun the strict parse.
-        return serde_json::from_str::<Value>(&content.to_string_lossy()).is_err();
-    }
-    if !crate::local::local_models::read()
-        .unwrap_or_default()
-        .is_empty()
-    {
-        return false;
-    }
-    let dir = super::xdg_config_home().join("opencode");
-    if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
-        let path = PathBuf::from(custom);
-        // An explicit target that exists but won't strict-parse (comments)
-        // is still real config to the CLI.
-        return path.exists()
-            && std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .is_none();
-    }
-    let json = dir.join("opencode.json");
-    // opencode honors a sibling `.jsonc` alongside — and comments inside —
-    // `.json`; either outruns what the file read can claim to have covered.
-    dir.join("opencode.jsonc").exists()
-        || (json.exists()
-            && std::fs::read_to_string(&json)
-                .ok()
-                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-                .is_none())
+    (config, unresolved)
 }
 
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).

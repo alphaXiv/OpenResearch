@@ -446,7 +446,7 @@ where
             }
             let out = match speculated.filter(|_| hit) {
                 Some(out) => Some(out),
-                None => Some(probes(bin.clone()).await),
+                None => Some(timed_probe(key, "spec", probes(bin.clone())).await),
             };
             (Some((bin, probe)), out)
         }
@@ -569,10 +569,50 @@ pub(crate) fn record_probe_timing(harness: &'static str, probe: &'static str, ms
     }
 }
 
+/// Records on drop, so a probe cancelled mid-flight (an aborted speculation)
+/// still leaves its consumed wall clock in the fill's telemetry rather than
+/// disappearing. The sink is captured when the probe wraps — a dropped future
+/// cannot count on the task-local being set during teardown.
+struct ProbeTimingGuard {
+    harness: &'static str,
+    probe: &'static str,
+    start: std::time::Instant,
+    sink: Option<ProbeTimingSink>,
+}
+
+impl ProbeTimingGuard {
+    fn new(harness: &'static str, probe: &'static str) -> Self {
+        Self {
+            harness,
+            probe,
+            start: std::time::Instant::now(),
+            sink: DETECT_TIMINGS.try_with(|sink| sink.clone()).ok(),
+        }
+    }
+}
+
+impl Drop for ProbeTimingGuard {
+    fn drop(&mut self) {
+        let Some(sink) = &self.sink else {
+            return;
+        };
+        let Ok(mut timings) = sink.lock() else {
+            return;
+        };
+        if timings.len() < MAX_PROBE_TIMINGS {
+            timings.push(ProbeTiming {
+                harness: self.harness,
+                probe: self.probe,
+                ms: self.start.elapsed().as_millis() as u64,
+            });
+        }
+    }
+}
+
 /// Times a detection probe: records its wall-clock duration — which includes
-/// any spawn-lane wait — for the catalog fill's telemetry and, under
-/// `ORX_DETECT_TIMING`, logs start and end relative to the first instrumented
-/// probe so queueing shows up as a late start, not just a long duration.
+/// any spawn-lane wait, since the permit is acquired inside `fut` — for the
+/// catalog fill's telemetry and, under `ORX_DETECT_TIMING`, logs start and
+/// end relative to the first instrumented probe.
 pub(crate) async fn timed_probe<T>(
     harness: &'static str,
     probe: &'static str,
@@ -580,13 +620,12 @@ pub(crate) async fn timed_probe<T>(
 ) -> T {
     let timing = detect_timing();
     let start_ms = timing.then(|| detect_epoch().elapsed().as_millis());
-    let t = std::time::Instant::now();
+    let guard = ProbeTimingGuard::new(harness, probe);
     let out = fut.await;
-    let ms = t.elapsed().as_millis() as u64;
-    record_probe_timing(harness, probe, ms);
     if timing {
         eprintln!(
-            "orx detect: probe {harness} {probe} took {ms}ms (start {}ms)",
+            "orx detect: probe {harness} {probe} took {}ms (start {}ms)",
+            guard.start.elapsed().as_millis(),
             start_ms.unwrap_or(0),
         );
     }
@@ -627,7 +666,7 @@ fn path_version(bin: &Path) -> Option<String> {
 fn pe_version(bin: &Path) -> Option<String> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
     };
     if !bin
         .file_name()
@@ -646,20 +685,18 @@ fn pe_version(bin: &Path) -> Option<String> {
         if GetFileVersionInfoW(wide.as_ptr(), 0, size, data.as_mut_ptr().cast()) == 0 {
             return None;
         }
-        // VS_FIXEDFILEINFO is ABI-frozen: dwFileVersionMS/LS sit at u32
-        // offsets 2 and 3 (after dwSignature and dwStrucVersion).
         let mut info: *mut core::ffi::c_void = std::ptr::null_mut();
         let mut len = 0u32;
         let root: Vec<u16> = "\\".encode_utf16().chain(Some(0)).collect();
         if VerQueryValueW(data.as_ptr().cast(), root.as_ptr(), &mut info, &mut len) == 0
             || info.is_null()
-            || (len as usize) < 4 * 4
+            || (len as usize) < size_of::<VS_FIXEDFILEINFO>()
         {
             return None;
         }
-        let info = info as *const u32;
-        let ms = std::ptr::read_unaligned(info.add(2));
-        let ls = std::ptr::read_unaligned(info.add(3));
+        let ffi = std::ptr::read_unaligned(info as *const VS_FIXEDFILEINFO);
+        let ms = ffi.dwFileVersionMS;
+        let ls = ffi.dwFileVersionLS;
         Some(format!("{}.{}.{}", ms >> 16, ms & 0xffff, ls >> 16))
     }
 }

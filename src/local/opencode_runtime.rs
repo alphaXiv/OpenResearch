@@ -158,14 +158,13 @@ fn resolve_binary_from_pin(path: &Path) -> Option<ResolvedBinary> {
     let pin_modified = std::fs::metadata(&pin_path).ok()?.modified().ok()?;
     // The installer writes the manifest then extracts the binary, so a fresh
     // install legitimately has the binary a few seconds newer; a *replaced*
-    // binary differs by days. Five minutes separates the two.
-    if metadata
-        .modified()
-        .ok()?
-        .duration_since(pin_modified)
-        .map(|gap| gap > Duration::from_secs(300))
-        .unwrap_or(false)
-    {
+    // binary differs by days, and a manifest newer than the binary describes
+    // a different install. Five minutes separates the two, either direction.
+    let gap = match metadata.modified().ok()?.duration_since(pin_modified) {
+        Ok(gap) => gap,
+        Err(earlier) => earlier.duration(),
+    };
+    if gap > Duration::from_secs(300) {
         return None;
     }
     let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(pin_path).ok()?).ok()?;

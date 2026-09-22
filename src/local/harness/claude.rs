@@ -249,7 +249,11 @@ fn credman_holds_claude_login() -> bool {
         let mut count = 0u32;
         let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
         if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds) == 0 {
-            return false;
+            // ERROR_NOT_FOUND means the filter matched nothing — a real
+            // signed-out signal. Any other failure is inconclusive, so err
+            // toward "a login may exist" and let the live probe decide.
+            use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+            return GetLastError() != ERROR_NOT_FOUND;
         }
         CredFree(creds.cast());
         count > 0

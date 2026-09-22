@@ -7091,15 +7091,20 @@ async fn seed_harnesses_locked(
     let cached_at = std::time::Instant::now();
     spawn_cursor_account_details(state, &mut payload, cached_at);
     *cache = Some((cached_at, payload.clone()));
-    crate::telemetry::harness::capture_detect(
-        fill_id,
-        "snapshot",
-        snapshot_ms,
-        None,
-        installed,
-        0,
-        Vec::new(),
-    );
+    // Off the lock-held request path and off a runtime worker: settings
+    // load + outbox persist are sync IO on the same filesystems this pass
+    // exists to stop blocking on.
+    tokio::task::spawn_blocking(move || {
+        crate::telemetry::harness::capture_detect(
+            fill_id,
+            "snapshot",
+            snapshot_ms,
+            None,
+            installed,
+            0,
+            Vec::new(),
+        );
+    });
     spawn_catalog_fill(state.clone(), cached_at, fill_id);
     payload
 }
@@ -7202,16 +7207,6 @@ fn payload_is_provisional(payload: &Value) -> bool {
     payload["harnesses"].as_array().is_some_and(|all| {
         all.iter()
             .any(|h| h["catalogPending"].as_bool() == Some(true))
-    })
-}
-
-/// The dashboard's onboarding gate (`agentReady && !catalogPending` on any
-/// entry) evaluated against a payload — what "a usable agent appeared" means.
-fn payload_has_ready_agent(payload: &Value) -> bool {
-    payload["harnesses"].as_array().is_some_and(|all| {
-        all.iter().any(|h| {
-            h["agentReady"].as_bool() == Some(true) && h["catalogPending"].as_bool() != Some(true)
-        })
     })
 }
 
@@ -7382,7 +7377,7 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                     // shared-auth retry that ran no stream probe) — count it, but
                     // only once publication is confirmed: a superseded fill
                     // reports its probe timings with no invented readiness mark.
-                    if first_ready_ms.is_none() && payload_has_ready_agent(&payload) {
+                    if first_ready_ms.is_none() && ready > 0 {
                         first_ready_ms = Some(started.elapsed().as_millis() as u64);
                     }
                     let filled_at = std::time::Instant::now();
@@ -7392,20 +7387,25 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                 }
             };
             // Emit regardless of the race outcome: a fill that lost it still ran
-            // real probes, and its timings are real data.
-            crate::telemetry::harness::capture_detect(
-                fill_id,
-                "full",
-                started.elapsed().as_millis() as u64,
-                first_ready_ms,
-                installed,
-                ready,
-                std::mem::take(
-                    &mut *probe_timings
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                ),
+            // real probes, and its timings are real data. Settings load +
+            // outbox persist are sync IO — keep them off the runtime workers.
+            let timings = std::mem::take(
+                &mut *probe_timings
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tokio::task::spawn_blocking(move || {
+                crate::telemetry::harness::capture_detect(
+                    fill_id,
+                    "full",
+                    duration_ms,
+                    first_ready_ms,
+                    installed,
+                    ready,
+                    timings,
+                );
+            });
             if !committed {
                 return;
             }
