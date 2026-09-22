@@ -246,7 +246,7 @@
   "onboarding_choose_one_or_more": "Elige una o varias.",
   "onboarding_consolidate_your_research": "Consolida tu investigación",
   "onboarding_continue": "Continuar",
-  "onboarding_detecting_claude_code_codex_open_code": "Detectando Claude Code, Codex, OpenCode, Cursor…",
+  "onboarding_detecting_claude_code_codex_open_code": "Detectando Claude Code, Codex, OpenCode, Cursor, Google Antigravity…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "p. ej., trabajo en RL eficiente en muestras para el post-entrenamiento de LLM, centrado en métodos sin modelo de recompensa.",
   "onboarding_everything_stays_local": "Todo se queda en local",
   "onboarding_get_started": "Empezar",
@@ -1209,5 +1209,13 @@
   "harness_setup_install_preview": "Aprueba el siguiente comando para descargar e instalar {agent} en tu equipo.",
   "harness_setup_update_preview": "Aprueba el siguiente comando para actualizar {agent} en tu equipo.",
   "harness_setup_approve_run": "Aprobar y ejecutar",
-  "onboarding_choose_another_agent": "Elegir otro agente de programación"
+  "onboarding_choose_another_agent": "Elegir otro agente de programación",
+  "image_zoom_out": "Alejar",
+  "image_zoom_in": "Acercar",
+  "image_zoom_reset": "Restablecer zoom para ajustar",
+  "ssh_default_host": "Servidor SSH predeterminado",
+  "ssh_run_in": "Ejecutar en",
+  "ssh_direct_host": "Servidor directamente",
+  "ssh_existing_container": "Contenedor existente",
+  "ssh_container_reference": "Nombre o ID del contenedor"
 }

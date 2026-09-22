@@ -110,6 +110,7 @@ pub async fn submit_local_modal_with_source(
     .await?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
         kind: "modal_job".to_string(),
         namespace: Some(MODAL_APP.to_string()),
         job_id: Some(sandbox_id.clone()),

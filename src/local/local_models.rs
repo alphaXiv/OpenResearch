@@ -204,7 +204,7 @@ pub fn prepare_env(cmd: &mut tokio::process::Command, model: Option<&str>) -> Re
     Ok(())
 }
 
-fn merge_config(
+pub(crate) fn merge_config(
     config: &mut Value,
     connections: &BTreeMap<String, Connection>,
     model: Option<&str>,

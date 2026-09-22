@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use crate::error::{anyhow, Result};
 use crate::jobs::ssh::{sh_quote, JobState};
 
+#[cfg(windows)]
+mod windows;
+
 /// The run's working directory: `<data dir>/local-runs/<run id>`.
 pub fn run_dir(run_id: &str) -> PathBuf {
     // Run ids are locally-minted UUIDs; sanitize anyway (same as log_path).
@@ -84,11 +87,16 @@ pub fn run_job(spec: &LocalJobSpec) -> Result<PathBuf> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    let child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
-    std::fs::write(dir.join("pid"), format!("{}\n", child.id()))
-        .map_err(|e| anyhow!("Could not record the run's pid: {}", e))?;
+    #[cfg(windows)]
+    windows::spawn(&mut cmd, &dir).map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
+    #[cfg(not(windows))]
+    {
+        let child = cmd
+            .spawn()
+            .map_err(|e| anyhow!("Could not launch the local run: {}", e))?;
+        std::fs::write(dir.join("pid"), format!("{}\n", child.id()))
+            .map_err(|e| anyhow!("Could not record the run's pid: {}", e))?;
+    }
     Ok(dir)
 }
 
@@ -222,7 +230,7 @@ pub fn cancel_job(dir: &Path) -> Result<()> {
     let pid = pid.trim().to_string();
     #[cfg(windows)]
     {
-        terminate_tree(&pid)
+        windows::cancel(dir, &pid)
     }
     #[cfg(not(windows))]
     {
@@ -405,7 +413,7 @@ mod tests {
     #[test]
     fn local_job_lifecycle() {
         // The only test that touches ORX_DATA_DIR, so the global env is safe.
-        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("orx-localbox-test-{}", uuid::Uuid::new_v4()));
         std::env::set_var("ORX_DATA_DIR", &base);
 
         let dir = run_job(&LocalJobSpec {
@@ -428,6 +436,11 @@ mod tests {
         assert_eq!(lines, ["hello-42"]);
         // Re-poll past the consumed lines: nothing new.
         assert_eq!(stream_logs(&dir, seen, &mut |_| ()).unwrap(), seen);
+        #[cfg(windows)]
+        {
+            cancel_job(&dir).unwrap();
+            assert_eq!(inspect_job(&dir).stage, "COMPLETED");
+        }
 
         let failed = run_job(&LocalJobSpec {
             run_id: "failing".into(),
@@ -448,11 +461,37 @@ mod tests {
         })
         .unwrap();
         assert_eq!(inspect_job(&cancelled).stage, "RUNNING");
+        #[cfg(windows)]
+        drop(windows::open_job(&cancelled).expect("the launcher must retain the job name"));
         cancel_job(&cancelled).unwrap();
         let state = wait_terminal(&cancelled);
         // TERM leaves either a dead pid with no exit_code, or a non-zero
         // exit_code if run.sh got to write one — ERROR either way.
         assert_eq!(state.stage, "ERROR");
+
+        let descendants = run_job(&LocalJobSpec {
+            run_id: "descendants".into(),
+            script: "(for i in {1..100}; do echo tick >> heartbeat; sleep 0.1; done) & wait".into(),
+            env: HashMap::new(),
+            secret_env: HashMap::new(),
+        })
+        .unwrap();
+        for _ in 0..100 {
+            if descendants.join("heartbeat").exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let started = descendants.join("heartbeat").exists();
+        cancel_job(&descendants).unwrap();
+        assert!(started, "the descendant did not start");
+        assert_eq!(wait_terminal(&descendants).stage, "ERROR");
+        let heartbeat = std::fs::read(descendants.join("heartbeat")).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            std::fs::read(descendants.join("heartbeat")).unwrap(),
+            heartbeat
+        );
 
         std::env::remove_var("ORX_DATA_DIR");
         let _ = std::fs::remove_dir_all(&base);

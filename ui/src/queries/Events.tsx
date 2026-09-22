@@ -2,6 +2,7 @@ import type { ChatSession } from "../api";
 import { markLiveUpdate } from "./live";
 import {
   refreshHarnesses,
+  getHarnessesQuery,
   getUpdateStatusQuery,
 } from "./settings";
 import { dispatchChat } from "./chatStore";
@@ -12,6 +13,7 @@ import {
   onProjectActivityEvent,
   onChatEvent,
   onHarnessAuth,
+  onHarnessCatalog,
   onUpdateStatus,
   useOrxEventStream,
 } from "../events";
@@ -99,12 +101,16 @@ export function QueryEvents() {
       }
     });
     const offAuth = onHarnessAuth(() => { if (isCurrentScope(scope)) void refreshHarnesses(true).catch(() => {}); });
+    // The catalog fill already ran server-side; a plain read serves the
+    // updated cache — forcing a refresh here would spawn a second sweep. The
+    // query's 5-minute staleTime would swallow a bare fetchQuery, so bypass it.
+    const offCatalog = onHarnessCatalog(() => { if (isCurrentScope(scope)) void queryClient.fetchQuery({ ...getHarnessesQuery(), staleTime: 0 }).catch(() => {}); });
     const offUpdate = onUpdateStatus((status) => {
       if (!isCurrentScope(scope)) return;
       markLiveUpdate(queryClient, getUpdateStatusQuery().queryKey);
       queryClient.setQueryData(getUpdateStatusQuery().queryKey, status);
     });
-    return () => { clearTimeout(activityTimer); offActivity(); offMove(); offChat(); offAuth(); offUpdate(); };
+    return () => { clearTimeout(activityTimer); offActivity(); offMove(); offChat(); offAuth(); offCatalog(); offUpdate(); };
   }, [scope[1]]);
   return null;
 }

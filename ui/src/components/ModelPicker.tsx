@@ -45,6 +45,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   cursor: "Cursor",
+  antigravity: "Google Antigravity",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -172,7 +173,7 @@ export function ModelPicker({
       let models = h.models;
       if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
       // Large catalogs stay behind the filter box.
-      else if (h.id === "opencode" || h.id === "cursor") models = models.slice(0, 5);
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -385,13 +386,13 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> {m.model_picker_unavailable()}
+                          {harness.catalogPending ? m.onboarding_checking() : <><Lock size={10} /> {m.model_picker_unavailable()}</>}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
+                        {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>

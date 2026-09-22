@@ -6,8 +6,8 @@
 
 <p>Turn <img src=".github/readme-assets/claude.svg" alt="" width="16" height="16" align="texttop" /> Claude Code,
 <img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="texttop" /> Codex,
-<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode, or
-<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor into research agents that can review
+<img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode,
+<img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor, or Google Antigravity into research agents that can review
 literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 <p>
@@ -23,7 +23,8 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 
 <p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
 
-<p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a></p>
+<p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
+<a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
 
 </div>
 
@@ -54,7 +55,7 @@ updates and use managed OpenResearch compute.
 | **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
 | **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
 | **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
-| **Your choice of agent** | Use Claude Code, Codex, OpenCode, or Cursor, with the harness and model selected per session. |
+| **Your choice of agent** | Use Claude Code, Codex, OpenCode, Cursor, or Google Antigravity, with the harness and model selected per session. |
 | **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
 | **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
 

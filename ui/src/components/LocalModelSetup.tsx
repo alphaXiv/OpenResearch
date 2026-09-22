@@ -1,7 +1,7 @@
 import { useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useDialogFocus } from "./useDialogFocus";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link2, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { connectLocalModel, discoverLocalModels, removeLocalModel, checkLocalModel, type LocalModelConnection } from "../api";
 import { getLocalModelsQuery, getHarnessesQuery, refreshHarnesses } from "../queries/settings";
@@ -35,7 +35,6 @@ export function LocalModelSetup({ installed, onConnected, dialogOnly = false, on
   dialogOnly?: boolean;
   onClose?: () => void;
 }) {
-  const queryClient = useQueryClient();
   const connections = useQuery({ ...getLocalModelsQuery(), enabled: !dialogOnly });
   const harnesses = useQuery(getHarnessesQuery());
   const opencode = harnesses.data?.find((harness) => harness.id === "opencode");
@@ -56,7 +55,9 @@ export function LocalModelSetup({ installed, onConnected, dialogOnly = false, on
   const probe = useMutation({ mutationFn: discoverLocalModels });
   const save = useMutation({ mutationFn: async (request: Parameters<typeof connectLocalModel>[0]) => {
     const result = await connectLocalModel(request);
-    const harnesses = await queryClient.fetchQuery({ ...getHarnessesQuery(), staleTime: 0 });
+    // A plain read can land on a provisional entry whose model list is still
+    // empty — verify against the forced refresh instead.
+    const harnesses = await refreshHarnesses(true);
     if (!harnesses.find((h) => h.id === "opencode")?.models.some((model) => model.id === result.model)) {
       throw new Error(m.local_models_config_restricted());
     }
@@ -102,7 +103,7 @@ export function LocalModelSetup({ installed, onConnected, dialogOnly = false, on
           <SavedLocalModel key={connection.id} connection={connection}
             harnessReady={opencode?.agentReady ?? false}
             availableModels={opencode?.models.map((model) => model.id) ?? []}
-            checking={harnesses.isFetching}
+            checking={harnesses.isFetching || (opencode?.catalogPending ?? false)}
             unknown={harnesses.isError || !harnesses.data}
             disabled={busy || remove.isPending}
             onRemove={() => void disconnect(connection.id)} />
