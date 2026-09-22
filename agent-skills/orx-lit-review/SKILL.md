@@ -1,13 +1,33 @@
 ---
 name: orx-lit-review
-description: "Search and read research papers. The main agent calls alphaXiv, OpenAlex, and bioRxiv discovery primitives, ranks the combined candidates, and chooses sources for focused follow-ups. Use for literature reviews, related work, prior art, papers, authors, methods, benchmarks, or research claims; never delegate the retrieval loop to a sub-agent."
+description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, and bioRxiv connectors; scale retrieval to the question."
 ---
 
 # Literature retrieval
 
-You are the retrieval ranker. Call the alphaXiv, OpenAlex, and bioRxiv
-primitives yourself, inspect the returned candidates, and decide which sources
-are useful for each focused follow-up. Never delegate this loop to a sub-agent.
+Use this skill for scientific explanations and comparisons, even without a named
+paper. Never delegate retrieval to a sub-agent.
+
+Use enabled literature connectors appropriate to the topic. General web search
+is a fallback only when relevant connectors provide no useful evidence. Do not
+supplement successful retrieval with a web search for a familiar or preferred
+paper; use a focused connector query or `orx paper`. Opening a selected original
+PDF to extract evidence is source access; opening its abstract first is unnecessary.
+
+## Explain with visual evidence
+
+- Prefer explaining through original figures, tables, and diagrams. For
+  comparisons, choose visuals that cover the relevant alternatives; let the
+  reader see the architecture, relationship, or result being explained.
+- Answer as a guided reading of those visuals, presenting them early. Keep
+  prose brief: what to notice, why it matters, and the caveats, grounded in
+  contextual author quotations.
+
+Visual evidence should replace standalone tutorials, generated comparison
+tables, and recitations of data or structure. Choose visuals for explanatory
+value, without a fixed image count. Text is the fallback when relevant sources
+contain no useful visual or extraction remains blocked; explain that gap.
+One unavailable figure is not a reason to omit other accessible visuals.
 
 Each command performs exactly one public endpoint request and emits its
 structured JSON result. No login is required:
@@ -21,8 +41,7 @@ orx discover biorxiv "<biology preprint query>"
 
 - `keyword` searches title, abstract, and full text. Results include the match
   snippets that explain why each paper was retrieved. Use short exact terms:
-  method names, acronyms, benchmarks, authors, or title phrases. Use only terms
-  stated by the user or observed in results; never invent an acronym expansion.
+  method names, acronyms, benchmarks, authors, or title phrases.
 - `embedding` searches titles and abstracts semantically, then reranks by
   similarity and the requested priority. Use the user's actual question or a
   concise description of a genuinely missing facet.
@@ -66,8 +85,6 @@ orx discover biorxiv "<query>" --limit 20
   popularity, or community standing.
 
 ## Main-agent retrieval loop
-
-You are the low-latency retrieval ranker. Run the loop below yourself.
 
 ### Set up the retrieval query
 
@@ -151,25 +168,15 @@ papers before retrieval has produced its ranked 5–15 candidate set.
 Do not compare alphaXiv votes numerically with OpenAlex citations; they measure
 different things. Topical fit is the cross-source ranking signal.
 
-In the final answer, link every alphaXiv/arXiv paper title or paper ID to
-`https://www.alphaxiv.org/abs/<versionless-paperId>`. Never return an
-`arxiv.org` link for those papers. Link a DOI result to `https://doi.org/<doi>`
-and a bare OpenAlex `W…` id to `https://openalex.org/<id>`.
-
-For claim-level synthesis, place the supporting source link immediately after
-each substantive scholarly claim, and use a paper as claim-level support only
-after reading it. A discovery-only result list may link candidate titles, but
-must not imply that their methods or findings were verified from snippets alone.
-
 ## Reading selected papers
 
 `orx paper` auto-detects an arXiv id/URL, bioRxiv DOI, other DOI, or OpenAlex
-`W…` id. For alphaXiv it returns a compact structured report; use `--full` only
-when you explicitly need raw text even if a report exists. Without `--full`, a
-missing report automatically falls back to extracted full text in the same
+`W…` id. For alphaXiv it returns a compact structured report; use `--full` for
+exact wording and surrounding context, even when a report exists. Without
+`--full`, a missing report automatically falls back to extracted full text in the same
 command. `--full` skips the report entirely rather than acting as a superset of
-the default. If extracted text is also unavailable, use the alphaXiv paper link
-it returns.
+the default. If extracted text is also unavailable, locate the original PDF
+through the returned paper link.
 
 `orx paper` prints the alphaXiv link before the content. When alphaXiv has an
 associated repository, it then prints `GitHub: <url>`. This is the most-starred
@@ -178,3 +185,75 @@ so sanity-check it before treating it as the implementation.
 
 All discovery and paper commands honor the user's disabled literature-source
 settings; do not work around an error saying a source is disabled.
+
+Read a paper before using it as claim-level support. Discovery lists may link
+candidate titles, but must not imply that methods or findings were verified
+from snippets alone.
+
+## Original visuals
+
+Crop directly from the verified original PDF, using alphaXiv's linked PDF for
+alphaXiv papers. For a verified arXiv ID, download the source PDF from
+`https://arxiv.org/pdf/<id>`. The alphaXiv `/pdf/` URL serves a viewer page,
+not the PDF asset; keep user-facing citations pointed at that viewer.
+Preserve panel titles, axes, legends, and table headings; exclude the printed
+caption and surrounding prose. Render legibly and inspect
+the crop. Do not substitute thumbnails, redraw results, or generate lookalikes.
+If extraction fails, inspect the error and try available PDF tooling; report
+an unresolved obstacle rather than silently omitting the figure.
+
+Save crops durably in the session working tree. Use the figure component with
+brief accessible alt text and a contextual caption in the Markdown title:
+
+```markdown
+![Architecture overview](paper/figure1.png "Figure 1. What this shows and why it matters. [p. 6](https://www.alphaxiv.org/pdf/PAPER_ID?page=6)")
+```
+
+Replace example values with verified paths, IDs, and pages. Base your caption
+on the original, tailor it to the question, and preserve important qualifications.
+It is your explanation, not an author quote. Do not bake it into the image or
+repeat it below the component.
+
+Embed each underlying file once per conversation. Later references use
+`[Figure 1](paper/figure1.png)` or `[Table 1](paper/table1.png)` to open the same
+local file in the right pane. Different crops/edits may be embedded; renaming an
+unchanged image does not make it new. Keep paper-provenance links separate.
+
+## Quotes and citations
+
+Ground claims in original evidence and distinguish your interpretation.
+Use direct quotations to ground authors' reasoning, methods, assumptions, and
+limitations instead of paraphrasing them all. Choose complete sentences or
+self-contained passages. Read surrounding context; isolated
+numbers and clipped phrases are not sufficient. Do not quote values already
+clear in a displayed visual. Cite immediately after a quote.
+
+Quote only original text you actually read, including full-text snippets with
+sufficient context—not generated reports or summaries. Preserve wording and
+qualifications; mark omissions and never join separate snippets into a continuous
+quote. Respect quotation limits by selecting fewer complete passages, not by
+clipping context. If exact evidence is unavailable, say so; never fabricate it
+or present a paraphrase as a quotation.
+
+Prefer `https://www.alphaxiv.org/pdf/<paper-id>?page=N` when alphaXiv contains
+the cited version and evidence. N is the verified one-based PDF page index;
+omit it when unknown. Do not substitute different preprint results for a journal
+version. Use another verified paper viewer when alphaXiv lacks that evidence
+or is disabled. Raw PDFs are for extraction, not user-facing citations.
+Do not cite abstract pages or invent exact-passage highlighting URL parameters.
+For discovery results without an alphaXiv representation, link a DOI to
+`https://doi.org/<doi>` or a bare OpenAlex `W…` ID to
+`https://openalex.org/<id>`. Never substitute an arXiv link for an available
+alphaXiv representation.
+
+| Reference | Label | Destination |
+| --- | --- | --- |
+| One paper, page known | `p. N` | Paper viewer at that PDF page |
+| Multiple papers | `Short title, p. N` | Corresponding paper/page |
+| Page unknown | `Paper` or consistent short title | Paper viewer without page |
+| Embedded visual | `Figure N` / `Table N` | Existing local image file |
+
+Use these labels consistently, not vague labels such as "Source" or descriptions
+of the claim. Disambiguate figures by paper when needed. Introductory paper-title links can
+retain their titles. Discovery and figure-provenance links provide navigation;
+they do not imply every claim in a paper has been verified.

@@ -7,6 +7,7 @@ import { type ChatPart } from "../api";
 
 import { findPartById, SubagentTranscript } from "./ChatPanel";
 import type { TabOpenIntent } from "../tabPreview";
+import { ChatImageScope } from "./Md";
 import { TabBody } from "./layout/TabBody";
 
 const PANE_CONTENT_CLASS_NAME = [
@@ -22,6 +23,7 @@ const PANE_CONTENT_CLASS_NAME = [
  * the same source the inline block renders from, so it stays in sync as the
  * sub-agent works. No dedicated fetch endpoint needed. */
 export function SubagentTab({
+  projectId,
   sessionId,
   spawnPartId,
   onOpenFile,
@@ -31,6 +33,7 @@ export function SubagentTab({
   experimentName,
   onOpenSubagent,
 }: {
+  projectId: string;
   sessionId: string;
   spawnPartId: string;
   onOpenFile?: (
@@ -112,15 +115,17 @@ export function SubagentTab({
       >
         <div ref={innerRef}>
           {spawn ? (
-            <SubagentTranscript
-              spawn={spawn}
-              onOpenFile={onOpenFile}
-              onOpenRun={onOpenRun}
-              runExperimentName={runExperimentName}
-              onOpenExperiment={onOpenExperiment}
-              experimentName={experimentName}
-              onOpenSubagent={onOpenSubagent}
-            />
+            <ChatImageScope projectId={projectId} sessionId={sessionId}>
+              <SubagentTranscript
+                spawn={spawn}
+                onOpenFile={onOpenFile}
+                onOpenRun={onOpenRun}
+                runExperimentName={runExperimentName}
+                onOpenExperiment={onOpenExperiment}
+                experimentName={experimentName}
+                onOpenSubagent={onOpenSubagent}
+              />
+            </ChatImageScope>
           ) : (
             <div className="subagent-empty py-[3px] px-1 text-sm text-muted">{m.subagent_tab_this_sub_agent_is_no_longer_available()}</div>
           )}

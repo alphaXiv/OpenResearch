@@ -58,6 +58,328 @@ mod v2;
 
 pub struct OpenCode;
 
+impl OpenCode {
+    /// `snapshot` skips every catalog probe — `models`/`debug config` children,
+    /// the V2 server bring-up, local-server and dead-key checks — and answers
+    /// install/auth only; readiness is deferred entirely and the entry is
+    /// marked `catalog_pending` until a full pass replaces it. The one
+    /// non-free check kept is the isolated DB lease preflight (file I/O, no
+    /// child process), which surfaces `needs_config_repair` early.
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
+        let mut info = HarnessInfo::new(self.id(), self.name());
+        let mut models = Vec::new();
+        let mut public_models = HashSet::new();
+        let mut config = Value::Null;
+        let bin = find_opencode().ok();
+        let mut resolved_binary = None;
+        if let Some(discovered) = &bin {
+            // The catalog children launch on the discovered binary while
+            // `resolve_binary` probes every candidate — each spawn costs
+            // seconds on Windows, and sequencing the catalog behind the
+            // version sweep made the fill their sum. A resolution landing on
+            // a different binary (a stale first candidate) re-runs the probes
+            // on the winner; a V2 verdict never needs them. The snapshot
+            // skips the spawns entirely — discovery already proves the file
+            // is there, and a V2 install's real auth only answers through
+            // the served API anyway.
+            let speculated = (!snapshot).then(|| {
+                super::detect::spawn_timed_probe(
+                    "opencode",
+                    "models",
+                    opencode_models(discovered.clone()),
+                )
+            });
+            let resolved = if snapshot {
+                None
+            } else {
+                Some(
+                    super::detect::timed_probe(
+                        "opencode",
+                        "resolve",
+                        crate::local::opencode::resolve_binary(),
+                    )
+                    .await,
+                )
+            };
+            let (bin, probe) = match resolved.as_ref() {
+                Some(Ok(binary)) => (
+                    binary.path.clone(),
+                    BinProbe::Answered(Some(binary.version.clone())),
+                ),
+                // Nothing resolved: report what discovery first named, so the
+                // UI shows a broken install rather than "not detected".
+                Some(Err(error)) => (discovered.clone(), BinProbe::Broken(error.to_string())),
+                None => (discovered.clone(), BinProbe::Unknown),
+            };
+            info.record_bin(&bin, probe);
+            // The speculation only stands when resolution picked the binary
+            // it ran against — anything else cuts the child loose
+            // (kill_on_drop reaps it) and the winner is probed below.
+            let mut spec_out = None;
+            if let Some(models_task) = speculated {
+                match resolved.as_ref() {
+                    Some(Ok(binary))
+                        if binary.protocol != crate::local::opencode::Protocol::V2
+                            && binary.path == *discovered =>
+                    {
+                        spec_out = Some(models_task.await);
+                    }
+                    other => {
+                        if std::env::var_os("ORX_DETECT_TIMING").is_some() {
+                            eprintln!(
+                                "orx detect: opencode spec miss (resolved={:?} spec={:?})",
+                                other.map(|r| r.as_ref().map(|b| b.path.clone())),
+                                discovered
+                            );
+                        }
+                        models_task.abort();
+                        // Await teardown so the aborted probe's timing row
+                        // lands in the fill's sink before the pass drains it.
+                        let _ = models_task.await;
+                    }
+                }
+            }
+            if let Some(Ok(binary)) = resolved {
+                if binary.protocol == crate::local::opencode::Protocol::V2 {
+                    return Some(v2::detect(binary, info).await);
+                }
+                resolved_binary = Some(binary);
+            }
+            if !info.install_broken {
+                let db = native_store::opencode_db(NativeStore::Isolated);
+                let preflight = tokio::task::spawn_blocking(move || {
+                    native_store::opencode_database::DatabaseLease::acquire(&db, 1).map(drop)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow!("OpenCode database inspection failed: {error}"))
+                });
+                if let Err(error) = preflight {
+                    let busy = error
+                        .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
+                        .is_some();
+                    info.auth_state = if busy {
+                        HarnessAuthState::Unknown
+                    } else {
+                        HarnessAuthState::Unsupported
+                    };
+                    // A database the CLI will not open is not an out-of-date
+                    // binary: upgrading a current install cannot repair it, and
+                    // orx must never delete a user's database to clear it.
+                    info.needs_config_repair = !busy;
+                    info.agent_note = Some(if busy {
+                        error.to_string()
+                    } else {
+                        format!(
+                            "{error}\nThis is an OpenCode database problem, not an out-of-date install. \
+                             Close other OpenCode processes and re-check; if it persists, move the file aside so OpenCode can recreate it."
+                        )
+                    });
+                    return Some(info);
+                }
+            }
+            // A binary that failed `--version` has no catalog to give either.
+            if let Some(binary) = resolved_binary.as_ref().filter(|_| !snapshot) {
+                (models, public_models) = match spec_out {
+                    Some(catalog) => catalog.ok().unwrap_or_default(),
+                    // Resolution picked a different binary than the
+                    // speculation ran on — rare enough to simply re-probe.
+                    None => opencode_models(binary.path.clone()).await,
+                };
+                // `debug config --pure` answers the same fields this pass
+                // consumes (provider gates, local providers, the default
+                // model) — project/plugin layers are off under `--pure` and
+                // the child runs from the home dir anyway — so the file read
+                // stands in for a multi-second spawn. It falls back to the
+                // child only for a config the strict parse cannot honor —
+                // `opencode.jsonc` or a `.json` carrying comments — which
+                // opencode accepts and a `Null` here would silently drop
+                // (configured local providers would vanish).
+                let unresolved;
+                (config, unresolved) = snapshot_config();
+                if unresolved {
+                    if let Some(text) = super::detect::timed_probe(
+                        "opencode",
+                        "config",
+                        run_models(binary.path.clone(), &["debug", "config", "--pure"]),
+                    )
+                    .await
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    {
+                        config = text;
+                    }
+                }
+            } else if snapshot {
+                // `debug config` costs a child process; the snapshot reads
+                // the config file directly.
+                config = snapshot_config().0;
+            }
+        }
+        apply_configured_labels(&mut models, &config);
+        let providers: Vec<_> = opencode_providers()
+            .into_iter()
+            .filter(|id| provider_enabled(&config, id))
+            .collect();
+        if !providers.is_empty() {
+            info.authenticated = true;
+            info.auth_method = Some("oauth");
+            info.account = Some(providers.join(", "));
+        }
+        // opencode also takes provider keys straight from the environment,
+        // writing no auth.json — same fallback claude.rs has. Checked against
+        // orx's synced env too, since that's a source the harness child gets
+        // but this process may not. Measured, not assumed: `opencode models`
+        // still lists free/bundled models when signed out, so a non-empty
+        // model list can't stand in for a credential.
+        const PROVIDER_KEYS: &[(&str, &str)] = &[
+            ("anthropic", "ANTHROPIC_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+            ("openrouter", "OPENROUTER_API_KEY"),
+            ("google", "GEMINI_API_KEY"),
+            ("google", "GOOGLE_API_KEY"),
+            ("groq", "GROQ_API_KEY"),
+            ("xai", "XAI_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
+        ];
+        if !info.authenticated
+            && PROVIDER_KEYS.iter().any(|(id, key)| {
+                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
+            })
+        {
+            info.authenticated = true;
+            info.auth_method = Some("apiKey");
+        }
+
+        let local = local_providers(&config);
+        // Snapshot defers the local-server liveness probes with the catalog.
+        let available = if snapshot {
+            HashSet::new()
+        } else {
+            available_local_models(&local).await
+        };
+        let is_local =
+            |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
+        let missing_local = models
+            .iter()
+            .any(|model| is_local(model) && !available.contains(&model.id));
+        if missing_local {
+            info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
+        }
+        models.retain(|model| {
+            available.contains(&model.id)
+                || (info.authenticated && !is_local(model))
+                || (public_models.contains(&model.id)
+                    && provider_enabled(&config, "opencode")
+                    && !is_local(model))
+        });
+        // Onboarding and the composer seed their selection from the first model.
+        let default = config.get("model").and_then(Value::as_str);
+        models.sort_by_key(|model| {
+            (
+                Some(model.id.as_str()) != default,
+                !model.id.starts_with("orx-local-"),
+            )
+        });
+        if !info.authenticated && !local.is_empty() {
+            info.auth_method = Some("local");
+        }
+        if !snapshot {
+            // Readiness needs the catalog — `models` proves a credential
+            // resolves to something runnable. The snapshot leaves it false;
+            // `detect_one` marks the answer pending until the fill lands.
+            info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
+        }
+        if info.agent_ready {
+            // Hide the models of providers whose stored key a live request rejects.
+            let cloud_providers: Vec<_> = providers
+                .iter()
+                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
+                .cloned()
+                .collect();
+            let dead = match &resolved_binary {
+                Some(binary) => dead_providers(binary, &cloud_providers, &models).await,
+                None => Vec::new(),
+            };
+            if !dead.is_empty() {
+                models.retain(|model| !dead.iter().any(|p| model_provider(&model.id) == p));
+                info.account = Some(
+                    providers
+                        .iter()
+                        .map(|p| {
+                            if dead.contains(p) {
+                                format!("{p} (key rejected)")
+                            } else {
+                                p.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                let note = format!(
+                    "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
+                    dead.join(", ")
+                );
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(local_note) => format!("{local_note} {note}"),
+                    None => note,
+                });
+            }
+            // Every key rejected and nothing free left: nothing can run a turn.
+            if models.is_empty() {
+                info.agent_ready = false;
+                info.auth_state = HarnessAuthState::NeedsLogin;
+            }
+            info.models = models;
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
+        } else if !info.installed {
+            info.agent_note = Some(
+                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
+                    .to_string(),
+            );
+        } else if !snapshot {
+            // Installed but not ready — the snapshot leaves the diagnosis to
+            // the fill, whose catalog decides which of these actually applies.
+            if !local.is_empty() {
+                info.agent_note = Some(if available.is_empty() {
+                    "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
+                } else {
+                    "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
+                }.to_string());
+            } else if info.authenticated {
+                info.agent_note = Some(
+                    "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
+                        .to_string(),
+                );
+            } else {
+                info.agent_note = Some(
+                    "Configure a local model in OpenCode, or sign in with `opencode auth login`."
+                        .to_string(),
+                );
+            }
+        }
+        if info.installed
+            && !info.install_broken
+            && !info.agent_ready
+            && !snapshot
+            && config.is_null()
+        {
+            info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
+        }
+        if info.auth_state == HarnessAuthState::Unknown && !config.is_null() {
+            info.auth_state = if info.authenticated || info.agent_ready {
+                HarnessAuthState::Ready
+            } else {
+                HarnessAuthState::NeedsLogin
+            };
+        }
+        if let Err(error) = crate::local::local_models::read() {
+            info.agent_note = Some(error.to_string());
+        }
+        Some(info)
+    }
+}
+
 #[async_trait]
 impl Harness for OpenCode {
     fn id(&self) -> &'static str {
@@ -103,205 +425,11 @@ impl Harness for OpenCode {
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
-        let mut info = HarnessInfo::new(self.id(), self.name());
-        let mut models = Vec::new();
-        let mut public_models = HashSet::new();
-        let mut config = Value::Null;
-        let bin = find_opencode().ok();
-        let mut resolved_binary = None;
-        if let Some(bin) = &bin {
-            let resolved = crate::local::opencode::resolve_binary_at(bin.clone()).await;
-            info.record_bin(
-                bin,
-                match &resolved {
-                    Ok(binary) => BinProbe::Answered(Some(binary.version.clone())),
-                    Err(error) => BinProbe::Broken(error.to_string()),
-                },
-            );
-            if let Ok(binary) = resolved {
-                if binary.protocol == crate::local::opencode::Protocol::V2 {
-                    return Some(v2::detect(binary, info).await);
-                }
-                resolved_binary = Some(binary);
-            }
-            if !info.install_broken {
-                let db = native_store::opencode_db(NativeStore::Isolated);
-                let preflight = tokio::task::spawn_blocking(move || {
-                    native_store::opencode_database::DatabaseLease::acquire(&db, 1).map(drop)
-                })
-                .await
-                .unwrap_or_else(|error| {
-                    Err(anyhow!("OpenCode database inspection failed: {error}"))
-                });
-                if let Err(error) = preflight {
-                    info.auth_state = if error
-                        .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
-                        .is_some()
-                    {
-                        HarnessAuthState::Unknown
-                    } else {
-                        HarnessAuthState::Unsupported
-                    };
-                    info.agent_note = Some(error.to_string());
-                    return Some(info);
-                }
-            }
-            // A binary that failed `--version` has no catalog to give either.
-            if let Some(binary) = &resolved_binary {
-                let (catalog, resolved) = tokio::join!(
-                    opencode_models(binary),
-                    run_models(binary, &["debug", "config", "--pure"])
-                );
-                (models, public_models) = catalog;
-                config = match resolved.and_then(|text| serde_json::from_str(&text).ok()) {
-                    Some(config) => config,
-                    None => Value::Null,
-                };
-            }
-        }
-        apply_configured_labels(&mut models, &config);
-        let providers: Vec<_> = opencode_providers()
-            .into_iter()
-            .filter(|id| provider_enabled(&config, id))
-            .collect();
-        if !providers.is_empty() {
-            info.authenticated = true;
-            info.auth_method = Some("oauth");
-            info.account = Some(providers.join(", "));
-        }
-        // opencode also takes provider keys straight from the environment,
-        // writing no auth.json — same fallback claude.rs has. Checked against
-        // orx's synced env too, since that's a source the harness child gets
-        // but this process may not. Measured, not assumed: `opencode models`
-        // still lists free/bundled models when signed out, so a non-empty
-        // model list can't stand in for a credential.
-        const PROVIDER_KEYS: &[(&str, &str)] = &[
-            ("anthropic", "ANTHROPIC_API_KEY"),
-            ("openai", "OPENAI_API_KEY"),
-            ("openrouter", "OPENROUTER_API_KEY"),
-            ("google", "GEMINI_API_KEY"),
-            ("google", "GOOGLE_API_KEY"),
-            ("groq", "GROQ_API_KEY"),
-            ("xai", "XAI_API_KEY"),
-            ("deepseek", "DEEPSEEK_API_KEY"),
-        ];
-        if !info.authenticated
-            && PROVIDER_KEYS.iter().any(|(id, key)| {
-                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
-            })
-        {
-            info.authenticated = true;
-            info.auth_method = Some("apiKey");
-        }
+        self.detect_at(false).await
+    }
 
-        let local = local_providers(&config);
-        let available = available_local_models(&local).await;
-        let is_local =
-            |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
-        let missing_local = models
-            .iter()
-            .any(|model| is_local(model) && !available.contains(&model.id));
-        if missing_local {
-            info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
-        }
-        models.retain(|model| {
-            available.contains(&model.id)
-                || (info.authenticated && !is_local(model))
-                || (public_models.contains(&model.id)
-                    && provider_enabled(&config, "opencode")
-                    && !is_local(model))
-        });
-        // Onboarding and the composer seed their selection from the first model.
-        let default = config.get("model").and_then(Value::as_str);
-        models.sort_by_key(|model| {
-            (
-                Some(model.id.as_str()) != default,
-                !model.id.starts_with("orx-local-"),
-            )
-        });
-        if !info.authenticated && !local.is_empty() {
-            info.auth_method = Some("local");
-        }
-        info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
-        if info.agent_ready {
-            // Hide the models of providers whose stored key a live request rejects.
-            let cloud_providers: Vec<_> = providers
-                .iter()
-                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
-                .cloned()
-                .collect();
-            let dead = match &resolved_binary {
-                Some(binary) => dead_providers(binary, &cloud_providers, &models).await,
-                None => Vec::new(),
-            };
-            if !dead.is_empty() {
-                models.retain(|model| !dead.iter().any(|p| model_provider(&model.id) == p));
-                info.account = Some(
-                    providers
-                        .iter()
-                        .map(|p| {
-                            if dead.contains(p) {
-                                format!("{p} (key rejected)")
-                            } else {
-                                p.clone()
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                let note = format!(
-                    "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
-                    dead.join(", ")
-                );
-                info.agent_note = Some(match info.agent_note.take() {
-                    Some(local_note) => format!("{local_note} {note}"),
-                    None => note,
-                });
-            }
-            // Every key rejected and nothing free left: nothing can run a turn.
-            if models.is_empty() {
-                info.agent_ready = false;
-                info.auth_state = HarnessAuthState::NeedsLogin;
-            }
-            info.models = models;
-        } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
-        } else if info.installed && !local.is_empty() {
-            info.agent_note = Some(if available.is_empty() {
-                "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
-            } else {
-                "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
-            }.to_string());
-        } else if info.installed && info.authenticated {
-            info.agent_note = Some(
-                "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
-                    .to_string(),
-            );
-        } else if info.installed {
-            info.agent_note = Some(
-                "Configure a local model in OpenCode, or sign in with `opencode auth login`."
-                    .to_string(),
-            );
-        } else {
-            info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
-                    .to_string(),
-            );
-        }
-        if info.installed && !info.install_broken && !info.agent_ready && config.is_null() {
-            info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
-        }
-        if info.auth_state == HarnessAuthState::Unknown && !config.is_null() {
-            info.auth_state = if info.authenticated || info.agent_ready {
-                HarnessAuthState::Ready
-            } else {
-                HarnessAuthState::NeedsLogin
-            };
-        }
-        if let Err(error) = crate::local::local_models::read() {
-            info.agent_note = Some(error.to_string());
-        }
-        Some(info)
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -393,6 +521,65 @@ fn opencode_auth_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".local").join("share")))?;
     Some(base.join("opencode").join("auth.json"))
+}
+
+/// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
+/// the file `OPENCODE_CONFIG` points at, else `opencode.json` under
+/// `OPENCODE_CONFIG_DIR` or the stock `~/.config/opencode`. `debug config
+/// --pure` additionally merges project and plugin layers, but it costs a
+/// child process — the snapshot settles for the file and the full pass
+/// re-reads it properly.
+///
+/// One merge the file read must not skip: orx's own connected local models,
+/// which `local_models::prepare_env` folds into `OPENCODE_CONFIG_CONTENT` for
+/// every spawned CLI — and inline content shadows the file entirely, so a
+/// connections-only user sees exactly those providers and nothing else.
+///
+/// Returns the config plus whether a source exists the strict parse could
+/// not honor (`.jsonc`, comments) — a cue for the full pass to ask the CLI.
+fn snapshot_config() -> (Value, bool) {
+    let connections = crate::local::local_models::read().unwrap_or_default();
+    // `true` when a config source exists that the strict file read cannot
+    // honor — opencode accepts `.jsonc` and comments, which parse as `Null`
+    // here and would silently drop configured providers. The full pass
+    // resolves those with `debug config --pure`.
+    let mut unresolved = false;
+    let mut config = if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
+    {
+        // The env var overrides the file entirely — present-but-unparseable
+        // means "no usable config", not "fall through to the file" — but its
+        // comments still outrun the strict parse.
+        let parsed = serde_json::from_str::<Value>(&content.to_string_lossy());
+        unresolved = parsed.is_err();
+        parsed.unwrap_or(Value::Null)
+    } else if !connections.is_empty() {
+        // The spawned CLI would get inline content built from the connections
+        // alone; the file never enters the picture.
+        json!({})
+    } else if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
+        let path = PathBuf::from(custom);
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        unresolved = path.exists() && parsed.is_none();
+        parsed.unwrap_or(Value::Null)
+    } else {
+        let dir = crate::local::shell_env::var("OPENCODE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| super::xdg_config_home().join("opencode"));
+        let json = dir.join("opencode.json");
+        let parsed = std::fs::read_to_string(&json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        // opencode honors a sibling `.jsonc` alongside — and comments inside
+        // — `.json`; either outruns what the file read can claim to cover.
+        unresolved = dir.join("opencode.jsonc").exists() || (json.exists() && parsed.is_none());
+        parsed.unwrap_or(Value::Null)
+    };
+    if !connections.is_empty() && config.is_object() {
+        let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
+    }
+    (config, unresolved)
 }
 
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
@@ -602,8 +789,8 @@ async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String>
 /// Falls back to the plain `opencode models` id list if `--verbose` is
 /// unavailable or unparseable, so an older/newer opencode still yields models
 /// (just without per-model variants).
-async fn opencode_models(binary: &ResolvedBinary) -> (Vec<super::ModelInfo>, HashSet<String>) {
-    let verbose = run_models(binary, &["models", "--verbose"]).await;
+async fn opencode_models(bin: PathBuf) -> (Vec<super::ModelInfo>, HashSet<String>) {
+    let verbose = run_models(bin.clone(), &["models", "--verbose"]).await;
     if let Some(out) = &verbose {
         let parsed = parse_verbose_models(out);
         if !parsed.is_empty() {
@@ -614,7 +801,7 @@ async fn opencode_models(binary: &ResolvedBinary) -> (Vec<super::ModelInfo>, Has
             return (parsed, public);
         }
     }
-    let Some(plain) = run_models(binary, &["models"]).await else {
+    let Some(plain) = run_models(bin, &["models"]).await else {
         return (Vec::new(), HashSet::new());
     };
     (
@@ -679,7 +866,8 @@ async fn opencode_child(
     // Stateless V1 calls must not race chat startup when initializing its database.
     cmd.env("OPENCODE_DB", ":memory:");
     cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
-        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
     // otherwise write escape codes straight into the reply.
     cmd.env("NO_COLOR", "1");
@@ -689,7 +877,7 @@ async fn opencode_child(
         // The task owns the lease until the child is reaped, even if its caller is cancelled.
         let _lease = lease;
         binary.check_unchanged().ok()?;
-        let mut child = cmd.spawn().ok()?;
+        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
         let mut stdout = child.stdout.take()?;
         let mut stderr = child.stderr.take()?;
         let output = tokio::spawn(async move {
@@ -725,16 +913,38 @@ async fn opencode_child(
 
 /// Run `opencode <args>` in the home dir, returning stdout on success.
 /// File redirection avoids the truncated piped config output reported in #307.
-async fn run_models(binary: &ResolvedBinary, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(&binary.path);
+/// Takes a bare path rather than `ResolvedBinary` so detection can spawn the
+/// catalog children before resolution settles — a binary swapped mid-detect
+/// just answers as whatever it now is, and the next pass re-verifies.
+async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(&bin);
     cmd.args(args)
         .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
-    cmd.env("OPENCODE_DB", ":memory:").env("NO_COLOR", "1");
-    binary.check_unchanged().ok()?;
+    cmd.env("OPENCODE_DB", ":memory:")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        // The probe runs from the home dir, so project-layer discovery is
+        // already empty — skipping the scan outright is ~1s off the child's
+        // startup (measured on Windows).
+        .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        // Serve the catalog bundled into the binary instead of refreshing
+        // models.dev — ~1.2s off a cold first-install run, and opencode
+        // refreshes its own cache on the next real launch anyway.
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+        // Nothing the catalog probe prints depends on plugins, LSP servers,
+        // the claude-code bridge, or terminal chrome — each disabled piece is
+        // startup work the child skips (~0.8s combined on Windows).
+        .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1")
+        .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1")
+        .env("OPENCODE_DISABLE_CLAUDE_CODE", "1")
+        .env("OPENCODE_DISABLE_PRUNE", "1")
+        .env("OPENCODE_DISABLE_AUTOCOMPACT", "1")
+        .env("OPENCODE_DISABLE_TERMINAL_TITLE", "1")
+        .env("NO_COLOR", "1");
     let path = std::env::temp_dir().join(format!("orx-opencode-stdout-{}", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -744,11 +954,24 @@ async fn run_models(binary: &ResolvedBinary, args: &[&str]) -> Option<String> {
         options.mode(0o600);
     }
     cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
-    let status = tokio::time::timeout(Duration::from_secs(20), cmd.status()).await;
+    let status = {
+        // The lane is acquired before the deadline, but the spawn itself is
+        // inside it — a `CreateProcess` wedged on an AV scan must not hold the
+        // fill (and its single-flight flag) forever. On timeout the dropped
+        // future kills the child via `kill_on_drop`.
+        let permit = super::detect::detect_spawn_permit().await;
+        tokio::time::timeout(Duration::from_secs(20), async move {
+            let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
+            child.wait().await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    };
     let stdout = std::fs::read(&path).ok();
     std::fs::remove_file(&path).ok();
     let stdout = stdout?;
-    matches!(status, Ok(Ok(status)) if status.success())
+    matches!(status, Some(status) if status.success())
         .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 
@@ -2517,7 +2740,9 @@ opencode/unknown
         let binary = crate::local::opencode::resolve_binary_at(script.clone())
             .await
             .unwrap();
-        let out = run_models(&binary, &[]).await.expect("child output");
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
         // macOS reports the write-only descriptor mode through /dev/stdout.
         assert!(
             out.starts_with("-rw-------") || out.starts_with("--w-------"),
@@ -2539,7 +2764,9 @@ opencode/unknown
         let binary = crate::local::opencode::resolve_binary_at(script.clone())
             .await
             .unwrap();
-        let out = run_models(&binary, &[]).await.expect("child output");
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
         assert_eq!(out.len(), 70_000);
         assert!(
             out.ends_with("0000006999"),

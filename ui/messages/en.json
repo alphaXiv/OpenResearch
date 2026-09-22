@@ -246,7 +246,7 @@
   "onboarding_choose_one_or_more": "Choose one or more.",
   "onboarding_consolidate_your_research": "Consolidate your research",
   "onboarding_continue": "Continue",
-  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor…",
+  "onboarding_detecting_claude_code_codex_open_code": "Detecting Claude Code, Codex, OpenCode, Cursor, Antigravity…",
   "onboarding_e_g_i_work_on_sample_efficient_rl": "e.g. I work on sample-efficient RL for LLM post-training, focused on reward-model-free methods.",
   "onboarding_everything_stays_local": "Everything stays local",
   "onboarding_get_started": "Get started",
@@ -1201,5 +1201,13 @@
   "harness_setup_install_preview": "Approve the command below to download and install {agent} on your computer.",
   "harness_setup_update_preview": "Approve the command below to update {agent} on your computer.",
   "harness_setup_approve_run": "Approve and run",
-  "onboarding_choose_another_agent": "Choose another coding agent"
+  "onboarding_choose_another_agent": "Choose another coding agent",
+  "image_zoom_out": "Zoom out",
+  "image_zoom_in": "Zoom in",
+  "image_zoom_reset": "Reset zoom to fit",
+  "ssh_default_host": "Default SSH host",
+  "ssh_run_in": "Run in",
+  "ssh_direct_host": "Direct host",
+  "ssh_existing_container": "Existing container",
+  "ssh_container_reference": "Container name or ID"
 }

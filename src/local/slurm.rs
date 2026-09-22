@@ -106,6 +106,7 @@ pub async fn submit_local_slurm_with_source(
         &run_id,
         &source.path,
         &source.digest,
+        None,
     )
     .await?;
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
@@ -122,6 +123,7 @@ pub async fn submit_local_slurm_with_source(
     .await?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
         kind: "slurm_job".to_string(),
         namespace: Some(host.clone()),
         job_id: Some(job_id.clone()),
