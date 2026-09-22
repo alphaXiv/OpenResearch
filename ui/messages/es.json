@@ -188,6 +188,7 @@
   "file_viewer_loading": "Cargando…",
   "file_viewer_open_in_default_editor": "Abrir en el editor predeterminado",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "Se descargó la copia de Overleaf de este archivo mientras tenías cambios sin guardar, así que lo que ves ya no coincide con lo que hay en disco. Si guardas ahora, este borrador se enviará a Overleaf.",
+  "file_viewer_reveal_in_file_manager": "Mostrar en el administrador de archivos",
   "file_viewer_saving": "Guardando…",
   "file_viewer_this_pdf_was_compiled_from_an_earlier_version": "Este PDF se compiló a partir de una versión anterior del código fuente — vuelve a compilar para actualizarlo.",
   "file_viewer_this_session_apos_s_worktree_isn_apos_t": "El árbol de trabajo de esta sesión no está disponible — se muestra la copia del clon del proyecto.",

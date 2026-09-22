@@ -3211,28 +3211,41 @@ struct OpenProjectFileReq {
 /// Open a checkout file in the machine's default app for its type (the user's
 /// editor for source files). Resolves the same worktree/clone the reader uses
 /// and confirms the file is inside it before handing the path to the OS opener.
+/// Validates a checkout-relative request path and resolves it to the
+/// canonicalized absolute path, confined to the checkout root — shared by the
+/// routes that hand a file to an OS action on this machine. `verb` names the
+/// action in error messages ("open", "reveal").
+fn confined_checkout_file(
+    id: &str,
+    req: &OpenProjectFileReq,
+    verb: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let (_, rel_path) = validated_project_file_path(&req.path)?;
+    if touches_git_dir(&rel_path) {
+        return Err(bad_request(format!("cannot {verb} files under .git")));
+    }
+    let store = Store::open()?;
+    let project = store
+        .get_local_project(id)?
+        .ok_or_else(|| not_found("project"))?;
+    let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
+    let full = match crate::paths::canonicalize(root.join(&rel_path)) {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
+        Err(e) => return Err(ApiError::from(anyhow!("{verb} failed: {e}"))),
+    };
+    if !full.starts_with(&root) {
+        return Err(bad_request("path escapes repository"));
+    }
+    Ok(full)
+}
+
 async fn open_project_file(
     Path(id): Path<String>,
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let (_, rel_path) = validated_project_file_path(&req.path)?;
-        if touches_git_dir(&rel_path) {
-            return Err(bad_request("cannot open files under .git"));
-        }
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
-            Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
-            Err(e) => return Err(ApiError::from(anyhow!("open failed: {e}"))),
-        };
-        if !full.starts_with(&root) {
-            return Err(bad_request("path escapes repository"));
-        }
+        let full = confined_checkout_file(&id, &req, "open")?;
         if full.is_dir() {
             return Err(bad_request("path is a directory"));
         }
@@ -3244,31 +3257,16 @@ async fn open_project_file(
 }
 
 /// Reveal a checkout file in the machine's file manager (Finder/Explorer),
-/// selecting it where the platform supports that. Resolves and confines the
-/// path exactly like `open_project_file`; the escape hatch for a binary or
-/// unrecognized file the dashboard cannot preview inline.
+/// selecting it where the platform supports that. Confines the path like
+/// `open_project_file`, minus the directory rejection — revealing a directory
+/// is meaningful. The escape hatch for a binary or unrecognized file the
+/// dashboard cannot preview inline.
 async fn reveal_project_file(
     Path(id): Path<String>,
     Json(req): Json<OpenProjectFileReq>,
 ) -> ApiResult {
     blocking_api(move || {
-        let (_, rel_path) = validated_project_file_path(&req.path)?;
-        if touches_git_dir(&rel_path) {
-            return Err(bad_request("cannot open files under .git"));
-        }
-        let store = Store::open()?;
-        let project = store
-            .get_local_project(&id)?
-            .ok_or_else(|| not_found("project"))?;
-        let (root, _) = resolve_checkout_root(&store, &project, req.session_id.as_deref())?;
-        let full = match crate::paths::canonicalize(root.join(&rel_path)) {
-            Ok(p) => p,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(not_found("file")),
-            Err(e) => return Err(ApiError::from(anyhow!("reveal failed: {e}"))),
-        };
-        if !full.starts_with(&root) {
-            return Err(bad_request("path escapes repository"));
-        }
+        let full = confined_checkout_file(&id, &req, "reveal")?;
         crate::editors::reveal_in_file_manager(&full)
             .map_err(|e| ApiError::from(anyhow!("could not reveal file: {e}")))?;
         Ok(Json(json!({ "ok": true })))
@@ -8621,6 +8619,7 @@ mod tests {
             "/api/settings/commands/run",
             "/api/remote/sessions",
             "/api/projects/p1/file/open",
+            "/api/projects/p1/file/reveal",
         ] {
             assert!(remote_route_forbidden(path), "{path}");
         }

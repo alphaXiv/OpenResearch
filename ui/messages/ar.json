@@ -188,6 +188,7 @@
   "file_viewer_loading": "جارٍ التحميل…",
   "file_viewer_open_in_default_editor": "فتح في المحرر الافتراضي",
   "file_viewer_overleaf_apos_s_copy_of_this_file_was": "تم سحب نسخة Overleaf من هذا الملف بينما كانت لديك تعديلات غير محفوظة، لذا ما تراه لم يعد مطابقًا لما هو على القرص. الحفظ الآن يرسل هذه المسودة إلى Overleaf بدلًا من ذلك.",
+  "file_viewer_reveal_in_file_manager": "إظهار في مدير الملفات",
   "file_viewer_saving": "جارٍ الحفظ…",
   "file_viewer_this_pdf_was_compiled_from_an_earlier_version": "أُنشئ ملف PDF هذا من نسخة أقدم من المصدر — أعِد تجميعه لتحديثه.",
   "file_viewer_this_session_apos_s_worktree_isn_apos_t": "شجرة عمل هذه الجلسة غير متاحة — عرض الملف من نسخة المشروع المستنسخة.",

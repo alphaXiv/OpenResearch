@@ -124,6 +124,26 @@ function CopyableCommand({ command }: { command: string }) {
   );
 }
 
+/** Busy/error wrapper for a detached OS action on a checkout file (open in
+ * editor, reveal in file manager): the call can only fail before the OS takes
+ * over, so the error is worth surfacing as a tooltip. */
+function useOsFileAction(run: () => Promise<unknown>) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trigger = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, trigger };
+}
+
 export function FileViewer({
   projectId,
   path,
@@ -406,37 +426,16 @@ export function FileViewer({
     else await save();
   };
 
-  const [openingEditor, setOpeningEditor] = useState(false);
-  const [editorError, setEditorError] = useState<string | null>(null);
   // Hand the file to the OS, which opens it in the user's default app for the
   // type (their editor for source files) — no picker.
-  const openInEditor = async () => {
-    setOpeningEditor(true);
-    setEditorError(null);
-    try {
-      await openFileInEditor(projectId, filePath, { sessionId });
-    } catch (e) {
-      setEditorError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setOpeningEditor(false);
-    }
-  };
-
-  const [revealing, setRevealing] = useState(false);
-  const [revealError, setRevealError] = useState<string | null>(null);
+  const openEditor = useOsFileAction(() =>
+    openFileInEditor(projectId, filePath, { sessionId }),
+  );
   // Show the file in the OS file manager (Finder/Explorer), the useful action
   // for a binary or unrecognized file the dashboard can't preview inline.
-  const revealInManager = async () => {
-    setRevealing(true);
-    setRevealError(null);
-    try {
-      await revealFileInManager(projectId, filePath, { sessionId });
-    } catch (e) {
-      setRevealError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRevealing(false);
-    }
-  };
+  const revealManager = useOsFileAction(() =>
+    revealFileInManager(projectId, filePath, { sessionId }),
+  );
   const reload = useCallback(() => {
     if (!bufferSession.saving) setNonce((value) => value + 1);
   }, [bufferSession]);
@@ -614,28 +613,28 @@ export function FileViewer({
           </IconButton>
         )}
         {onDisk && !remote && (
-          <IconButton
-            size="small"
-            data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_open_in_default_editor()}
-            disabled={openingEditor}
-            onClick={() => void openInEditor()}
-          >
-            {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
-          </IconButton>
-        )}
-        {onDisk && !remote && (
-          <IconButton
-            size="small"
-            data-tip={revealError ?? m.file_viewer_reveal_in_file_manager()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_reveal_in_file_manager()}
-            disabled={revealing}
-            onClick={() => void revealInManager()}
-          >
-            {revealing ? <Spinner /> : <FolderOpen size={13} />}
-          </IconButton>
+          <>
+            <IconButton
+              size="small"
+              data-tip={openEditor.error ?? m.file_viewer_open_in_default_editor()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_open_in_default_editor()}
+              disabled={openEditor.busy}
+              onClick={() => void openEditor.trigger()}
+            >
+              {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
+            </IconButton>
+            <IconButton
+              size="small"
+              data-tip={revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_reveal_in_file_manager()}
+              disabled={revealManager.busy}
+              onClick={() => void revealManager.trigger()}
+            >
+              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
+            </IconButton>
+          </>
         )}
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be
