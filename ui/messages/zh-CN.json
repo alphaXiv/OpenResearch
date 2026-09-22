@@ -1187,5 +1187,10 @@
   "onboarding_choose_another_agent": "选择其他编程智能体",
   "image_zoom_out": "缩小",
   "image_zoom_in": "放大",
-  "image_zoom_reset": "重置为适合窗口"
+  "image_zoom_reset": "重置为适合窗口",
+  "ssh_default_host": "默认 SSH 主机",
+  "ssh_run_in": "运行位置",
+  "ssh_direct_host": "直接在主机上",
+  "ssh_existing_container": "现有容器",
+  "ssh_container_reference": "容器名称或 ID"
 }

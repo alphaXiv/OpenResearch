@@ -119,7 +119,7 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       react: state.react,
       "react-dom": { createPortal: (tree) => tree },
       "@tanstack/react-query": {
-        useQuery: ({ kind }) => ({ data: kind === "hosts" ? [{ host: "research" }] : [] }),
+        useQuery: ({ kind }) => ({ data: kind === "hosts" ? { hosts: [{ host: "research" }], defaultHost: null } : [] }),
         useMutation: () => ({ mutateAsync: async (args) => {
           calls.push(["connect", ...args]);
           if (outcome === "failure") throw new Error("connection failed");
@@ -129,7 +129,7 @@ for (const outcome of ["success", "failure", "popup-blocked"]) {
       "lucide-react": { SlidersHorizontal: "Icon", X: "Icon" },
       "../api": {}, "../paraglide/messages.js": messages,
       "../paraglide/runtime.js": { getLocale: () => "en" },
-      "../queries/settings": { getSshHostsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
+      "../queries/settings": { getSshSettingsQuery: () => ({ kind: "hosts" }), listRemoteSessionsQuery: () => ({ kind: "sessions" }) },
       "../theme": { getThemePreference: () => "dark" },
       "./useDialogFocus": { useDialogFocus: () => {} },
       "./ui": {

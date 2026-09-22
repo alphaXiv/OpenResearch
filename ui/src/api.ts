@@ -953,6 +953,7 @@ export const moveDataDir = (path: string) =>
   post<{ started: boolean }>("/api/settings/data-dir/move", { path });
 
 export interface SshHost {
+  container?: string | null;
   host: string;
   hostname?: string;
   user?: string;
@@ -962,8 +963,16 @@ export interface SshHost {
   lastTest?: SshPreflight;
 }
 
-export const getSshHosts = (signal?: AbortSignal) =>
-  get<{ hosts: SshHost[] }>("/api/settings/ssh", signal).then((r) => r.hosts);
+export interface SshSettings { hosts: SshHost[]; defaultHost: string | null }
+export const getSshSettings = (signal?: AbortSignal) => get<SshSettings>("/api/settings/ssh", signal);
+export const saveSshHost = (body: { host: string; container: string | null }) =>
+  post<{ ok: boolean }>("/api/settings/ssh", body);
+export const saveSshDefault = (host: string | null) => post<{ ok: boolean }>("/api/settings/ssh/default", { host });
+export interface SshExecutionPreflight extends SshPreflight {
+  container: { reference: string; ready: boolean; error: string | null } | null;
+}
+export const testSshExecution = (host: string, container: string | null) =>
+  post<SshExecutionPreflight>("/api/settings/ssh/preflight", { host, container });
 
 export interface SshConfigFile {
   path: string;
@@ -2127,7 +2136,13 @@ export function backendDetail(backend: Run["backend"]): string {
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
   // Ray's namespace is the whole Jobs URL — too long for a badge.
   if (backendKind(backend) === "ray_job") return "";
-  if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
+  if (typeof backend.namespace === "string" && backend.namespace) {
+    const container = backend.sshContainer;
+    if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {
+      return `${backend.namespace} / ${container.reference}`;
+    }
+    return backend.namespace;
+  }
   return "";
 }
 

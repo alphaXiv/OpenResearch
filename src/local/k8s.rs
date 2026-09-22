@@ -150,6 +150,7 @@ pub async fn submit_local_k8s_with_source(
     .await?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
         kind: "k8s_job".to_string(),
         namespace: Some(namespace.clone()),
         job_id: Some(submitted.job_name.clone()),
