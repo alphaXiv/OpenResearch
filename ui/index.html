@@ -49,6 +49,7 @@
       html { background: #ffffff; }
       html[data-theme="dark"] { background: #0e0c0c; }
     </style>
+    <script>document.addEventListener("keydown",(event)=>{if(!(event.ctrlKey||event.metaKey)||event.altKey||event.shiftKey||event.key.toLowerCase()!=="a")return;const asElement=(node)=>node&&node.nodeType===1?node:node&&node.parentElement;const target=asElement(event.target);if(target&&target.closest("input, textarea, [contenteditable]"))return;const selection=document.getSelection();const viewer=target?.closest(".file-view-body")??(target===document.body||target===document.documentElement?asElement(selection?.anchorNode):null)?.closest(".file-view-body");if(!viewer)return;event.preventDefault();const range=document.createRange();range.selectNodeContents(viewer);selection?.removeAllRanges();selection?.addRange(range);},true);</script>
   </head>
   <body>
     <div
