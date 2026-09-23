@@ -1,0 +1,49 @@
+name: Linked issue
+
+on:
+  # Runs main's copy of this workflow, so a fork PR can't edit its own check. It never checks out PR code.
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  issues: read
+  pull-requests: read
+
+jobs:
+  linked-issue:
+    name: linked issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a linked issue on fork PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          # Only people with write access can push branches here; author_association hides private org members.
+          if [ "$HEAD_REPO" = "$OWNER/$REPO" ]; then
+            echo "PR is from a branch in $OWNER/$REPO; no linked issue required."
+            exit 0
+          fi
+
+          linked=$(gh api graphql \
+            -F owner="$OWNER" -F repo="$REPO" -F number="$PR_NUMBER" \
+            -f query='query($owner: String!, $repo: String!, $number: Int!) {
+              repository(owner: $owner, name: $repo) {
+                pullRequest(number: $number) {
+                  closingIssuesReferences(first: 10) { nodes { number repository { nameWithOwner } } }
+                }
+              }
+            }' \
+            --jq "[.data.repository.pullRequest.closingIssuesReferences.nodes[]
+                   | select(.repository.nameWithOwner == \"$OWNER/$REPO\") | .number] | join(\", #\")")
+
+          if [ -n "$linked" ]; then
+            echo "Linked issue: #$linked"
+            exit 0
+          fi
+
+          echo "::error::PRs from forks must link an issue in $OWNER/$REPO. Add \"Closes #<number>\" (or Fixes/Resolves) to the PR description and this check re-runs automatically. No issue yet? Open one first: https://github.com/$OWNER/$REPO/issues/new"
+          exit 1
