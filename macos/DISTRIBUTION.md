@@ -72,11 +72,15 @@ local and global builds. It re-uploads each darwin archive under the same
 artifact name with a rewritten `.sha256` and per-target manifest checksum, so the
 installers and `sha256.sum` built afterwards match the signed archives. It uses
 the same `release-signing` environment, so a release waits on one approval for
-it, then another for the DMG.
+it, then another for the DMG. Unlike the DMG, it ignores `MACOS_SIGNING_ENABLED`:
+every published release needs those secrets and that approval. Dry runs skip it,
+so the first real release is its first end-to-end run.
 
 dist does not generate this job's `needs: build-local-artifacts`, so
-`dist-workspace.toml` sets `allow-dirty = ["ci"]`: dist no longer checks
-`release.yml`, and after any `dist generate` that edit must be re-applied.
+`dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
+skip `release.yml` entirely: dist config changes no longer reach CI on their own.
+To regenerate, remove `allow-dirty`, run the pinned `dist generate`, re-add that `needs`
+line to `custom-sign-macos-cli`, and restore `allow-dirty`.
 
 ## Configure signing (CI)
 

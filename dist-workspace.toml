@@ -11,8 +11,8 @@ ci = "github"
 github-build-setup = "../build-setup.yml"
 # Sign and notarize the macOS archives before the global build checksums them.
 local-artifacts-jobs = ["./sign-macos-cli"]
-# release.yml hand-adds `needs: build-local-artifacts` to custom-sign-macos-cli,
-# so re-apply it after any `dist generate`.
+# release.yml is hand-edited (custom-sign-macos-cli needs build-local-artifacts),
+# so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
 allow-dirty = ["ci"]
 # Verify packaged binaries and source CI before publishing.
 global-artifacts-jobs = ["./verify-build-channel", "./telemetry-contract", "./ci"]

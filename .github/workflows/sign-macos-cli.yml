@@ -1,7 +1,6 @@
 # Signs and notarizes the macOS CLI archives before dist's global build, which
 # derives installers and sha256.sum from each target's manifest checksums.
-# release.yml hand-adds `needs: build-local-artifacts` to this job, which dist
-# doesn't generate (hence `allow-dirty = ["ci"]`). See macos/DISTRIBUTION.md.
+# See macos/DISTRIBUTION.md.
 
 name: Sign macOS CLI
 
@@ -12,10 +11,12 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
+  # Always runs: if every job here skipped, the caller would too, skipping all downstream release jobs.
   targets:
-    # Dry runs build development binaries that are never published.
-    if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.targets.outputs.matrix }}
@@ -32,10 +33,12 @@ jobs:
   sign:
     name: sign (${{ join(matrix.targets, ', ') }})
     needs: targets
+    # Dry runs build development binaries that are never published.
+    if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
     strategy:
       matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
     runs-on: macos-14
-    timeout-minutes: 30
+    timeout-minutes: 40
     environment: release-signing
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -81,11 +84,14 @@ jobs:
           fi
 
           codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$binary"
-          codesign --verify --strict --verbose=2 "$binary"
+          # Same requirement src/updates/macos_app.rs pins, so a wrong identity fails here.
+          codesign --verify --strict --verbose=2 \
+            -R='anchor apple generic and certificate leaf[subject.OU] = "9P69UXUJUK" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' \
+            "$binary"
 
           # A bare binary can't carry a stapled ticket; Gatekeeper finds it online.
           ditto -c -k "$binary" "$RUNNER_TEMP/orx.zip"
-          result="$(xcrun notarytool submit "$RUNNER_TEMP/orx.zip" --keychain-profile orx-notary --wait --output-format json)"
+          result="$(xcrun notarytool submit "$RUNNER_TEMP/orx.zip" --keychain-profile orx-notary --wait --timeout 25m --output-format json)" || true
           echo "$result"
           if [[ "$(jq -r .status <<< "$result")" != Accepted ]]; then
             xcrun notarytool log "$(jq -r .id <<< "$result")" --keychain-profile orx-notary || true
@@ -100,7 +106,7 @@ jobs:
           sum="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
           printf '%s *%s\n\n' "$sum" "$name" > "$archive.sha256"
           jq --arg name "$name" --arg sum "$sum" \
-            'if .artifacts[$name] then .artifacts[$name].checksums.sha256 = $sum else error("\($name) missing from manifest") end' \
+            'if .artifacts[$name].checksums.sha256 then .artifacts[$name].checksums.sha256 = $sum else error("\($name) has no sha256 in the manifest") end' \
             "$manifest" > "$manifest.new"
           mv "$manifest.new" "$manifest"
           echo "$name signed and notarized; sha256 $sum"
