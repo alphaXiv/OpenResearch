@@ -99,7 +99,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 To **read or edit** a node's code—including diffing what a run changed—use plain
 Git in the local session worktree. See the `orx-git` module.
 
-### Literature & papers — alphaXiv / OpenAlex / bioRxiv (no login required) — module `orx-lit-review`
+### Literature & papers — alphaXiv / OpenAlex / bioRxiv / PubMed (no login required) — module `orx-lit-review`
 Use before any web search for academic/research queries (paper, author, blog, model release).
 | Command | What it does |
 |---|---|
@@ -107,7 +107,8 @@ Use before any web search for academic/research queries (paper, author, blog, mo
 | `orx discover embedding "<query>"` | Call the alphaXiv semantic retrieval primitive. The main agent ranks candidates and decides focused follow-ups; see `orx-lit-review`. |
 | `orx discover openalex "<query>"` | Search the cross-disciplinary OpenAlex scholarly graph. |
 | `orx discover biorxiv "<query>"` | Search bioRxiv preprints through OpenAlex's bioRxiv index. |
-| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv metadata+abstract. Source auto-detected from the id. |
+| `orx discover pubmed "<query>"` | Search PubMed biomedical literature through NCBI E-utilities. |
+| `orx paper <id\|url> [--source ...] [--full]` | Fetch a paper: alphaXiv report with automatic full-text fallback (`--full` forces raw text), or OpenAlex/bioRxiv/PubMed metadata+abstract. Source auto-detected from the id. |
 
 ### Skills & templates — module `orx-customize`
 | Command | What it does |

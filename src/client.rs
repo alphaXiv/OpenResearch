@@ -807,9 +807,9 @@ pub const BIORXIV_SOURCE_ID: &str = "S4306402567";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LitHit {
-    /// `"alphaxiv" | "openalex" | "biorxiv"` — set by the search fn.
+    /// `"alphaxiv" | "openalex" | "biorxiv" | "pubmed"` — set by the search fn.
     pub source: String,
-    /// Self-routing id for `orx paper`: an arXiv id, a DOI, or an OpenAlex `W…` id.
+    /// Self-routing id for `orx paper`: an arXiv id, a DOI, an OpenAlex `W…` id, or a PMID.
     pub id: String,
     pub title: String,
     #[serde(rename = "abstract", default)]
@@ -1028,18 +1028,12 @@ fn openalex_discovery_url(
 
 fn rerank_openalex_works(works: &mut [OpenAlexWork], prioritize: &str) {
     match prioritize {
-        "recency" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
-            (Some(a), Some(b)) => b.cmp(a),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }),
-        "historical" => works.sort_by(|a, b| match (&a.publication_date, &b.publication_date) {
-            (Some(a), Some(b)) => a.cmp(b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }),
+        "recency" => {
+            works.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, true))
+        }
+        "historical" => {
+            works.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, false))
+        }
         "popular" => works.sort_by(|a, b| {
             b.cited_by_count
                 .unwrap_or_default()
@@ -1187,6 +1181,391 @@ pub async fn fetch_biorxiv(doi: &str) -> Result<Option<BiorxivDetail>> {
     Ok(body.collection.into_iter().last())
 }
 
+// ---------------------------------------------------------------------------
+// PubMed via NCBI E-utilities: esearch ranks PMIDs (Best Match), efetch returns
+// the records. efetch serves abstracts only as XML, so records are parsed here.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+pub struct PubmedDiscoveryOptions<'a> {
+    pub limit: u32,
+    pub published_after: Option<&'a str>,
+    pub published_before: Option<&'a str>,
+    pub prioritize: &'a str,
+}
+
+/// One PubMed record, parsed from an efetch `<PubmedArticle>` or `<PubmedBookArticle>`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PubmedArticle {
+    pub pmid: String,
+    pub title: String,
+    pub abstract_: String,
+    pub authors: Vec<String>,
+    /// Journal title, or the book title for a book record.
+    pub journal: String,
+    /// `YYYY[-MM[-DD]]`: the electronic date when present, else the issue date.
+    pub publication_date: Option<String>,
+    pub doi: Option<String>,
+    pub pmcid: Option<String>,
+}
+
+impl PubmedArticle {
+    fn into_lit_hit(self) -> LitHit {
+        LitHit {
+            source: "pubmed".to_string(),
+            id: self.pmid,
+            title: self.title,
+            abstract_: self.abstract_,
+            publication_date: self.publication_date,
+            votes: None,
+            citations: None,
+            snippets: Vec::new(),
+        }
+    }
+}
+
+fn pubmed_discovery_url(
+    base: &str,
+    query: &str,
+    email: &str,
+    options: PubmedDiscoveryOptions<'_>,
+) -> Result<reqwest::Url> {
+    // PubMed has no citation counts, so only date priorities rerank a broader relevance page.
+    let fetch_limit = if matches!(options.prioritize, "recency" | "historical") {
+        options.limit.saturating_mul(4).max(50)
+    } else {
+        options.limit
+    };
+    let mut url = reqwest::Url::parse(&format!("{base}/esearch.fcgi"))?;
+    {
+        let mut params = url.query_pairs_mut();
+        params.append_pair("db", "pubmed");
+        params.append_pair("term", query);
+        params.append_pair("retmode", "json");
+        params.append_pair("retmax", &fetch_limit.clamp(1, 200).to_string());
+        params.append_pair("sort", "relevance");
+        params.append_pair("tool", "orx");
+        params.append_pair("email", email);
+        // E-utilities ignores a date range unless both bounds are set.
+        if options.published_after.is_some() || options.published_before.is_some() {
+            let bound = |date: Option<&str>, fallback: &str| {
+                date.map_or_else(|| fallback.to_string(), |d| d.replace('-', "/"))
+            };
+            params.append_pair("datetype", "pdat");
+            params.append_pair("mindate", &bound(options.published_after, "1000/01/01"));
+            params.append_pair("maxdate", &bound(options.published_before, "3000/12/31"));
+        }
+    }
+    Ok(url)
+}
+
+fn pubmed_fetch_url(base: &str, pmids: &[String], email: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(&format!("{base}/efetch.fcgi"))?;
+    url.query_pairs_mut()
+        .append_pair("db", "pubmed")
+        .append_pair("id", &pmids.join(","))
+        .append_pair("retmode", "xml")
+        .append_pair("tool", "orx")
+        .append_pair("email", email);
+    Ok(url)
+}
+
+/// How long to wait before retrying a throttled request: NCBI's `Retry-After`
+/// (seconds, capped) plus jitter so concurrent `orx` processes don't retry in lockstep.
+fn pubmed_retry_delay(retry_after: Option<&str>) -> std::time::Duration {
+    let secs = retry_after
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1)
+        .min(5);
+    let jitter_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_millis()) % 500);
+    std::time::Duration::from_millis(secs * 1000 + jitter_ms)
+}
+
+async fn pubmed_get(base: &str, url: reqwest::Url, action: &str) -> Result<reqwest::Response> {
+    // Keyless E-utilities allows 3 requests/s per IP, which parallel agent calls exceed.
+    const ATTEMPTS: usize = 3;
+    let mut attempt = 1;
+    loop {
+        let res = http()
+            .get(url.clone())
+            .header("user-agent", ALPHAXIV_UA)
+            .send()
+            .await
+            .map_err(|e| anyhow!("Could not reach PubMed at {}: {}", base, e))?;
+        let status = res.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS && attempt < ATTEMPTS {
+            let retry_after = res
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok());
+            tokio::time::sleep(pubmed_retry_delay(retry_after)).await;
+            attempt += 1;
+            continue;
+        }
+        if !status.is_success() {
+            let reason = status.canonical_reason().unwrap_or("");
+            return Err(anyhow!(
+                "PubMed {} failed ({} {})",
+                action,
+                status.as_u16(),
+                reason
+            ));
+        }
+        return Ok(res);
+    }
+}
+
+async fn fetch_pubmed_articles(pmids: &[String]) -> Result<Vec<PubmedArticle>> {
+    let base = crate::config::pubmed_api_url();
+    let url = pubmed_fetch_url(&base, pmids, &crate::config::ncbi_email())?;
+    let xml = pubmed_get(&base, url, "lookup").await?.text().await?;
+    parse_pubmed_articles(&xml)
+}
+
+/// Search PubMed, keeping esearch's relevance order unless a date priority reranks it.
+pub async fn discover_pubmed(
+    query: &str,
+    options: PubmedDiscoveryOptions<'_>,
+) -> Result<Vec<LitHit>> {
+    let base = crate::config::pubmed_api_url();
+    let url = pubmed_discovery_url(&base, query, &crate::config::ncbi_email(), options)?;
+
+    #[derive(Deserialize)]
+    struct SearchResult {
+        #[serde(default)]
+        idlist: Vec<String>,
+        #[serde(rename = "ERROR")]
+        error: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct SearchResponse {
+        esearchresult: SearchResult,
+    }
+    let result = pubmed_get(&base, url, "search")
+        .await?
+        .json::<SearchResponse>()
+        .await?
+        .esearchresult;
+    if let Some(error) = result.error {
+        return Err(anyhow!("PubMed search failed: {error}"));
+    }
+    if result.idlist.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // efetch returns records in the order of the requested ids.
+    let mut articles = fetch_pubmed_articles(&result.idlist).await?;
+    rerank_pubmed_articles(&mut articles, options.prioritize);
+    Ok(articles
+        .into_iter()
+        .take(options.limit as usize)
+        .map(PubmedArticle::into_lit_hit)
+        .collect())
+}
+
+fn rerank_pubmed_articles(articles: &mut [PubmedArticle], prioritize: &str) {
+    match prioritize {
+        "recency" => {
+            articles.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, true))
+        }
+        "historical" => {
+            articles.sort_by(|a, b| compare_dates(&a.publication_date, &b.publication_date, false))
+        }
+        _ => {}
+    }
+}
+
+/// Undated records sort last in either direction.
+fn compare_dates(a: &Option<String>, b: &Option<String>, newest_first: bool) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) if newest_first => b.cmp(a),
+        (Some(a), Some(b)) => a.cmp(b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Fetch one PubMed record by PMID. Returns `Ok(None)` when PubMed has no such
+/// record (efetch answers 200 with an empty set).
+pub async fn fetch_pubmed(pmid: &str) -> Result<Option<PubmedArticle>> {
+    Ok(fetch_pubmed_articles(&[pmid.to_string()])
+        .await?
+        .into_iter()
+        .next())
+}
+
+fn xml_child<'a, 'i>(node: roxmltree::Node<'a, 'i>, name: &str) -> Option<roxmltree::Node<'a, 'i>> {
+    node.children().find(|c| c.has_tag_name(name))
+}
+
+fn xml_path<'a, 'i>(
+    node: roxmltree::Node<'a, 'i>,
+    path: &[&str],
+) -> Option<roxmltree::Node<'a, 'i>> {
+    path.iter().try_fold(node, |n, name| xml_child(n, name))
+}
+
+/// All text under a node, so inline markup (`<i>`, `<sup>`) in titles and abstracts is kept as text.
+fn xml_text(node: roxmltree::Node<'_, '_>) -> String {
+    node.descendants()
+        .filter(|n| n.is_text())
+        .filter_map(|n| n.text())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// `<Year>/<Month>/<Day>` → `YYYY[-MM[-DD]]`. Month may be numeric or `Jan`…`Dec`;
+/// an issue date may instead be a free-form `<MedlineDate>` such as `2024 Jan-Feb`.
+fn pubmed_date(node: roxmltree::Node<'_, '_>) -> Option<String> {
+    let year = match xml_child(node, "Year") {
+        Some(y) => xml_text(y),
+        None => xml_text(xml_child(node, "MedlineDate")?)
+            .get(..4)
+            .filter(|y| y.bytes().all(|b| b.is_ascii_digit()))?
+            .to_string(),
+    };
+    let month = xml_child(node, "Month").map(xml_text).and_then(|m| {
+        const MONTHS: [&str; 12] = [
+            "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+        ];
+        let lower = m.to_ascii_lowercase();
+        match lower.parse::<u32>() {
+            Ok(n) if (1..=12).contains(&n) => Some(n),
+            _ => MONTHS
+                .iter()
+                .position(|name| lower.starts_with(name))
+                .map(|i| i as u32 + 1),
+        }
+    });
+    let day = xml_child(node, "Day").and_then(|d| xml_text(d).parse::<u32>().ok());
+    Some(match (month, day) {
+        (Some(m), Some(d)) => format!("{year}-{m:02}-{d:02}"),
+        (Some(m), None) => format!("{year}-{m:02}"),
+        _ => year,
+    })
+}
+
+/// Labeled sections of a (possibly structured) `<Abstract>` under `parent`.
+fn pubmed_abstract(parent: roxmltree::Node<'_, '_>) -> String {
+    let Some(abs) = xml_child(parent, "Abstract") else {
+        return String::new();
+    };
+    abs.children()
+        .filter(|c| c.has_tag_name("AbstractText"))
+        .map(|section| match section.attribute("Label") {
+            Some(label) if !label.eq_ignore_ascii_case("unlabelled") => {
+                format!("{label}: {}", xml_text(section))
+            }
+            _ => xml_text(section),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Author names under `parent`.
+fn pubmed_authors(parent: roxmltree::Node<'_, '_>) -> Vec<String> {
+    let Some(list) = xml_child(parent, "AuthorList") else {
+        return Vec::new();
+    };
+    list.children()
+        .filter(|c| c.has_tag_name("Author"))
+        .filter_map(|author| {
+            if let Some(collective) = xml_child(author, "CollectiveName") {
+                return Some(xml_text(collective));
+            }
+            let last = xml_text(xml_child(author, "LastName")?);
+            Some(match xml_child(author, "ForeName") {
+                Some(fore) => format!("{} {last}", xml_text(fore)),
+                None => last,
+            })
+        })
+        .collect()
+}
+
+/// An id of `kind` from the record's own id list; each reference in `ReferenceList` carries one too.
+fn pubmed_article_id(data: roxmltree::Node<'_, '_>, kind: &str) -> Option<String> {
+    xml_child(data, "ArticleIdList")?
+        .children()
+        .find(|c| c.has_tag_name("ArticleId") && c.attribute("IdType") == Some(kind))
+        .map(xml_text)
+}
+
+fn parse_pubmed_article(node: roxmltree::Node<'_, '_>) -> Option<PubmedArticle> {
+    let citation = xml_child(node, "MedlineCitation")?;
+    let article = xml_child(citation, "Article")?;
+    let data = xml_child(node, "PubmedData");
+    let doi = data.and_then(|d| pubmed_article_id(d, "doi")).or_else(|| {
+        article
+            .children()
+            .find(|c| c.has_tag_name("ELocationID") && c.attribute("EIdType") == Some("doi"))
+            .map(xml_text)
+    });
+    Some(PubmedArticle {
+        pmid: xml_text(xml_child(citation, "PMID")?),
+        title: xml_child(article, "ArticleTitle")
+            .map(xml_text)
+            .unwrap_or_default(),
+        abstract_: pubmed_abstract(article),
+        authors: pubmed_authors(article),
+        journal: xml_path(article, &["Journal", "Title"])
+            .map(xml_text)
+            .unwrap_or_default(),
+        publication_date: xml_child(article, "ArticleDate")
+            .and_then(pubmed_date)
+            .or_else(|| {
+                xml_path(article, &["Journal", "JournalIssue", "PubDate"]).and_then(pubmed_date)
+            }),
+        doi,
+        pmcid: data.and_then(|d| pubmed_article_id(d, "pmc")),
+    })
+}
+
+/// Book chapters (e.g. StatPearls) come back as `<PubmedBookArticle>` and rank highly for clinical queries.
+fn parse_pubmed_book_article(node: roxmltree::Node<'_, '_>) -> Option<PubmedArticle> {
+    let document = xml_child(node, "BookDocument")?;
+    let book = xml_child(document, "Book");
+    let book_title = book
+        .and_then(|b| xml_child(b, "BookTitle"))
+        .map(xml_text)
+        .unwrap_or_default();
+    Some(PubmedArticle {
+        pmid: xml_text(xml_child(document, "PMID")?),
+        title: xml_child(document, "ArticleTitle")
+            .map(xml_text)
+            .unwrap_or_else(|| book_title.clone()),
+        abstract_: pubmed_abstract(document),
+        authors: pubmed_authors(document),
+        journal: book_title,
+        publication_date: book
+            .and_then(|b| xml_child(b, "PubDate"))
+            .and_then(pubmed_date),
+        doi: xml_child(node, "PubmedBookData").and_then(|d| pubmed_article_id(d, "doi")),
+        pmcid: None,
+    })
+}
+
+fn parse_pubmed_articles(xml: &str) -> Result<Vec<PubmedArticle>> {
+    let options = roxmltree::ParsingOptions {
+        allow_dtd: true,
+        ..Default::default()
+    };
+    let doc = roxmltree::Document::parse_with_options(xml, options)
+        .map_err(|e| anyhow!("Could not parse the PubMed response: {e}"))?;
+    Ok(doc
+        .root_element()
+        .children()
+        .filter_map(|n| match n.tag_name().name() {
+            "PubmedArticle" => parse_pubmed_article(n),
+            "PubmedBookArticle" => parse_pubmed_book_article(n),
+            _ => None,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1195,7 +1574,163 @@ mod tests {
         OpenAlexDiscoveryOptions, OpenAlexWork, PaperDiscoveryOptions, PaperHit, SandboxEnvelope,
         SandboxTarget, BIORXIV_SOURCE_ID,
     };
+    use super::{
+        parse_pubmed_articles, pubmed_discovery_url, pubmed_fetch_url, pubmed_retry_delay,
+        rerank_pubmed_articles, PubmedArticle, PubmedDiscoveryOptions,
+    };
     use serde_json::json;
+
+    #[test]
+    fn pubmed_discovery_url_fills_the_open_date_bound_and_widens_date_priorities() {
+        let url = pubmed_discovery_url(
+            "https://eutils.example/entrez/eutils",
+            "crispr base editing",
+            "orx@example.com",
+            PubmedDiscoveryOptions {
+                limit: 10,
+                published_after: Some("2024-01-01"),
+                published_before: None,
+                prioritize: "recency",
+            },
+        )
+        .expect("valid PubMed URL");
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.path(), "/entrez/eutils/esearch.fcgi");
+        assert_eq!(params["term"], "crispr base editing");
+        assert_eq!(params["retmax"], "50");
+        assert_eq!(params["sort"], "relevance");
+        assert_eq!(params["datetype"], "pdat");
+        assert_eq!(params["mindate"], "2024/01/01");
+        assert_eq!(params["maxdate"], "3000/12/31");
+        assert_eq!(params["tool"], "orx");
+        assert_eq!(params["email"], "orx@example.com");
+
+        let url = pubmed_discovery_url(
+            "https://eutils.example",
+            "q",
+            "e",
+            PubmedDiscoveryOptions {
+                limit: 10,
+                published_after: None,
+                published_before: None,
+                prioritize: "popular",
+            },
+        )
+        .unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(params["retmax"], "10");
+        assert!(!params.contains_key("mindate"));
+    }
+
+    #[test]
+    fn pubmed_fetch_url_joins_pmids() {
+        let url =
+            pubmed_fetch_url("https://eutils.example", &["1".into(), "2".into()], "e").unwrap();
+        assert_eq!(url.path(), "/efetch.fcgi");
+        assert!(url.query().unwrap().contains("id=1%2C2"));
+    }
+
+    /// Trimmed from a real efetch response: DTD header, inline markup, structured
+    /// abstract, collective author, and a reference whose DOI must be ignored.
+    #[test]
+    fn parses_pubmed_efetch_records() {
+        let xml = r#"<?xml version="1.0" ?>
+<!DOCTYPE PubmedArticleSet PUBLIC "-//NLM//DTD PubMedArticle, 1st January 2025//EN" "https://dtd.nlm.nih.gov/ncbi/pubmed/out/pubmed_250101.dtd">
+<PubmedArticleSet>
+<PubmedArticle><MedlineCitation><PMID Version="1">111</PMID><Article>
+<Journal><JournalIssue><PubDate><Year>2024</Year><Month>Jun</Month></PubDate></JournalIssue><Title>Nature reviews</Title></Journal>
+<ArticleTitle>CRISPR in <i>E. coli</i>.</ArticleTitle>
+<ELocationID EIdType="doi" ValidYN="Y">10.1/eloc</ELocationID>
+<Abstract><AbstractText Label="BACKGROUND">Why.</AbstractText><AbstractText Label="RESULTS">What.</AbstractText></Abstract>
+<AuthorList><Author><LastName>Villiger</LastName><ForeName>Lukas</ForeName></Author><Author><CollectiveName>CRISPR Consortium</CollectiveName></Author></AuthorList>
+<ArticleDate DateType="Electronic"><Year>2024</Year><Month>02</Month><Day>02</Day></ArticleDate>
+</Article></MedlineCitation>
+<PubmedData><ArticleIdList><ArticleId IdType="pubmed">111</ArticleId><ArticleId IdType="doi">10.1/own</ArticleId><ArticleId IdType="pmc">PMC123</ArticleId></ArticleIdList>
+<ReferenceList><Reference><ArticleIdList><ArticleId IdType="doi">10.1/ref</ArticleId></ArticleIdList></Reference></ReferenceList></PubmedData>
+</PubmedArticle>
+<PubmedArticle><MedlineCitation><PMID>222</PMID><Article>
+<Journal><JournalIssue><PubDate><MedlineDate>1998 Jan-Feb</MedlineDate></PubDate></JournalIssue><Title>J</Title></Journal>
+<ArticleTitle>Old</ArticleTitle><ELocationID EIdType="doi">10.1/eloc2</ELocationID>
+<Abstract><AbstractText Label="UNLABELLED">Plain.</AbstractText></Abstract>
+</Article></MedlineCitation><PubmedData><ArticleIdList><ArticleId IdType="pubmed">222</ArticleId></ArticleIdList></PubmedData></PubmedArticle>
+<PubmedBookArticle><BookDocument><PMID Version="1">333</PMID>
+<Book><BookTitle book="statpearls">StatPearls</BookTitle><PubDate><Year>2026</Year><Month>01</Month></PubDate>
+</Book>
+<ArticleTitle>Splenectomy</ArticleTitle>
+<AuthorList Type="authors"><Author><LastName>Menon</LastName><ForeName>Gopal</ForeName></Author></AuthorList>
+<Abstract><AbstractText>Removal of the spleen.</AbstractText><CopyrightInformation>Copyright</CopyrightInformation></Abstract>
+</BookDocument><PubmedBookData><ArticleIdList><ArticleId IdType="pubmed">333</ArticleId></ArticleIdList></PubmedBookData></PubmedBookArticle>
+</PubmedArticleSet>"#;
+        let articles = parse_pubmed_articles(xml).expect("valid PubMed XML");
+        assert_eq!(
+            articles[0],
+            PubmedArticle {
+                pmid: "111".into(),
+                title: "CRISPR in E. coli.".into(),
+                abstract_: "BACKGROUND: Why.\n\nRESULTS: What.".into(),
+                authors: vec!["Lukas Villiger".into(), "CRISPR Consortium".into()],
+                journal: "Nature reviews".into(),
+                publication_date: Some("2024-02-02".into()),
+                doi: Some("10.1/own".into()),
+                pmcid: Some("PMC123".into()),
+            }
+        );
+        assert_eq!(articles[1].publication_date.as_deref(), Some("1998"));
+        assert_eq!(articles[1].doi.as_deref(), Some("10.1/eloc2"));
+        assert_eq!(articles[1].pmcid, None);
+        assert_eq!(articles[1].abstract_, "Plain.");
+        assert_eq!(
+            articles[2],
+            PubmedArticle {
+                pmid: "333".into(),
+                title: "Splenectomy".into(),
+                abstract_: "Removal of the spleen.".into(),
+                authors: vec!["Gopal Menon".into()],
+                journal: "StatPearls".into(),
+                publication_date: Some("2026-01".into()),
+                doi: None,
+                pmcid: None,
+            }
+        );
+
+        let empty = r#"<?xml version="1.0" ?><PubmedArticleSet></PubmedArticleSet>"#;
+        assert!(parse_pubmed_articles(empty).unwrap().is_empty());
+    }
+
+    #[test]
+    fn pubmed_retry_delay_honors_retry_after_within_a_cap() {
+        let ms = |header| pubmed_retry_delay(header).as_millis();
+        assert!((2000..2500).contains(&ms(Some("2"))));
+        assert!((5000..5500).contains(&ms(Some("600"))));
+        assert!((1000..1500).contains(&ms(None)));
+        assert!((1000..1500).contains(&ms(Some("Wed, 21 Oct 2026 07:28:00 GMT"))));
+    }
+
+    #[test]
+    fn reranks_pubmed_by_date_with_undated_last() {
+        let article = |pmid: &str, date: Option<&str>| PubmedArticle {
+            pmid: pmid.into(),
+            publication_date: date.map(Into::into),
+            ..Default::default()
+        };
+        let articles = || {
+            vec![
+                article("a", Some("2020-05")),
+                article("b", None),
+                article("c", Some("2024-01-01")),
+            ]
+        };
+        let order = |a: &[PubmedArticle]| a.iter().map(|a| a.pmid.clone()).collect::<Vec<_>>();
+        let mut recency = articles();
+        rerank_pubmed_articles(&mut recency, "recency");
+        assert_eq!(order(&recency), ["c", "a", "b"]);
+        let mut historical = articles();
+        rerank_pubmed_articles(&mut historical, "historical");
+        assert_eq!(order(&historical), ["a", "c", "b"]);
+        let mut popular = articles();
+        rerank_pubmed_articles(&mut popular, "popular");
+        assert_eq!(order(&popular), ["a", "b", "c"]);
+    }
 
     #[test]
     fn paper_pdf_url_drops_the_version_and_keeps_legacy_id_slashes() {

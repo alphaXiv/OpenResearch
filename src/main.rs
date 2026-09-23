@@ -117,7 +117,7 @@ enum Command {
     /// Call one paper-retrieval primitive; the caller owns the search loop.
     Discover(DiscoverArgs),
 
-    /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv metadata.
+    /// Fetch a paper: alphaXiv report/full-text, or OpenAlex/bioRxiv/PubMed metadata.
     /// The source is auto-detected from the id (override with `--source`).
     Paper(PaperArgs),
 
@@ -689,6 +689,8 @@ pub enum LitSource {
     Openalex,
     /// bioRxiv biology preprints (searched via OpenAlex, fetched via bioRxiv).
     Biorxiv,
+    /// PubMed biomedical literature (NCBI E-utilities).
+    Pubmed,
 }
 
 impl LitSource {
@@ -700,6 +702,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaxiv",
             LitSource::Openalex => "openalex",
             LitSource::Biorxiv => "biorxiv",
+            LitSource::Pubmed => "pubmed",
         }
     }
 
@@ -709,6 +712,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaXiv",
             LitSource::Openalex => "OpenAlex",
             LitSource::Biorxiv => "bioRxiv",
+            LitSource::Pubmed => "PubMed",
         }
     }
 }
@@ -729,6 +733,8 @@ pub enum DiscoverCommand {
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
+    /// PubMed biomedical literature search through NCBI E-utilities.
+    Pubmed(DiscoverySearchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -828,13 +834,13 @@ pub enum DeleteCommand {
 #[derive(Args, Debug)]
 pub struct PaperArgs {
     /// Paper id: an arXiv id / URL (alphaXiv), a DOI (bioRxiv `10.1101/…` or any
-    /// other), or an OpenAlex `W…` id. The source is auto-detected.
+    /// other), an OpenAlex `W…` id, or a PubMed PMID / URL. The source is auto-detected.
     pub id: String,
     /// Force the source instead of auto-detecting it from the id.
     #[arg(long, value_enum)]
     pub source: Option<LitSource>,
     /// Fetch the full extracted paper text instead of the report (alphaXiv only;
-    /// OpenAlex/bioRxiv have no extracted full text and point you at the PDF).
+    /// OpenAlex/bioRxiv/PubMed have no extracted full text and point you at a full-text link).
     #[arg(long)]
     pub full: bool,
 }
@@ -1234,10 +1240,11 @@ mod cli_tests {
     }
 
     #[test]
-    fn discover_parses_openalex_and_biorxiv_primitives() {
+    fn discover_parses_openalex_biorxiv_and_pubmed_primitives() {
         for (source, expected) in [
             ("openalex", LitSource::Openalex),
             ("biorxiv", LitSource::Biorxiv),
+            ("pubmed", LitSource::Pubmed),
         ] {
             let cli = Cli::try_parse_from(["orx", "discover", source, "protein folding"])
                 .expect("source discovery should parse");
@@ -1247,6 +1254,7 @@ mod cli_tests {
             let actual = match command {
                 DiscoverCommand::Openalex(_) => LitSource::Openalex,
                 DiscoverCommand::Biorxiv(_) => LitSource::Biorxiv,
+                DiscoverCommand::Pubmed(_) => LitSource::Pubmed,
                 _ => panic!("expected non-alphaXiv discovery source"),
             };
             assert_eq!(actual, expected);

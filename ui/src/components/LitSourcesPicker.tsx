@@ -10,7 +10,7 @@ import { setLitSources } from "../api";
 import { LitSourceLogo, LIT_SOURCE_NAME, type LitSource } from "./LitSourceLogo";
 import { MenuItem, SwitchIndicator } from "./ui";
 
-const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv"];
+const LIT_SOURCES: LitSource[] = ["alphaxiv", "openalex", "biorxiv", "pubmed"];
 
 export function LitSourcesList() {
   const options = getLitSourcesQuery();

@@ -1162,7 +1162,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openresearch-cli"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "aes",
  "anyhow",
@@ -1183,6 +1183,7 @@ dependencies = [
  "pbkdf2",
  "portable-pty",
  "reqwest",
+ "roxmltree",
  "rusqlite",
  "rust-embed",
  "same-file",
@@ -1465,6 +1466,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

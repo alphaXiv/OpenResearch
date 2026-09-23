@@ -1505,6 +1505,7 @@ function computeToolActivity(part: ChatPart): ToolActivity {
             embedding: m.activity_searched_alphaxiv_semantically(),
             openalex: m.activity_searched_openalex(),
             biorxiv: m.activity_searched_biorxiv(),
+            pubmed: m.activity_searched_pubmed(),
           }[litCall.strategy]
           : null;
         const label = litCall.kind === "discover"
