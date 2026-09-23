@@ -587,14 +587,6 @@ pub(crate) fn preference_enabled() -> bool {
     preference_disabled_reason(false).is_none()
 }
 
-/// Opt-outs and `ORX_TELEMETRY_ENV`, but not the build channel: `orx feedback`
-/// honors them, and source builds may still report.
-pub(crate) fn preference_allows_sending() -> bool {
-    let runtime_environment = std::env::var("ORX_TELEMETRY_ENV").ok();
-    environment_disabled_reason_for("production", runtime_environment.as_deref()).is_none()
-        && preference_disabled_reason(flag()).is_none()
-}
-
 /// Convenience: `true` when events should be sent.
 fn is_enabled(cli_flag: bool) -> bool {
     disabled_reason(cli_flag).is_none()

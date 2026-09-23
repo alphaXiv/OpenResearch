@@ -32,7 +32,8 @@ struct Context {
 }
 
 pub async fn run(args: crate::FeedbackArgs) -> Result<()> {
-    if !crate::telemetry::preference_allows_sending() {
+    // Same gate as analytics: nothing from development builds or opted-out users.
+    if crate::telemetry::effective_disabled_reason().is_some() {
         return Ok(());
     }
     let feedback = Feedback {
