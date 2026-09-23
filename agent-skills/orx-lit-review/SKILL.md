@@ -1,6 +1,6 @@
 ---
 name: orx-lit-review
-description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, and bioRxiv connectors; scale retrieval to the question."
+description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, bioRxiv, and PubMed connectors; scale retrieval to the question."
 ---
 
 # Literature retrieval
@@ -29,7 +29,7 @@ value, without a fixed image count. Text is the fallback when relevant sources
 contain no useful visual or extraction remains blocked; explain that gap.
 One unavailable figure is not a reason to omit other accessible visuals.
 
-Each command performs exactly one public endpoint request and emits its
+Each command performs one search against public endpoints and emits its
 structured JSON result. No login is required:
 
 ```sh
@@ -37,6 +37,7 @@ orx discover keyword "<exact keyword query>"
 orx discover embedding "<semantic description in the user's terms>"
 orx discover openalex "<scholarly search query>"
 orx discover biorxiv "<biology preprint query>"
+orx discover pubmed "<biomedical query>"
 ```
 
 - `keyword` searches title, abstract, and full text. Results include the match
@@ -50,9 +51,14 @@ orx discover biorxiv "<biology preprint query>"
   outside arXiv.
 - `biorxiv` searches OpenAlex's bioRxiv source index. bioRxiv has no comparable
   native search API; the bioRxiv API is used later when reading a selected DOI.
+- `pubmed` searches PubMed's biomedical and life-science journal literature
+  through NCBI E-utilities, ranked by PubMed's Best Match. It
+  accepts PubMed query syntax such as field tags (`[ti]`, `[au]`, `[mh]`).
+  Result ids are PMIDs.
 - Every primitive returns the same JSON shape: `source`, self-routing `id`,
   title, abstract, and publication date. alphaXiv results may include votes and
   full-text snippets; OpenAlex and bioRxiv results may include citations.
+  PubMed results carry no votes or citations.
 
 ## Date and ranking controls
 
@@ -64,6 +70,7 @@ orx discover keyword "<query>" --published-after 2024-01-01 --prioritize recency
 orx discover embedding "<query>" --published-before 2012-01-01 --prioritize historical
 orx discover openalex "<query>" --published-after 2024-01-01 --prioritize recency
 orx discover biorxiv "<query>" --limit 20
+orx discover pubmed "<query>" --published-after 2020-01-01 --prioritize recency
 ```
 
 - `--published-after` and `--published-before` are inclusive `YYYY-MM-DD`
@@ -74,12 +81,15 @@ orx discover biorxiv "<query>" --limit 20
   exists or retry the identical query and window.
 - `--prioritize` is `default`, `recency`, `historical`, or `popular`.
 - `--limit` can narrow alphaXiv output but cannot widen alphaXiv's fixed
-  server-side candidate pools. For OpenAlex and bioRxiv it also controls the
-  requested pool size.
+  server-side candidate pools. For OpenAlex, bioRxiv, and PubMed it also
+  controls the requested pool size.
 - OpenAlex and bioRxiv implement these controls with OpenAlex publication-date
   filters, then rerank the returned relevance pool by date or citations. Their
   ranking is best-effort and is not identical to alphaXiv's semantic,
   vote-aware ranking.
+- PubMed applies the window as a publication-date filter and reranks its
+  relevance pool by date for `recency` and `historical`. It has no citation
+  counts, so `popular` keeps PubMed's relevance order.
 - Use `recency` for explicitly new/latest work. Use `historical` for seminal or
   foundational work. Use `popular` only when the user asks about votes,
   popularity, or community standing.
@@ -108,10 +118,11 @@ orx discover biorxiv "<query>" --limit 20
    according to whether exact full-text evidence, semantic coverage, or both are
    useful. Add OpenAlex for broader journal, conference, citation, or
    cross-disciplinary coverage. Use bioRxiv for biology and adjacent
-   life-science preprints, not as a ritual call for unrelated topics. When the
-   corpus is genuinely ambiguous or interdisciplinary, query multiple relevant
-   sources concurrently. If the initial round includes alphaXiv keyword and its
-   terms mix other terms with one or more 2–10 character tokens
+   life-science preprints and PubMed for biomedical, clinical, and
+   life-science journal literature, not as ritual calls for unrelated topics.
+   When the corpus is genuinely ambiguous or interdisciplinary, query multiple
+   relevant sources concurrently. If the initial round includes alphaXiv
+   keyword and its terms mix other terms with one or more 2–10 character tokens
    that start with a letter, contain only letters, digits, or hyphens, and have
    at least two uppercase letters, concurrently run one additional keyword call
    whose query is exactly those acronym tokens joined by spaces and nothing
@@ -123,7 +134,8 @@ orx discover biorxiv "<query>" --limit 20
    or arXiv id visible in the metadata, then exact normalized title as a
    cross-source fallback. Prefer the alphaXiv representation of an arXiv
    duplicate because it supports full-text reading. bioRxiv is a subset of
-   OpenAlex, so overlap between those calls is expected. Within each source,
+   OpenAlex, and PubMed journal records largely overlap OpenAlex, so overlap
+   between those calls is expected. Within each source,
    the API order already blends topical relevance with the requested priority:
    - With `recency`, freshness is already upranked and old accumulated votes
      are damped. Reorder only for topical fit; do not exclude an older but much
@@ -140,7 +152,8 @@ orx discover biorxiv "<query>" --limit 20
    organization, title phrase, venue, or subtopic. Choose one or more sources
    based on the gap: alphaXiv keyword for exact/full-text evidence, alphaXiv
    embedding for a semantic arXiv angle, OpenAlex for broad scholarly or
-   citation coverage, and bioRxiv for recent biology preprints. Later rounds do
+   citation coverage, bioRxiv for recent biology preprints, and PubMed for
+   biomedical or clinical journal literature. Later rounds do
    **not** need to query all sources. Calls for the same missing angle count
    together as one round. Never spend a round merely rephrasing an existing
    search. Re-evaluate after each round and stop as soon as coverage is
@@ -170,8 +183,9 @@ different things. Topical fit is the cross-source ranking signal.
 
 ## Reading selected papers
 
-`orx paper` auto-detects an arXiv id/URL, bioRxiv DOI, other DOI, or OpenAlex
-`W…` id. For alphaXiv it returns a compact structured report; use `--full` for
+`orx paper` auto-detects an arXiv id/URL, bioRxiv DOI, other DOI, OpenAlex
+`W…` id, or PubMed PMID/URL.
+For alphaXiv it returns a compact structured report; use `--full` for
 exact wording and surrounding context, even when a report exists. Without
 `--full`, a missing report automatically falls back to extracted full text in the same
 command. `--full` skips the report entirely rather than acting as a superset of
@@ -242,9 +256,10 @@ version. Use another verified paper viewer when alphaXiv lacks that evidence
 or is disabled. Raw PDFs are for extraction, not user-facing citations.
 Do not cite abstract pages or invent exact-passage highlighting URL parameters.
 For discovery results without an alphaXiv representation, link a DOI to
-`https://doi.org/<doi>` or a bare OpenAlex `W…` ID to
-`https://openalex.org/<id>`. Never substitute an arXiv link for an available
-alphaXiv representation.
+`https://doi.org/<doi>`, a bare OpenAlex `W…` ID to
+`https://openalex.org/<id>`, or a PMID to
+`https://pubmed.ncbi.nlm.nih.gov/<pmid>/`. Never substitute an arXiv link for
+an available alphaXiv representation.
 
 | Reference | Label | Destination |
 | --- | --- | --- |

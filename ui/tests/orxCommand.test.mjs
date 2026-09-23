@@ -151,6 +151,12 @@ test("paper discovery commands expose their strategy and query", () => {
     strategy: "biorxiv",
     query: "single-cell atlas",
   });
+  assert.deepEqual(parseOrxLit('orx discover pubmed "sepsis biomarkers" --prioritize recency'), {
+    kind: "discover",
+    source: "pubmed",
+    strategy: "pubmed",
+    query: "sepsis biomarkers",
+  });
 });
 
 test("paper parsing remains intact", () => {
@@ -159,4 +165,11 @@ test("paper parsing remains intact", () => {
     source: "biorxiv",
     id: "10.1101/2024.01.01.123456v2",
   });
+});
+
+test("paper ids route PMIDs, pmid: prefixes, and PubMed URLs to PubMed", () => {
+  for (const id of ["38308006", "PMID:38308006", "https://pubmed.ncbi.nlm.nih.gov/38308006/"]) {
+    assert.deepEqual(parseOrxLit(`orx paper "${id}"`), { kind: "paper", source: "pubmed", id });
+  }
+  assert.equal(parseOrxLit("orx paper 2410.12345")?.source, "alphaxiv");
 });

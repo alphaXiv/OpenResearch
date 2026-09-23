@@ -3,11 +3,13 @@
 // OpenAlex for …") instead of a raw shell line. The official SVGs are inlined
 // at build time via `?raw` (no external asset — the UI is rust-embedded and
 // CSP-locked) and shown in a small white tile so the black marks (OpenAlex,
-// bioRxiv) stay visible in dark mode and every source reads uniformly.
+// bioRxiv) stay visible in dark mode and every source reads uniformly. PubMed's
+// is a placeholder mark until the official one is added.
 
 import alphaxivSvg from "../assets/lit-sources/alphaxiv.svg?raw";
 import biorxivSvg from "../assets/lit-sources/biorxiv.svg?raw";
 import openalexSvg from "../assets/lit-sources/openalex.svg?raw";
+import pubmedSvg from "../assets/lit-sources/pubmed.svg?raw";
 import type { LitSource } from "../orxCommand";
 export { parseOrxLit, type LitSource, type OrxLitCall } from "../orxCommand";
 
@@ -15,12 +17,14 @@ export const LIT_SOURCE_NAME: Record<LitSource, string> = {
   alphaxiv: "alphaXiv",
   openalex: "OpenAlex",
   biorxiv: "bioRxiv",
+  pubmed: "PubMed",
 };
 
 const LIT_SOURCE_SVG: Record<LitSource, string> = {
   alphaxiv: alphaxivSvg,
   openalex: openalexSvg,
   biorxiv: biorxivSvg,
+  pubmed: pubmedSvg,
 };
 
 /** `decorative` when the source name is already shown as adjacent text (Settings
@@ -58,14 +62,19 @@ function doiFrom(id: string): string | null {
 }
 
 /** The public page to open for a fetched paper, on its own source: alphaXiv for
- * arXiv ids, the resolving DOI (→ bioRxiv) for bioRxiv, and the DOI or the
- * OpenAlex work page for OpenAlex. */
+ * arXiv ids, the resolving DOI (→ bioRxiv) for bioRxiv, the DOI or the
+ * OpenAlex work page for OpenAlex, and the PubMed record for a PMID. */
 export function paperUrl(source: LitSource, id: string): string {
   const s = id.trim();
   if (source === "alphaxiv") {
     const last = s.split(/[?#]/)[0].split("/").pop() || s;
     const arxivId = last.replace(/\.(pdf|md)$/i, "");
     return `https://www.alphaxiv.org/abs/${encodeURIComponent(arxivId)}`;
+  }
+  if (source === "pubmed") {
+    const path = s.split(/[?#]/)[0];
+    const pmid = /^pmid:/i.test(path) ? path.slice(5).trim() : path.replace(/\/+$/, "").split("/").pop();
+    if (pmid && /^\d{1,9}$/.test(pmid)) return `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`;
   }
   const doi = doiFrom(s);
   if (doi) return `https://doi.org/${doi}`;
