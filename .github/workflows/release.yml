@@ -173,11 +173,22 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  custom-sign-macos-cli:
+    needs:
+      - plan
+      - build-local-artifacts
+    if: ${{ needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload' || inputs.tag == 'dry-run' }}
+    uses: ./.github/workflows/sign-macos-cli.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
   # Build and package all the platform-agnostic(ish) things
   build-global-artifacts:
     needs:
       - plan
       - build-local-artifacts
+      - custom-sign-macos-cli
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -224,6 +235,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-sign-macos-cli
     uses: ./.github/workflows/verify-build-channel.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -233,6 +245,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-sign-macos-cli
     uses: ./.github/workflows/telemetry-contract.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -242,6 +255,7 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-sign-macos-cli
     uses: ./.github/workflows/ci.yml
     with:
       plan: ${{ needs.plan.outputs.val }}
@@ -251,12 +265,13 @@ jobs:
     needs:
       - plan
       - build-local-artifacts
+      - custom-sign-macos-cli
       - build-global-artifacts
       - custom-verify-build-channel
       - custom-telemetry-contract
       - custom-ci
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.custom-ci.result == 'skipped' || needs.custom-ci.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.custom-verify-build-channel.result == 'skipped' || needs.custom-verify-build-channel.result == 'success') && (needs.custom-telemetry-contract.result == 'skipped' || needs.custom-telemetry-contract.result == 'success') && (needs.custom-ci.result == 'skipped' || needs.custom-ci.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') && (needs.custom-sign-macos-cli.result == 'skipped' || needs.custom-sign-macos-cli.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

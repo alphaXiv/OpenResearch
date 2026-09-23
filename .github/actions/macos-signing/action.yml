@@ -1,0 +1,50 @@
+name: macOS signing setup
+description: >-
+  Import the Developer ID certificate into a temporary keychain and store
+  notarytool credentials under the `orx-notary` keychain profile.
+
+inputs:
+  cert-p12-base64:
+    required: true
+  cert-password:
+    required: true
+  notary-apple-id:
+    required: true
+  notary-team-id:
+    required: true
+  notary-password:
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Import signing certificate into a temp keychain
+      shell: bash
+      env:
+        CERT_P12_BASE64: ${{ inputs.cert-p12-base64 }}
+        CERT_PASSWORD: ${{ inputs.cert-password }}
+      run: |
+        set -euo pipefail
+        KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+        KEYCHAIN_PW="$(openssl rand -base64 24)"
+        security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN"
+        security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+        echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+        security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PW" "$KEYCHAIN"
+        # Prepend the temp keychain to the search list, keeping the login keychain.
+        security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+        rm -f "$RUNNER_TEMP/cert.p12"
+
+    - name: Store notary credentials
+      shell: bash
+      env:
+        NOTARY_APPLE_ID: ${{ inputs.notary-apple-id }}
+        NOTARY_TEAM_ID: ${{ inputs.notary-team-id }}
+        NOTARY_PASSWORD: ${{ inputs.notary-password }}
+      run: |
+        xcrun notarytool store-credentials orx-notary \
+          --apple-id "$NOTARY_APPLE_ID" \
+          --team-id "$NOTARY_TEAM_ID" \
+          --password "$NOTARY_PASSWORD"
