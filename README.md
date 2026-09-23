@@ -37,10 +37,25 @@ curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
+`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
+
+On a managed Mac (for example, a work computer), use the macOS download above
+instead. Device-management policies may block the CLI that `install.sh`
+installs because it is not yet signed. The app is signed with a Developer ID
+and notarized by Apple. To use `orx` in your terminal, click **Install** under
+**Install the `orx` command** in the app's Settings → Updates, or run (adjusting
+the path if the app is not in `/Applications`):
+
+```sh
+/Applications/OpenResearch.app/Contents/MacOS/orx install-cli
+```
+
+Either way, `orx` is linked into `~/.local/bin`, with a hint to add it to your
+`PATH` if needed. If you already ran `install.sh`, remove `~/.cargo/bin/orx`
+first and open a new terminal.
+
 On Windows, use the beta download above after installing
 [Git for Windows](docs/windows.md).
-
-`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
 [Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
 or a custom endpoint with OpenCode.
