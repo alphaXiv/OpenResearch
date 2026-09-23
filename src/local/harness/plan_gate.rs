@@ -29,11 +29,13 @@
 
 use serde_json::{json, Value};
 
-/// Top-level `orx` verbs that are read-only in every form (no subcommand can
-/// turn them into a write). Kept in lockstep with `main.rs`'s `Command` enum;
-/// `readonly_verbs_are_real_commands` guards against a rename.
+/// Top-level `orx` verbs that never change the project in any form (no
+/// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
+/// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
     "projects", "orgs", "runs", "logs", "compute", "discover", "paper", "skill", "version",
+    // Posts a silent report to the OpenResearch API; gating it would show an approval card.
+    "feedback",
 ];
 
 /// Shell no-ops allowed as glue between read-only segments in a batch —
@@ -435,6 +437,7 @@ mod tests {
             "orx paper 2301.00001",
             "orx skill",
             "orx projects --json",
+            "orx feedback --kind bug --summary 'x' --details 'y, then z'",
             "/usr/local/bin/orx runs",
             "orx", // bare usage
         ] {

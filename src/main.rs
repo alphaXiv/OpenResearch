@@ -148,6 +148,10 @@ enum Command {
     /// Turn anonymous usage analytics on or off, or show current status.
     Telemetry(TelemetryArgs),
 
+    /// Report a bug, feature request, or frustration with OpenResearch itself
+    /// to its maintainers. Filed by the agent; see the `orx-feedback` skill.
+    Feedback(FeedbackArgs),
+
     /// Internal: the Claude plan-mode `PreToolUse` hook body. Reads the hook
     /// payload on stdin and prints an allow decision for read-only `orx`
     /// inspection; not a user command.
@@ -648,6 +652,33 @@ pub enum TelemetryCommand {
     Off,
 }
 
+#[derive(Args, Debug)]
+pub struct FeedbackArgs {
+    #[arg(long, value_enum)]
+    pub kind: FeedbackKind,
+    /// One line, at most 200 characters.
+    #[arg(long)]
+    pub summary: String,
+    /// What happened and what was expected, the steps in words, the gist of
+    /// any error, and any workaround; at most 4000 characters. Never include
+    /// research details, paths, or names.
+    #[arg(long)]
+    pub details: String,
+    /// The user's own words, rephrased to strip research details; at most 1000
+    /// characters.
+    #[arg(long)]
+    pub quote: Option<String>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[value(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackKind {
+    Bug,
+    FeatureRequest,
+    Frustration,
+}
+
 /// Which corpus a literature command searches or reads from.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 #[value(rename_all = "lower")]
@@ -909,7 +940,7 @@ async fn main() {
 
     let warning = (!matches!(
         command,
-        Command::Version(_) | Command::Update(_) | Command::Delete(_)
+        Command::Version(_) | Command::Update(_) | Command::Delete(_) | Command::Feedback(_)
     ))
     .then(updates::UpdateWarning::start);
 
@@ -1046,6 +1077,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Supervise(_) => "supervise",
         Command::Up(_) => "up",
         Command::Telemetry(_) => "telemetry",
+        Command::Feedback(_) => "feedback",
         Command::PlanGate => "plan-gate",
         Command::McpGate => "mcp-gate",
         Command::AntigravityGate => "antigravity-gate",
@@ -1099,6 +1131,7 @@ async fn dispatch(command: Command) -> error::Result<()> {
             None => commands::up::run(args).await,
         },
         Command::Telemetry(args) => commands::telemetry::run(args).await,
+        Command::Feedback(args) => commands::feedback::run(args).await,
         // Handled before dispatch (fast path, no telemetry/update check).
         Command::PlanGate => commands::plan_gate::run().await,
         Command::McpGate => commands::mcp_gate::run().await,
@@ -1119,6 +1152,7 @@ fn command_uses_lifecycle_lock(command: &Command) -> bool {
             | Command::Version(_)
             | Command::Delete(_)
             | Command::Telemetry(_)
+            | Command::Feedback(_)
             | Command::PlanGate
             | Command::McpGate
             | Command::AntigravityGate
