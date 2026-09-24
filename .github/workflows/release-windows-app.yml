@@ -1,0 +1,107 @@
+# Attaches the Windows desktop app installer (OpenResearch-Setup.exe) to a
+# GitHub Release. It packages the release's own orx.exe with the launcher, so
+# the app runs exactly the published CLI build, and that orx.exe keeps itself
+# current through the CLI's self-update.
+#
+# Triggers mirror release-macos-app.yml: the automatic workflow_run after a
+# successful dispatched "Release", or a manual dispatch naming the tag. Gated on
+# the repo variable WINDOWS_APP_ENABLED. See docs/windows.md.
+
+name: Attach Windows app to release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Windows app to (e.g. v0.2.11)
+        required: true
+        type: string
+
+permissions:
+  contents: write # upload release assets
+
+concurrency:
+  group: release-windows-app
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: ${{ vars.WINDOWS_APP_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch')) }}
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+      tag: ${{ steps.gate.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+      - id: gate
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+            tag="v${version}"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  windows-app:
+    needs: check
+    if: ${{ needs.check.outputs.ok == 'true' }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the launcher
+        run: cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
+
+      - name: Take orx.exe from the release
+        run: |
+          gh release download $env:TAG --repo $env:GITHUB_REPOSITORY --pattern '*-x86_64-pc-windows-msvc.zip' --dir release-archive
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Expand-Archive -Path (Get-ChildItem release-archive/*.zip | Select-Object -First 1) -DestinationPath release-unpacked
+          New-Item -ItemType Directory -Force app-staging | Out-Null
+          Copy-Item (Get-ChildItem release-unpacked -Recurse -Filter orx.exe | Select-Object -First 1).FullName app-staging
+          Copy-Item windows/launcher/target/release/OpenResearch.exe app-staging
+
+      - name: Verify the packaged production channel
+        env:
+          ORX_TELEMETRY_ENV: "off"
+        run: |
+          $channel = & app-staging/orx.exe version --build-channel
+          if ($channel -ne 'production') { throw "expected build channel 'production', got '$channel'" }
+
+      - name: Build the installer
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$($env:TAG.TrimStart('v'))" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-installer" windows\OpenResearch.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload the installer to the release
+        run: |
+          gh release upload $env:TAG app-installer/OpenResearch-Setup.exe --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

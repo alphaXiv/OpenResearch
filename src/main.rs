@@ -845,9 +845,9 @@ pub struct PaperArgs {
     pub full: bool,
 }
 
-// The default multi-thread runtime is load-bearing for macOS app mode: it blocks
-// the main thread in the AppKit run loop while the dashboard server runs on
-// worker threads. A `current_thread` flavor would deadlock. See commands::app.
+// The default multi-thread runtime is load-bearing for desktop app mode: it
+// blocks the main thread in the window's run loop while the dashboard server runs
+// on worker threads. A `current_thread` flavor would deadlock. See commands::app.
 #[tokio::main]
 async fn main() {
     #[cfg(windows)]
@@ -866,6 +866,14 @@ async fn main() {
         telemetry::set_flag(false);
         let _session = telemetry::TelemetrySession::start_app();
         // AppKit owns process shutdown; the durable outbox covers termination before delivery.
+        commands::app::run().await;
+        return;
+    }
+    // Started by the Windows app's launcher, OpenResearch.exe. See commands::app.
+    #[cfg(windows)]
+    if commands::app::launched_as_windows_app() {
+        telemetry::set_flag(false);
+        let _session = telemetry::TelemetrySession::start_app();
         commands::app::run().await;
         return;
     }
@@ -984,12 +992,14 @@ fn owns_its_console() -> bool {
     false
 }
 
-/// A double-clicked exe's console closes with it, so repeat the error in a dialog.
+/// A double-clicked exe's console closes with it, and the app's is hidden, so
+/// repeat the error in a dialog.
 #[cfg(windows)]
 fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-    if !owns_its_console() {
+    // The app shares its console with the agents it runs, so it doesn't own it.
+    if !owns_its_console() && !commands::app::launched_as_windows_app() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();

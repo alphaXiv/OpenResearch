@@ -847,10 +847,10 @@ fn instance_id() -> &'static str {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Environment the app-bundle relaunch hands to the new app: the port the old
-/// one served on, so the new window keeps its origin (and localStorage) even when
+/// Environment the app relaunch hands to the new app: the port the old one
+/// served on, so the new window keeps its origin (and localStorage) even when
 /// the old one had fallen back from the app's usual port.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
 /// Relaunch this process into the copy on disk. Returns only on failure.
@@ -890,10 +890,17 @@ pub fn relaunch(port: u16) -> std::io::Error {
 }
 
 /// Windows has no `exec`: spawn the new binary, which waits for this process to
-/// exit before it binds the port, then leave.
+/// exit before it binds the port, then leave. The desktop app comes back as the
+/// app, on the same port.
 #[cfg(windows)]
-pub fn relaunch(_port: u16) -> std::io::Error {
-    windows::relaunch(relaunch_args(std::env::args_os().skip(1)))
+pub fn relaunch(port: u16) -> std::io::Error {
+    if crate::commands::app::launched_as_windows_app() {
+        return windows::relaunch(
+            vec![crate::commands::app::WINDOWS_APP_ARG.into()],
+            &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
+        );
+    }
+    windows::relaunch(relaunch_args(std::env::args_os().skip(1)), &[])
 }
 
 /// Linux reports a replaced binary as `<path> (deleted)`; the installer put the

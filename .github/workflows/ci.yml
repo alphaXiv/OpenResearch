@@ -121,6 +121,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
+      - name: Clippy (app launcher)
+        run: cargo clippy --manifest-path windows/launcher/Cargo.toml --locked -- -D warnings
+
       - name: Build
         run: cargo build --locked
 
@@ -139,6 +142,27 @@ jobs:
         with:
           name: orx-windows-x86_64
           path: target/release/orx.exe
+          if-no-files-found: error
+
+      # The same installer a release attaches, around this run's orx.exe.
+      - name: Build the desktop app installer
+        if: ${{ !inputs.plan }}
+        shell: pwsh
+        run: |
+          cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force app-staging | Out-Null
+          Copy-Item windows/launcher/target/release/OpenResearch.exe, target/release/orx.exe app-staging
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$version" "/DSourceDir=$PWD\app-staging" "/DOutputDir=$PWD\app-installer" windows\OpenResearch.iss
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Upload the desktop app installer
+        if: ${{ !inputs.plan }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: openresearch-windows-installer
+          path: app-installer/OpenResearch-Setup.exe
           if-no-files-found: error
 
   # Guards the version-bump release flow (release-on-bump.yml): the version in

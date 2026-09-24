@@ -261,10 +261,27 @@ pub async fn run(args: UpArgs) -> Result<()> {
     Ok(())
 }
 
-/// Resolves when the process is asked to stop. SIGINT everywhere; on Unix also
+/// The desktop app's quit. A stored permit covers a quit that lands before the
+/// server is waiting for one.
+static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+#[cfg(any(target_os = "macos", windows))]
+pub(crate) fn request_shutdown() {
+    SHUTDOWN_REQUESTED.notify_one();
+}
+
+/// Resolves when the process is asked to stop: SIGINT everywhere; on Unix also
 /// SIGTERM and SIGHUP (SIGHUP is what an SSH tunnel delivers on disconnect, so
-/// a `--remote`-launched server exits with its tunnel instead of leaking).
+/// a `--remote`-launched server exits with its tunnel instead of leaking); and
+/// [`request_shutdown`].
 async fn shutdown_signal() {
+    tokio::select! {
+        _ = SHUTDOWN_REQUESTED.notified() => {}
+        _ = os_shutdown_signal() => {}
+    }
+}
+
+async fn os_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, Signal, SignalKind};
