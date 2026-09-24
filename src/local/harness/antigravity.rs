@@ -465,7 +465,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     Ok(())
 }
 
-struct TurnProcesses(Option<u32>);
+pub(crate) struct TurnProcesses(pub(crate) Option<u32>);
 
 impl Drop for TurnProcesses {
     fn drop(&mut self) {
