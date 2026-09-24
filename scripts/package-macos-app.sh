@@ -29,9 +29,8 @@ fi
 if [[ -n "${MACOS_SIGN_IDENTITY:-}" ]]; then
   echo "==> Codesigning with hardened runtime"
   # Sign inside-out: the nested executable first, then the bundle.
-  ENTITLEMENTS="$ROOT/macos/entitlements.plist"
-  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$MACOS_SIGN_IDENTITY" "$EXE"
-  codesign --force --options runtime --timestamp --entitlements "$ENTITLEMENTS" --sign "$MACOS_SIGN_IDENTITY" "$APP"
+  codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$EXE"
+  codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$APP"
   codesign --verify --strict --verbose=2 "$APP"
 else
   echo "==> MACOS_SIGN_IDENTITY unset — building an UNSIGNED bundle (local test only)."

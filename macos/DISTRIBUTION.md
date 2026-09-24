@@ -115,11 +115,6 @@ Also enable **Require a pull request** + **Require review from Code Owners** on
 `main` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
 Never commit the `.p12`.
 
-`package-macos-app.sh` signs with `macos/entitlements.plist`, which grants the
-Apple-events entitlement the Dock-click tab focus needs. Without it that path is
-denied in signed builds only — unsigned local bundles never exercise the check —
-and the first Dock click prompts once for Automation access.
-
 ## Build / sign locally
 
 ```bash
@@ -173,8 +168,9 @@ it, run the bundled binary from a terminal:
 The app and a `curl`-installed `orx` share one data dir and one config dir, so
 both must be safe to have at once:
 
-- **Ports** — the app binds an ephemeral loopback port rather than `orx up`'s
-  4791.
+- **Ports** — the app binds loopback port 4792 rather than `orx up`'s 4791,
+  falling back to an ephemeral port when 4792 is taken. Keeping it fixed keeps
+  the window's origin, and so its localStorage, stable across launches.
 - **Store** — SQLite in WAL with a 5s busy timeout; concurrent readers/writers
   are expected. Run supervisors hold a per-run exclusive lock, so a second
   server recovering the same active run exits instead of double-driving it.

@@ -856,7 +856,7 @@ async fn main() {
         updates::remove_retired_exes();
     }
     // Double-clicked as the macOS .app? Enter GUI app mode (Dock icon, dashboard
-    // server, browser) instead of parsing CLI args. Also require an empty argv so
+    // server, window) instead of parsing CLI args. Also require an empty argv so
     // the bundled binary stays usable as a CLI (`…/MacOS/OpenResearch up`), since
     // the bundle itself launches it with no arguments. See commands::app.
     #[cfg(target_os = "macos")]

@@ -848,8 +848,8 @@ fn instance_id() -> &'static str {
 }
 
 /// Environment the app-bundle relaunch hands to the new app: the port the old
-/// one served on, so the dashboard tab that asked for the restart reconnects to
-/// the same origin instead of timing out against a fresh ephemeral port.
+/// one served on, so the new window keeps its origin (and localStorage) even when
+/// the old one had fallen back from the app's usual port.
 #[cfg(target_os = "macos")]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
@@ -861,8 +861,9 @@ pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 /// LaunchServices track the launch, not the image — so it exits and leaves a
 /// detached shell to `open` the bundle once the old process is gone.
 ///
-/// `port` is what the dashboard is served on; the relaunch keeps it, and skips
-/// opening a browser, because the tab that asked is reloading itself.
+/// `port` is what the dashboard is served on; the relaunch keeps it. A terminal
+/// `orx up` also skips opening a browser, because the tab that asked is reloading
+/// itself; the app opens a fresh window on the same origin.
 #[cfg(unix)]
 pub fn relaunch(port: u16) -> std::io::Error {
     // Same test as `main`: the bundle exe run from a terminal with arguments is
