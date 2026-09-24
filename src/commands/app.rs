@@ -3,12 +3,11 @@
 //! The bundle's executable IS the `orx` binary. When launched from a `.app`
 //! (double-click), macOS starts it with no arguments, so `main` routes here
 //! instead of parsing CLI args. App mode owns the main thread with the AppKit
-//! run loop — giving a proper Dock icon (from the bundle's `.icns`), the
-//! "OpenResearch" menu-bar name, and interactive Dock-icon clicks — while the
-//! `orx up` dashboard server runs on background tokio worker threads.
+//! run loop and shows the dashboard in its own window, while the `orx up`
+//! dashboard server runs on background tokio worker threads.
 //!
 //! This is distinct from `orx up` launched in a terminal, which stays a plain
-//! CLI. The whole module is macOS-only; other targets compile it away.
+//! CLI. The GUI parts are macOS-only; other targets compile them away.
 
 /// True when `exe` is a `<name>.app/Contents/MacOS` bundle executable that was
 /// invoked under its own name — the signal to enter GUI app mode instead of
@@ -42,10 +41,12 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// Enter GUI app mode: adopt the user's shell PATH, pick a free port, start the
-/// dashboard server on background threads, and hand the main thread to the
-/// AppKit run loop. Returns only when the user quits the app (usually the
-/// process just exits).
+#[cfg(target_os = "macos")]
+const APP_PORT: u16 = 4792;
+
+/// Enter GUI app mode: pick a port, start the dashboard server on background
+/// threads, and hand the main thread to the window's run loop. Returns only if
+/// setup fails; quitting exits the process.
 #[cfg(target_os = "macos")]
 pub async fn run() {
     if let Err(error) = crate::local::storage::prepare().await {
@@ -70,25 +71,22 @@ pub async fn run() {
             return;
         }
     };
-    // After an update relaunch, keep the previous port so the open dashboard
-    // tab reconnects; it is reloading itself, so no new tab either. Otherwise an
-    // ephemeral loopback port so the app never collides with a terminal `orx
-    // up`. Bind-then-drop to reserve it; the tiny race is harmless locally.
-    let relaunch_port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
+    // After an update relaunch, keep the previous port. Otherwise a fixed port,
+    // since the window's localStorage is keyed by origin, falling back to an
+    // ephemeral one when a terminal `orx up` or another app holds it.
+    let port_is_free = |port: &u16| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok();
+    let port = std::env::var(crate::updates::APP_RELAUNCH_PORT_ENV)
         .ok()
         .and_then(|port| port.parse::<u16>().ok())
-        .filter(|port| std::net::TcpListener::bind(("127.0.0.1", *port)).is_ok());
-    let port = relaunch_port.unwrap_or_else(|| {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
-            .and_then(|l| l.local_addr())
-            .map(|a| a.port())
-            .unwrap_or(4791)
-    });
-    imp::run_event_loop(
-        format!("http://127.0.0.1:{port}/"),
-        port,
-        relaunch_port.is_some(),
-    );
+        .filter(port_is_free)
+        .or_else(|| Some(APP_PORT).filter(port_is_free))
+        .unwrap_or_else(|| {
+            std::net::TcpListener::bind(("127.0.0.1", 0))
+                .and_then(|l| l.local_addr())
+                .map(|a| a.port())
+                .unwrap_or(4791)
+        });
+    imp::run_event_loop(port);
 }
 
 /// Adopt the user's shell environment in place of the one launchd handed us
@@ -154,228 +152,57 @@ pub(crate) async fn hydrate_shell_env() {
     }
 }
 
-/// Dock-icon click: raise the dashboard the user already has open instead of
-/// opening the URL again, which lands on a *new* tab once the SPA has navigated
-/// off `/`.
-#[cfg(target_os = "macos")]
-fn focus_or_open(url: &str) {
-    // The first attempt parks on the Automation permission prompt, which needs
-    // unbounded user time; without this, every impatient re-click stacks
-    // another blocked thread and, once they all unblock, another tab.
-    let Some(in_flight) = InFlight::claim() else {
-        return;
-    };
-    let url = url.to_string();
-    // Off the main thread for that same prompt — the AppKit run loop has to
-    // stay responsive while it is up.
-    std::thread::spawn(move || {
-        if !raise_dashboard(&url) {
-            crate::browser::open_browser(&url);
-        }
-        // Named so the closure captures it: dropping at the end of
-        // `focus_or_open` instead would end the claim before the attempt starts.
-        drop(in_flight);
-    });
+/// True when `url` is a page of the dashboard at `origin`, as opposed to the
+/// `about:blank` the window holds before the server is up and while quitting.
+// Un-gated so its tests run on CI's Linux runner; only macOS has a caller.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_dashboard_url(url: &str, origin: &str) -> bool {
+    url.strip_prefix(origin)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
-#[cfg(target_os = "macos")]
-static ATTEMPT_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "macos")]
-struct InFlight;
-
-#[cfg(target_os = "macos")]
-impl InFlight {
-    fn claim() -> Option<Self> {
-        // Constructed only on the winning branch: `then_some` would build one
-        // for the loser too and its `Drop` would free the winner's claim.
-        if ATTEMPT_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            None
-        } else {
-            Some(Self)
-        }
-    }
+/// Schemes a pop-up may hand to the system browser. A browser asks before
+/// launching the app behind any other scheme (`ssh:`, `vscode:`); `open` would not.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn opens_in_browser(url: &str) -> bool {
+    ["http:", "https:", "mailto:"]
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
 }
-
-#[cfg(target_os = "macos")]
-impl Drop for InFlight {
-    /// Released here rather than on the happy path so a panic cannot latch the
-    /// claim on and kill the Dock icon for the life of the process.
-    fn drop(&mut self) {
-        ATTEMPT_IN_FLIGHT.store(false, std::sync::atomic::Ordering::SeqCst);
-    }
-}
-
-/// True when a dashboard the user already had open was brought forward. False
-/// means the caller must open the URL — a duplicate tab beats a Dock icon that
-/// visibly does nothing, since app mode's port is ephemeral and the user has no
-/// other way back to the dashboard.
-#[cfg(target_os = "macos")]
-fn raise_dashboard(url: &str) -> bool {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    const NEVER: u64 = u64::MAX;
-    // Long enough to cover looking at the browser and deciding the dashboard is
-    // not there, short enough that a click minutes later still prefers a raise
-    // over a duplicate tab. Guessing wrong either way costs one tab.
-    const ACTIVATION_IS_RECENT_MS: u64 = 5_000;
-    // Only a real activation is recorded, so a click that fell through cannot
-    // slide the window forward and suppress the next one.
-    static LAST_ACTIVATION_MS: AtomicU64 = AtomicU64::new(NEVER);
-
-    if focus_existing_tab(url) {
-        return true;
-    }
-    // Firefox exposes no tab API, so a tab there can only be inferred from its
-    // event stream, and nothing finer than its whole browser can be raised.
-    // Clicking again within seconds says that did not surface the dashboard —
-    // it was left on another tab — so the repeat click opens the URL instead.
-    if !crate::commands::up::has_live_dashboard_clients() {
-        return false;
-    }
-    let last = LAST_ACTIVATION_MS.load(Ordering::SeqCst);
-    if last != NEVER && monotonic_ms() - last < ACTIVATION_IS_RECENT_MS {
-        return false;
-    }
-    if !activate_default_browser() {
-        return false;
-    }
-    LAST_ACTIVATION_MS.store(monotonic_ms(), Ordering::SeqCst);
-    true
-}
-
-/// Monotonic, so an NTP correction cannot suppress the fallback or end its
-/// window early.
-#[cfg(target_os = "macos")]
-fn monotonic_ms() -> u64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_millis() as u64
-}
-
-/// Activates the browser tab whose URL starts with `url`. False when no tab
-/// matches, no scriptable browser is running, or Automation permission was
-/// denied.
-#[cfg(target_os = "macos")]
-fn focus_existing_tab(url: &str) -> bool {
-    let out = std::process::Command::new("osascript")
-        .args(["-l", "JavaScript", "-e", FOCUS_TAB_SCRIPT, url])
-        .output();
-    let Ok(out) = out else {
-        return false;
-    };
-    match String::from_utf8_lossy(&out.stdout).trim() {
-        "ok" => true,
-        // Silent otherwise: "no tab open" is the ordinary case, but a denied
-        // Automation prompt is invisible without a line in the log.
-        "blocked" => {
-            eprintln!(
-                "openresearch app: not allowed to search browser tabs — grant OpenResearch \
-                 Automation access in System Settings › Privacy & Security"
-            );
-            false
-        }
-        _ => false,
-    }
-}
-
-/// Brings the default browser forward without opening anything, so the tab the
-/// user left open stays put. False when it is not running, where `open -a`
-/// would raise an empty browser instead of the dashboard.
-#[cfg(target_os = "macos")]
-fn activate_default_browser() -> bool {
-    let Some(browser) = default_browser_path() else {
-        return false;
-    };
-    if !is_running(&browser) {
-        return false;
-    }
-    std::process::Command::new("open")
-        .arg("-a")
-        .arg(&browser)
-        .status()
-        .is_ok_and(|status| status.success())
-}
-
-/// True when the app bundle at `bundle_path` is running. Both sides come from
-/// `NSURL.path`, so plain string equality is enough. The autorelease pools here
-/// and in `default_browser_path` are explicit because this runs on a plain
-/// `std::thread`, which never gets one of its own.
-#[cfg(target_os = "macos")]
-fn is_running(bundle_path: &str) -> bool {
-    use objc2_app_kit::NSWorkspace;
-
-    objc2::rc::autoreleasepool(|_| {
-        NSWorkspace::sharedWorkspace()
-            .runningApplications()
-            .iter()
-            .any(|app| {
-                app.bundleURL()
-                    .and_then(|url| url.path())
-                    .is_some_and(|path| path.to_string() == bundle_path)
-            })
-    })
-}
-
-/// macOS has no "which browser is default" call, so ask which app would open a
-/// throwaway `http://` URL.
-#[cfg(target_os = "macos")]
-fn default_browser_path() -> Option<String> {
-    use objc2_app_kit::NSWorkspace;
-    use objc2_foundation::{NSString, NSURL};
-
-    objc2::rc::autoreleasepool(|_| {
-        let probe = NSURL::URLWithString(&NSString::from_str("http://127.0.0.1/"))?;
-        let app = NSWorkspace::sharedWorkspace().URLForApplicationToOpenURL(&probe)?;
-        app.path().map(|path| path.to_string())
-    })
-}
-
-#[cfg(target_os = "macos")]
-const FOCUS_TAB_SCRIPT: &str = include_str!("../../macos/focus-dashboard-tab.js");
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use objc2::rc::Retained;
-    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
-    use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
-    use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate};
+    use std::cell::Cell;
+    use std::path::PathBuf;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
 
-    struct DelegateIvars {
-        url: String,
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+    use muda::{AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn};
+    use objc2_foundation::NSString;
+    use tao::dpi::LogicalSize;
+    use tao::event::{Event, StartCause, WindowEvent};
+    use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tao::window::WindowBuilder;
+    use wry::{NewWindowResponse, PageLoadEvent, WebViewBuilder, WebViewExtMacOS};
+
+    enum UserEvent {
+        ServerReady,
+        Menu(MenuId),
     }
 
-    define_class!(
-        // SAFETY: NSObject has no subclassing requirements; no `Drop` impl.
-        #[unsafe(super(NSObject))]
-        #[thread_kind = MainThreadOnly]
-        #[name = "OrxAppDelegate"]
-        #[ivars = DelegateIvars]
-        struct Delegate;
-
-        unsafe impl NSObjectProtocol for Delegate {}
-
-        unsafe impl NSApplicationDelegate for Delegate {
-            // Dock-icon click with no open windows → raise the dashboard.
-            #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
-            fn should_handle_reopen(&self, _app: &NSApplication, _has_windows: bool) -> bool {
-                super::focus_or_open(&self.ivars().url);
-                true
-            }
-        }
-    );
-
-    impl Delegate {
-        fn new(mtm: MainThreadMarker, url: String) -> Retained<Self> {
-            let this = Self::alloc(mtm).set_ivars(DelegateIvars { url });
-            unsafe { msg_send![super(this), init] }
-        }
+    enum Quit {
+        No,
+        Flushing,
+        ShuttingDown,
     }
 
-    pub(super) fn run_event_loop(url: String, port: u16, no_browser: bool) {
-        let mtm = MainThreadMarker::new().expect("app mode runs on the main thread");
+    pub(super) fn run_event_loop(port: u16) {
+        let origin = format!("http://127.0.0.1:{port}");
+        let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
         // Dashboard server on background workers (we're inside main's runtime).
         tokio::spawn(async move {
@@ -387,40 +214,290 @@ mod imp {
                 model: None,
                 remote_host: false,
             };
-            if let Err(err) = crate::commands::up::run(args).await {
-                eprintln!("openresearch app: dashboard server exited: {err}");
+            // The window is useless without its server, so the app goes with it.
+            match crate::commands::up::run(args).await {
+                Ok(()) => std::process::exit(0),
+                Err(err) => {
+                    eprintln!("openresearch app: dashboard server exited: {err}");
+                    crate::show_error_dialog(&format!("The dashboard server stopped: {err}"));
+                    std::process::exit(1);
+                }
             }
         });
 
-        // Open the browser once the server accepts connections.
-        let ready_url = url.clone();
-        if !no_browser {
-            tokio::spawn(async move {
-                for _ in 0..100 {
-                    if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                        .await
-                        .is_ok()
-                    {
-                        crate::browser::open_browser(&ready_url);
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                }
-            });
-        }
+        let ready = event_loop.create_proxy();
+        tokio::spawn(async move {
+            while tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_err()
+            {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let _ = ready.send_event(UserEvent::ServerReady);
+        });
 
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-        // Delegate must outlive `run()` — AppKit holds it weakly.
-        let delegate = Delegate::new(mtm, url);
-        app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-        app.run();
+        let menu_proxy = event_loop.create_proxy();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
+        }));
+        let quit = MenuItem::new(
+            "Quit OpenResearch",
+            true,
+            Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
+        );
+        let reload = MenuItem::new(
+            "Reload",
+            true,
+            Some(Accelerator::new(Modifiers::META, Code::KeyR)),
+        );
+        let menu = match build_menu(&quit, &reload) {
+            Ok(menu) => menu,
+            Err(err) => {
+                crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
+                return;
+            }
+        };
+
+        let window = match WindowBuilder::new()
+            .with_title("OpenResearch")
+            .with_inner_size(LogicalSize::new(1280.0, 820.0))
+            .with_min_inner_size(LogicalSize::new(720.0, 480.0))
+            // Shown once the dashboard has loaded, so it never flashes blank.
+            .with_visible(false)
+            .build(&event_loop)
+        {
+            Ok(window) => Rc::new(window),
+            Err(err) => {
+                crate::show_error_dialog(&format!("Could not open the window: {err}"));
+                return;
+            }
+        };
+
+        let shown = Cell::new(false);
+        let webview = WebViewBuilder::new()
+            .with_accept_first_mouse(true)
+            // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
+            .with_initialization_script("window.__ORX_DESKTOP__ = true;")
+            // Pop-ups go to the browser, dashboard pages included: a window wry
+            // opens itself has none of this window's handlers.
+            .with_new_window_req_handler(|url, _features| {
+                if super::opens_in_browser(&url) {
+                    crate::browser::open_browser(&url);
+                }
+                NewWindowResponse::Deny
+            })
+            .with_download_started_handler(choose_download_path)
+            .with_document_title_changed_handler({
+                let window = window.clone();
+                move |title| window.set_title(&title)
+            })
+            .with_on_page_load_handler({
+                let window = window.clone();
+                let origin = origin.clone();
+                move |event, url| {
+                    if matches!(event, PageLoadEvent::Finished)
+                        && super::is_dashboard_url(&url, &origin)
+                        && !shown.replace(true)
+                    {
+                        window.set_visible(true);
+                        window.set_focus();
+                    }
+                }
+            })
+            .build(&*window);
+        let webview = match webview {
+            Ok(webview) => webview,
+            Err(err) => {
+                crate::show_error_dialog(&format!("Could not open the dashboard view: {err}"));
+                return;
+            }
+        };
+        add_confirm_panel(&webview);
+
+        let quit_id = quit.id().clone();
+        let reload_id = reload.id().clone();
+        let mut quit = Quit::No;
+        event_loop.run(move |event, _, control_flow| match event {
+            Event::NewEvents(StartCause::Init) => {
+                *control_flow = ControlFlow::Wait;
+                menu.init_for_nsapp();
+            }
+            Event::NewEvents(StartCause::ResumeTimeReached { .. }) => match quit {
+                Quit::No => {}
+                // SIGTERM takes the server's own shutdown path, which stops the
+                // agents and then exits the process.
+                Quit::Flushing => {
+                    unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+                    quit = Quit::ShuttingDown;
+                    *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5));
+                }
+                Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
+            },
+            Event::UserEvent(UserEvent::ServerReady) => {
+                let _ = webview.load_url(&format!("{origin}/"));
+            }
+            Event::UserEvent(UserEvent::Menu(id)) if id == quit_id => {
+                // A repeat press would restart the sequence and push back the fallback exit.
+                if !matches!(quit, Quit::No) {
+                    return;
+                }
+                window.set_visible(false);
+                // Unloading fires the page's `pagehide` flush of workspace state,
+                // which has to reach the in-process server before it exits.
+                let _ = webview.load_url("about:blank");
+                quit = Quit::Flushing;
+                *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
+            }
+            Event::UserEvent(UserEvent::Menu(id)) if id == reload_id => {
+                let _ = webview.reload();
+            }
+            // Closing hides, like other Mac apps; the Dock icon brings it back.
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => window.set_visible(false),
+            Event::Reopen { .. } => {
+                window.set_visible(true);
+                window.set_focus();
+            }
+            _ => {}
+        })
+    }
+
+    fn build_menu(quit: &MenuItem, reload: &MenuItem) -> muda::Result<Menu> {
+        let about = AboutMetadata {
+            name: Some("OpenResearch".into()),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
+            ..Default::default()
+        };
+        Menu::with_items(&[
+            &Submenu::with_items(
+                "OpenResearch",
+                true,
+                &[
+                    &PredefinedMenuItem::about(None, Some(about)),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::services(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::hide_others(None),
+                    &PredefinedMenuItem::show_all(None),
+                    &PredefinedMenuItem::separator(),
+                    quit,
+                ],
+            )?,
+            &Submenu::with_items(
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(None),
+                    &PredefinedMenuItem::redo(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::cut(None),
+                    &PredefinedMenuItem::copy(None),
+                    &PredefinedMenuItem::paste(None),
+                    &PredefinedMenuItem::select_all(None),
+                ],
+            )?,
+            &Submenu::with_items(
+                "View",
+                true,
+                &[
+                    reload,
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::fullscreen(None),
+                ],
+            )?,
+            &Submenu::with_items(
+                "Window",
+                true,
+                &[
+                    &PredefinedMenuItem::minimize(None),
+                    &PredefinedMenuItem::maximize(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::close_window(None),
+                ],
+            )?,
+        ])
+    }
+
+    /// WKWebView drops downloads without a handler, and wry's default saves
+    /// silently into ~/Downloads; ask where, as a browser would.
+    fn choose_download_path(_url: String, path: &mut PathBuf) -> bool {
+        let mut dialog = rfd::FileDialog::new();
+        if let Some(dir) = path.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = path.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+        match dialog.save_file() {
+            Some(chosen) => {
+                // WebKit fails a download onto an existing file, and the panel
+                // has already confirmed replacing it.
+                if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
+                    return false;
+                }
+                *path = chosen;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
+    /// every `window.confirm` with false, so add it to the delegate's class.
+    fn add_confirm_panel(webview: &wry::WebView) {
+        type ConfirmPanel = unsafe extern "C-unwind" fn(
+            &AnyObject,
+            Sel,
+            *mut AnyObject,
+            &NSString,
+            *mut AnyObject,
+            &block2::Block<dyn Fn(Bool)>,
+        );
+        let wk = webview.webview();
+        unsafe {
+            let delegate: *mut AnyObject = objc2::msg_send![&*wk, UIDelegate];
+            let Some(delegate) = delegate.as_ref() else {
+                return;
+            };
+            let class: *const AnyClass = delegate.class();
+            let imp: ConfirmPanel = run_confirm_panel;
+            objc2::ffi::class_addMethod(
+                class.cast_mut(),
+                objc2::sel!(webView:runJavaScriptConfirmPanelWithMessage:initiatedByFrame:completionHandler:),
+                std::mem::transmute::<ConfirmPanel, objc2::runtime::Imp>(imp),
+                c"v@:@@@@?".as_ptr(),
+            );
+            // WebKit reads which methods a delegate has only when it is set.
+            let _: () = objc2::msg_send![&*wk, setUIDelegate: delegate];
+        }
+    }
+
+    unsafe extern "C-unwind" fn run_confirm_panel(
+        _this: &AnyObject,
+        _cmd: Sel,
+        _webview: *mut AnyObject,
+        message: &NSString,
+        _frame: *mut AnyObject,
+        handler: &block2::Block<dyn Fn(Bool)>,
+    ) {
+        // SAFETY: WebKit calls its UI delegate on the main thread.
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        // An NSAlert modal keeps the run loop turning, so the window still paints.
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(message);
+        alert.addButtonWithTitle(&NSString::from_str("OK"));
+        alert.addButtonWithTitle(&NSString::from_str("Cancel"));
+        let confirmed = alert.runModal() == NSAlertFirstButtonReturn;
+        handler.call((Bool::new(confirmed),));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_bundle_exe_launch;
+    use super::{is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
     use std::ffi::OsStr;
     use std::path::Path;
 
@@ -457,5 +534,34 @@ mod tests {
             Some(OsStr::new("orx"))
         ));
         assert!(!is_bundle_exe_launch(Path::new(EXE), None));
+    }
+
+    #[test]
+    fn only_dashboard_pages_count_as_the_dashboard() {
+        let origin = "http://127.0.0.1:4792";
+        assert!(is_dashboard_url("http://127.0.0.1:4792", origin));
+        assert!(is_dashboard_url(
+            "http://127.0.0.1:4792/remote-launch",
+            origin
+        ));
+        assert!(!is_dashboard_url("about:blank", origin));
+        assert!(!is_dashboard_url("http://127.0.0.1:47920/", origin));
+        assert!(!is_dashboard_url("https://github.com/alphaXiv", origin));
+        assert!(!is_dashboard_url(
+            "https://www.overleaf.com/project",
+            origin
+        ));
+    }
+
+    #[test]
+    fn only_web_and_mail_links_reach_the_system_browser() {
+        assert!(opens_in_browser("https://github.com/alphaXiv"));
+        assert!(opens_in_browser("http://127.0.0.1:4792/api/artifacts/raw"));
+        assert!(opens_in_browser("mailto:team@example.com"));
+        assert!(!opens_in_browser("ssh://attacker.example"));
+        assert!(!opens_in_browser("vscode://file/etc/passwd"));
+        assert!(!opens_in_browser(
+            "x-apple.systempreferences:com.apple.preference"
+        ));
     }
 }
