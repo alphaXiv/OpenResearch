@@ -116,6 +116,13 @@ fn managed_node_dir() -> Option<PathBuf> {
     }
 }
 
+/// PATH for a child that runs `mcode`: the managed Node.js first, when there is one.
+pub(crate) fn child_path() -> Option<std::ffi::OsString> {
+    let node = managed_node_dir()?;
+    let current = crate::local::shell_env::search_path().unwrap_or_default();
+    std::env::join_paths(std::iter::once(node).chain(std::env::split_paths(&current))).ok()
+}
+
 /// Whether an `mcode login` was saved for any region.
 fn has_login(data: &Path) -> bool {
     let Ok(envs) = std::fs::read_dir(data.join("auth")) else {

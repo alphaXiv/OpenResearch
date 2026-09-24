@@ -3,6 +3,18 @@
 
 import type { HarnessId } from "../api";
 
+// Letter badges: these agents ship no brand mark we embed.
+function Monogram({ letter, size, children }: { letter: string; size: number; children: React.ReactNode }) {
+  return (
+    <svg className="block shrink-0" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+      {children}
+      <text x="12" y="16.5" textAnchor="middle" fontSize="13" fontWeight="700" fontFamily="system-ui, sans-serif" fill="#ffffff">
+        {letter}
+      </text>
+    </svg>
+  );
+}
+
 export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?: number }) {
   const cls = "block shrink-0";
   if (harness === "claude-code") {
@@ -53,6 +65,20 @@ export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?:
       <svg className={cls} width={size} height={size} viewBox="13 18 85 80" fill="#3186FF" aria-hidden="true">
         <path d="M89.6992 93.695C94.3659 97.195 101.366 94.8617 94.9492 88.445C75.6992 69.7783 79.7825 18.445 55.8659 18.445C31.9492 18.445 36.0325 69.7783 16.7825 88.445C9.78251 95.445 17.3658 97.195 22.0325 93.695C40.1159 81.445 38.9492 59.8617 55.8659 59.8617C72.7825 59.8617 71.6159 81.445 89.6992 93.695Z" />
       </svg>
+    );
+  }
+  if (harness === "kimi-code") {
+    return (
+      <Monogram letter="K" size={size}>
+        <rect width="24" height="24" rx="6" fill="#1f1f1f" />
+      </Monogram>
+    );
+  }
+  if (harness === "minimax-code") {
+    return (
+      <Monogram letter="M" size={size}>
+        <rect width="24" height="24" rx="6" fill="#e2167e" />
+      </Monogram>
     );
   }
   return (

@@ -20,6 +20,8 @@ fn unix_bootstrap(harness: &str) -> Option<(&'static str, &'static str)> {
         "opencode" => Some(("https://opencode.ai/install", "bash")),
         "antigravity" => Some(("https://antigravity.google/cli/install.sh", "bash")),
         "cursor" => Some(("https://cursor.com/install", "bash")),
+        "kimi-code" => Some(("https://code.kimi.com/kimi-code/install.sh", "bash")),
+        "minimax-code" => Some(("https://filecdn.minimax.chat/public/install.sh", "bash")),
         _ => None,
     }
 }
@@ -32,6 +34,8 @@ fn windows_install_command(harness: &str) -> Option<&'static str> {
         "opencode" => Some(include_str!("install_opencode.ps1")),
         "antigravity" => Some("irm https://antigravity.google/cli/install.ps1 | iex"),
         "cursor" => Some("irm 'https://cursor.com/install?win32=true' | iex"),
+        "kimi-code" => Some("irm https://code.kimi.com/kimi-code/install.ps1 | iex"),
+        "minimax-code" => Some(include_str!("install_minimax.ps1")),
         _ => None,
     }
 }
@@ -89,6 +93,12 @@ fn login_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
         "opencode" => Some(("opencode auth login", vec!["auth".into(), "login".into()])),
         "antigravity" => Some(("agy", vec![])),
         "cursor" => Some(("agent login", vec!["login".into()])),
+        "kimi-code" => Some(("kimi login", vec!["login".into()])),
+        // `mcode login` defaults to the mainland (cn) account region.
+        "minimax-code" => Some((
+            "mcode login --region global",
+            vec!["login".into(), "--region".into(), "global".into()],
+        )),
         _ => None,
     }
 }
@@ -100,6 +110,8 @@ fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
         "opencode" => Some(("opencode upgrade", vec!["upgrade".into()])),
         "antigravity" => Some(("agy update", vec!["update".into()])),
         "cursor" => Some(("agent update", vec!["update".into()])),
+        "kimi-code" => Some(("kimi upgrade", vec!["upgrade".into()])),
+        "minimax-code" => Some(("mcode update", vec!["update".into()])),
         _ => None,
     }
 }
@@ -350,10 +362,16 @@ async fn run(
             None
         };
         // The lease ends with `run`; the follow-up shell only inherits the path.
-        let env: Vec<_> = lease
+        let mut env: Vec<_> = lease
             .as_ref()
             .map(|lease| vec![("OPENCODE_DB", lease.path().as_os_str().to_owned())])
             .unwrap_or_default();
+        // An npm-installed mcode needs the Node.js MiniMax's installer provisioned.
+        if request.harness == "minimax-code" && !matches!(request.action, Action::Install) {
+            if let Some(path) = crate::local::harness::minimax::child_path() {
+                env.push(("PATH", path));
+            }
+        }
         attempt.record("command_started", "command", None, None, None);
         let pty_size = *size;
         let shell_env = env.clone();

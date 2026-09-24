@@ -1,7 +1,15 @@
 use super::*;
 use serde_json::Value;
 
-pub(crate) const IDS: [&str; 5] = ["claude-code", "codex", "opencode", "cursor", "antigravity"];
+pub(crate) const IDS: [&str; 7] = [
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "antigravity",
+    "kimi-code",
+    "minimax-code",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct InitialSnapshot {
@@ -501,13 +509,13 @@ mod tests {
         );
         let snapshot = settings.harness_snapshot.unwrap();
         let events = snapshot.payload["events"].as_array().unwrap();
-        assert_eq!(events.len(), 5);
+        assert_eq!(events.len(), IDS.len());
         assert_eq!(
             events
                 .iter()
                 .map(|e| e["properties"]["harness"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            ["claude-code", "codex", "opencode", "cursor", "antigravity"]
+            IDS
         );
         assert_eq!(
             events[4]["properties"],
@@ -517,7 +525,10 @@ mod tests {
                 "usability": "usable", "localConfigured": false
             })
         );
-        for event in &events[..4] {
+        for event in events
+            .iter()
+            .filter(|e| e["properties"]["harness"] != "antigravity")
+        {
             assert_eq!(event["properties"]["installation"], "unknown");
             assert_eq!(event["properties"]["usability"], "unknown");
         }
