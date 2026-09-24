@@ -20,6 +20,7 @@ pub use container::{
 };
 
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -70,6 +71,7 @@ fn prepare_control_dir() -> Result<()> {
 }
 
 /// Path to the orx-managed OpenSSH config file (e.g. `~/.config/openresearch/ssh_config`).
+#[cfg(unix)]
 pub fn managed_ssh_config_path() -> PathBuf {
     crate::config::config_dir().join("ssh_config")
 }
