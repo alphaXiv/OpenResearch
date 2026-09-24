@@ -20,8 +20,7 @@ pub use container::{
 };
 
 use std::collections::HashMap;
-#[cfg(unix)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -67,6 +66,160 @@ fn prepare_control_dir() -> Result<()> {
 
 #[cfg(not(unix))]
 fn prepare_control_dir() -> Result<()> {
+    Ok(())
+}
+
+/// Path to the orx-managed OpenSSH config file (e.g. `~/.config/openresearch/ssh_config`).
+pub fn managed_ssh_config_path() -> PathBuf {
+    crate::config::config_dir().join("ssh_config")
+}
+
+#[cfg(unix)]
+fn render_managed_host_entry(host: &str, socket_path: &Path) -> String {
+    format!(
+        "Host {host}\n  ControlMaster auto\n  ControlPath {}\n",
+        socket_path.display()
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn upsert_managed_host_entry(content: &str, host: &str, socket_path: &Path) -> String {
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut current_host: Option<String> = None;
+    let mut current_body = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(host_name) = trimmed.strip_prefix("Host ") {
+            if let Some(h) = current_host.take() {
+                entries.push((h, current_body.join("\n")));
+                current_body.clear();
+            }
+            let h = host_name.trim().to_string();
+            current_host = Some(h);
+        } else if current_host.is_some() {
+            current_body.push(line);
+        }
+    }
+    if let Some(h) = current_host {
+        entries.push((h, current_body.join("\n")));
+    }
+
+    let mut found = false;
+    let mut out =
+        String::from("# Managed automatically by OpenResearch (orx). Do not edit manually.\n\n");
+
+    for (h, body) in entries {
+        if h == host {
+            out.push_str(&render_managed_host_entry(host, socket_path));
+            out.push('\n');
+            found = true;
+        } else {
+            out.push_str(&format!("Host {h}\n{}\n\n", body.trim_end()));
+        }
+    }
+
+    if !found {
+        out.push_str(&render_managed_host_entry(host, socket_path));
+    }
+
+    out
+}
+
+#[cfg(unix)]
+pub(crate) fn ensure_ssh_config_include_in(
+    user_config_path: &Path,
+    managed_path: &Path,
+) -> Result<bool> {
+    let home = dirs::home_dir();
+    let include_line = if let Some(ref h) = home {
+        if let Ok(rel) = managed_path.strip_prefix(h) {
+            format!("Include ~/{}", rel.display())
+        } else {
+            format!("Include {}", managed_path.display())
+        }
+    } else {
+        format!("Include {}", managed_path.display())
+    };
+
+    let current = match std::fs::read_to_string(user_config_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(anyhow!("Could not read SSH config: {e}")),
+    };
+
+    let managed_str = managed_path.to_string_lossy();
+    let managed_name = managed_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let target_spec = include_line.strip_prefix("Include ").unwrap_or("").trim();
+
+    for line in current.lines() {
+        let trimmed = line.trim();
+        if let Some(target) = trimmed.strip_prefix("Include ") {
+            let target = target.trim();
+            if target == target_spec
+                || (!managed_str.is_empty() && target.contains(&*managed_str))
+                || (target.contains("openresearch") && target.contains("ssh_config"))
+                || (!managed_name.is_empty() && target.ends_with(&managed_name))
+            {
+                return Ok(false);
+            }
+        }
+    }
+
+    let updated = if current.trim().is_empty() {
+        format!("{include_line}\n")
+    } else {
+        format!("{include_line}\n\n{current}")
+    };
+
+    if let Some(parent) = user_config_path.parent() {
+        let existed = parent.exists();
+        std::fs::create_dir_all(parent)?;
+        if !existed {
+            use std::os::unix::fs::PermissionsExt as _;
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        }
+    }
+
+    crate::local::git::atomic_write_with_mode(user_config_path, updated.as_bytes(), Some(0o600))?;
+    Ok(true)
+}
+
+#[cfg(unix)]
+pub(crate) fn ensure_ssh_config_include() -> Result<bool> {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return Ok(false),
+    };
+    ensure_ssh_config_include_in(&home.join(".ssh/config"), &managed_ssh_config_path())
+}
+
+/// Syncs the target's control socket to the managed SSH config.
+#[cfg(unix)]
+pub(crate) fn sync_managed_ssh_host(target: &SshTarget) -> Result<()> {
+    let managed_path = managed_ssh_config_path();
+    if let Some(parent) = managed_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let sock = control_path(target);
+    let current = match std::fs::read_to_string(&managed_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(anyhow!("Could not read managed SSH config: {e}")),
+    };
+
+    let updated = upsert_managed_host_entry(&current, &target.dest, &sock);
+    crate::local::git::atomic_write_with_mode(&managed_path, updated.as_bytes(), Some(0o600))?;
+    let _ = ensure_ssh_config_include();
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_managed_ssh_host(_target: &SshTarget) -> Result<()> {
     Ok(())
 }
 
@@ -261,6 +414,9 @@ pub(crate) fn forward_args(
     remote_cmd: &str,
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
+    if !cfg!(test) {
+        let _ = sync_managed_ssh_host(target);
+    }
     let mut args = ssh_opts(target, true);
     for option in [
         "ExitOnForwardFailure=yes",
@@ -288,6 +444,9 @@ pub(crate) fn forward_args(
 /// master, so this only proves the host reachable and primes nothing.
 pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     prepare_control_dir()?;
+    if !cfg!(test) {
+        let _ = sync_managed_ssh_host(target);
+    }
     let mut args = ssh_opts(target, false);
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
     Ok(args)
@@ -668,6 +827,9 @@ pub async fn preflight(target: &SshTarget) -> SshPreflight {
                     missing_tools.join(" and ")
                 )
             });
+            if !cfg!(test) {
+                let _ = sync_managed_ssh_host(target);
+            }
             SshPreflight {
                 reachable: true,
                 tools_found: missing_tools.is_empty(),
@@ -802,5 +964,61 @@ mod tests {
         let target = SshTarget::alias("cluster");
         assert!(ssh_opts(&target, true).contains(&"BatchMode=yes".to_string()));
         assert!(ssh_opts(&target, false).contains(&"BatchMode=no".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_managed_host_entry_creates_new_file_and_updates() {
+        let sock1 = Path::new("/tmp/sock1");
+        let sock2 = Path::new("/tmp/sock2");
+        let sock1_updated = Path::new("/tmp/sock1_updated");
+
+        let out = upsert_managed_host_entry("", "node1", sock1);
+        assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.starts_with("# Managed automatically by OpenResearch (orx)"));
+
+        let out = upsert_managed_host_entry(&out, "node2", sock2);
+        assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+
+        let out = upsert_managed_host_entry(&out, "node1", sock1_updated);
+        assert!(
+            out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n")
+        );
+        assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(!out.contains("/tmp/sock1\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_ssh_config_include_in_prepends_and_is_idempotent() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-include-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let user_ssh = temp_dir.join("config");
+        let managed = temp_dir.join("managed_ssh_config");
+
+        // 1. Missing file: creates file with Include
+        let added = ensure_ssh_config_include_in(&user_ssh, &managed).unwrap();
+        assert!(added);
+        let content = std::fs::read_to_string(&user_ssh).unwrap();
+        assert!(content.contains(&format!("Include {}", managed.display())));
+
+        // 2. Already contains Include: returns false and does not duplicate
+        let added_again = ensure_ssh_config_include_in(&user_ssh, &managed).unwrap();
+        assert!(!added_again);
+        let content2 = std::fs::read_to_string(&user_ssh).unwrap();
+        assert_eq!(content, content2);
+
+        // 3. Existing config without Include: prepends Include
+        let user_ssh2 = temp_dir.join("config2");
+        std::fs::write(&user_ssh2, "Host foo\n  HostName 1.2.3.4\n").unwrap();
+        let added = ensure_ssh_config_include_in(&user_ssh2, &managed).unwrap();
+        assert!(added);
+        let content3 = std::fs::read_to_string(&user_ssh2).unwrap();
+        assert!(content3.starts_with("Include "));
+        assert!(content3.contains("Host foo\n  HostName 1.2.3.4\n"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

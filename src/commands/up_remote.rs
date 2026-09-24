@@ -1020,6 +1020,9 @@ async fn connect_once(
         let _ = child.wait().await;
         return ConnectionEnd::Cancelled;
     }
+    if !cfg!(test) {
+        let _ = crate::jobs::ssh::sync_managed_ssh_host(&session.target);
+    }
 
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     loop {
