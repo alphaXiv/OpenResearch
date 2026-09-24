@@ -1,5 +1,5 @@
 //! The harness compatibility layer: one `Harness` trait that every coding-agent
-//! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity, Kimi Code) implements, plus the
+//! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity, Kimi Code, MiniMax Code) implements, plus the
 //! single `registry()` that every consumer iterates.
 //!
 //! A harness can offer up to three capabilities, and no harness is required to
@@ -24,6 +24,7 @@ pub(crate) mod codex;
 pub(crate) mod cursor;
 mod detect;
 pub(crate) mod kimi;
+pub(crate) mod minimax;
 pub(crate) mod opencode;
 mod options;
 mod plan_gate;
@@ -519,6 +520,7 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(cursor::Cursor),
         Box::new(antigravity::Antigravity),
         Box::new(kimi::KimiCode),
+        Box::new(minimax::MiniMaxCode),
     ]
 }
 
