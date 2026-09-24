@@ -67,6 +67,15 @@ The desktop apps do not put a command-line tool on PATH:
   drives the official CLI (`irm https://filecdn.minimax.chat/public/install.ps1
   | iex`, launchers in `%USERPROFILE%\.minimax-code`). The desktop login is
   expected to carry over; this is not yet verified.
+  On the test machine the installer failed at activation ("Staged versioned
+  MCode release validation failed") after it had provisioned Node in
+  `%USERPROFILE%\.minimax-code\runtime\node-v22.19.0-win-x64`. Installing
+  with that Node's npm (`npm install -g --prefix
+  %USERPROFILE%\.minimax-code\npm @minimax-ai/code`) works. The resulting
+  `mcode.cmd` needs that Node on PATH, so orx must prepend it when spawning.
+  `mcode login` defaults to the `cn` region (account.minimax.cn). Accounts
+  created in the international desktop app need `mcode login --region
+  global`.
 - **ZCode**: `%LOCALAPPDATA%\Programs\ZCode\ZCode.exe` bundles the CLI runtime
   as `resources\glm\zcode.cjs`, the same file the npm repack ships. orx can run
   it as `ZCode.exe resources\glm\zcode.cjs …` with `ELECTRON_RUN_AS_NODE=1`.

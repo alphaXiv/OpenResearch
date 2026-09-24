@@ -49,7 +49,7 @@ $agents = @(
     @{
         Id = 'minimax-code'; Name = 'mcode'
         Homes = @('.minimax', '.minimax-code')
-        Dirs = @('.minimax-code', '.local\bin', '.minimax\bin')
+        Dirs = @('.minimax-code\npm', '.minimax-code\current', '.minimax-code', '.local\bin', '.minimax\bin')
         Print = @('exec', '--output-format', 'stream-json', 'Reply with the single word OK.')
         Acp = $true
     },
@@ -61,6 +61,13 @@ $agents = @(
         Acp = $false
     }
 )
+
+# MiniMax's installer provisions its own Node.js under ~/.minimax-code/runtime.
+# An npm-installed mcode.cmd there needs that node on PATH to start.
+$managedNode = Get-ChildItem (Join-Path $userHome '.minimax-code\runtime') -Directory -Filter 'node-*' -ErrorAction SilentlyContinue |
+    Where-Object { Test-Path (Join-Path $_.FullName 'node.exe') } |
+    Sort-Object Name -Descending | Select-Object -First 1
+if ($managedNode) { $env:PATH = "$($managedNode.FullName);$env:PATH" }
 
 $npmPrefix = $null
 if (Get-Command npm -ErrorAction SilentlyContinue) {
@@ -215,6 +222,7 @@ foreach ($gb in @("$env:ProgramFiles\Git\bin\bash.exe", "$env:LOCALAPPDATA\Progr
     Say "Git Bash at ${gb}: $(Test-Path $gb)"
 }
 Say "npm global prefix: $npmPrefix"
+Say "MiniMax managed node: $(if ($managedNode) { $managedNode.FullName } else { '(none)' })"
 Say ''
 
 $work = Join-Path $env:TEMP ("orx-probe-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
