@@ -9,6 +9,9 @@
 #
 # The report is written to %TEMP%\orx-agent-probe.txt. Review it before
 # sharing: it contains install paths and may contain your account name.
+#
+# Keep this file ASCII-only: Windows PowerShell 5.1 reads a BOM-less script in
+# the ANSI code page, where UTF-8 punctuation can decode to a quote character.
 
 param(
     [switch]$Turn,
@@ -39,7 +42,7 @@ if (Get-Command npm -ErrorAction SilentlyContinue) {
     $npmPrefix = (& npm prefix -g 2>$null | Select-Object -First 1)
 }
 
-Say "orx agent probe — $(Get-Date -Format o)"
+Say "orx agent probe - $(Get-Date -Format o)"
 Say "Windows: $([Environment]::OSVersion.VersionString); PowerShell $($PSVersionTable.PSVersion)"
 Say "node: $((Get-Command node -ErrorAction SilentlyContinue).Source) $(if (Get-Command node -ErrorAction SilentlyContinue) { & node --version })"
 Say "git bash: $((Get-Command bash -ErrorAction SilentlyContinue).Source)"
@@ -211,4 +214,4 @@ foreach ($agent in $agents) {
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 $lines | Set-Content -Path $report -Encoding UTF8
 Write-Host ''
-Write-Host "Report written to $report — review it, then share it."
+Write-Host "Report written to $report - review it, then share it."
