@@ -174,7 +174,7 @@ impl LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    pub async fn experiment_status(&self) -> Result<()> {
+    pub async fn experiment_status(&self, scheduler: bool) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
         println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
@@ -211,6 +211,35 @@ impl LocalPlane {
                     crate::output::format_duration(run.duration_secs),
                     run.updated_display
                 );
+                if let Ok(backend) = crate::jobs::BackendDescriptor::parse(&r.backend_json) {
+                    if backend.kind == "slurm_job" {
+                        println!(
+                            "  requested time limit: {}",
+                            backend
+                                .timeout_secs
+                                .map(|s| format!("{s}s"))
+                                .unwrap_or_else(|| "unknown (older run or cluster default)".into())
+                        );
+                        if let Some(error) = backend.monitoring_error.as_deref() {
+                            println!("  {error}");
+                        }
+                        if scheduler {
+                            match backend.slurm_ref() {
+                                Ok((host, job_id)) => match tokio::time::timeout(
+                                    std::time::Duration::from_secs(15),
+                                    crate::jobs::slurm::diagnostics(host, job_id),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(details)) => println!("  scheduler: {details}"),
+                                    Ok(Err(error)) => println!("  scheduler: unknown ({error})"),
+                                    Err(_) => println!("  scheduler: unknown (query timed out)"),
+                                },
+                                Err(_) => println!("  scheduler: unknown (job not submitted)"),
+                            }
+                        }
+                    }
+                }
                 if let Some(detail) = run.failure_detail() {
                     println!("  {detail}");
                 }

@@ -52,6 +52,10 @@ pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, Stri
 pub struct BackendDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_container: Option<ssh::ContainerRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring_error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancellation_accepted: bool,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -81,9 +85,7 @@ pub struct BackendDescriptor {
     pub ssh_port: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_user: Option<String>,
-    /// Wall-clock bound the supervisor wraps around the payload
-    /// (openresearch_job only) — persisted here because the launch happens in
-    /// the supervisor, long after the `--timeout` flag is gone.
+    /// Requested execution limit for OpenResearch and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Immutable local source archive used for this run. These fields make a
@@ -252,6 +254,8 @@ mod tests {
     fn openresearch_descriptor() -> BackendDescriptor {
         BackendDescriptor {
             ssh_container: None,
+            monitoring_error: None,
+            cancellation_accepted: false,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),

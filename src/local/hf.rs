@@ -107,6 +107,8 @@ pub async fn submit_local_hf_with_source(
 
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: "hf_job".to_string(),
         namespace: Some(namespace.clone()),
         job_id: Some(job.id.clone()),

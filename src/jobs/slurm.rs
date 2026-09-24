@@ -107,6 +107,13 @@ pub struct SlurmJobSpec {
     pub time_limit_secs: Option<u64>,
 }
 
+pub fn resolve_time_limit(explicit: Option<&str>, saved: Option<&str>) -> Result<Option<u64>> {
+    explicit
+        .or(saved)
+        .map(super::huggingface::parse_timeout)
+        .transpose()
+}
+
 /// Map a `--flavor` string onto a `--gres` request. A flavor names GPUs —
 /// CPU-only runs just omit it (unlike HF/Modal there is no machine shape to
 /// pick; partition + cluster defaults decide CPUs/memory).
@@ -253,26 +260,39 @@ pub struct JobState {
     pub message: Option<String>,
 }
 
+// A job-specific query can fail after Slurm forgets a completed job.
+fn queue_probe(job_id: &str) -> String {
+    format!(
+        "if st=$(squeue --all --states=all -h --jobs={job_id} -o %T 2>/dev/null); then :; \
+         elif all=$(squeue --all --states=all --user=\"$(id -un)\" -h -o '%i %T' 2>/dev/null); then \
+         st=$(printf '%s\\n' \"$all\" | while read -r id state; do \
+         if [ \"$id\" = {job_id} ]; then printf '%s\\n' \"$state\"; fi; done); \
+         else exit 1; fi; \
+         if [ -n \"$st\" ]; then echo \"SQ $st\"; else echo GONE; fi",
+        job_id = sh_quote(job_id),
+    )
+}
+
 /// One combined remote probe emitting a single token — exit_code first
 /// (ground truth), then live queue state, then accounting for jobs that left
 /// the queue without one. POSIX-sh only: the command runs under the remote
 /// user's login shell. `sacct -P` (parsable) because the default fixed-width
 /// State column truncates ("CANCELLED by 1234" prints as "CANCELLED+").
 ///
-/// `GONE` is NOT terminal by itself: it also fires when slurmctld is briefly
-/// down or the exit_code write is NFS-lagged — the supervisor debounces it
-/// over several polls before declaring the job lost.
+/// `GONE` means monitoring is unavailable, not that the job terminated.
+/// Accounting can be disabled or unavailable while a job still runs.
 pub async fn inspect_job(host: &str, run_id: &str, job_id: &str) -> Result<JobState> {
     let dir = run_dir(run_id);
+    let queue = queue_probe(job_id);
     let cmd = format!(
         "d=\"$HOME/{dir}\"; \
          if [ -f \"$d/exit_code\" ]; then echo \"EXIT $(cat \"$d/exit_code\")\"; \
-         else st=$(squeue -h -j {job_id} -o %T 2>/dev/null | head -n1); \
-           if [ -n \"$st\" ]; then echo \"SQ $st\"; \
-           else st=$(sacct -nPX -j {job_id} -o State 2>/dev/null | head -n1); \
-             if [ -n \"$st\" ]; then echo \"SA $st\"; else echo GONE; fi; \
-           fi; \
-         fi",
+         else queue=$({queue}); \
+         case \"$queue\" in \
+         SQ*) echo \"$queue\";; \
+         *) if st=$(sacct -nPX -j {job_id} -o State 2>/dev/null) && [ -n \"$st\" ]; then echo \"SA $st\"; \
+         elif [ \"$queue\" = GONE ]; then echo GONE; else echo UNAVAILABLE; fi;; esac; fi",
+        job_id = sh_quote(job_id),
     );
     let out = ssh_run(&SshTarget::alias(host), &cmd, None).await?;
     Ok(map_inspect_token(out.trim()))
@@ -280,7 +300,7 @@ pub async fn inspect_job(host: &str, run_id: &str, job_id: &str) -> Result<JobSt
 
 /// Pure token → stage mapping (unit-tested; Slurm state names are stable).
 /// Emits the internal `GONE` stage for a job the scheduler no longer knows —
-/// the caller debounces it (see `inspect_job`).
+/// missing scheduler evidence never proves the job has terminated.
 fn map_inspect_token(out: &str) -> JobState {
     let state = |stage: &str, message: Option<String>| JobState {
         stage: stage.to_string(),
@@ -305,7 +325,7 @@ fn map_inspect_token(out: &str) -> JobState {
     let (source, raw) = match (out.strip_prefix("SQ "), out.strip_prefix("SA ")) {
         (Some(s), _) => ("squeue", s),
         (_, Some(s)) => ("sacct", s),
-        _ if out == "GONE" => return state("GONE", None),
+        _ if matches!(out, "GONE" | "UNAVAILABLE") => return state(out, None),
         _ => return state("RUNNING", Some(format!("unexpected inspect output: {out}"))),
     };
     let word = raw
@@ -327,7 +347,7 @@ fn map_inspect_token(out: &str) -> JobState {
         // PreemptMode=REQUEUE) re-queues these under the same job id — a poll
         // landing in the window must not finalize a run that's about to
         // re-run. If the job is NOT requeued it leaves the queue and the
-        // sacct/GONE path delivers the terminal verdict.
+        // sacct path delivers the terminal verdict.
         "NODE_FAIL" | "PREEMPTED" if source == "squeue" => state("RUNNING", None),
         "CANCELLED" | "REVOKED" => state("CANCELED", None),
         "TIMEOUT" | "DEADLINE" => state("ERROR", Some("job hit its time limit".into())),
@@ -342,12 +362,17 @@ fn map_inspect_token(out: &str) -> JobState {
     }
 }
 
-/// Cancel = `scancel`. Tolerant of already-finished jobs (scancel exits
-/// non-zero for them); the supervisor's next poll observes the outcome.
+/// Cancellation succeeds when accepted or the controller confirms the job is absent.
 pub async fn cancel_job(host: &str, job_id: &str) -> Result<()> {
+    let queue = queue_probe(job_id);
     ssh_run(
         &SshTarget::alias(host),
-        &format!("scancel {job_id} 2>/dev/null || true"),
+        &format!(
+            "if error=$(scancel {} 2>&1); then exit 0; \
+             elif [ \"$({queue})\" = GONE ]; then exit 0; \
+             else printf '%s\\n' \"$error\" >&2; exit 1; fi",
+            sh_quote(job_id)
+        ),
         None,
     )
     .await?;
@@ -411,6 +436,25 @@ pub async fn preflight(host: &str) -> SlurmPreflight {
     }
 }
 
+/// Best-effort accounting details; absent records are explicitly unknown.
+pub async fn diagnostics(host: &str, job_id: &str) -> Result<serde_json::Value> {
+    let cmd = format!(
+        "sacct -nPX -j {} -o State,Timelimit,Elapsed,Reason,ExitCode",
+        sh_quote(job_id)
+    );
+    let output = ssh_run(&SshTarget::alias(host), &cmd, None).await?;
+    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok(serde_json::json!({"available": false}));
+    };
+    let fields: Vec<_> = line.split('|').map(str::trim).collect();
+    if fields.len() != 5 {
+        return Err(anyhow!("Unrecognized Slurm accounting response."));
+    }
+    Ok(
+        serde_json::json!({"available": true, "state": fields[0], "timeLimit": fields[1], "elapsed": fields[2], "schedulingReason": fields[3], "exitCode": fields[4]}),
+    )
+}
+
 // --- tests ----------------------------------------------------------------------
 
 #[cfg(test)]
@@ -429,6 +473,18 @@ mod tests {
             account: None,
             time_limit_secs: None,
         }
+    }
+
+    #[test]
+    fn saved_day_limit_and_launch_override_reach_batch_script() {
+        let mut job = spec();
+        job.time_limit_secs = resolve_time_limit(None, Some("24h")).unwrap();
+        assert_eq!(job.time_limit_secs, Some(86400));
+        assert!(render_sbatch(&job).contains("#SBATCH --time=1-00:00:00\n"));
+        job.time_limit_secs = resolve_time_limit(Some("2h"), Some("24h")).unwrap();
+        assert!(render_sbatch(&job).contains("#SBATCH --time=02:00:00\n"));
+        job.time_limit_secs = resolve_time_limit(None, None).unwrap();
+        assert!(!render_sbatch(&job).contains("#SBATCH --time="));
     }
 
     #[test]
@@ -487,7 +543,7 @@ mod tests {
     ///   ORX_SLURM_TEST_HOST=<ssh alias> cargo test jobs::slurm -- --ignored
     /// Covers submit → SCHEDULING/RUNNING → COMPLETED with logs, plus
     /// scancel → the job leaving the queue (CANCELED, or GONE where
-    /// accounting is disabled — the supervisor debounces GONE).
+    /// accounting is disabled — monitoring remains unknown).
     #[tokio::test]
     #[ignore = "needs a live slurm cluster; set ORX_SLURM_TEST_HOST"]
     async fn e2e_lifecycle_against_live_cluster() {
@@ -592,10 +648,10 @@ mod tests {
         assert_eq!(map_inspect_token("SA TIMEOUT").stage, "ERROR");
         assert_eq!(map_inspect_token("SA NODE_FAIL").stage, "ERROR");
         // From squeue these are requeue-transient (JobRequeue=1); terminal
-        // only once sacct (or GONE) confirms the job really left.
+        // only once sacct confirms the job really left.
         assert_eq!(map_inspect_token("SQ NODE_FAIL").stage, "RUNNING");
         assert_eq!(map_inspect_token("SQ PREEMPTED").stage, "RUNNING");
-        // GONE is not terminal here — the supervisor debounces it.
+        // GONE is not terminal: absent accounting is not evidence of termination.
         assert_eq!(map_inspect_token("GONE").stage, "GONE");
         // Unknown states never wedge the supervisor into a terminal state.
         assert_eq!(map_inspect_token("SQ SOMETHING_NEW").stage, "RUNNING");

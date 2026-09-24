@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 /// subcommand can turn them into a write). Kept in lockstep with `main.rs`'s `Command`
 /// enum; `readonly_verbs_are_real_commands` guards against a rename.
 const WHOLE_VERB_READS: &[&str] = &[
-    "projects", "orgs", "runs", "logs", "compute", "discover", "paper", "skill", "version",
+    "projects", "orgs", "runs", "logs", "discover", "paper", "skill", "version",
     // Posts a silent report to the OpenResearch API; gating it would show an approval card.
     "feedback",
 ];
@@ -274,6 +274,36 @@ fn is_readonly_orx(tokens: &[&str], stage: &str) -> bool {
     }
 
     match verb {
+        "compute" => {
+            use crate::commands::compute::{ComputeCommand, InstructionsCommand, SshConfigCommand};
+            use clap::Parser;
+            let parsed = crate::Cli::try_parse_from(tokens).map(|cli| cli.command);
+            (stage
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '\t' | '-' | '_'))
+                && matches!(
+                    &parsed,
+                    Err(error) if matches!(error.kind(), clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion)
+                ))
+                || matches!(
+                    parsed,
+                    Ok(Some(crate::Command::Compute(crate::ComputeArgs {
+                        command: None
+                            | Some(
+                                ComputeCommand::Catalog(_)
+                                    | ComputeCommand::Status
+                                    | ComputeCommand::Show { .. }
+                                    | ComputeCommand::Instructions {
+                                        command: InstructionsCommand::Show
+                                    }
+                                    | ComputeCommand::SshConfig {
+                                        command: SshConfigCommand::Show
+                                    }
+                            ),
+                        ..
+                    })))
+                )
+        }
         // Verbs with a write subcommand: allow only the read-only subcommand(s).
         "project" => matches!(subcommand(&mut rest), Some("view")),
         "exp" => match subcommand(&mut rest) {
@@ -423,6 +453,35 @@ mod tests {
 
     fn allowed(command: &str) -> bool {
         decide(&payload(command)).is_some()
+    }
+
+    #[test]
+    fn compute_reads_are_allowed_but_setup_and_instruction_writes_are_gated() {
+        for command in [
+            "orx compute",
+            "orx compute --gpu H100",
+            "orx compute status --json",
+            "orx compute show ssh",
+            "orx compute instructions show --json",
+            "orx compute configure ssh --help",
+            "orx compute ssh-config show",
+        ] {
+            assert!(allowed(command), "{command}");
+        }
+        for command in [
+            "orx compute default clear",
+            "orx compute configure ssh --default-host lab",
+            "orx compute connect ssh --host lab",
+            "orx compute instructions path",
+            r"orx compute instructions set --file my\ --help --expected-revision x",
+            "orx compute default set slurm --flavor=${NOPE:+x --help y}",
+            "orx compute configure slurm --partition gpu\r--help",
+            "orx compute configure slurm --partition gpu\u{00a0}--help",
+            "orx compute instructions set --file x --expected-revision y",
+            "orx compute ssh-config set --file x --previous-file y",
+        ] {
+            assert!(!allowed(command), "{command}");
+        }
     }
 
     #[test]
