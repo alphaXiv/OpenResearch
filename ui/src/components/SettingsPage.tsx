@@ -827,7 +827,7 @@ function HostTestCell({ test, connecting, masterRunning, containerFailed = false
   );
 }
 
-function SshSection({ remote = false }: { remote?: boolean }) {
+function SshSection() {
   const hostsOptions = getSshSettingsQuery();
   const hostsQuery = useQuery(hostsOptions);
   const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
@@ -840,7 +840,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const checkedHosts = remote ? [] : hosts
+  const checkedHosts = hosts
     ?.filter((host) => {
       const test = tests[host.host] ?? host.lastTest;
       return test?.reachable && test.toolsFound;
@@ -872,7 +872,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
     <>
       {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        {!remote && hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
+        {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
         <Button variant="ghost" className="ms-auto" onClick={() => setConfigOpen(true)}>
           <Settings size={14} /> {m.ssh_configure_hosts()}
         </Button>
@@ -898,7 +898,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
             const connectionError = hostTest?.error || containerError;
             const connecting = connectingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
-            const hasTerminal = !remote && (connecting || Boolean(connectionError));
+            const hasTerminal = connecting || Boolean(connectionError);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
@@ -912,7 +912,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                       <div className="mt-1 truncate text-sm text-subtext" title={address}>{address}</div>
                     </div>
                   </div>
-                  {!remote && <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
+                  <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
                     <div className="flex items-center gap-2 text-start">
                       <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} containerFailed={containerFailed} />
                       {hasTerminal && (
@@ -953,9 +953,9 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                             ? m.settings_reconnect()
                             : m.settings_connect()}
                     </Button>
-                  </div>}
+                  </div>
                 </div>
-                {!remote && <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
+                <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
                   onChange={(value) => {
                     if (connecting) cancelConnect();
                     setDrafts((drafts) => ({ ...drafts, [h.host]: value }));
@@ -964,7 +964,7 @@ function SshSection({ remote = false }: { remote?: boolean }) {
                       delete next[h.host];
                       return next;
                     });
-                  }} />}
+                  }} />
                 {hasTerminal && (open || connecting) && (
                   <div className={`border-t border-t-border-variant py-3${open ? "" : " hidden"}`}>
                     {!connecting && connectionError && (
@@ -1051,7 +1051,7 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
   return <Badge className="rounded-sm" variant="success">{m.settings_page_ready()}</Badge>;
 }
 
-function SlurmSection({ remote = false }: { remote?: boolean }) {
+function SlurmSection() {
   const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
 
   const settingsOptions = getSlurmSettingsQuery();
@@ -1071,7 +1071,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
   const [connecting, setConnecting] = useState(false);
   const [connectionFailed, setConnectionFailed] = useState(false);
   const [connectionAttempt, setConnectionAttempt] = useState(0);
-  const readyHost = !remote && host && test?.reachable && test.slurmFound && test.toolsFound ? [host] : [];
+  const readyHost = host && test?.reachable && test.slurmFound && test.toolsFound ? [host] : [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(readyHost);
 
   function connect() {
@@ -1170,29 +1170,27 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
               </label>
             </div>
             <div className="actions">
-              {!remote && (
-                <Button
-                  type="button"
-                  onClick={() => {
-                    if (connecting && !connectionFailed) {
-                      setConnectionFailed(false);
-                      setConnecting(false);
-                    } else {
-                      connect();
-                    }
-                  }}
-                  disabled={!host}
-                  title={host ? undefined : m.settings_pick_login_node()}
-                >
-                  {connecting
-                    ? connectionFailed
-                      ? m.app_retry()
-                      : m.settings_page_cancel()
-                    : test
-                      ? m.settings_reconnect()
-                      : m.settings_connect()}
-                </Button>
-              )}
+              <Button
+                type="button"
+                onClick={() => {
+                  if (connecting && !connectionFailed) {
+                    setConnectionFailed(false);
+                    setConnecting(false);
+                  } else {
+                    connect();
+                  }
+                }}
+                disabled={!host}
+                title={host ? undefined : m.settings_pick_login_node()}
+              >
+                {connecting
+                  ? connectionFailed
+                    ? m.app_retry()
+                    : m.settings_page_cancel()
+                  : test
+                    ? m.settings_reconnect()
+                    : m.settings_connect()}
+              </Button>
               <span role="status">
                 <SlurmTestBadge
                   test={test}
@@ -1249,7 +1247,7 @@ function SlurmSection({ remote = false }: { remote?: boolean }) {
               </Button>
             </div>
           </form>
-          {!remote && connecting && (
+          {connecting && (
             <SshConnectTerminal
               key={connectionAttempt}
               host={host}
@@ -1883,8 +1881,8 @@ function BackendDetailPage({
         )}
       </div>
       <div className="mt-6 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
-        {target.id === "ssh" && <SshSection remote={remote} />}
-        {target.id === "slurm" && <SlurmSection remote={remote} />}
+        {target.id === "ssh" && <SshSection />}
+        {target.id === "slurm" && <SlurmSection />}
         {target.id === "openresearch" && <OpenResearchSection remote={remote} />}
       </div>
     </>
