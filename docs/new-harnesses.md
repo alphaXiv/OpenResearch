@@ -52,6 +52,32 @@ Print-mode fallbacks exist if ACP turns out to be unsuitable:
 - **Open question:** does the Windows Desktop app ship a runnable `zcode`
   CLI, or only an Electron bundle? `probe-agents.ps1` answers this.
 
+## Windows desktop apps (first probe report)
+
+The desktop apps do not put a command-line tool on PATH:
+
+- **Kimi**: `%LOCALAPPDATA%\Programs\Kimi\Kimi.exe` (Electron 3.2.x) plus
+  `%APPDATA%\kimi-desktop\daimon-bundle`. It does not use `~/.kimi-code`, so
+  the desktop login is not shared with Kimi Code CLI. orx drives the official
+  CLI (`irm https://code.kimi.com/kimi-code/install.ps1 | iex`), and the user
+  signs in once with `kimi login`.
+- **MiniMax Code**: `%LOCALAPPDATA%\Programs\MiniMax Code\MiniMax Code.exe`
+  (Electron, agent inside `app.asar`). It keeps its data in `~/.minimax`
+  (`auth\`, `sessions\`, `config.yaml`), the same directory `mcode` uses. orx
+  drives the official CLI (`irm https://filecdn.minimax.chat/public/install.ps1
+  | iex`, launchers in `%USERPROFILE%\.minimax-code`). The desktop login is
+  expected to carry over; this is not yet verified.
+- **ZCode**: `%LOCALAPPDATA%\Programs\ZCode\ZCode.exe` bundles the CLI runtime
+  as `resources\glm\zcode.cjs`, the same file the npm repack ships. orx can run
+  it as `ZCode.exe resources\glm\zcode.cjs …` with `ELECTRON_RUN_AS_NODE=1`.
+  Outside the app, the runtime also needs `ZCODE_BUILTIN_PROVIDER_CONFIG_FILE`
+  pointing at `zcode-builtin.json`. Without it, `-p` fails with "无法定位 CLI
+  ZCode Built-in Provider Config". Whether this build's Electron fuses allow
+  RunAsNode is still to be confirmed on Windows.
+
+Never launch the GUI executables to probe them. Only files named
+`kimi`/`mcode`/`zcode` are command-line tools.
+
 ## Still to capture
 
 Real turn streams (text, tool calls, permission requests, errors) for the
