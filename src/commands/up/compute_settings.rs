@@ -483,8 +483,8 @@ pub(super) async fn save_ssh_config(Json(req): Json<SaveSshConfigReq>) -> ApiRes
 
 #[derive(Deserialize)]
 pub(super) struct SshPreflightReq {
-    host: String,
-    container: Option<String>,
+    pub(super) host: String,
+    pub(super) container: Option<String>,
 }
 
 pub(super) async fn ssh_master_status(Query(req): Query<SshPreflightReq>) -> ApiResult {
