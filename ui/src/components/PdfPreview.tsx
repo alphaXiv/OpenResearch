@@ -10,10 +10,12 @@ import {
   PDFLinkService,
   PDFViewer,
 } from "pdfjs-dist/legacy/web/pdf_viewer.mjs";
-import { ChevronDown, ChevronUp, Minus, MoveHorizontal, Plus } from "lucide-react";
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { ChevronDown, ChevronUp, Minus, MoveHorizontal, Plus, Search } from "lucide-react";
+import { useContext, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { fmtNumber } from "../i18n";
 import { m } from "../paraglide/messages.js";
+import { MediaDownloadButton, MediaToolbarSlot } from "./mediaToolbar";
 import { IconButton, Input } from "./ui";
 
 // WebKit's streams aren't async-iterable, and PDF.js iterates one to extract page
@@ -51,10 +53,12 @@ type FindMatches = { current: number; total: number };
 export default function PdfPreview({
   url,
   name,
+  download,
   onError,
 }: {
   url: string;
   name: string;
+  download: boolean;
   onError: () => void;
 }) {
   const paneRef = useRef<HTMLDivElement>(null);
@@ -68,6 +72,7 @@ export default function PdfPreview({
   const [pageCount, setPageCount] = useState(0);
   const [query, setQuery] = useState("");
   const [matches, setMatches] = useState<FindMatches | null>(null);
+  const toolbarSlot = useContext(MediaToolbarSlot);
 
   useEffect(() => {
     const pane = paneRef.current;
@@ -171,86 +176,102 @@ export default function PdfPreview({
     }
   }
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onKeyDown}>
-      <div className="flex shrink-0 items-center gap-1 border-b border-border-variant py-1 px-4">
-        <span className="px-1 text-xs text-subtext tabular-nums whitespace-nowrap">
-          {pageCount ? `${fmtNumber(page)} / ${fmtNumber(pageCount)}` : ""}
+  const controls = (
+    <>
+      <span className="px-1 text-xs text-muted tabular-nums whitespace-nowrap @max-xl:hidden">
+        {pageCount ? `${fmtNumber(page)} / ${fmtNumber(pageCount)}` : ""}
+      </span>
+      <IconButton
+        size="small"
+        aria-label={m.image_zoom_out()}
+        data-tip={m.image_zoom_out()}
+        data-tip-align="end"
+        onClick={() => viewerRef.current?.decreaseScale()}
+      >
+        <Minus size={13} />
+      </IconButton>
+      <IconButton
+        size="small"
+        className="@max-lg:hidden"
+        aria-label={m.pdf_preview_fit_width()}
+        data-tip={m.pdf_preview_fit_width()}
+        data-tip-align="end"
+        onClick={() => {
+          if (viewerRef.current) viewerRef.current.currentScaleValue = "page-width";
+        }}
+      >
+        <MoveHorizontal size={13} />
+      </IconButton>
+      <IconButton
+        size="small"
+        aria-label={m.image_zoom_in()}
+        data-tip={m.image_zoom_in()}
+        data-tip-align="end"
+        onClick={() => viewerRef.current?.increaseScale()}
+      >
+        <Plus size={13} />
+      </IconButton>
+      <div className="flex h-7 w-36 min-w-20 shrink items-center overflow-hidden gap-0.5 rounded-md border border-border bg-background ps-2 pe-0.5 focus-within:border-text">
+        <Search size={13} className="shrink-0 text-muted" />
+        <Input
+          ref={findInputRef}
+          variant="inline"
+          className="h-full min-w-0 flex-1 border-b-0 ps-1 text-xs [&::-webkit-search-cancel-button]:hidden"
+          type="search"
+          aria-label={m.pdf_preview_find()}
+          data-tip={m.pdf_preview_find()}
+          data-tip-align="end"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            // The new count arrives only once the whole document is scanned.
+            setMatches(null);
+            find(event.target.value, false);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              find(query, true, event.shiftKey);
+            }
+          }}
+        />
+        <span className="text-xs text-muted tabular-nums whitespace-nowrap" aria-live="polite">
+          {query && matches
+            ? matches.total
+              ? `${fmtNumber(matches.current)} / ${fmtNumber(matches.total)}`
+              : fmtNumber(0)
+            : ""}
         </span>
         <IconButton
           size="small"
-          aria-label={m.image_zoom_out()}
-          data-tip={m.image_zoom_out()}
-          onClick={() => viewerRef.current?.decreaseScale()}
+          className="size-6"
+          aria-label={m.pdf_preview_previous_match()}
+          data-tip={m.pdf_preview_previous_match()}
+          data-tip-align="end"
+          disabled={!query}
+          onClick={() => find(query, true, true)}
         >
-          <Minus size={13} />
+          <ChevronUp size={13} />
         </IconButton>
         <IconButton
           size="small"
-          aria-label={m.image_zoom_in()}
-          data-tip={m.image_zoom_in()}
-          onClick={() => viewerRef.current?.increaseScale()}
+          className="size-6"
+          aria-label={m.pdf_preview_next_match()}
+          data-tip={m.pdf_preview_next_match()}
+          data-tip-align="end"
+          disabled={!query}
+          onClick={() => find(query, true)}
         >
-          <Plus size={13} />
+          <ChevronDown size={13} />
         </IconButton>
-        <IconButton
-          size="small"
-          aria-label={m.pdf_preview_fit_width()}
-          data-tip={m.pdf_preview_fit_width()}
-          onClick={() => {
-            if (viewerRef.current) viewerRef.current.currentScaleValue = "page-width";
-          }}
-        >
-          <MoveHorizontal size={13} />
-        </IconButton>
-        <div className="ms-auto flex min-w-0 items-center gap-1">
-          <Input
-            ref={findInputRef}
-            className="h-7 w-48 min-w-0 shrink"
-            type="search"
-            placeholder={m.pdf_preview_find()}
-            aria-label={m.pdf_preview_find()}
-            value={query}
-            onChange={(event) => {
-              setQuery(event.target.value);
-              // The new count arrives only once the whole document is scanned.
-              setMatches(null);
-              find(event.target.value, false);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-                find(query, true, event.shiftKey);
-              }
-            }}
-          />
-          <span className="px-1 text-xs text-subtext tabular-nums whitespace-nowrap" aria-live="polite">
-            {query && matches
-              ? matches.total
-                ? `${fmtNumber(matches.current)} / ${fmtNumber(matches.total)}`
-                : fmtNumber(0)
-              : ""}
-          </span>
-          <IconButton
-            size="small"
-            aria-label={m.pdf_preview_previous_match()}
-            data-tip={m.pdf_preview_previous_match()}
-            disabled={!query}
-            onClick={() => find(query, true, true)}
-          >
-            <ChevronUp size={13} />
-          </IconButton>
-          <IconButton
-            size="small"
-            aria-label={m.pdf_preview_next_match()}
-            data-tip={m.pdf_preview_next_match()}
-            data-tip-align="end"
-            disabled={!query}
-            onClick={() => find(query, true)}
-          >
-            <ChevronDown size={13} />
-          </IconButton>
-        </div>
       </div>
+      {download && <MediaDownloadButton url={url} name={name} />}
+    </>
+  );
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col" onKeyDown={onKeyDown}>
+      {toolbarSlot &&
+        createPortal(<div className="flex min-w-0 shrink items-center gap-1">{controls}</div>, toolbarSlot)}
       {/* PDFViewer requires an absolutely positioned scroll container. */}
       <div ref={paneRef} className="relative min-h-0 flex-1 bg-surface">
         {/* Focusable, so a click in the pages keeps Cmd/Ctrl+F here and the keys scroll. */}

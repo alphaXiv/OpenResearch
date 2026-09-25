@@ -63,6 +63,7 @@ import { FileTypeIcon, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTyp
 import { HtmlPreview } from "./HtmlPreview";
 import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
+import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
@@ -243,6 +244,7 @@ export function FileViewer({
   const bodyRef = useRef<HTMLDivElement>(null);
   const selectableContentRef = useRef<HTMLDivElement>(null);
   const [copiedContents, setCopiedContents] = useState(false);
+  const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
   // A cited `artifacts/…` file can answer from either name in the checkout, so
@@ -564,13 +566,13 @@ export function FileViewer({
 
   return (
     <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
-      <div className="file-view-header flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
+      <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
         <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
           {filePath.split("/").pop() || filePath}
         </span>
         {branchLabel && (
-          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
@@ -591,6 +593,7 @@ export function FileViewer({
             )}
           </span>
         )}
+        <div ref={setMediaToolbarSlot} className="contents" />
         {isLatex && latex.compiled && (
           <IconButton
             size="small"
@@ -851,23 +854,27 @@ export function FileViewer({
             {loaded ? notFoundCopy(loaded) : m.file_viewer_not_found()}
           </div>
         ) : mediaKind ? (
-          <MediaPreview
-            kind={mediaKind}
-            url={rawUrl}
-            name={path.split("/").pop() ?? path}
-          />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              kind={mediaKind}
+              url={rawUrl}
+              name={path.split("/").pop() ?? path}
+            />
+          </MediaToolbarSlot.Provider>
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
           </div>
         ) : showingPdf && pdfPaneUrl && compiledPdfName ? (
-          <MediaPreview
-            key={pdfPaneUrl}
-            kind="pdf"
-            url={pdfPaneUrl}
-            name={compiledPdfName}
-            downloadBar={false}
-          />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              key={pdfPaneUrl}
+              kind="pdf"
+              url={pdfPaneUrl}
+              name={compiledPdfName}
+              download={false}
+            />
+          </MediaToolbarSlot.Provider>
         ) : isMarkdown && !showSource ? (
           <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
