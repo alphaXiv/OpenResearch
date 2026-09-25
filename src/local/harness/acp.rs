@@ -41,8 +41,9 @@ const AUTH_REQUIRED: i64 = -32000;
 const METHOD_NOT_FOUND: i64 = -32601;
 
 /// An `auth_required` answer. Agents also send it when a started turn fails
-/// on the model provider's auth (an expired or revoked token), and then the
-/// message carries the provider's reason, which the user needs to see.
+/// on the provider's auth — a revoked token, or a plan without access to the
+/// chosen model — and then the message carries the provider's reason, which is
+/// the actionable part: signing in again does not fix a plan's model list.
 fn not_signed_in(agent: &AcpAgent, error: &RpcError) -> crate::error::Error {
     let detail = error
         .message
@@ -55,7 +56,7 @@ fn not_signed_in(agent: &AcpAgent, error: &RpcError) -> crate::error::Error {
         anyhow!("{} is not signed in. {}", agent.display, agent.login_hint)
     } else {
         anyhow!(
-            "{} is not signed in ({detail}). {}",
+            "{} refused the request: {detail}. If you are signed out: {}",
             agent.display,
             agent.login_hint
         )
@@ -1075,7 +1076,7 @@ pub(crate) mod tests {
         )
         .to_string();
         assert!(
-            detailed.starts_with("Kimi Code is not signed in (token refresh failed (401))."),
+            detailed.starts_with("Kimi Code refused the request: token refresh failed (401). "),
             "{detailed}"
         );
     }

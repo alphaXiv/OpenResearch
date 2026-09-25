@@ -271,7 +271,8 @@ impl Harness for MiniMaxCode {
     fn options(&self) -> HarnessOptions {
         HarnessOptions::none().with_permission_choices(
             vec![
-                OptionChoice::described("ask", "Ask", "Ask before tools run"),
+                // No "Ask": MiniMax's `default` mode is its own risk policy and
+                // ran out-of-project commands without a permission request.
                 OptionChoice::described(
                     "auto",
                     "Auto",
@@ -337,6 +338,17 @@ mod tests {
             settings(None, false).config,
             vec![("permissionMode", "auto")]
         );
+    }
+
+    #[test]
+    fn composer_offers_no_ask_mode() {
+        let ids: Vec<_> = MiniMaxCode
+            .options()
+            .permission_modes
+            .into_iter()
+            .map(|choice| choice.id)
+            .collect();
+        assert_eq!(ids, vec!["auto", "bypass"]);
     }
 
     #[test]
