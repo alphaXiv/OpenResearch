@@ -1,9 +1,9 @@
 [package]
 name = "openresearch-cli"
-version = "0.2.10"
+version = "0.3.0"
 edition = "2021"
 description = "OpenResearch CLI (orx) — Rust port"
-repository = "https://github.com/alphaXiv/OpenResearch"
+repository = "https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode"
 license = "MIT"
 
 [[bin]]

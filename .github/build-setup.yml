@@ -1,4 +1,0 @@
-- name: Mark official release build
-  if: needs.plan.outputs.publishing == 'true'
-  shell: bash
-  run: echo "ORX_OFFICIAL_RELEASE_BUILD=1" >> "$GITHUB_ENV"
