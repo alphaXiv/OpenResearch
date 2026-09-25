@@ -9,7 +9,7 @@
 //! copy is deleted by a later start, once every process that mapped it has
 //! exited.
 //!
-//! There is no `exec`, so a restarting `orx up` spawns the new binary and exits;
+//! There is no `exec`, so a restarting `orx up` or app spawns the new binary and exits;
 //! the child waits on the parent's process handle before binding the port.
 
 use std::path::{Path, PathBuf};
@@ -17,18 +17,19 @@ use std::process::Command;
 
 use crate::error::{anyhow, Result};
 
-/// Environment a relaunched `orx up` reads to wait for the process it replaces.
+/// Environment a relaunched `orx up` or app reads to wait for the process it replaces.
 const RELAUNCH_WAIT_PID_ENV: &str = "ORX_RELAUNCH_WAIT_PID";
 
-/// Spawn the copy on disk with `args`, telling it which process to wait for,
-/// then exit. Returns only when the spawn failed.
-pub(super) fn relaunch(args: Vec<std::ffi::OsString>) -> std::io::Error {
+/// Spawn the copy on disk with `args` and `envs`, telling it which process to
+/// wait for, then exit. Returns only when the spawn failed.
+pub(super) fn relaunch(args: Vec<std::ffi::OsString>, envs: &[(&str, String)]) -> std::io::Error {
     // The load-time path, which the update swapped a new file under.
     let Ok(exe) = std::env::current_exe() else {
         return std::io::Error::other("could not resolve the running executable");
     };
     let spawned = Command::new(exe)
         .args(args)
+        .envs(envs.iter().cloned())
         .env(RELAUNCH_WAIT_PID_ENV, std::process::id().to_string())
         .spawn();
     match spawned {

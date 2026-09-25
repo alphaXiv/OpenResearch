@@ -300,6 +300,10 @@ pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     if let Some(receipt) = load_receipt()? {
         let prefix = PathBuf::from(&receipt.install_prefix);
         let prefix = crate::paths::canonicalize(&prefix).unwrap_or(prefix);
+        #[cfg(windows)]
+        if let Some(dir) = portable_outside_prefix(exe, &prefix) {
+            return Ok(InstallChannel::Portable(dir));
+        }
         return Ok(InstallChannel::Installer { receipt, prefix });
     }
     if exe.parent().is_some_and(|dir| dir.ends_with(".cargo/bin")) {
@@ -322,6 +326,17 @@ fn portable_dir(exe: &Path) -> Option<PathBuf> {
     }
     let dir = exe.parent()?;
     (!package_manager_owns(dir)).then(|| dir.to_path_buf())
+}
+
+/// A zip-extracted or desktop-app `orx.exe` away from the CLI installer's prefix
+/// still updates itself when that installer's receipt exists too.
+// Un-gated so its test runs on CI's Linux runner; only Windows has a caller.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn portable_outside_prefix(exe: &Path, prefix: &Path) -> Option<PathBuf> {
+    if exe_matches_prefix(exe, prefix) {
+        return None;
+    }
+    portable_dir(exe)
 }
 
 /// Scoop, Chocolatey and winget each install under a directory named for them;
@@ -375,7 +390,7 @@ pub fn remove_retired_exes() {
     }
 }
 
-/// A relaunched `orx up` waits here for the process it replaces to release the
+/// A relaunched `orx up` or app waits here for the process it replaces to release the
 /// port, then sweeps the binary that process was running. Only Windows
 /// relaunches by spawning; everywhere else this is a no-op.
 pub fn await_replaced_parent() {
@@ -773,7 +788,7 @@ fn mutate_cache(f: impl FnOnce(&mut CheckCache)) {
 }
 
 // ---------------------------------------------------------------------------
-// Status, for long-lived processes (`orx up` and the macOS app)
+// Status, for long-lived processes (`orx up` and the desktop app)
 // ---------------------------------------------------------------------------
 
 /// How often a long-lived process re-checks. Short enough that a day-long
@@ -847,10 +862,10 @@ fn instance_id() -> &'static str {
     ID.get_or_init(|| uuid::Uuid::new_v4().to_string())
 }
 
-/// Environment the app-bundle relaunch hands to the new app: the port the old
-/// one served on, so the new window keeps its origin (and localStorage) even when
+/// Environment the app relaunch hands to the new app: the port the old one
+/// served on, so the new window keeps its origin (and localStorage) even when
 /// the old one had fallen back from the app's usual port.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
 /// Relaunch this process into the copy on disk. Returns only on failure.
@@ -890,10 +905,17 @@ pub fn relaunch(port: u16) -> std::io::Error {
 }
 
 /// Windows has no `exec`: spawn the new binary, which waits for this process to
-/// exit before it binds the port, then leave.
+/// exit before it binds the port, then leave. The desktop app comes back as the
+/// app, on the same port.
 #[cfg(windows)]
-pub fn relaunch(_port: u16) -> std::io::Error {
-    windows::relaunch(relaunch_args(std::env::args_os().skip(1)))
+pub fn relaunch(port: u16) -> std::io::Error {
+    if crate::commands::app::launched_as_windows_app() {
+        return windows::relaunch(
+            vec![crate::commands::app::WINDOWS_APP_ARG.into()],
+            &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
+        );
+    }
+    windows::relaunch(relaunch_args(std::env::args_os().skip(1)), &[])
 }
 
 /// Linux reports a replaced binary as `<path> (deleted)`; the installer put the
@@ -1002,7 +1024,7 @@ pub async fn apply_now() -> Result<()> {
 const APPLY_NOW_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// One update pass for a process that outlives the invocation-time check in
-/// [`UpdateWarning::start`] — `orx up` and the macOS app can run for days, so
+/// [`UpdateWarning::start`] — `orx up` and the desktop app can run for days, so
 /// they poll instead.
 ///
 /// The check is refreshed even when auto-update is off, so the dashboard can
@@ -1254,9 +1276,9 @@ impl UpdateWarning {
 mod tests {
     use super::{
         app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, package_manager_owns, parse_manifest, portable_dir, precedence, relaunch_args,
-        relaunch_target, render, retired_path, warning_for, CheckCache, InstallChannel,
-        ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        now_unix, package_manager_owns, parse_manifest, portable_dir, portable_outside_prefix,
+        precedence, relaunch_args, relaunch_target, render, retired_path, warning_for, CheckCache,
+        InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1472,6 +1494,21 @@ mod tests {
         );
         assert_eq!(portable_dir(Path::new("Downloads/orx-0.2.exe")), None);
         assert_eq!(portable_dir(Path::new("Downloads/ORX.EXE")), None);
+    }
+
+    #[test]
+    fn the_desktop_apps_orx_updates_itself_beside_a_cli_install() {
+        // Forward slashes, so the parent splits the same way off Windows.
+        let prefix = Path::new("C:/Users/me/.cargo");
+        let app = Path::new("C:/Users/me/AppData/Local/Programs/OpenResearch/orx.exe");
+        assert_eq!(
+            portable_outside_prefix(app, prefix),
+            Some(PathBuf::from(
+                "C:/Users/me/AppData/Local/Programs/OpenResearch"
+            ))
+        );
+        let cli = Path::new("C:/Users/me/.cargo/bin/orx.exe");
+        assert_eq!(portable_outside_prefix(cli, prefix), None);
     }
 
     #[test]

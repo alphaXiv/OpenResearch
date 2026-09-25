@@ -1029,7 +1029,7 @@ impl TelemetrySession {
         TelemetrySession
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn start_app() -> TelemetrySession {
         retry_outbox();
         capture("app_started", json!({}));

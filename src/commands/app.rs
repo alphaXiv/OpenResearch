@@ -1,13 +1,14 @@
-//! macOS `.app` mode — the GUI entry point for the downloadable OpenResearch app.
+//! Desktop app mode — the GUI entry point for the downloadable OpenResearch app.
 //!
-//! The bundle's executable IS the `orx` binary. When launched from a `.app`
-//! (double-click), macOS starts it with no arguments, so `main` routes here
-//! instead of parsing CLI args. App mode owns the main thread with the AppKit
-//! run loop and shows the dashboard in its own window, while the `orx up`
-//! dashboard server runs on background tokio worker threads.
+//! On macOS the `.app` bundle's executable IS the `orx` binary; launched from
+//! Finder with no arguments, `main` routes here instead of parsing CLI args. On
+//! Windows the installed `OpenResearch.exe` launcher (windows/launcher) starts
+//! the `orx.exe` beside it as `orx app`, in a hidden console its children share.
+//! Either way app mode owns the main thread with the window's run loop, while the
+//! `orx up` dashboard server runs on background tokio worker threads.
 //!
 //! This is distinct from `orx up` launched in a terminal, which stays a plain
-//! CLI. The GUI parts are macOS-only; other targets compile them away.
+//! CLI. The GUI parts are macOS- and Windows-only; other targets compile them away.
 
 /// True when `exe` is a `<name>.app/Contents/MacOS` bundle executable that was
 /// invoked under its own name — the signal to enter GUI app mode instead of
@@ -41,14 +42,37 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-#[cfg(target_os = "macos")]
+/// The whole argument list the Windows launcher starts `orx.exe` with; `orx app`
+/// with anything after it is not the app.
+#[cfg(windows)]
+pub const WINDOWS_APP_ARG: &str = "app";
+
+#[cfg(windows)]
+pub fn launched_as_windows_app() -> bool {
+    let mut args = std::env::args_os().skip(1);
+    args.next().is_some_and(|arg| arg == WINDOWS_APP_ARG) && args.next().is_none()
+}
+
+#[cfg(any(target_os = "macos", windows))]
 const APP_PORT: u16 = 4792;
 
 /// Enter GUI app mode: pick a port, start the dashboard server on background
 /// threads, and hand the main thread to the window's run loop. Returns only if
 /// setup fails; quitting exits the process.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub async fn run() {
+    #[cfg(windows)]
+    let focus_requests = {
+        // A relaunched app first waits out its predecessor, which holds the claim.
+        crate::updates::await_replaced_parent();
+        match instance::claim() {
+            Some(requests) => requests,
+            None => return,
+        }
+    };
+    // After the claim, so a launch that only brings the window forward isn't a
+    // start. The durable outbox covers a quit before delivery.
+    let _telemetry = crate::telemetry::TelemetrySession::start_app();
     if let Err(error) = crate::local::storage::prepare().await {
         eprintln!("OpenResearch storage: {error}");
         crate::show_error_dialog(&error.to_string());
@@ -86,7 +110,10 @@ pub async fn run() {
                 .map(|a| a.port())
                 .unwrap_or(4791)
         });
+    #[cfg(target_os = "macos")]
     imp::run_event_loop(port);
+    #[cfg(windows)]
+    imp::run_event_loop(port, focus_requests);
 }
 
 /// Adopt the user's shell environment in place of the one launchd handed us
@@ -154,8 +181,8 @@ pub(crate) async fn hydrate_shell_env() {
 
 /// True when `url` is a page of the dashboard at `origin`, as opposed to the
 /// `about:blank` the window holds before the server is up and while quitting.
-// Un-gated so its tests run on CI's Linux runner; only macOS has a caller.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// Un-gated so its tests run on CI's Linux runner; only the desktop targets call it.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn is_dashboard_url(url: &str, origin: &str) -> bool {
     url.strip_prefix(origin)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -163,35 +190,116 @@ fn is_dashboard_url(url: &str, origin: &str) -> bool {
 
 /// Schemes a pop-up may hand to the system browser. A browser asks before
 /// launching the app behind any other scheme (`ssh:`, `vscode:`); `open` would not.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 fn opens_in_browser(url: &str) -> bool {
     ["http:", "https:", "mailto:"]
         .iter()
         .any(|scheme| url.starts_with(scheme))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// One app per user session on Windows, where nothing else enforces it: a
+/// second launch brings the running window forward and exits.
+#[cfg(windows)]
+mod instance {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
+
+    const MUTEX: &str = r"Local\OpenResearchApp";
+    const FOCUS_EVENT: &str = r"Local\OpenResearchAppFocus";
+
+    /// Signalled by each later launch.
+    pub(super) struct FocusRequests(HANDLE);
+
+    // SAFETY: an event handle may be waited on from any thread.
+    unsafe impl Send for FocusRequests {}
+
+    /// Claims the app for this process. `None` means another instance has it
+    /// and was asked to come forward.
+    pub(super) fn claim() -> Option<FocusRequests> {
+        // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
+        // on purpose: the claim lasts until the process exits.
+        // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
+        let (event_name, mutex_name) = (super::wide(FOCUS_EVENT), super::wide(MUTEX));
+        unsafe {
+            // The event first, so it exists by the time anyone sees the claim.
+            // For a second launch this opens the running app's event.
+            let event = CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr());
+            CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                // Windows lets the running app take the foreground only with our leave.
+                AllowSetForegroundWindow(ASFW_ANY);
+                SetEvent(event);
+                CloseHandle(event);
+                return None;
+            }
+            Some(FocusRequests(event))
+        }
+    }
+
+    impl FocusRequests {
+        /// Calls `on_request` for every later launch, from a thread of its own.
+        pub(super) fn listen(self, on_request: impl Fn() + Send + 'static) {
+            std::thread::spawn(move || {
+                while self.wait() {
+                    on_request();
+                }
+            });
+        }
+
+        // A method, so the thread above captures the `Send` wrapper and not
+        // its bare handle.
+        fn wait(&self) -> bool {
+            // SAFETY: waits on the event this process created and never closes.
+            unsafe { WaitForSingleObject(self.0, INFINITE) == WAIT_OBJECT_0 }
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", windows))]
 mod imp {
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
-    use muda::accelerator::{Accelerator, Code, Modifiers};
-    use muda::{AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
-    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
-    use objc2::MainThreadMarker;
-    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn};
-    use objc2_foundation::NSString;
     use tao::dpi::LogicalSize;
     use tao::event::{Event, StartCause, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
-    use tao::window::WindowBuilder;
-    use wry::{NewWindowResponse, PageLoadEvent, WebViewBuilder, WebViewExtMacOS};
+    use tao::window::{Window, WindowBuilder};
+    use wry::{NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder};
+
+    #[cfg(target_os = "macos")]
+    use muda::{
+        accelerator::{Accelerator, Code, Modifiers},
+        AboutMetadata, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+    };
+    #[cfg(target_os = "macos")]
+    use objc2::runtime::{AnyClass, AnyObject, Bool, Sel};
+    #[cfg(target_os = "macos")]
+    use objc2::MainThreadMarker;
+    #[cfg(target_os = "macos")]
+    use objc2_app_kit::{NSAlert, NSAlertFirstButtonReturn};
+    #[cfg(target_os = "macos")]
+    use objc2_foundation::NSString;
+    #[cfg(target_os = "macos")]
+    use wry::WebViewExtMacOS;
 
     enum UserEvent {
         ServerReady,
+        #[cfg(target_os = "macos")]
         Menu(MenuId),
+        #[cfg(windows)]
+        Focus,
     }
 
     enum Quit {
@@ -200,7 +308,10 @@ mod imp {
         ShuttingDown,
     }
 
-    pub(super) fn run_event_loop(port: u16) {
+    pub(super) fn run_event_loop(
+        port: u16,
+        #[cfg(windows)] focus_requests: super::instance::FocusRequests,
+    ) {
         let origin = format!("http://127.0.0.1:{port}");
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
@@ -236,36 +347,53 @@ mod imp {
             let _ = ready.send_event(UserEvent::ServerReady);
         });
 
-        let menu_proxy = event_loop.create_proxy();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
-        }));
-        let quit = MenuItem::new(
-            "Quit OpenResearch",
-            true,
-            Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
-        );
-        let reload = MenuItem::new(
-            "Reload",
-            true,
-            Some(Accelerator::new(Modifiers::META, Code::KeyR)),
-        );
-        let menu = match build_menu(&quit, &reload) {
-            Ok(menu) => menu,
-            Err(err) => {
-                crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
-                return;
+        #[cfg(windows)]
+        {
+            let focus = event_loop.create_proxy();
+            focus_requests.listen(move || {
+                let _ = focus.send_event(UserEvent::Focus);
+            });
+            set_taskbar_identity();
+        }
+
+        #[cfg(target_os = "macos")]
+        let (menu, quit_item, reload_item) = {
+            let menu_proxy = event_loop.create_proxy();
+            MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+                let _ = menu_proxy.send_event(UserEvent::Menu(event.id));
+            }));
+            let quit = MenuItem::new(
+                "Quit OpenResearch",
+                true,
+                Some(Accelerator::new(Modifiers::META, Code::KeyQ)),
+            );
+            let reload = MenuItem::new(
+                "Reload",
+                true,
+                Some(Accelerator::new(Modifiers::META, Code::KeyR)),
+            );
+            match build_menu(&quit, &reload) {
+                Ok(menu) => (menu, quit, reload),
+                Err(err) => {
+                    crate::show_error_dialog(&format!("Could not build the menu bar: {err}"));
+                    return;
+                }
             }
         };
 
-        let window = match WindowBuilder::new()
+        let window = WindowBuilder::new()
             .with_title("OpenResearch")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
             // Shown once the dashboard has loaded, so it never flashes blank.
-            .with_visible(false)
-            .build(&event_loop)
-        {
+            .with_visible(false);
+        #[cfg(windows)]
+        let window = {
+            use tao::platform::windows::IconExtWindows;
+            // Resource 1 is the icon build.rs embeds in orx.exe.
+            window.with_window_icon(tao::window::Icon::from_resource(1, None).ok())
+        };
+        let window = match window.build(&event_loop) {
             Ok(window) => Rc::new(window),
             Err(err) => {
                 crate::show_error_dialog(&format!("Could not open the window: {err}"));
@@ -273,7 +401,7 @@ mod imp {
             }
         };
 
-        let shown = Cell::new(false);
+        let shown = Rc::new(Cell::new(false));
         let webview = WebViewBuilder::new()
             .with_accept_first_mouse(true)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
@@ -286,7 +414,10 @@ mod imp {
                 }
                 NewWindowResponse::Deny
             })
-            .with_download_started_handler(choose_download_path)
+            .with_download_started_handler({
+                let window = window.clone();
+                move |_url, path| choose_download_path(&window, path)
+            })
             .with_document_title_changed_handler({
                 let window = window.clone();
                 move |title| window.set_title(&title)
@@ -294,6 +425,7 @@ mod imp {
             .with_on_page_load_handler({
                 let window = window.clone();
                 let origin = origin.clone();
+                let shown = shown.clone();
                 move |event, url| {
                     if matches!(event, PageLoadEvent::Finished)
                         && super::is_dashboard_url(&url, &origin)
@@ -312,50 +444,57 @@ mod imp {
                 return;
             }
         };
+        #[cfg(target_os = "macos")]
         add_confirm_panel(&webview);
 
-        let quit_id = quit.id().clone();
-        let reload_id = reload.id().clone();
         let mut quit = Quit::No;
         event_loop.run(move |event, _, control_flow| match event {
             Event::NewEvents(StartCause::Init) => {
                 *control_flow = ControlFlow::Wait;
+                #[cfg(target_os = "macos")]
                 menu.init_for_nsapp();
             }
             Event::NewEvents(StartCause::ResumeTimeReached { .. }) => match quit {
                 Quit::No => {}
-                // SIGTERM takes the server's own shutdown path, which stops the
-                // agents and then exits the process.
+                // The server's own shutdown path stops the agents and then exits
+                // the process.
                 Quit::Flushing => {
-                    unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
+                    crate::commands::up::request_shutdown();
                     quit = Quit::ShuttingDown;
                     *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_secs(5));
                 }
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
-            Event::UserEvent(UserEvent::ServerReady) => {
+            Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
                 let _ = webview.load_url(&format!("{origin}/"));
             }
-            Event::UserEvent(UserEvent::Menu(id)) if id == quit_id => {
-                // A repeat press would restart the sequence and push back the fallback exit.
-                if !matches!(quit, Quit::No) {
-                    return;
-                }
-                window.set_visible(false);
-                // Unloading fires the page's `pagehide` flush of workspace state,
-                // which has to reach the in-process server before it exits.
-                let _ = webview.load_url("about:blank");
-                quit = Quit::Flushing;
-                *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
+                begin_quit(&mut quit, &window, &webview, control_flow);
             }
-            Event::UserEvent(UserEvent::Menu(id)) if id == reload_id => {
+            #[cfg(target_os = "macos")]
+            Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
             }
-            // Closing hides, like other Mac apps; the Dock icon brings it back.
+            // Before the first load the window shows itself; while quitting it
+            // must stay hidden.
+            #[cfg(windows)]
+            Event::UserEvent(UserEvent::Focus) if shown.get() && matches!(quit, Quit::No) => {
+                window.set_minimized(false);
+                window.set_visible(true);
+                window.set_focus();
+            }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
                 ..
-            } => window.set_visible(false),
+            } => {
+                // Closing hides, like other Mac apps; the Dock icon brings it back.
+                #[cfg(target_os = "macos")]
+                window.set_visible(false);
+                #[cfg(windows)]
+                begin_quit(&mut quit, &window, &webview, control_flow);
+            }
+            #[cfg(target_os = "macos")]
             Event::Reopen { .. } => {
                 window.set_visible(true);
                 window.set_focus();
@@ -364,6 +503,36 @@ mod imp {
         })
     }
 
+    fn begin_quit(
+        quit: &mut Quit,
+        window: &Window,
+        webview: &WebView,
+        control_flow: &mut ControlFlow,
+    ) {
+        // A repeat request would restart the sequence and push back the fallback exit.
+        if !matches!(quit, Quit::No) {
+            return;
+        }
+        window.set_visible(false);
+        // Unloading fires the page's `pagehide` flush of workspace state,
+        // which has to reach the in-process server before it exits.
+        let _ = webview.load_url("about:blank");
+        *quit = Quit::Flushing;
+        *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
+    }
+
+    /// Matches the Start menu shortcut's AppUserModelID, so the taskbar groups
+    /// the window with the shortcut and pins the launcher rather than orx.exe.
+    #[cfg(windows)]
+    fn set_taskbar_identity() {
+        use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+
+        let id = super::wide("alphaXiv.OpenResearch");
+        // SAFETY: the string is NUL-terminated and outlives the call.
+        unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
+    }
+
+    #[cfg(target_os = "macos")]
     fn build_menu(quit: &MenuItem, reload: &MenuItem) -> muda::Result<Menu> {
         let about = AboutMetadata {
             name: Some("OpenResearch".into()),
@@ -421,10 +590,18 @@ mod imp {
         ])
     }
 
-    /// WKWebView drops downloads without a handler, and wry's default saves
-    /// silently into ~/Downloads; ask where, as a browser would.
-    fn choose_download_path(_url: String, path: &mut PathBuf) -> bool {
+    /// Without a handler WKWebView drops downloads and WebView2 saves them
+    /// silently into Downloads; ask where, as a browser would.
+    fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
         let mut dialog = rfd::FileDialog::new();
+        // Owned by the window, which Windows disables while the dialog is up. On
+        // macOS a parent turns the panel into a sheet, which a hidden window can't show.
+        #[cfg(windows)]
+        {
+            dialog = dialog.set_parent(window);
+        }
+        #[cfg(not(windows))]
+        let _ = window;
         if let Some(dir) = path.parent() {
             dialog = dialog.set_directory(dir);
         }
@@ -433,7 +610,7 @@ mod imp {
         }
         match dialog.save_file() {
             Some(chosen) => {
-                // WebKit fails a download onto an existing file, and the panel
+                // Neither webview writes over an existing file, and the panel
                 // has already confirmed replacing it.
                 if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
                     return false;
@@ -447,7 +624,8 @@ mod imp {
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
     /// every `window.confirm` with false, so add it to the delegate's class.
-    fn add_confirm_panel(webview: &wry::WebView) {
+    #[cfg(target_os = "macos")]
+    fn add_confirm_panel(webview: &WebView) {
         type ConfirmPanel = unsafe extern "C-unwind" fn(
             &AnyObject,
             Sel,
@@ -475,6 +653,7 @@ mod imp {
         }
     }
 
+    #[cfg(target_os = "macos")]
     unsafe extern "C-unwind" fn run_confirm_panel(
         _this: &AnyObject,
         _cmd: Sel,

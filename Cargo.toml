@@ -69,24 +69,31 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 # Win32 calls std lacks: run liveness, console ownership, the error dialog, PE
 # version-resource reads (GetFileVersionInfoW / VerQueryValueW — the spawn-free
-# `--version` fast path in harness detection). Already in the tree.
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+# `--version` fast path in harness detection), and the desktop app's single
+# instance and taskbar identity. Already in the tree.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Credentials", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_SystemServices", "Win32_System_Threading", "Win32_System_Console", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+# Desktop app mode (src/commands/app.rs): the dashboard in its own window. tao
+# owns the run loop on the main thread, wry hosts the dashboard in the system
+# webview (WKWebView, WebView2), and rfd shows the save panel. Not on Linux, so
+# the static musl builds are untouched.
+tao = "0.37"
+wry = "0.57"
+rfd = "0.17"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-# macOS `.app` mode (src/commands/app.rs): the dashboard in its own window. tao
-# owns the AppKit run loop on the main thread, wry hosts the dashboard in a
-# WKWebView, muda builds the menu bar, rfd the save panel, and objc2-app-kit's
-# NSAlert backs `window.confirm`.
-# macOS-only so the static musl Linux builds are untouched.
+# muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSView"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
-tao = "0.37"
-wry = "0.57"
 muda = "0.20"
-rfd = "0.17"
 # `window.confirm` panel added to wry's WKUIDelegate (src/commands/app.rs).
 block2 = "0.6"
+
+[build-dependencies]
+# Embeds the Windows icon in orx.exe; a no-op for other targets.
+embed-resource = "3"
 
 # The profile that 'dist' will build with
 [profile.dist]
