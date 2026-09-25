@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::Value;
 
-pub(crate) const IDS: [&str; 7] = [
+pub(crate) const IDS: [&str; 8] = [
     "claude-code",
     "codex",
     "opencode",
@@ -9,6 +9,7 @@ pub(crate) const IDS: [&str; 7] = [
     "antigravity",
     "kimi-code",
     "minimax-code",
+    "zcode",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

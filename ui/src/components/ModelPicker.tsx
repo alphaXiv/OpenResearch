@@ -48,6 +48,7 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   antigravity: "Google Antigravity",
   "kimi-code": "Kimi Code",
   "minimax-code": "MiniMax Code",
+  zcode: "ZCode",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.

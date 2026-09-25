@@ -493,7 +493,7 @@ async fn drive(
         _ => {}
     }
     if ctx.plan_mode {
-        if let Some(card) = plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
+        if let Some(card) = synthesized_plan_card(&ctx.assistant.parts, &ctx.assistant.id) {
             ctx.upsert_part(card);
         }
     }
@@ -911,7 +911,8 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
     }
 }
 
-fn plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
+/// A plan card from the turn's final text, for agents with no native plan tool.
+pub(crate) fn synthesized_plan_card(parts: &[WirePart], assistant_id: &str) -> Option<WirePart> {
     let last_text = parts.iter().rev().find_map(|part| {
         (part.kind == "text")
             .then_some(part.text.as_deref())

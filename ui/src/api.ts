@@ -1491,7 +1491,8 @@ export type HarnessId =
   | "cursor"
   | "antigravity"
   | "kimi-code"
-  | "minimax-code";
+  | "minimax-code"
+  | "zcode";
 
 export interface HarnessModel {
   id: string;

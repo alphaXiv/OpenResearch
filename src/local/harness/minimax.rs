@@ -2,8 +2,9 @@
 //!
 //! Chat: one `mcode acp` child per turn, driven by the shared ACP adapter
 //! ([`super::acp`]). Permissions map onto the session's `permissionMode`
-//! config option (`default` asks, `auto`, `bypassPermissions`); Plan is the
-//! session's `plan` mode.
+//! config option (`auto`, `bypassPermissions`); Plan is the session's `plan`
+//! mode. The composer offers no "Ask": MiniMax's `default` mode is its own
+//! risk policy, which ran out-of-project commands without asking.
 //!
 //! Detection: the official installer's launchers in `~/.minimax-code`, an npm
 //! install into `~/.minimax-code/npm`, or `mcode` on PATH. The installer's
@@ -140,6 +141,35 @@ fn has_login(data: &Path) -> bool {
     })
 }
 
+/// Whether `config.yaml` configures a custom provider with a key — added by
+/// `mcode provider add`, which needs no MiniMax login.
+fn has_custom_provider(config: &str) -> bool {
+    let mut in_section = false;
+    for line in config.lines() {
+        let top_level = !line.starts_with(char::is_whitespace);
+        if top_level {
+            in_section = line.trim_end() == "custom_provider:";
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        let entry = line.trim();
+        if let Some(key) = entry.strip_prefix("apiKey:") {
+            if !key.trim().trim_matches(['"', '\'']).is_empty() {
+                return true;
+            }
+        }
+        if let Some(var) = entry.strip_prefix("apiKeyEnv:") {
+            let var = var.trim().trim_matches(['"', '\'']);
+            if !var.is_empty() && crate::local::shell_env::var(var).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// MiniMax Code's managed models (as advertised by `session/new`).
 fn models() -> Vec<ModelInfo> {
     [
@@ -166,6 +196,13 @@ impl MiniMaxCode {
             .await;
         if info.installed && !info.install_broken {
             if crate::local::shell_env::var("MCODE_PROVIDER_API_KEY").is_some() {
+                info.authenticated = true;
+                info.auth_state = HarnessAuthState::Ready;
+                info.auth_method = Some("apiKey");
+            } else if data_home().is_some_and(|data| {
+                std::fs::read_to_string(data.join("config.yaml"))
+                    .is_ok_and(|config| has_custom_provider(&config))
+            }) {
                 info.authenticated = true;
                 info.auth_state = HarnessAuthState::Ready;
                 info.auth_method = Some("apiKey");
@@ -330,6 +367,17 @@ mod tests {
         advertised.sort();
         ours.sort();
         assert_eq!(ours, advertised);
+    }
+
+    #[test]
+    fn a_keyed_custom_provider_counts_as_access() {
+        let config =
+            "logLevel: info\ncustom_provider:\n  mock:\n    options:\n      apiKey: sk-mock\n";
+        assert!(has_custom_provider(config));
+        assert!(!has_custom_provider(
+            "custom_provider:\n  mock:\n    options:\n      apiKey: \"\"\n"
+        ));
+        assert!(!has_custom_provider("other:\n  apiKey: sk\n"));
     }
 
     #[test]
