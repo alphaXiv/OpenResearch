@@ -195,14 +195,11 @@ impl MiniMaxCode {
         super::detect::record_selected(&mut info, snapshot, KEY, find_mcode, find_mcode_working())
             .await;
         if info.installed && !info.install_broken {
-            if crate::local::shell_env::var("MCODE_PROVIDER_API_KEY").is_some() {
-                info.authenticated = true;
-                info.auth_state = HarnessAuthState::Ready;
-                info.auth_method = Some("apiKey");
-            } else if data_home().is_some_and(|data| {
+            let custom_provider = data_home().is_some_and(|data| {
                 std::fs::read_to_string(data.join("config.yaml"))
                     .is_ok_and(|config| has_custom_provider(&config))
-            }) {
+            });
+            if crate::local::shell_env::var("MCODE_PROVIDER_API_KEY").is_some() || custom_provider {
                 info.authenticated = true;
                 info.auth_state = HarnessAuthState::Ready;
                 info.auth_method = Some("apiKey");
