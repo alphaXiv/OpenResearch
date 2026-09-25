@@ -74,9 +74,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
+      # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
       - name: Build the launcher
         run: cargo build --release --locked --manifest-path windows/launcher/Cargo.toml
 

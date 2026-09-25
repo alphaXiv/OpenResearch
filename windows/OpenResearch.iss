@@ -41,8 +41,6 @@ UninstallDisplayName=OpenResearch
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; The launcher starts the app; Restart Manager restarting orx.exe would not.
-RestartApplications=no
 
 [Tasks]
 Name: desktopicon; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -84,19 +82,27 @@ begin
     or HasWebView2Version(HKCU, 'Software\' + WebView2ClientKey);
 end;
 
+procedure ReportMissingWebView2;
+begin
+  SuppressibleMsgBox('OpenResearch needs the Microsoft Edge WebView2 Runtime, which could not be ' +
+    'installed. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ ' +
+    'and then start OpenResearch.', mbError, MB_OK, IDOK);
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
 begin
   if (CurStep <> ssPostInstall) or WebView2Installed then
     Exit;
+  // The bootstrapper runs hidden and can take minutes.
+  WizardForm.StatusLabel.Caption := 'Installing the Microsoft Edge WebView2 Runtime...';
   try
     DownloadTemporaryFile(WebView2Bootstrapper, 'MicrosoftEdgeWebview2Setup.exe', '', nil);
-    Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '',
-      SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if not Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '',
+      SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      ReportMissingWebView2;
   except
-    SuppressibleMsgBox('OpenResearch needs the Microsoft Edge WebView2 Runtime, which could not be ' +
-      'downloaded. Install it from https://developer.microsoft.com/microsoft-edge/webview2/ ' +
-      'and then start OpenResearch.', mbError, MB_OK, IDOK);
+    ReportMissingWebView2;
   end;
 end;

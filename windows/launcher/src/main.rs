@@ -9,17 +9,25 @@
 fn main() {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
     let started = std::env::current_exe().and_then(|exe| {
         std::process::Command::new(exe.with_file_name("orx.exe"))
+            // WINDOWS_APP_ARG in src/commands/app.rs.
             .arg("app")
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
     });
-    if let Err(error) = started {
-        show_error(&format!(
+    match started {
+        // Explorer lets the program it started take the foreground; pass that on,
+        // so orx's window, or the running one it wakes, comes to the front.
+        // SAFETY: a plain syscall on the child's process id.
+        Ok(child) => unsafe {
+            AllowSetForegroundWindow(child.id());
+        },
+        Err(error) => show_error(&format!(
             "Could not start orx.exe: {error}\n\nReinstall OpenResearch to repair it."
-        ));
+        )),
     }
 }
 

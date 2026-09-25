@@ -91,3 +91,14 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 | SSH connection reuse | Windows' OpenSSH cannot multiplex, so each status or log poll opens its own connection, and the Settings page uses the most recent preflight result instead of reporting a missing multiplexed master as a disconnection. Use a key held by an agent, or one without a passphrase. |
 | The PATH guard | Not applied; it needs a POSIX shell startup file. |
 | Data directory | Still `%USERPROFILE%\.local\share\openresearch`, not `%APPDATA%`. |
+| Signing out or upgrading while the app runs | Windows ends the app at once, without stopping the agents it started or saving the last workspace state. |
+| Starting the app while it is quitting | The new launch finds the old one still running and exits, so start it again once it has closed. |
+
+## Releasing the app
+
+`release-windows-app.yml` builds `OpenResearch-Setup.exe` from each release's
+published `orx.exe` and attaches it, once the repository variable
+`WINDOWS_APP_ENABLED` is `true`. Like the macOS app it follows a Release run
+dispatched by a token (see `macos/DISTRIBUTION.md`); to attach the installer to
+an existing release, dispatch the workflow with its tag. Every CI run on
+Windows also uploads an `openresearch-windows-installer` artifact to test with.

@@ -41,6 +41,6 @@ fn embed_windows_icon() {
     let escaped = icon.display().to_string().replace('\\', "\\\\");
     std::fs::write(&rc, format!("1 ICON \"{escaped}\"\n")).unwrap();
     embed_resource::compile(&rc, embed_resource::NONE)
-        .manifest_optional()
+        .manifest_required()
         .unwrap();
 }

@@ -61,7 +61,6 @@ const APP_PORT: u16 = 4792;
 /// setup fails; quitting exits the process.
 #[cfg(any(target_os = "macos", windows))]
 pub async fn run() {
-    // macOS keeps an app to one instance itself; Windows leaves it to the app.
     #[cfg(windows)]
     let focus_requests = {
         // A relaunched app first waits out its predecessor, which holds the claim.
@@ -71,6 +70,9 @@ pub async fn run() {
             None => return,
         }
     };
+    // After the claim, so a launch that only brings the window forward isn't a
+    // start. The durable outbox covers a quit before delivery.
+    let _telemetry = crate::telemetry::TelemetrySession::start_app();
     if let Err(error) = crate::local::storage::prepare().await {
         eprintln!("OpenResearch storage: {error}");
         crate::show_error_dialog(&error.to_string());
@@ -203,15 +205,14 @@ mod instance {
         CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_OBJECT_0,
     };
     use windows_sys::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, OpenEventW, SetEvent, WaitForSingleObject, EVENT_MODIFY_STATE,
-        INFINITE,
+        CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
 
     const MUTEX: &str = r"Local\OpenResearchApp";
     const FOCUS_EVENT: &str = r"Local\OpenResearchAppFocus";
 
-    fn wide(text: &str) -> Vec<u16> {
+    pub(super) fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().chain(Some(0)).collect()
     }
 
@@ -224,21 +225,20 @@ mod instance {
     /// Claims the app for this process. `None` means another instance has it
     /// and was asked to come forward.
     pub(super) fn claim() -> Option<FocusRequests> {
-        // SAFETY: plain syscalls on NUL-terminated names. The mutex handle is
-        // left open on purpose: the claim lasts until the process exits.
+        // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
+        // on purpose: the claim lasts until the process exits.
         unsafe {
+            // The event first, so it exists by the time anyone sees the claim.
+            // For a second launch this opens the running app's event.
+            let event = CreateEventW(std::ptr::null(), 0, 0, wide(FOCUS_EVENT).as_ptr());
             CreateMutexW(std::ptr::null(), 0, wide(MUTEX).as_ptr());
             if GetLastError() == ERROR_ALREADY_EXISTS {
-                let event = OpenEventW(EVENT_MODIFY_STATE, 0, wide(FOCUS_EVENT).as_ptr());
-                if !event.is_null() {
-                    // Windows lets the running app take the foreground only with our leave.
-                    AllowSetForegroundWindow(ASFW_ANY);
-                    SetEvent(event);
-                    CloseHandle(event);
-                }
+                // Windows lets the running app take the foreground only with our leave.
+                AllowSetForegroundWindow(ASFW_ANY);
+                SetEvent(event);
+                CloseHandle(event);
                 return None;
             }
-            let event = CreateEventW(std::ptr::null(), 0, 0, wide(FOCUS_EVENT).as_ptr());
             Some(FocusRequests(event))
         }
     }
@@ -247,11 +247,17 @@ mod instance {
         /// Calls `on_request` for every later launch, from a thread of its own.
         pub(super) fn listen(self, on_request: impl Fn() + Send + 'static) {
             std::thread::spawn(move || {
-                // SAFETY: waits on the event this process created and never closes.
-                while unsafe { WaitForSingleObject(self.0, INFINITE) } == WAIT_OBJECT_0 {
+                while self.wait() {
                     on_request();
                 }
             });
+        }
+
+        // A method, so the thread above captures the `Send` wrapper and not
+        // its bare handle.
+        fn wait(&self) -> bool {
+            // SAFETY: waits on the event this process created and never closes.
+            unsafe { WaitForSingleObject(self.0, INFINITE) == WAIT_OBJECT_0 }
         }
     }
 }
@@ -392,7 +398,7 @@ mod imp {
             }
         };
 
-        let shown = Cell::new(false);
+        let shown = Rc::new(Cell::new(false));
         let webview = WebViewBuilder::new()
             .with_accept_first_mouse(true)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
@@ -405,7 +411,10 @@ mod imp {
                 }
                 NewWindowResponse::Deny
             })
-            .with_download_started_handler(choose_download_path)
+            .with_download_started_handler({
+                let window = window.clone();
+                move |_url, path| choose_download_path(&window, path)
+            })
             .with_document_title_changed_handler({
                 let window = window.clone();
                 move |title| window.set_title(&title)
@@ -413,6 +422,7 @@ mod imp {
             .with_on_page_load_handler({
                 let window = window.clone();
                 let origin = origin.clone();
+                let shown = shown.clone();
                 move |event, url| {
                     if matches!(event, PageLoadEvent::Finished)
                         && super::is_dashboard_url(&url, &origin)
@@ -452,7 +462,7 @@ mod imp {
                 }
                 Quit::ShuttingDown => *control_flow = ControlFlow::Exit,
             },
-            Event::UserEvent(UserEvent::ServerReady) => {
+            Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
                 let _ = webview.load_url(&format!("{origin}/"));
             }
             #[cfg(target_os = "macos")]
@@ -463,8 +473,10 @@ mod imp {
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
             }
+            // Before the first load the window shows itself; while quitting it
+            // must stay hidden.
             #[cfg(windows)]
-            Event::UserEvent(UserEvent::Focus) => {
+            Event::UserEvent(UserEvent::Focus) if shown.get() && matches!(quit, Quit::No) => {
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -512,10 +524,7 @@ mod imp {
     fn set_taskbar_identity() {
         use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
-        let id: Vec<u16> = "alphaXiv.OpenResearch"
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+        let id = super::instance::wide("alphaXiv.OpenResearch");
         // SAFETY: the string is NUL-terminated and outlives the call.
         unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
     }
@@ -580,8 +589,9 @@ mod imp {
 
     /// Without a handler WKWebView drops downloads and WebView2 saves them
     /// silently into Downloads; ask where, as a browser would.
-    fn choose_download_path(_url: String, path: &mut PathBuf) -> bool {
-        let mut dialog = rfd::FileDialog::new();
+    fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
+        // Owned by the window, which Windows disables while the dialog is up.
+        let mut dialog = rfd::FileDialog::new().set_parent(window);
         if let Some(dir) = path.parent() {
             dialog = dialog.set_directory(dir);
         }

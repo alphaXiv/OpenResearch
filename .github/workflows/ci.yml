@@ -84,7 +84,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Format
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check
+          cargo fmt --manifest-path windows/launcher/Cargo.toml --check
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings

@@ -864,8 +864,6 @@ async fn main() {
         // Shell hydration may change XDG_CONFIG_HOME; settle it before telemetry or the lifecycle lock.
         commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
-        let _session = telemetry::TelemetrySession::start_app();
-        // AppKit owns process shutdown; the durable outbox covers termination before delivery.
         commands::app::run().await;
         return;
     }
@@ -873,7 +871,6 @@ async fn main() {
     #[cfg(windows)]
     if commands::app::launched_as_windows_app() {
         telemetry::set_flag(false);
-        let _session = telemetry::TelemetrySession::start_app();
         commands::app::run().await;
         return;
     }
@@ -992,13 +989,13 @@ fn owns_its_console() -> bool {
     false
 }
 
-/// A double-clicked exe's console closes with it, and the app's is hidden, so
-/// repeat the error in a dialog.
+/// A double-clicked exe's console closes with it, so repeat the error in a dialog.
 #[cfg(windows)]
 fn show_error_dialog(message: &str) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-    // The app shares its console with the agents it runs, so it doesn't own it.
+    // The app's console is hidden, and shared with the agents it runs, so it
+    // doesn't own it.
     if !owns_its_console() && !commands::app::launched_as_windows_app() {
         return;
     }
