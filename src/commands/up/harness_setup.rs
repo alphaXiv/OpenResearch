@@ -806,6 +806,16 @@ mod tests {
         );
     }
 
+    /// Agents the dashboard deliberately cannot install, sign in or update:
+    /// ZCode ships inside its desktop app, whose executable is the GUI.
+    const NO_SETUP: &[&str] = &["zcode"];
+
+    fn with_setup() -> impl Iterator<Item = &'static str> {
+        crate::telemetry::harness::IDS
+            .into_iter()
+            .filter(|harness| !NO_SETUP.contains(harness))
+    }
+
     #[cfg(not(windows))]
     #[test]
     fn unix_install_fetches_to_a_file_so_the_installer_owns_the_terminal() {
@@ -821,7 +831,7 @@ mod tests {
         // Bounded transient retries, with an explicit ceiling.
         assert!(script.contains("--retry 2") && script.contains("--max-time 300"));
         assert!(script.contains("trap 'rm -f \"$script\"' EXIT"));
-        for harness in crate::telemetry::harness::IDS {
+        for harness in with_setup() {
             let (url, interpreter) = unix_bootstrap(harness).expect(harness);
             // The approved command must describe the one that runs: same URL,
             // same interpreter, and no pipeline we no longer use.
@@ -854,11 +864,17 @@ mod tests {
 
     #[test]
     fn setup_accepts_only_known_agents_and_actions() {
-        for harness in crate::telemetry::harness::IDS {
-            assert!(install_command(harness, false).is_some());
-            assert!(install_command(harness, true).is_some());
-            assert!(login_command(harness).is_some());
-            assert!(update_command(harness).is_some());
+        for harness in with_setup() {
+            assert!(install_command(harness, false).is_some(), "{harness}");
+            assert!(install_command(harness, true).is_some(), "{harness}");
+            assert!(login_command(harness).is_some(), "{harness}");
+            assert!(update_command(harness).is_some(), "{harness}");
+        }
+        for harness in NO_SETUP {
+            assert!(install_command(harness, false).is_none(), "{harness}");
+            assert!(install_command(harness, true).is_none(), "{harness}");
+            assert!(login_command(harness).is_none(), "{harness}");
+            assert!(update_command(harness).is_none(), "{harness}");
         }
         assert!(install_command("codex; touch /tmp/injected", false).is_none());
         assert!(!install_command("codex", true).unwrap().starts_with("npm "));
