@@ -1371,10 +1371,10 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, appimage_file, attempt_backoff, attempt_due, bold, detect_channel,
-        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
-        portable_outside_prefix, precedence, relaunch_args, relaunch_target, render, retired_path,
-        warning_for, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
+        now_unix, package_manager_owns, parse_manifest, portable_dir, portable_outside_prefix,
+        precedence, relaunch_args, relaunch_target, render, retired_path, warning_for, CheckCache,
+        InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1595,6 +1595,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn only_the_orx_inside_the_mount_is_the_appimage() {
+        use super::appimage_file;
         use std::ffi::OsStr;
         let (appdir, appimage) = (
             Some(OsStr::new("/tmp/.mount_OpenReAbc")),
