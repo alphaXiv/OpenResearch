@@ -1,5 +1,31 @@
 # Kimi Code, MiniMax Code, and ZCode: integration notes
 
+## Using them
+
+`orx up` detects each agent and lists it under Settings → Harnesses.
+
+- **Kimi Code**: install the CLI (Windows:
+  `irm https://code.kimi.com/kimi-code/install.ps1 | iex`; macOS/Linux:
+  `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`), then run
+  `kimi login`. The Kimi desktop app is not used. Modes: Ask, Auto, YOLO, and
+  `/plan`. Pick a model your plan includes: a model outside it is refused
+  with the provider's reason (for example K2.7 Code Highspeed on a basic plan).
+- **MiniMax Code**: install the CLI from the dashboard, or run MiniMax's
+  installer (`irm https://filecdn.minimax.chat/public/install.ps1 | iex`).
+  When its final step fails, the dashboard's installer falls back to
+  `npm install` with the Node.js the installer provided, into
+  `~/.minimax-code/npm`. Sign in with `mcode login --region global` (or
+  `--region cn` for a mainland account). Modes: Auto, Full access, and
+  `/plan`. There is no Ask: MiniMax's own `default` mode ran commands outside
+  the project without asking.
+- **ZCode**: uses the runtime bundled with the ZCode desktop app (or a `zcode`
+  CLI on PATH). Sign in through the app. Modes: Edit, YOLO, and `/plan`.
+  Print mode cannot ask for approval, so there is no Ask. The model is the one
+  configured in ZCode. An account without a plan or balance fails with
+  `1113 Insufficient balance`.
+
+The rest of this file is the integration notes.
+
 Working notes for adding three harnesses beside Claude Code, Codex, OpenCode,
 Cursor, and Antigravity (see `src/local/harness/mod.rs`). Each fact below was
 observed against the npm builds listed here, in a Linux container with no

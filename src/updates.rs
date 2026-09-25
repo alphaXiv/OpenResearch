@@ -33,7 +33,7 @@ pub mod macos_app;
 pub(crate) mod windows;
 
 /// GitHub repo the released binaries come from.
-pub const REPO_URL: &str = "https://github.com/alphaXiv/OpenResearch";
+pub const REPO_URL: &str = "https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode";
 
 /// The cargo-dist app name (the *package* name, not the `orx` bin name) — used
 /// in release asset names and the receipt path.
@@ -458,10 +458,10 @@ pub fn auto_update_eligible() -> bool {
 /// The one-liner that reinstalls orx through the release installer.
 const INSTALL_HINT: &str = if cfg!(windows) {
     "powershell -ExecutionPolicy Bypass -c \"irm \
-https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.ps1 | iex\""
+https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.ps1 | iex\""
 } else {
     "curl --proto '=https' --tlsv1.2 -LsSf \
-https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-installer.sh | sh"
+https://github.com/artur-shaikhutdinov/OpenResearch-Kimi-MiniMax-ZCode/releases/latest/download/openresearch-cli-installer.sh | sh"
 };
 
 /// Confirm a directory can be written before an update commits to it — root-owned
