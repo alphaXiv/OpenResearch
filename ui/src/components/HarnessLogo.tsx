@@ -3,18 +3,6 @@
 
 import type { HarnessId } from "../api";
 
-// Letter badges: these agents ship no brand mark we embed.
-function Monogram({ letter, size, children }: { letter: string; size: number; children: React.ReactNode }) {
-  return (
-    <svg className="block shrink-0" width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
-      {children}
-      <text x="12" y="16.5" textAnchor="middle" fontSize="13" fontWeight="700" fontFamily="system-ui, sans-serif" fill="#ffffff">
-        {letter}
-      </text>
-    </svg>
-  );
-}
-
 export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?: number }) {
   const cls = "block shrink-0";
   if (harness === "claude-code") {
@@ -67,25 +55,33 @@ export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?:
       </svg>
     );
   }
+  // Kimi, MiniMax and Z.ai marks from @lobehub/icons (MIT).
   if (harness === "kimi-code") {
     return (
-      <Monogram letter="K" size={size}>
-        <rect width="24" height="24" rx="6" fill="#1f1f1f" />
-      </Monogram>
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+        <path fill="#1783FF" d="M21.846 0a1.923 1.923 0 110 3.846H20.15a.226.226 0 01-.227-.226V1.923C19.923.861 20.784 0 21.846 0z" />
+        <path d="M11.065 11.199l7.257-7.2c.137-.136.06-.41-.116-.41H14.3a.164.164 0 00-.117.051l-7.82 7.756c-.122.12-.302.013-.302-.179V3.82c0-.127-.083-.23-.185-.23H3.186c-.103 0-.186.103-.186.23V19.77c0 .128.083.23.186.23h2.69c.103 0 .186-.102.186-.23v-3.25c0-.069.025-.135.069-.178l2.424-2.406a.158.158 0 01.205-.023l6.484 4.772a7.677 7.677 0 003.453 1.283c.108.012.2-.095.2-.23v-3.06c0-.117-.07-.212-.164-.227a5.028 5.028 0 01-2.027-.807l-5.613-4.064c-.117-.078-.132-.279-.028-.381z" />
+      </svg>
     );
   }
   if (harness === "minimax-code") {
     return (
-      <Monogram letter="M" size={size}>
-        <rect width="24" height="24" rx="6" fill="#e2167e" />
-      </Monogram>
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" aria-hidden="true">
+        <defs>
+          <linearGradient id="orx-minimax-mark" x1="0%" x2="100%" y1="50%" y2="50%">
+            <stop offset="0%" stopColor="#E2167E" />
+            <stop offset="100%" stopColor="#FE603C" />
+          </linearGradient>
+        </defs>
+        <path fill="url(#orx-minimax-mark)" fillRule="nonzero" d="M16.278 2c1.156 0 2.093.927 2.093 2.07v12.501a.74.74 0 00.744.709.74.74 0 00.743-.709V9.099a2.06 2.06 0 012.071-2.049A2.06 2.06 0 0124 9.1v6.561a.649.649 0 01-.652.645.649.649 0 01-.653-.645V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v7.472a2.037 2.037 0 01-2.048 2.026 2.037 2.037 0 01-2.048-2.026v-12.5a.785.785 0 00-.788-.753.785.785 0 00-.789.752l-.001 15.904A2.037 2.037 0 0113.441 22a2.037 2.037 0 01-2.048-2.026V18.04c0-.356.292-.645.652-.645.36 0 .652.289.652.645v1.934c0 .263.142.506.372.638.23.131.514.131.744 0a.734.734 0 00.372-.638V4.07c0-1.143.937-2.07 2.093-2.07zm-5.674 0c1.156 0 2.093.927 2.093 2.07v11.523a.648.648 0 01-.652.645.648.648 0 01-.652-.645V4.07a.785.785 0 00-.789-.78.785.785 0 00-.789.78v14.013a2.06 2.06 0 01-2.07 2.048 2.06 2.06 0 01-2.071-2.048V9.1a.762.762 0 00-.766-.758.762.762 0 00-.766.758v3.8a2.06 2.06 0 01-2.071 2.049A2.06 2.06 0 010 12.9v-1.378c0-.357.292-.646.652-.646.36 0 .653.29.653.646V12.9c0 .418.343.757.766.757s.766-.339.766-.757V9.099a2.06 2.06 0 012.07-2.048 2.06 2.06 0 012.071 2.048v8.984c0 .419.343.758.767.758.423 0 .766-.339.766-.758V4.07c0-1.143.937-2.07 2.093-2.07z" />
+      </svg>
     );
   }
   if (harness === "zcode") {
     return (
-      <Monogram letter="Z" size={size}>
-        <rect width="24" height="24" rx="6" fill="#2d5bff" />
-      </Monogram>
+      <svg className={cls} width={size} height={size} viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" aria-hidden="true">
+        <path d="M12.105 2L9.927 4.953H.653L2.83 2h9.276zM23.254 19.048L21.078 22h-9.242l2.174-2.952h9.244zM24 2L9.264 22H0L14.736 2H24z" />
+      </svg>
     );
   }
   return (
