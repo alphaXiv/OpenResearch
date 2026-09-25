@@ -47,16 +47,25 @@ and reconcile instead of overwriting someone else's edit.
 
 ## Maintain the custom recipe
 
+For most users, leave `CUSTOM.md` empty. Use standard `orx compute` settings and
+committed project scripts first. Add instructions only for a verified,
+consistently repeated bespoke compute workflow that neither can express and
+that truly requires extra steps from the agent. Do not record ordinary settings
+or one-off fixes.
+
 ```sh
 orx compute instructions show --json
-orx compute instructions path
-orx compute instructions set --file recipe.md --expected-revision <revision>
+orx compute instructions set --file - --expected-revision <revision>
 ```
 
 There is one canonical `<ORX config directory>/compute/CUSTOM.md`; it is not a
-copy in each session's generated skills. `path` creates it empty if absent.
-`set --file -` reads stdin. Use the revision from the last read; a conflict means
-reread and reconcile. Direct edits at the returned path are also supported.
+copy in each session's generated skills. `set --file -` reads stdin. Use the
+revision from the last read; a conflict means reread and reconcile. The CLI
+write lock serializes `set` calls; the revision rejects changes saved since
+`show` and before the check. Agents and users should update through `set`.
+`orx compute instructions path` locates or initializes the file for inspection.
+Direct editor saves do not use the lock and can race with `set`; close or reload
+an editor before a CLI update rather than editing concurrently.
 Skill refreshes, upgrades, and session cleanup do not own or delete this file.
 
 Keep a short section for each backend/host: verified environment activation,

@@ -503,6 +503,33 @@ fn concurrent_instruction_writers_cannot_overwrite_each_other() {
     assert!(["first recipe", "second recipe"].contains(&final_value["content"].as_str().unwrap()));
 }
 
+#[test]
+fn instruction_set_rejects_prior_direct_edit() {
+    let sandbox = Sandbox::new();
+    let path = sandbox.run(&["compute", "instructions", "path"]);
+    assert!(path.status.success());
+    let path = String::from_utf8(path.stdout).unwrap();
+    let before = sandbox.json(&["compute", "instructions", "show", "--json"]);
+    std::fs::write(path.trim(), "editor guidance").unwrap();
+    let draft = sandbox.0.join("draft.md");
+    std::fs::write(&draft, "stale agent guidance").unwrap();
+
+    let result = sandbox.run(&[
+        "compute",
+        "instructions",
+        "set",
+        "--file",
+        draft.to_str().unwrap(),
+        "--expected-revision",
+        before["revision"].as_str().unwrap(),
+    ]);
+    assert!(!result.status.success());
+    assert_eq!(
+        sandbox.json(&["compute", "instructions", "show", "--json"])["content"],
+        "editor guidance"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn custom_instructions_survive_reinstall_and_harness_switches_across_projects() {

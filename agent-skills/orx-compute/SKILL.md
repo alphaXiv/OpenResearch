@@ -32,8 +32,13 @@ For configuration, connection tests, login, or instruction updates, read
 [references/configuration.md](references/configuration.md)
 (`orx skill compute/configuration` is the fallback).
 
-After verifying reusable custom setup, update this short recipe with the working
-commands, environment paths, cluster constraints, and documentation links.
+Usually leave `CUSTOM.md` empty. Add verified, consistently repeated bespoke
+compute instructions only when standard CLI settings and committed project
+scripts cannot express the workflow and the agent truly needs extra steps.
+Keep any such guidance short: working commands, environment paths, cluster
+constraints, and documentation links.
+Use `orx compute instructions set --file - --expected-revision <revision from show>`;
+never write the file directly with file-edit tools or shell redirects.
 Preserve the user's guidance; replace obsolete steps instead of appending run
 logs. Never store credentials or invent cluster commands. Read linked cluster
 instructions before using unfamiliar scheduler options. Instructions do not
