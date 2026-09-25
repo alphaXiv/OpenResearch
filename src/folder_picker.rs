@@ -67,8 +67,8 @@ pub fn pick_folder() -> Result<Option<PathBuf>> {
         picker.args(args);
         crate::local::shell_env::restore_host_gui_env(&mut picker);
         // `.` is kdialog's start folder; the app's own is inside the read-only image.
-        if let Some(home) = dirs::home_dir() {
-            picker.current_dir(home);
+        if let Ok(base) = crate::local::projects::relative_base() {
+            picker.current_dir(base);
         }
         let output = match picker.output() {
             Ok(output) => output,

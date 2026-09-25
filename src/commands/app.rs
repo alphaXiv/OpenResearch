@@ -73,9 +73,8 @@ pub async fn run() {
             None => return,
         }
     };
-    // A desktop launcher's environment lacks what .bashrc puts on PATH. After the
-    // claim, so a launch that only brings the window forward doesn't wait on it;
-    // before storage and telemetry, which read the directories it may change.
+    // A launcher's environment lacks .bashrc's PATH. Before storage and telemetry,
+    // which read the directories it may change.
     #[cfg(target_os = "linux")]
     hydrate_shell_env().await;
     // After the claim, so a launch that only brings the window forward isn't a
@@ -517,8 +516,7 @@ mod imp {
             });
         #[cfg(not(target_os = "linux"))]
         let webview = builder.build(&*window);
-        // `build` supports only X11 on Linux; the window's own GTK box also works
-        // on Wayland.
+        // `build` supports only X11 on Linux.
         #[cfg(target_os = "linux")]
         let webview = {
             use tao::platform::unix::WindowExtUnix;

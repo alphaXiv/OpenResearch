@@ -15,6 +15,8 @@ export ORX_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config"
 export ORX_NO_UPDATE_CHECK=1 ORX_TELEMETRY_ENV=off
 # No FUSE on CI runners; the AppImage runs from a temporary extraction instead.
 export APPIMAGE_EXTRACT_AND_RUN=1
+# Cleanup kills the runtime before it removes its extraction, so extract here.
+export TMPDIR="$SANDBOX"
 
 # Its own process group, so cleanup reaches orx and WebKit, not just xvfb-run.
 setsid xvfb-run -a "$APPIMAGE" >"$LOG" 2>&1 &
@@ -52,6 +54,8 @@ done
 pgrep -f WebKitWebProcess >/dev/null || fail "No WebKit web process is running."
 
 for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
+  # WebKit may replace a web process between pgrep and here.
+  [ -e "/proc/$pid" ] || continue
   exe="$(readlink "/proc/$pid/exe" || true)"
   case "$exe" in
     *appimage_extracted_*) ;;

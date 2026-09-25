@@ -139,10 +139,9 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
 
 /// What the Linux AppImage's GTK hook points at the image (keep in step with
 /// linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
-const APPIMAGE_GTK_VARS: [&str; 11] = [
+const APPIMAGE_GTK_VARS: [&str; 10] = [
     "GDK_BACKEND",
     "GDK_PIXBUF_MODULE_FILE",
-    "GIO_EXTRA_MODULES",
     "GI_TYPELIB_PATH",
     "GSETTINGS_SCHEMA_DIR",
     "GTK_DATA_PREFIX",
@@ -153,10 +152,8 @@ const APPIMAGE_GTK_VARS: [&str; 11] = [
     "XDG_DATA_DIRS",
 ];
 
-/// The session's own values for the variables the AppImage set for its bundled
-/// GTK, for a host program orx starts: a system file manager handed the image's
-/// schemas and modules fails to start. `None` means the session had none. Empty
-/// outside the AppImage.
+/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// for host programs, which fail on the image's schemas. Empty outside the AppImage.
 pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
     APPIMAGE_GTK_VARS
         .iter()

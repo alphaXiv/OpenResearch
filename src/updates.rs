@@ -299,14 +299,8 @@ fn appimage_file(
     appdir: Option<&std::ffi::OsStr>,
     appimage: Option<&std::ffi::OsStr>,
 ) -> Option<PathBuf> {
-    let (appdir, appimage) = (Path::new(appdir?), appimage?);
-    // An empty or root APPDIR would claim every binary on the machine.
-    if !appdir.is_absolute() || appdir.parent().is_none() {
-        return None;
-    }
-    // `exe` is canonical, and the runtime mounts under a temp dir that may be a symlink.
-    let appdir = crate::paths::canonicalize(appdir).unwrap_or_else(|_| appdir.to_path_buf());
-    exe.starts_with(&appdir).then(|| PathBuf::from(appimage))
+    let appimage = appimage?;
+    crate::paths::in_appimage_mount(exe, appdir).then(|| PathBuf::from(appimage))
 }
 
 /// Classify `exe`. The app tests come first: an app's binary has no receipt,
@@ -931,9 +925,8 @@ pub fn relaunch(port: u16) -> std::io::Error {
     }
     #[cfg(all(desktop_app, target_os = "linux"))]
     if crate::commands::app::launched_with_app_arg() {
-        // The update replaced the `.AppImage` file, not this mount of the old
-        // one; its AppRun supplies `app` itself. Not the exec below, whose
-        // `--no-browser` would stop `orx app` being the app.
+        // The update replaced the `.AppImage` file, not this mount of it, and its
+        // AppRun adds `app`, which the exec below's `--no-browser` would undo.
         let mut app = match std::env::var_os("APPIMAGE") {
             Some(appimage) => std::process::Command::new(appimage),
             None => {
@@ -945,6 +938,8 @@ pub fn relaunch(port: u16) -> std::io::Error {
                 app
             }
         };
+        // Or the new AppRun would save this image's GTK settings as the session's.
+        crate::local::shell_env::restore_host_gui_env(&mut app);
         return app.env(APP_RELAUNCH_PORT_ENV, port.to_string()).exec();
     }
     // Only the app relaunches need the port; exec keeps the original `--port`.

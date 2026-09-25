@@ -61,9 +61,9 @@ pub(crate) fn expand_path(path: &str) -> Result<PathBuf> {
 
 /// Where a relative path is anchored: the working directory, except in the Linux
 /// AppImage, whose working directory is its read-only mount (see linux/AppRun).
-fn relative_base() -> Result<PathBuf> {
+pub fn relative_base() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let in_image = std::env::var_os("APPDIR").is_some_and(|appdir| cwd.starts_with(appdir));
+    let in_image = crate::paths::in_appimage_mount(&cwd, std::env::var_os("APPDIR").as_deref());
     Ok(match dirs::home_dir() {
         Some(home) if in_image => home,
         _ => cwd,

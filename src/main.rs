@@ -1037,8 +1037,11 @@ fn show_error_dialog(message: &str) {
     }
     eprintln!("OpenResearch: {message}");
     for (program, args) in [
-        ("zenity", ["--error", "--title=OpenResearch", "--text"]),
-        ("kdialog", ["--title", "OpenResearch", "--error"]),
+        (
+            "zenity",
+            &["--error", "--no-markup", "--title=OpenResearch", "--text"][..],
+        ),
+        ("kdialog", &["--title", "OpenResearch", "--error"][..]),
     ] {
         let mut dialog = std::process::Command::new(program);
         dialog.args(args).arg(message);
