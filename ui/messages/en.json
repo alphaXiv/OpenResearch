@@ -314,6 +314,7 @@
   "projects_home_no_projects_yet_create_one_to_get_started": "No projects yet — create one to get started.",
   "projects_home_project": "Project",
   "projects_home_projects": "Projects",
+  "projects_home_reorder": "Reorder {name}: drag or use the up and down arrow keys",
   "projects_home_repository": "Repository",
   "settings_appearance_heading": "Appearance",
   "settings_language_description": "Choose the language for the interface on this device.",

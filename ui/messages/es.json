@@ -314,6 +314,7 @@
   "projects_home_no_projects_yet_create_one_to_get_started": "Aún no hay proyectos — crea uno para empezar.",
   "projects_home_project": "Proyecto",
   "projects_home_projects": "Proyectos",
+  "projects_home_reorder": "Reordenar {name}: arrastra o usa las flechas arriba y abajo",
   "projects_home_repository": "Repositorio",
   "settings_appearance_heading": "Apariencia",
   "settings_language_description": "Elige el idioma de la interfaz en este dispositivo.",

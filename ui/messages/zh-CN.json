@@ -314,6 +314,7 @@
   "projects_home_no_projects_yet_create_one_to_get_started": "尚无项目——新建一个即可开始。",
   "projects_home_project": "项目",
   "projects_home_projects": "项目",
+  "projects_home_reorder": "调整 {name} 的顺序：拖动或使用上下方向键",
   "projects_home_repository": "仓库",
   "settings_appearance_heading": "外观",
   "settings_language_description": "选择此设备上的界面语言。",

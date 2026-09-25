@@ -314,6 +314,7 @@
   "projects_home_no_projects_yet_create_one_to_get_started": "لا توجد مشاريع بعد — أنشئ واحدًا للبدء.",
   "projects_home_project": "المشروع",
   "projects_home_projects": "المشاريع",
+  "projects_home_reorder": "إعادة ترتيب {name}: اسحب أو استخدم مفتاحي السهم لأعلى ولأسفل",
   "projects_home_repository": "المستودع",
   "settings_appearance_heading": "المظهر",
   "settings_language_description": "اختر لغة الواجهة على هذا الجهاز.",
