@@ -69,13 +69,13 @@ use crate::store::{Store, StoredChatMessage};
 // `models --verbose` — so models and tiers are normally *queried*, not curated.
 //
 // Each entry is `(model id, the `model_reasoning_effort` values it accepts)`,
-// mirroring the catalog as of codex-cli 0.144. Sol/Terra reach `ultra`; Luna
+// including Astra. Astra/Sol/Terra reach `ultra`; Luna
 // stops at `max`; 5.5 stops at `xhigh`. (A live `codex exec` turn on Luna
 // tolerated `ultra`, but the catalog is what codex's own picker offers — the
 // catalog wins for what WE offer.) Getting a tier wrong is not cosmetic: codex
 // forwards the value unvalidated and an unsupported one comes back as a 400
 // that kills the turn (observed: 5.5 + `max`).
-const CODEX_MODELS: [(&str, &[&str]); 4] = [
+const CODEX_MODELS: [(&str, &[&str]); 5] = [
     (
         "gpt-5.6-sol",
         &["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -86,6 +86,10 @@ const CODEX_MODELS: [(&str, &[&str]); 4] = [
     ),
     ("gpt-5.6-luna", &["low", "medium", "high", "xhigh", "max"]),
     ("gpt-5.5", &["low", "medium", "high", "xhigh"]),
+    (
+        "gpt-6-astra",
+        &["low", "medium", "high", "xhigh", "max", "ultra"],
+    ),
 ];
 
 /// Codex usage occupying the context window: `input_tokens + output_tokens`

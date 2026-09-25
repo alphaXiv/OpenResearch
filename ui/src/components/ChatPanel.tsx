@@ -4145,6 +4145,25 @@ const STARTER_TONES = [
 const STARTER_GRID_CLASS =
   "mt-7 grid w-full max-w-readable grid-cols-1 gap-3 sm:grid-cols-2";
 
+/** Reconcile the settings attached to a selected model without treating the
+ * catalog as an allowlist. The picker deliberately accepts free-form ids, so
+ * replacing an unlisted id with the catalog's first entry changes both what
+ * the composer displays and what the next request sends. Invalid ids should
+ * reach the CLI and surface its real error instead. */
+export function deriveComposerSelection(
+  rawSelection: ModelSelection | null,
+  activeHarness: Harness | undefined,
+): ModelSelection | null {
+  if (!rawSelection) return null;
+  const model = rawSelection.model ?? null;
+  return {
+    ...rawSelection,
+    model,
+    serviceTier: reconcileServiceTier(activeHarness, model, rawSelection.serviceTier),
+    reasoningLevel: reconcileReasoning(activeHarness, model, rawSelection.reasoningLevel),
+  };
+}
+
 export function ChatPanel({
   projectId,
   projectName,
@@ -4546,29 +4565,9 @@ export function ChatPanel({
   const skillMenuOpen = skillMatches.length > 0;
   const activeSkillIdx = Math.min(skillIdx, Math.max(0, skillMatches.length - 1));
   useEffect(() => setSkillIdx(0), [slashToken]);
-  // Reconcile the reasoning level against the *currently selected model* here
-  // rather than only in the picker's `pick`. Two paths reach the composer with
-  // a level nobody chose for this model: a session row stored by an older build
-  // (which always wrote an explicit effort), and a stale saved preference.
-  // Reconciling at the point the composer derives its state covers both, so the
-  // displayed value and the value `send` transmits can never be one the model
-  // rejects.
-  // A saved model the harness no longer lists (a provider whose key was
-  // rejected, a retired id) falls back to the harness's first model.
-  const composerModel =
-    rawSelection &&
-      activeHarness &&
-      !activeHarness.catalogPending &&
-      activeHarness.models.length > 0 &&
-      !activeHarness.models.some((model) => model.id === rawSelection.model)
-      ? activeHarness.models[0].id
-      : (rawSelection?.model ?? null);
-  const composerSelection: ModelSelection | null = rawSelection && {
-    ...rawSelection,
-    model: composerModel,
-    serviceTier: reconcileServiceTier(activeHarness, composerModel, rawSelection.serviceTier),
-    reasoningLevel: reconcileReasoning(activeHarness, composerModel, rawSelection.reasoningLevel),
-  };
+  // Reconcile the selected model's settings, including stale saved preferences,
+  // without replacing custom model IDs that are absent from the catalog.
+  const composerSelection = deriveComposerSelection(rawSelection, activeHarness);
   // Reasoning choices follow the *selected model*, not just the harness — an
   // OpenCode model with no `variants` hides the picker entirely, and Codex's
   // top tiers appear only on the models that accept them.
