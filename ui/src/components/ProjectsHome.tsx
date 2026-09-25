@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { listProjectActivityQuery } from "../queries/projects";
 import { m } from "../paraglide/messages.js";
 import { autoDir, ltr } from "../i18n";
-import { Plus, Trash2 } from "lucide-react";
+import { GripVertical, Plus, Trash2 } from "lucide-react";
 import { GitHubMark } from "./BackendLogos";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -15,6 +15,7 @@ import {
 
 import { NewProjectForm } from "./NewProjectForm";
 import { Button } from "./ui";
+import { useRuntime } from "../RemoteRuntime";
 
 export function NewProjectDialog({
   onClose,
@@ -222,11 +223,50 @@ export function ProjectsHome({
   remote?: boolean;
 }) {
   const [modalOpen, setModalOpen] = useState(false);
+  const runtime = useRuntime();
+  const orderKey = `orx:project-order:${runtime.kind === "local" ? "local" : JSON.stringify([runtime.session.host, runtime.session.installPaths?.database])}`;
+  const [projectOrder, setProjectOrder] = useState<string[]>(() => {
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(orderKey) ?? "[]");
+      return Array.isArray(stored) && stored.every((id) => typeof id === "string") ? stored : [];
+    } catch {
+      return [];
+    }
+  });
+  const [draggedId, setDraggedId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [projectPendingDelete, setProjectPendingDelete] = useState<Project | null>(null);
   const activity = useQuery(listProjectActivityQuery());
   const activityByProject = Object.fromEntries((activity.data ?? []).map((summary) => [summary.projectId, summary]));
+  const order = new Map(projectOrder.map((id, index) => [id, index]));
+  const sortedProjects = [...projects].sort((a, b) => {
+    // New projects stay at the top; saved projects keep their manual order.
+    const rank = (order.get(a.id) ?? -1) - (order.get(b.id) ?? -1);
+    const aActivity = activityByProject[a.id]?.lastMessageAt ?? a.createdAt;
+    const bActivity = activityByProject[b.id]?.lastMessageAt ?? b.createdAt;
+    return rank || bActivity - aActivity || a.name.localeCompare(b.name);
+  });
+
+  function moveProject(id: string, targetIndex: number) {
+    const ids = sortedProjects.map((project) => project.id);
+    const fromIndex = ids.indexOf(id);
+    if (fromIndex < 0 || targetIndex < 0 || targetIndex >= ids.length || fromIndex === targetIndex) return;
+    ids.splice(fromIndex, 1);
+    ids.splice(targetIndex, 0, id);
+    setProjectOrder(ids);
+    try {
+      localStorage.setItem(orderKey, JSON.stringify(ids));
+    } catch {
+      // Keep sorting usable when browser storage is unavailable.
+    }
+  }
+
+  function endDrag() {
+    setDraggedId(null);
+    setDropTargetId(null);
+  }
 
   async function onDelete(p: Project) {
     setDeleting(p.id);
@@ -265,11 +305,7 @@ export function ProjectsHome({
             {projects.length === 0 ? (
               <div className="py-8 px-4 text-sm text-muted">{m.projects_home_no_projects_yet_create_one_to_get_started()}</div>
             ) : (
-              [...projects].sort((a, b) => {
-                const aActivity = activityByProject[a.id]?.lastMessageAt ?? a.createdAt;
-                const bActivity = activityByProject[b.id]?.lastMessageAt ?? b.createdAt;
-                return bActivity - aActivity || a.name.localeCompare(b.name);
-              }).map((p) => {
+              sortedProjects.map((p, index) => {
                 const summary = activityByProject[p.id];
                 const githubUrl = p.githubEnabled
                   ? p.githubUrl ??
@@ -307,7 +343,24 @@ export function ProjectsHome({
                 return (
                   <div
                     key={p.id}
-                    className="group project-row relative grid cursor-pointer grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border-variant py-4 ps-4 pe-2 text-start transition-colors duration-120 ease-standard last:border-b-0 hover:bg-surface-bright focus-within:bg-surface-bright [@media((max-width:_960px))]:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)] [@media((max-width:_960px))]:items-start [@media((max-width:_960px))]:gap-x-4 [@media((max-width:_960px))]:gap-y-3 [@media((max-width:_960px))]:py-4 [@media((max-width:_960px))]:px-4 [@media((max-width:_600px))]:grid-cols-2"
+                    data-dragging={draggedId === p.id || undefined}
+                    data-drop-target={dropTargetId === p.id || undefined}
+                    onDragOver={(event) => {
+                      if (!draggedId || draggedId === p.id) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      setDropTargetId(p.id);
+                    }}
+                    onDragLeave={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTargetId(null);
+                    }}
+                    onDrop={(event) => {
+                      if (!draggedId) return;
+                      event.preventDefault();
+                      moveProject(draggedId, index);
+                      endDrag();
+                    }}
+                    className="group project-row relative grid data-[dragging]:opacity-40 data-[drop-target]:ring-2 data-[drop-target]:ring-inset data-[drop-target]:ring-text cursor-pointer grid-cols-[minmax(0,1fr)_9rem_9rem_minmax(18rem,max-content)] items-center gap-3 border-b border-border-variant py-4 ps-4 pe-2 text-start transition-colors duration-120 ease-standard last:border-b-0 hover:bg-surface-bright focus-within:bg-surface-bright [@media((max-width:_960px))]:grid-cols-[minmax(0,0.8fr)_minmax(0,0.8fr)_minmax(0,1.4fr)] [@media((max-width:_960px))]:items-start [@media((max-width:_960px))]:gap-x-4 [@media((max-width:_960px))]:gap-y-3 [@media((max-width:_960px))]:py-4 [@media((max-width:_960px))]:px-4 [@media((max-width:_600px))]:grid-cols-2"
                   >
                     <button
                       className="project-row-open absolute inset-0 z-0 cursor-pointer rounded-[inherit] focus-visible:outline focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-[-2px]"
@@ -316,8 +369,31 @@ export function ProjectsHome({
                     />
                     {/* Cells stay click-transparent so the stretched button owns row navigation. */}
                     <div className="relative z-1 flex min-w-0 flex-col gap-1 pointer-events-none [@media((max-width:_960px))]:col-span-3 [@media((max-width:_600px))]:col-span-2">
-                      <span dir="auto" className="project-row-title whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
-                      <span className="relative z-2 flex items-center gap-1.5 text-xs text-muted [@media((max-width:_960px))]:flex-wrap">
+                      <span className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          draggable
+                          className="project-row-secondary inline-flex h-6 w-6 shrink-0 cursor-grab items-center justify-center rounded-sm text-muted pointer-events-auto hover:bg-surface hover:text-text active:cursor-grabbing focus-visible:outline focus-visible:outline-2 focus-visible:outline-text"
+                          aria-label={m.projects_home_reorder({ name: autoDir(p.name) })}
+                          title={m.projects_home_reorder({ name: autoDir(p.name) })}
+                          onDragStart={(event) => {
+                            event.dataTransfer.effectAllowed = "move";
+                            event.dataTransfer.setData("text/plain", p.id);
+                            setDraggedId(p.id);
+                          }}
+                          onDragEnd={endDrag}
+                          onKeyDown={(event) => {
+                            if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            moveProject(p.id, index + (event.key === "ArrowUp" ? -1 : 1));
+                          }}
+                        >
+                          <GripVertical size={16} />
+                        </button>
+                        <span dir="auto" className="project-row-title min-w-0 whitespace-normal break-words text-base font-semibold text-text pointer-events-none">{p.name}</span>
+                      </span>
+                      <span className="relative z-2 flex items-center gap-1.5 ps-8 text-xs text-muted [@media((max-width:_960px))]:flex-wrap">
                         <span>{m.projects_home_created()} {timeAgo(p.createdAt)}</span>
                         {p.paperId && <span aria-hidden="true">·</span>}
                         {p.paperId && <span>{m.projects_home_ar_xiv_paper_id()} {ltr(p.paperId)}</span>}
