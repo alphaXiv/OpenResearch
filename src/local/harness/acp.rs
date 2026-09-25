@@ -461,6 +461,7 @@ async fn drive(
     for (method, params) in session_setup(
         &session_id,
         &opened,
+        resumed,
         &settings,
         ctx.model.as_deref(),
         ctx.reasoning_level.as_deref(),
@@ -520,12 +521,16 @@ async fn drive(
     Ok(())
 }
 
-/// The `session/set_mode` / `session/set_config_option` calls that move a
-/// freshly opened session onto the composer's state. Only values the session
-/// advertised are sent, and only when they differ from its current value.
+/// The `session/set_mode` / `session/set_config_option` calls that move an
+/// opened session onto the composer's state. Only values the session
+/// advertised are sent. A new session's current values are trusted, so a match
+/// sends nothing; a resumed one's are not: Kimi Code reports its config default
+/// (`default`) for a resumed session still running in the `auto` mode of its
+/// last turn, which skipped the switch and ran Ask turns without asking.
 fn session_setup(
     session_id: &str,
     opened: &Value,
+    resumed: bool,
     settings: &AcpSettings,
     model: Option<&str>,
     reasoning: Option<&str>,
@@ -543,7 +548,7 @@ fn session_setup(
         let current = modes
             .and_then(|m| m.get("currentModeId"))
             .and_then(Value::as_str);
-        if available && current != Some(mode) {
+        if available && (resumed || current != Some(mode)) {
             calls.push((
                 "session/set_mode",
                 json!({"sessionId": session_id, "modeId": mode}),
@@ -585,7 +590,7 @@ fn session_setup(
                     .any(|o| o.get("value").and_then(Value::as_str) == Some(&value))
             });
         let current = option.get("currentValue").and_then(Value::as_str);
-        if offered && current != Some(value.as_str()) {
+        if offered && (resumed || current != Some(value.as_str())) {
             calls.push((
                 "session/set_config_option",
                 json!({"sessionId": session_id, "configId": id, "value": value}),
@@ -1228,7 +1233,14 @@ pub(crate) mod tests {
             config: vec![("nonexistent", "x")],
             auto_allow: true,
         };
-        let calls = session_setup("s1", &opened, &settings, Some("kimi-code/k3"), Some("low"));
+        let calls = session_setup(
+            "s1",
+            &opened,
+            false,
+            &settings,
+            Some("kimi-code/k3"),
+            Some("low"),
+        );
         let methods: Vec<_> = calls.iter().map(|(m, p)| (*m, p.clone())).collect();
         assert_eq!(
             methods,
@@ -1248,17 +1260,42 @@ pub(crate) mod tests {
             ]
         );
         // Current values and unknown models are left alone.
+        let ask = AcpSettings {
+            mode: Some("default"),
+            ..Default::default()
+        };
         let calls = session_setup(
             "s1",
             &opened,
-            &AcpSettings {
-                mode: Some("default"),
-                ..Default::default()
-            },
+            false,
+            &ask,
             Some("kimi-code/kimi-for-coding"),
             Some("unknown-level"),
         );
         assert!(calls.is_empty());
+        // A resumed session's reported values are not trusted: every chosen
+        // value is sent again (unknown ones still are not).
+        let calls = session_setup(
+            "s1",
+            &opened,
+            true,
+            &ask,
+            Some("kimi-code/kimi-for-coding"),
+            Some("unknown-level"),
+        );
+        assert_eq!(
+            calls,
+            vec![
+                (
+                    "session/set_mode",
+                    json!({"sessionId": "s1", "modeId": "default"})
+                ),
+                (
+                    "session/set_config_option",
+                    json!({"sessionId": "s1", "configId": "model", "value": "kimi-code/kimi-for-coding"})
+                ),
+            ]
+        );
     }
 
     #[test]
