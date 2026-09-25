@@ -149,11 +149,14 @@ pub(crate) async fn hydrate_shell_env() {
         .join(" ");
     let template = "%s\\0".repeat(crate::local::shell_env::IMPORTED.len());
     let script = format!(r#"/bin/sh -c 'printf "{marker}{template}{marker}" {reads}'"#);
-    let fut = tokio::process::Command::new(&shell)
+    let mut probe = tokio::process::Command::new(&shell);
+    probe
         .args(["-ilc".to_string(), script])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    // Anything the rc files start is a host program.
+    crate::local::shell_env::restore_host_gui_env(probe.as_std_mut());
+    let fut = probe.output();
     // A slow rc file (nvm, conda) delays the dashboard, so cap the wait; the
     // inherited environment stays in force when the probe doesn't answer.
     let out = match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {

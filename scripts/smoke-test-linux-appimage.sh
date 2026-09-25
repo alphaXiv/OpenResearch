@@ -23,7 +23,8 @@ setsid xvfb-run -a "$APPIMAGE" >"$LOG" 2>&1 &
 APP=$!
 cleanup() {
   kill -- -"$APP" 2>/dev/null || true
-  rm -rf "$SANDBOX"
+  # orx may still be shutting down and writing into it.
+  rm -rf "$SANDBOX" || true
 }
 trap cleanup EXIT
 
@@ -55,13 +56,13 @@ pgrep -f WebKitWebProcess >/dev/null || fail "No WebKit web process is running."
 
 for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
   # WebKit may replace a web process between pgrep and here.
-  [ -e "/proc/$pid" ] || continue
-  exe="$(readlink "/proc/$pid/exe" || true)"
+  exe="$(readlink "/proc/$pid/exe")" || continue
+  maps="$(cat "/proc/$pid/maps" 2>/dev/null)" || continue
   case "$exe" in
     *appimage_extracted_*) ;;
     *) fail "WebKit helper $pid runs $exe, not the AppImage's." ;;
   esac
-  grep -q 'appimage_extracted_.*/libwebkit2gtk' "/proc/$pid/maps" \
+  grep -q 'appimage_extracted_.*/libwebkit2gtk' <<<"$maps" \
     || fail "WebKit helper $pid did not load the AppImage's libwebkit2gtk."
 done
 echo "The AppImage's WebKit loaded the dashboard:"

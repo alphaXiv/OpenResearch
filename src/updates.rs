@@ -907,7 +907,8 @@ pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 /// (plus `--no-browser`), so whatever started it (a shell, a supervisor, an SSH launcher's tunnel)
 /// sees an uninterrupted process. The macOS app cannot be exec'd — AppKit and
 /// LaunchServices track the launch, not the image — so it exits and leaves a
-/// detached shell to `open` the bundle once the old process is gone.
+/// detached shell to `open` the bundle once the old process is gone. The Linux
+/// AppImage execs the replaced `.AppImage` file.
 ///
 /// `port` is what the dashboard is served on; the relaunch keeps it. A terminal
 /// `orx up` also skips opening a browser, because the tab that asked is reloading
@@ -927,19 +928,29 @@ pub fn relaunch(port: u16) -> std::io::Error {
     if crate::commands::app::launched_with_app_arg() {
         // The update replaced the `.AppImage` file, not this mount of it, and its
         // AppRun adds `app`, which the exec below's `--no-browser` would undo.
-        let mut app = match std::env::var_os("APPIMAGE") {
-            Some(appimage) => std::process::Command::new(appimage),
+        let Ok(exe) = std::env::current_exe() else {
+            return std::io::Error::other("could not resolve the running executable");
+        };
+        let appimage = crate::paths::canonicalize(&exe).ok().and_then(|exe| {
+            appimage_file(
+                &exe,
+                std::env::var_os("APPDIR").as_deref(),
+                std::env::var_os("APPIMAGE").as_deref(),
+            )
+        });
+        let mut app = match appimage {
+            Some(appimage) => {
+                let mut app = std::process::Command::new(appimage);
+                // Or the new AppRun would save this image's GTK settings as the session's.
+                crate::local::shell_env::restore_host_gui_env(&mut app);
+                app
+            }
             None => {
-                let Ok(exe) = std::env::current_exe() else {
-                    return std::io::Error::other("could not resolve the running executable");
-                };
                 let mut app = std::process::Command::new(relaunch_target(exe));
                 app.arg(crate::commands::app::APP_ARG);
                 app
             }
         };
-        // Or the new AppRun would save this image's GTK settings as the session's.
-        crate::local::shell_env::restore_host_gui_env(&mut app);
         return app.env(APP_RELAUNCH_PORT_ENV, port.to_string()).exec();
     }
     // Only the app relaunches need the port; exec keeps the original `--port`.
