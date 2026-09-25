@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{anyhow, Result};
 
+#[cfg(target_os = "linux")]
+pub mod linux_app;
 pub mod macos_app;
 #[cfg(windows)]
 pub(crate) mod windows;
@@ -233,6 +235,10 @@ pub enum InstallChannel {
     },
     /// The executable inside `OpenResearch.app`; the path is the bundle root.
     AppBundle(PathBuf),
+    /// The executable inside the Linux AppImage; the path is the `.AppImage`
+    /// file, which orx replaces whole.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AppImage(PathBuf),
     /// A Windows `orx.exe` extracted from the release zip; the path is its
     /// directory, where orx swaps the new `orx.exe` in.
     #[cfg_attr(not(windows), allow(dead_code))]
@@ -251,6 +257,7 @@ impl InstallChannel {
         match self {
             InstallChannel::Installer { .. } => "installer",
             InstallChannel::AppBundle(_) => "app-bundle",
+            InstallChannel::AppImage(_) => "appimage",
             InstallChannel::Portable(_) => "portable",
             InstallChannel::Cargo => "cargo",
             InstallChannel::Homebrew => "homebrew",
@@ -266,6 +273,7 @@ impl InstallChannel {
             self,
             InstallChannel::Installer { .. }
                 | InstallChannel::AppBundle(_)
+                | InstallChannel::AppImage(_)
                 | InstallChannel::Portable(_)
         )
     }
@@ -282,13 +290,34 @@ fn app_bundle_root(exe: &Path) -> Option<PathBuf> {
     macos.parent()?.parent().map(Path::to_path_buf)
 }
 
-/// Classify `exe`. The bundle test comes first: the bundled binary has no
-/// receipt, so every later branch would misfile it. A malformed receipt is an
-/// error rather than "no receipt" for the reason [`load_receipt`] gives — the
-/// wrong answer here sends the user down the wrong update path.
+/// The `.AppImage` file `exe` runs from, given the AppImage runtime's `APPDIR`
+/// (where the image is mounted) and `APPIMAGE` (the file). Agents inherit both,
+/// so an `orx` outside the mount is some other install.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn appimage_file(
+    exe: &Path,
+    appdir: Option<&std::ffi::OsStr>,
+    appimage: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let (appdir, appimage) = (appdir?, appimage?);
+    exe.starts_with(appdir).then(|| PathBuf::from(appimage))
+}
+
+/// Classify `exe`. The app tests come first: an app's binary has no receipt,
+/// so every later branch would misfile it. A malformed receipt is an error
+/// rather than "no receipt" for the reason [`load_receipt`] gives — the wrong
+/// answer here sends the user down the wrong update path.
 pub fn detect_channel(exe: &Path) -> Result<InstallChannel> {
     if let Some(root) = app_bundle_root(exe) {
         return Ok(InstallChannel::AppBundle(root));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(file) = appimage_file(
+        exe,
+        std::env::var_os("APPDIR").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    ) {
+        return Ok(InstallChannel::AppImage(file));
     }
     let exe_str = exe.to_string_lossy();
     if exe_str.starts_with("/nix/store/") {
@@ -496,6 +525,9 @@ pub enum UpdateTarget {
     Installer(Receipt),
     /// The `.app` root to swap. macOS only; see the `macos_app` module.
     AppBundle(PathBuf),
+    /// The `.AppImage` file to replace. Linux only; see the `linux_app` module.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    AppImage(PathBuf),
     /// The directory holding a zip-extracted `orx.exe`. Only Windows reads it.
     #[cfg_attr(not(windows), allow(dead_code))]
     Portable(PathBuf),
@@ -509,6 +541,7 @@ pub fn preflight(force: bool) -> Result<UpdateTarget> {
     let channel = detect_channel(&exe)?;
     let (receipt, prefix) = match channel {
         InstallChannel::AppBundle(root) => return Ok(UpdateTarget::AppBundle(root)),
+        InstallChannel::AppImage(file) => return Ok(UpdateTarget::AppImage(file)),
         InstallChannel::Portable(dir) => {
             probe_writable(&dir).map_err(|e| {
                 anyhow!(
@@ -865,7 +898,7 @@ fn instance_id() -> &'static str {
 /// Environment the app relaunch hands to the new app: the port the old one
 /// served on, so the new window keeps its origin (and localStorage) even when
 /// the old one had fallen back from the app's usual port.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(desktop_app)]
 pub const APP_RELAUNCH_PORT_ENV: &str = "ORX_APP_RELAUNCH_PORT";
 
 /// Relaunch this process into the copy on disk. Returns only on failure.
@@ -890,8 +923,25 @@ pub fn relaunch(port: u16) -> std::io::Error {
             None => return std::io::Error::other("could not locate the app bundle to relaunch"),
         }
     }
-    // Only the bundle relaunch needs the port; exec keeps the original `--port`.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(desktop_app, target_os = "linux"))]
+    if crate::commands::app::launched_with_app_arg() {
+        // The update replaced the `.AppImage` file, not this mount of the old
+        // one; its AppRun supplies `app` itself.
+        let mut app = match std::env::var_os("APPIMAGE") {
+            Some(appimage) => std::process::Command::new(appimage),
+            None => {
+                let Ok(exe) = std::env::current_exe() else {
+                    return std::io::Error::other("could not resolve the running executable");
+                };
+                let mut app = std::process::Command::new(relaunch_target(exe));
+                app.arg(crate::commands::app::APP_ARG);
+                app
+            }
+        };
+        return app.env(APP_RELAUNCH_PORT_ENV, port.to_string()).exec();
+    }
+    // Only the app relaunches need the port; exec keeps the original `--port`.
+    #[cfg(not(any(target_os = "macos", all(desktop_app, target_os = "linux"))))]
     let _ = port;
 
     // Not the canonical helper: the launch path is what the installer swapped
@@ -909,9 +959,9 @@ pub fn relaunch(port: u16) -> std::io::Error {
 /// app, on the same port.
 #[cfg(windows)]
 pub fn relaunch(port: u16) -> std::io::Error {
-    if crate::commands::app::launched_as_windows_app() {
+    if crate::commands::app::launched_with_app_arg() {
         return windows::relaunch(
-            vec![crate::commands::app::WINDOWS_APP_ARG.into()],
+            vec![crate::commands::app::APP_ARG.into()],
             &[(APP_RELAUNCH_PORT_ENV, port.to_string())],
         );
     }
@@ -973,13 +1023,46 @@ fn relaunch_app_bundle(root: &Path, port: u16) -> std::io::Error {
 /// install would advertise — and endlessly re-attempt — a build that does not
 /// exist for it. `Ok(None)` means "nothing newer published for this channel".
 pub async fn fetch_latest_for_channel(timeout: Duration) -> Result<Option<Version>> {
-    if matches!(current_channel(), Ok(InstallChannel::AppBundle(_))) {
-        return Ok(macos_app::fetch_manifest(timeout)
-            .await?
-            .map(|manifest| Version::parse(&manifest.version))
-            .transpose()?);
+    let app_version = match current_channel() {
+        Ok(InstallChannel::AppBundle(_)) => {
+            macos_app::fetch_manifest(timeout).await?.map(|m| m.version)
+        }
+        #[cfg(target_os = "linux")]
+        Ok(InstallChannel::AppImage(_)) => {
+            linux_app::fetch_manifest(timeout).await?.map(|m| m.version)
+        }
+        _ => return Ok(Some(fetch_latest(timeout).await?.version)),
+    };
+    Ok(app_version.map(|v| Version::parse(&v)).transpose()?)
+}
+
+/// Fetches a desktop app's release manifest. `Ok(None)` for a 404 — the expected
+/// state between a release being published and its app build being attached.
+/// That is "nothing to update to yet", never an error the user should see.
+async fn fetch_app_manifest<T: serde::de::DeserializeOwned>(
+    asset: &str,
+    timeout: Duration,
+) -> Result<Option<T>> {
+    let url = format!("{REPO_URL}/releases/latest/download/{asset}");
+    let res = http()
+        .get(&url)
+        .header("user-agent", UA)
+        .timeout(timeout)
+        .send()
+        .await
+        .map_err(|e| anyhow!("Could not fetch {asset}: {e}"))?;
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
     }
-    Ok(Some(fetch_latest(timeout).await?.version))
+    let status = res.status();
+    if !status.is_success() {
+        return Err(anyhow!(
+            "{asset} request failed ({} {})",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        ));
+    }
+    Ok(Some(serde_json::from_str(&res.text().await?)?))
 }
 
 /// Apply an update right now, on request, ignoring the backoff — a person
@@ -1275,10 +1358,10 @@ impl UpdateWarning {
 #[cfg(test)]
 mod tests {
     use super::{
-        app_bundle_root, attempt_backoff, attempt_due, bold, detect_channel, exe_matches_prefix,
-        now_unix, package_manager_owns, parse_manifest, portable_dir, portable_outside_prefix,
-        precedence, relaunch_args, relaunch_target, render, retired_path, warning_for, CheckCache,
-        InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
+        app_bundle_root, appimage_file, attempt_backoff, attempt_due, bold, detect_channel,
+        exe_matches_prefix, now_unix, package_manager_owns, parse_manifest, portable_dir,
+        portable_outside_prefix, precedence, relaunch_args, relaunch_target, render, retired_path,
+        warning_for, CheckCache, InstallChannel, ATTEMPT_BACKOFF_MAX, ATTEMPT_BACKOFF_MIN,
     };
     use semver::Version;
     use std::ffi::OsString;
@@ -1494,6 +1577,36 @@ mod tests {
         );
         assert_eq!(portable_dir(Path::new("Downloads/orx-0.2.exe")), None);
         assert_eq!(portable_dir(Path::new("Downloads/ORX.EXE")), None);
+    }
+
+    #[test]
+    fn only_the_orx_inside_the_mount_is_the_appimage() {
+        use std::ffi::OsStr;
+        let (appdir, appimage) = (
+            Some(OsStr::new("/tmp/.mount_OpenReAbc")),
+            Some(OsStr::new("/home/me/Applications/OpenResearch.AppImage")),
+        );
+        assert_eq!(
+            appimage_file(
+                Path::new("/tmp/.mount_OpenReAbc/usr/bin/orx"),
+                appdir,
+                appimage
+            ),
+            Some(PathBuf::from("/home/me/Applications/OpenResearch.AppImage"))
+        );
+        // An agent inherits APPDIR, but runs some other orx.
+        assert_eq!(
+            appimage_file(Path::new("/home/me/.cargo/bin/orx"), appdir, appimage),
+            None
+        );
+        assert_eq!(
+            appimage_file(
+                Path::new("/tmp/.mount_OpenReAbc/usr/bin/orx"),
+                None,
+                appimage
+            ),
+            None
+        );
     }
 
     #[test]

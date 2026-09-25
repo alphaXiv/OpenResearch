@@ -723,6 +723,7 @@
   "compute_usage_openresearch": "An ephemeral OpenResearch box runs the experiment, is billed to your organization, and is deleted when the run ends.",
   "updates_channel_installer": "Installed with the orx installer",
   "updates_channel_app": "macOS app",
+  "updates_channel_appimage": "Linux app (AppImage)",
   "updates_channel_portable": "Portable orx.exe",
   "updates_channel_cargo": "Installed with cargo",
   "updates_channel_homebrew": "Installed with Homebrew",

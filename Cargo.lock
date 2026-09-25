@@ -2210,6 +2210,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "pbkdf2",
+ "png",
  "portable-pty",
  "reqwest",
  "rfd",
@@ -2713,6 +2714,9 @@ checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
 dependencies = [
  "block2",
  "dispatch2",
+ "glib-sys",
+ "gobject-sys",
+ "gtk-sys",
  "js-sys",
  "libc",
  "log",

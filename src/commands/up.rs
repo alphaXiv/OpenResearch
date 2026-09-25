@@ -265,7 +265,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 /// server is waiting for one.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(desktop_app)]
 pub(crate) fn request_shutdown() {
     SHUTDOWN_REQUESTED.notify_one();
 }

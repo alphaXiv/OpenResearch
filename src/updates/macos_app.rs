@@ -58,34 +58,9 @@ pub struct AppManifest {
     pub sha256: String,
 }
 
-/// Fetches the published app manifest. `Ok(None)` for a 404 — the expected state
-/// between a release being published and its DMG being attached. That is
-/// "nothing to update to yet", never an error the user should see.
+/// Fetches the published app manifest; `Ok(None)` until the DMG is attached.
 pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    let url = format!(
-        "{}/releases/latest/download/{}",
-        super::REPO_URL,
-        MANIFEST_ASSET
-    );
-    let res = super::http()
-        .get(&url)
-        .header("user-agent", super::UA)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not fetch the macOS app manifest: {}", e))?;
-    if res.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let status = res.status();
-    if !status.is_success() {
-        return Err(anyhow!(
-            "App manifest request failed ({} {})",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("")
-        ));
-    }
-    Ok(Some(serde_json::from_str(&res.text().await?)?))
+    super::fetch_app_manifest(MANIFEST_ASSET, timeout).await
 }
 
 /// Update the installed bundle at `root` in place.

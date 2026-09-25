@@ -140,7 +140,7 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(desktop_app, target_os = "linux")))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }

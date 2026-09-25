@@ -723,6 +723,7 @@
   "compute_usage_openresearch": "एक अस्थायी OpenResearch बॉक्स प्रयोग चलाता है, आपके संगठन को बिल किया जाता है, और रन खत्म होने पर हटा दिया जाता है।",
   "updates_channel_installer": "orx इंस्टॉलर से इंस्टॉल किया गया",
   "updates_channel_app": "macOS ऐप",
+  "updates_channel_appimage": "Linux ऐप (AppImage)",
   "updates_channel_portable": "पोर्टेबल orx.exe",
   "updates_channel_cargo": "cargo से इंस्टॉल किया गया",
   "updates_channel_homebrew": "Homebrew से इंस्टॉल किया गया",

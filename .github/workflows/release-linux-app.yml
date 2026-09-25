@@ -1,0 +1,135 @@
+# Attaches the Linux desktop app (OpenResearch-<arch>.AppImage for x86_64 and
+# aarch64) and linux-app.json, which the AppImage's self-update reads, to a
+# GitHub Release. Unlike the CLI's static musl binaries, the app is a glibc build
+# with the `desktop` feature, so it is built here from the release's commit.
+#
+# Triggers mirror release-macos-app.yml: the automatic workflow_run after a
+# successful dispatched "Release", or a manual dispatch naming the tag. Gated on
+# the repo variable LINUX_APP_ENABLED. See docs/linux.md.
+
+name: Attach Linux app to release
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to attach the Linux app to (e.g. v0.2.11)
+        required: true
+        type: string
+
+permissions:
+  contents: write # upload release assets
+
+concurrency:
+  group: release-linux-app
+  cancel-in-progress: false
+
+jobs:
+  check:
+    if: ${{ vars.LINUX_APP_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch')) }}
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
+      tag: ${{ steps.gate.outputs.tag }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+      - id: gate
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+            tag="v${version}"
+          fi
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::No release $tag found (dry-run dispatch?) — nothing to attach."
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  appimage:
+    needs: check
+    if: ${{ needs.check.outputs.ok == 'true' }}
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.tag }}
+
+      - name: Install WebKitGTK and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev file xvfb
+
+      # The runner's preinstalled stable toolchain, as release-macos-app.yml uses.
+      - name: Build the production orx
+        run: ORX_OFFICIAL_RELEASE_BUILD=1 cargo build --release --locked --features desktop
+
+      - name: Verify the production channel
+        env:
+          ORX_TELEMETRY_ENV: "off"
+        run: test "$(target/release/orx version --build-channel)" = production
+
+      - name: Package the AppImage
+        run: scripts/build-linux-appimage.sh target/release/orx app-dist
+
+      - name: Smoke-test the AppImage
+        run: scripts/smoke-test-linux-appimage.sh app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: appimage-${{ matrix.arch }}
+          path: app-dist/OpenResearch-${{ matrix.arch }}.AppImage
+          if-no-files-found: error
+
+  # linux-app.json is what the AppImage's self-updater reads, so it goes up only
+  # after both AppImages it describes, and a re-run deletes the old one first.
+  publish:
+    needs: [check, appimage]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: appimage-*
+          merge-multiple: true
+          path: app-dist
+
+      - name: Upload the AppImages and their manifest to the release
+        run: |
+          set -euo pipefail
+          gh release delete-asset "$TAG" linux-app.json --repo "$GITHUB_REPOSITORY" --yes 2>/dev/null || true
+          gh release upload "$TAG" app-dist/OpenResearch-*.AppImage --repo "$GITHUB_REPOSITORY" --clobber
+          asset() {
+            jq -n --arg asset "OpenResearch-$1.AppImage" \
+              --arg sha256 "$(sha256sum "app-dist/OpenResearch-$1.AppImage" | cut -d' ' -f1)" '$ARGS.named'
+          }
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg tag "$TAG" \
+            --argjson x86_64 "$(asset x86_64)" \
+            --argjson aarch64 "$(asset aarch64)" \
+            '{version: $version, tag: $tag, assets: {x86_64: $x86_64, aarch64: $aarch64}}' > app-dist/linux-app.json
+          cat app-dist/linux-app.json
+          gh release upload "$TAG" app-dist/linux-app.json --repo "$GITHUB_REPOSITORY" --clobber

@@ -867,9 +867,13 @@ async fn main() {
         commands::app::run().await;
         return;
     }
-    // Started by the Windows app's launcher, OpenResearch.exe. See commands::app.
-    #[cfg(windows)]
-    if commands::app::launched_as_windows_app() {
+    // Started by the Windows app's launcher, OpenResearch.exe, or the Linux
+    // AppImage's AppRun. See commands::app.
+    #[cfg(all(desktop_app, not(target_os = "macos")))]
+    if commands::app::launched_with_app_arg() {
+        // A desktop launcher's environment lacks what .bashrc puts on PATH.
+        #[cfg(target_os = "linux")]
+        commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
         commands::app::run().await;
         return;
@@ -996,7 +1000,7 @@ fn show_error_dialog(message: &str) {
 
     // The app's console is hidden, and shared with the agents it runs, so it
     // doesn't own it.
-    if !owns_its_console() && !commands::app::launched_as_windows_app() {
+    if !owns_its_console() && !commands::app::launched_with_app_arg() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();

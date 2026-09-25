@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=OpenResearch
+Comment=Automated ML research with your coding agents
+Exec=orx app
+Icon=OpenResearch
+Categories=Development;Science;
+Terminal=false
+StartupWMClass=orx

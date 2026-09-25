@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The AppImage's entry point: start the bundled orx as the desktop app (see
+# src/commands/app.rs). Arguments are ignored; the CLI is `orx`, not this.
+set -e
+
+export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
+
+# linuxdeploy-plugin-gtk's hook points GTK at the bundled modules and schemas.
+for hook in "$APPDIR"/apprun-hooks/*.sh; do
+  if [ -e "$hook" ]; then
+    # shellcheck disable=SC1090
+    . "$hook"
+  fi
+done
+
+# scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
+# so WebKit finds its bundled helper processes relative to this directory.
+cd "$APPDIR/usr"
+exec "$APPDIR/usr/bin/orx" app

@@ -99,6 +99,12 @@ async fn apply(args: crate::UpdateArgs) -> Result<Outcome> {
             .await
             .map(|_| Outcome::Done);
     }
+    #[cfg(target_os = "linux")]
+    if let UpdateTarget::AppImage(appimage) = &target {
+        return updates::linux_app::update(appimage, &current, args.dry_run, args.background)
+            .await
+            .map(|_| Outcome::Done);
+    }
 
     let latest = updates::fetch_latest(Duration::from_secs(10)).await?;
     // Record what the release actually is before acting on it, so a cache that
@@ -200,7 +206,7 @@ fn run_installer(target: &UpdateTarget, installer: &[u8], quiet: bool) -> Result
             .join("bin")
             .join("orx.exe"),
         UpdateTarget::Portable(dir) => dir.join("orx.exe"),
-        UpdateTarget::AppBundle(_) => {
+        UpdateTarget::AppBundle(_) | UpdateTarget::AppImage(_) => {
             return Err(anyhow!("This install is not managed by the installer."))
         }
     };
