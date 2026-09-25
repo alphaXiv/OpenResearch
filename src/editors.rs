@@ -40,6 +40,7 @@ pub fn open_in_default_app(path: &std::path::Path) -> std::io::Result<()> {
     let mut cmd = {
         let mut c = Command::new("xdg-open");
         c.arg(path);
+        crate::local::shell_env::restore_host_gui_env(&mut c);
         c
     };
 
@@ -71,6 +72,7 @@ fn reveal_command(path: &std::path::Path) -> Command {
         // No portable "select the file" opener on Linux, so open the containing directory.
         let mut c = Command::new("xdg-open");
         c.arg(path.parent().unwrap_or(path));
+        crate::local::shell_env::restore_host_gui_env(&mut c);
         c
     };
     cmd

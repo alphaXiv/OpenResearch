@@ -14,7 +14,7 @@ path = "src/main.rs"
 # The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
 # default so the static musl CLI builds stay free of GTK. macOS and Windows
 # always build the app.
-desktop = ["dep:tao", "dep:wry", "dep:rfd", "dep:png"]
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
@@ -88,11 +88,12 @@ wry = "0.57"
 rfd = "0.17"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# The same, behind the `desktop` feature: WebKitGTK, plus png for the window
-# icon. rfd drives GTK directly, which the window has already initialized.
+# The same, behind the `desktop` feature: WebKitGTK, png for the window icon,
+# and gtk (tao's version) for the save dialog. Not rfd: its GTK backend runs on a
+# thread of its own, which deadlocks against tao's hold on the main context.
 tao = { version = "0.37", optional = true }
 wry = { version = "0.57", optional = true }
-rfd = { version = "0.17", default-features = false, features = ["gtk3"], optional = true }
+gtk = { version = "0.18", optional = true }
 png = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

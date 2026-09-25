@@ -871,9 +871,6 @@ async fn main() {
     // AppImage's AppRun. See commands::app.
     #[cfg(all(desktop_app, not(target_os = "macos")))]
     if commands::app::launched_with_app_arg() {
-        // A desktop launcher's environment lacks what .bashrc puts on PATH.
-        #[cfg(target_os = "linux")]
-        commands::app::hydrate_shell_env().await;
         telemetry::set_flag(false);
         commands::app::run().await;
         return;
@@ -1031,7 +1028,28 @@ fn show_error_dialog(message: &str) {
         .output();
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+/// A launcher-started AppImage has no terminal to read, so show the error with
+/// whichever desktop's dialog tool is installed, as the folder picker does.
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn show_error_dialog(message: &str) {
+    if !commands::app::launched_with_app_arg() {
+        return;
+    }
+    eprintln!("OpenResearch: {message}");
+    for (program, args) in [
+        ("zenity", ["--error", "--title=OpenResearch", "--text"]),
+        ("kdialog", ["--title", "OpenResearch", "--error"]),
+    ] {
+        let mut dialog = std::process::Command::new(program);
+        dialog.args(args).arg(message);
+        local::shell_env::restore_host_gui_env(&mut dialog);
+        if dialog.status().is_ok() {
+            return;
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", all(desktop_app, target_os = "linux"))))]
 fn show_error_dialog(_message: &str) {}
 
 /// Main thread only: a worker's panic has a running dashboard to report through.

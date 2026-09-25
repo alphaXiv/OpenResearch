@@ -65,13 +65,19 @@ const APP_PORT: u16 = 4792;
 pub async fn run() {
     #[cfg(not(target_os = "macos"))]
     let focus_requests = {
-        // A relaunched app first waits out its predecessor, which holds the claim.
+        // A relaunched Windows app first waits out its predecessor, which holds
+        // the claim (Linux relaunches by exec, which releases it).
         crate::updates::await_replaced_parent();
         match instance::claim() {
             Some(requests) => requests,
             None => return,
         }
     };
+    // A desktop launcher's environment lacks what .bashrc puts on PATH. After the
+    // claim, so a launch that only brings the window forward doesn't wait on it;
+    // before storage and telemetry, which read the directories it may change.
+    #[cfg(target_os = "linux")]
+    hydrate_shell_env().await;
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
@@ -127,13 +133,18 @@ pub async fn run() {
 /// inherited, where fish would have printed its own list-valued `$PATH`
 /// space-separated. NUL separates them because a PATH or a directory may
 /// contain spaces, colons, and newlines, but never NUL.
-#[cfg(any(target_os = "macos", all(desktop_app, target_os = "linux")))]
+#[cfg(all(desktop_app, unix))]
 pub(crate) async fn hydrate_shell_env() {
     // Nonce, so rc-file chatter can't forge the fence around the values. The
     // leading `_` is load-bearing: `printf` reads `\0` plus up to three octal
     // digits, so a marker starting with a digit would be eaten by the escape.
     let marker = format!("__ORX_ENV_{}__", uuid::Uuid::new_v4().simple());
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    let fallback = if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/sh"
+    };
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| fallback.into());
     let reads = crate::local::shell_env::IMPORTED
         .map(|key| format!(r#""${key}""#))
         .join(" ");
@@ -512,12 +523,9 @@ mod imp {
         let webview = {
             use tao::platform::unix::WindowExtUnix;
             use wry::WebViewBuilderExtUnix;
-            let Some(vbox) = window.default_vbox() else {
-                crate::show_error_dialog(
-                    "Could not open the dashboard view: the window has no GTK box",
-                );
-                return;
-            };
+            let vbox = window
+                .default_vbox()
+                .expect("tao gives every window a default vbox");
             builder.build_gtk(vbox)
         };
         let webview = match webview {
@@ -690,6 +698,20 @@ mod imp {
     /// Without a handler WKWebView drops downloads and WebView2 saves them
     /// silently into Downloads; ask where, as a browser would.
     fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
+        let Some(chosen) = ask_save_path(window, path) else {
+            return false;
+        };
+        // No webview writes over an existing file, and the dialog has already
+        // confirmed replacing it.
+        if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
+            return false;
+        }
+        *path = chosen;
+        true
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn ask_save_path(window: &Window, suggested: &std::path::Path) -> Option<PathBuf> {
         let mut dialog = rfd::FileDialog::new();
         // Owned by the window, which Windows disables while the dialog is up. On
         // macOS a parent turns the panel into a sheet, which a hidden window can't show.
@@ -699,24 +721,43 @@ mod imp {
         }
         #[cfg(not(windows))]
         let _ = window;
-        if let Some(dir) = path.parent() {
+        if let Some(dir) = suggested.parent() {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(name) = path.file_name() {
+        if let Some(name) = suggested.file_name() {
             dialog = dialog.set_file_name(name.to_string_lossy());
         }
-        match dialog.save_file() {
-            Some(chosen) => {
-                // Neither webview writes over an existing file, and the panel
-                // has already confirmed replacing it.
-                if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
-                    return false;
-                }
-                *path = chosen;
-                true
-            }
-            None => false,
+        dialog.save_file()
+    }
+
+    /// On the main thread, which owns GTK here: WebKit asks from a signal
+    /// handler there, and the modal loop keeps the window painting.
+    #[cfg(target_os = "linux")]
+    fn ask_save_path(window: &Window, suggested: &std::path::Path) -> Option<PathBuf> {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+
+        let dialog = gtk::FileChooserDialog::with_buttons(
+            None,
+            Some(window.gtk_window()),
+            gtk::FileChooserAction::Save,
+            &[
+                ("_Cancel", gtk::ResponseType::Cancel),
+                ("_Save", gtk::ResponseType::Accept),
+            ],
+        );
+        dialog.set_do_overwrite_confirmation(true);
+        if let Some(dir) = suggested.parent() {
+            dialog.set_current_folder(dir);
         }
+        if let Some(name) = suggested.file_name() {
+            dialog.set_current_name(&name.to_string_lossy());
+        }
+        let chosen = (dialog.run() == gtk::ResponseType::Accept)
+            .then(|| dialog.filename())
+            .flatten();
+        dialog.close();
+        chosen
     }
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers

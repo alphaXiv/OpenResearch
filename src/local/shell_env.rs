@@ -137,10 +137,52 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
+/// What the Linux AppImage's GTK hook points at the image (keep in step with
+/// linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 11] = [
+    "GDK_BACKEND",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GIO_EXTRA_MODULES",
+    "GI_TYPELIB_PATH",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_DATA_PREFIX",
+    "GTK_EXE_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GTK_PATH",
+    "GTK_THEME",
+    "XDG_DATA_DIRS",
+];
+
+/// The session's own values for the variables the AppImage set for its bundled
+/// GTK, for a host program orx starts: a system file manager handed the image's
+/// schemas and modules fails to start. `None` means the session had none. Empty
+/// outside the AppImage.
+pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
+    APPIMAGE_GTK_VARS
+        .iter()
+        .filter_map(|var| {
+            let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
+            let saved = saved.to_str()?;
+            // AppRun writes `=<value>` for a set variable and `-` for an unset one.
+            Some((*var, saved.strip_prefix('=').map(OsString::from)))
+        })
+        .collect()
+}
+
+/// [`host_gui_env`], applied to a command about to start a host program.
+pub fn restore_host_gui_env(command: &mut std::process::Command) {
+    for (var, value) in host_gui_env() {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
+}
+
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(any(target_os = "macos", all(desktop_app, target_os = "linux")))]
+#[cfg(all(desktop_app, unix))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }

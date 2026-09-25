@@ -63,7 +63,14 @@ pub fn pick_folder() -> Result<Option<PathBuf>> {
             ][..],
         ),
     ] {
-        let output = match Command::new(program).args(args).output() {
+        let mut picker = Command::new(program);
+        picker.args(args);
+        crate::local::shell_env::restore_host_gui_env(&mut picker);
+        // `.` is kdialog's start folder; the app's own is inside the read-only image.
+        if let Some(home) = dirs::home_dir() {
+            picker.current_dir(home);
+        }
+        let output = match picker.output() {
             Ok(output) => output,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(anyhow!("Could not open the folder picker: {error}")),

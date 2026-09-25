@@ -5,6 +5,19 @@ set -e
 
 export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
 
+# The session's values of what the hook below overrides, as `=<value>` or `-` for
+# unset, so orx can hand them back to the host programs it opens
+# (shell_env::host_gui_env; keep the two lists in step).
+for var in GDK_BACKEND GDK_PIXBUF_MODULE_FILE GIO_EXTRA_MODULES GI_TYPELIB_PATH \
+  GSETTINGS_SCHEMA_DIR GTK_DATA_PREFIX GTK_EXE_PREFIX GTK_IM_MODULE_FILE GTK_PATH \
+  GTK_THEME XDG_DATA_DIRS; do
+  if [ -n "${!var+set}" ]; then
+    export "ORX_HOST_$var==${!var}"
+  else
+    export "ORX_HOST_$var=-"
+  fi
+done
+
 # linuxdeploy-plugin-gtk's hook points GTK at the bundled modules and schemas.
 for hook in "$APPDIR"/apprun-hooks/*.sh; do
   if [ -e "$hook" ]; then

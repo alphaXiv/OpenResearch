@@ -2202,6 +2202,7 @@ dependencies = [
  "embed-resource",
  "fd-lock",
  "futures",
+ "gtk",
  "hyper",
  "hyper-util",
  "libc",
@@ -2714,9 +2715,6 @@ checksum = "20dafead71c16a34e1ff357ddefc8afc11e7d51d6d2b9fbd07eaa48e3e540220"
 dependencies = [
  "block2",
  "dispatch2",
- "glib-sys",
- "gobject-sys",
- "gtk-sys",
  "js-sys",
  "libc",
  "log",
