@@ -342,7 +342,19 @@ pub(super) async fn select_working(
     candidates: Vec<PathBuf>,
     minimum: Option<(u64, u64, u64)>,
 ) -> Option<(PathBuf, BinProbe)> {
-    let selected = select_working_from(candidates, minimum).await;
+    select_working_with_path(key, candidates, minimum, None).await
+}
+
+/// [`select_working`] for a launcher that needs `path` as its PATH to run at
+/// all — an npm `.cmd` shim calls `node` from PATH, and the Node.js its
+/// installer provisioned is not on the user's PATH.
+pub(super) async fn select_working_with_path(
+    key: &'static str,
+    candidates: Vec<PathBuf>,
+    minimum: Option<(u64, u64, u64)>,
+    path: Option<std::ffi::OsString>,
+) -> Option<(PathBuf, BinProbe)> {
+    let selected = select_working_from(candidates, minimum, path.as_deref()).await;
     // The sync `find_*` callers cannot probe; publishing the choice keeps them
     // on the verified binary instead of the first PATH hit it skipped.
     if let Some((path, _)) = &selected {
@@ -390,13 +402,15 @@ fn selected_bins() -> &'static std::sync::Mutex<std::collections::HashMap<&'stat
 async fn select_working_from(
     candidates: Vec<PathBuf>,
     minimum: Option<(u64, u64, u64)>,
+    path: Option<&std::ffi::OsStr>,
 ) -> Option<(PathBuf, BinProbe)> {
     // Probe candidates in parallel: a node CLI's `--version` can take seconds
     // (cold start, AV scan). The pick still walks results in discovery order;
     // this trades extra spawns (the old short-circuit probed one binary in
     // the common case) for bounded wall-clock.
     let candidates = unique(candidates);
-    let probes = futures::future::join_all(candidates.iter().map(|c| probe_bin(c))).await;
+    let probes =
+        futures::future::join_all(candidates.iter().map(|c| probe_bin_with_path(c, path))).await;
     let mut fallback: Option<(PathBuf, BinProbe)> = None;
     for (candidate, probe) in candidates.into_iter().zip(probes) {
         let version = match &probe {
@@ -735,6 +749,11 @@ fn pe_version(_bin: &Path) -> Option<String> {
 
 /// `<bin> --version`, with a timeout (node CLIs can be slow).
 pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
+    probe_bin_with_path(bin, None).await
+}
+
+/// [`probe_bin`] with `path`, when given, as the child's PATH.
+async fn probe_bin_with_path(bin: &Path, path: Option<&std::ffi::OsStr>) -> BinProbe {
     if let Some(version) = path_version(bin).or_else(|| pe_version(bin)) {
         return BinProbe::Answered(Some(version));
     }
@@ -743,6 +762,9 @@ pub(super) async fn probe_bin(bin: &Path) -> BinProbe {
     // An unparseable version downgrades a signed-in harness to `Unknown` —
     // which is why a synced `FORCE_COLOR` must not reach the version line.
     crate::local::chat::prepare_env(&mut cmd);
+    if let Some(path) = path {
+        cmd.env("PATH", path);
+    }
     cmd.env("NO_COLOR", "1");
     let Some(result) = detect_spawn_output_timed(cmd, VERSION_TIMEOUT).await else {
         return BinProbe::Unknown;
@@ -993,7 +1015,7 @@ mod tests {
         // and the healthy native binary the installer just wrote.
         let stale = script("stale", "#!/bin/sh\necho 'spawn ENOENT' >&2\nexit 1\n");
         let fresh = script("fresh", "#!/bin/sh\necho '1.18.31'\n");
-        let (picked, _) = select_working_from(vec![stale.clone(), fresh.clone()], None)
+        let (picked, _) = select_working_from(vec![stale.clone(), fresh.clone()], None, None)
             .await
             .unwrap();
         assert_eq!(
@@ -1005,7 +1027,7 @@ mod tests {
         let old = script("old", "#!/bin/sh\necho '2.1.210 (Claude Code)'\n");
         let new = script("new", "#!/bin/sh\necho '2.1.277 (Claude Code)'\n");
         assert_eq!(
-            select_working_from(vec![old.clone(), new.clone()], None)
+            select_working_from(vec![old.clone(), new.clone()], None, None)
                 .await
                 .unwrap()
                 .0,
@@ -1013,14 +1035,14 @@ mod tests {
         );
         // Only a version the harness actually rejects makes it look further.
         let (picked, probe) =
-            select_working_from(vec![old.clone(), new.clone()], Some((2, 1, 211)))
+            select_working_from(vec![old.clone(), new.clone()], Some((2, 1, 211)), None)
                 .await
                 .unwrap();
         assert_eq!(picked, new);
         assert!(matches!(probe, BinProbe::Answered(Some(v)) if v.starts_with("2.1.277")));
         // No candidate clears the bar: the one that runs is still reported.
         assert_eq!(
-            select_working_from(vec![old.clone()], Some((2, 1, 211)))
+            select_working_from(vec![old.clone()], Some((2, 1, 211)), None)
                 .await
                 .unwrap()
                 .0,
@@ -1030,7 +1052,7 @@ mod tests {
         // Every candidate broken still reports an install (the first), so the
         // UI says "installed but failed to run", not "not found".
         let also_stale = script("also-stale", "#!/bin/sh\nexit 1\n");
-        let (picked, probe) = select_working_from(vec![stale.clone(), also_stale], None)
+        let (picked, probe) = select_working_from(vec![stale.clone(), also_stale], None, None)
             .await
             .unwrap();
         assert_eq!(picked, stale);
@@ -1039,7 +1061,7 @@ mod tests {
         // Answered-but-unversioned is a working install, and wins outright.
         let quiet = script("quiet", "#!/bin/sh\nexit 0\n");
         assert_eq!(
-            select_working_from(vec![quiet.clone(), fresh.clone()], None)
+            select_working_from(vec![quiet.clone(), fresh.clone()], None, None)
                 .await
                 .unwrap()
                 .0,
@@ -1047,13 +1069,31 @@ mod tests {
         );
         // ...but it cannot clear a minimum, so the versioned one wins there.
         assert_eq!(
-            select_working_from(vec![quiet, fresh.clone()], Some((1, 0, 0)))
+            select_working_from(vec![quiet, fresh.clone()], Some((1, 0, 0)), None)
                 .await
                 .unwrap()
                 .0,
             fresh
         );
-        assert!(select_working_from(Vec::new(), None).await.is_none());
+        assert!(select_working_from(Vec::new(), None, None).await.is_none());
+
+        // An npm shim runs `node` from PATH: without the installer's Node
+        // there it is broken, with it the same launcher answers.
+        let node_dir = dir.join("managed-node");
+        std::fs::create_dir_all(&node_dir).unwrap();
+        let node = node_dir.join("orx-test-node");
+        std::fs::write(&node, "#!/bin/sh\necho '0.5.4'\n").unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shim = script("shim", "#!/bin/sh\nexec orx-test-node \"$@\"\n");
+        assert!(matches!(
+            select_working_from(vec![shim.clone()], None, None).await,
+            Some((_, BinProbe::Broken(_)))
+        ));
+        let path = std::env::join_paths([node_dir, "/usr/bin".into(), "/bin".into()]).unwrap();
+        assert!(matches!(
+            select_working_from(vec![shim], None, Some(&path)).await,
+            Some((_, BinProbe::Answered(Some(v)))) if v == "0.5.4"
+        ));
 
         // Non-adjacent repeats are one candidate, so the same binary is never
         // probed twice at `VERSION_TIMEOUT`.

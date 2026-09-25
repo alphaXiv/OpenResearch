@@ -40,6 +40,28 @@ use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
 const AUTH_REQUIRED: i64 = -32000;
 const METHOD_NOT_FOUND: i64 = -32601;
 
+/// An `auth_required` answer. Agents also send it when a started turn fails
+/// on the model provider's auth (an expired or revoked token), and then the
+/// message carries the provider's reason, which the user needs to see.
+fn not_signed_in(agent: &AcpAgent, error: &RpcError) -> crate::error::Error {
+    let detail = error
+        .message
+        .trim()
+        .strip_prefix("Authentication required")
+        .unwrap_or(error.message.trim())
+        .trim_start_matches([':', ' '])
+        .trim();
+    if detail.is_empty() {
+        anyhow!("{} is not signed in. {}", agent.display, agent.login_hint)
+    } else {
+        anyhow!(
+            "{} is not signed in ({detail}). {}",
+            agent.display,
+            agent.login_hint
+        )
+    }
+}
+
 /// How one ACP harness is launched and configured.
 pub(crate) struct AcpAgent {
     pub harness_id: &'static str,
@@ -398,11 +420,7 @@ async fn drive(
             match resumed {
                 Ok(result) => session = Some((native_id, result)),
                 Err(error) if error.code == AUTH_REQUIRED => {
-                    return Err(anyhow!(
-                        "{} is not signed in. {}",
-                        agent.display,
-                        agent.login_hint
-                    ))
+                    return Err(not_signed_in(agent, &error))
                 }
                 Err(_) => {}
             }
@@ -423,7 +441,7 @@ async fn drive(
             .await?
             .map_err(|error| {
                 if error.code == AUTH_REQUIRED {
-                    anyhow!("{} is not signed in. {}", agent.display, agent.login_hint)
+                    not_signed_in(agent, &error)
                 } else {
                     anyhow!("{} could not open a session: {error}", agent.display)
                 }
@@ -472,7 +490,7 @@ async fn drive(
     ctx.mark_delivery(DeliveryState::Accepted);
     let result = response.map_err(|error| {
         if error.code == AUTH_REQUIRED {
-            anyhow!("{} is not signed in. {}", agent.display, agent.login_hint)
+            not_signed_in(agent, &error)
         } else {
             anyhow!("{}: {}", agent.display, error.message)
         }
@@ -1037,6 +1055,29 @@ pub(crate) mod tests {
             }
         }
         ctx
+    }
+
+    #[test]
+    fn auth_errors_keep_the_agents_reason() {
+        let error = |message: &str| RpcError {
+            code: AUTH_REQUIRED,
+            message: message.into(),
+        };
+        let agent = &super::super::kimi::AGENT;
+        let bare = not_signed_in(agent, &error("Authentication required")).to_string();
+        assert_eq!(
+            bare,
+            format!("Kimi Code is not signed in. {}", agent.login_hint)
+        );
+        let detailed = not_signed_in(
+            agent,
+            &error("Authentication required: token refresh failed (401)"),
+        )
+        .to_string();
+        assert!(
+            detailed.starts_with("Kimi Code is not signed in (token refresh failed (401))."),
+            "{detailed}"
+        );
     }
 
     #[test]

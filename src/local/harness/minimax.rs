@@ -92,7 +92,8 @@ pub(crate) fn find_mcode() -> Option<PathBuf> {
 }
 
 async fn find_mcode_working() -> Option<(PathBuf, super::detect::BinProbe)> {
-    super::detect::select_working(KEY, candidates(), None).await
+    // npm's `mcode.cmd` runs `node` from PATH; the installer's Node is not on it.
+    super::detect::select_working_with_path(KEY, candidates(), None, child_path()).await
 }
 
 /// The newest Node.js the MiniMax installer provisioned, if any.
