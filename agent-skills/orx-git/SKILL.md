@@ -43,6 +43,6 @@ git log --oneline <parent-branch>..orx/<child-slug>
 ```
 
 Once a run answers an experiment, its branch and history are immutable. Never
-merge or rebase it. To incorporate other work, create a child and put the merge
-commit on the child's branch. Never rebase experiment history; it records the
-exact code that ran.
+merge or rebase it. To incorporate other work, merge it into the next
+experiment's branch only if that experiment needs it. Never rebase experiment
+history; it records the exact code that ran.
