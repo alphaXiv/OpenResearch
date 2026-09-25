@@ -8,7 +8,9 @@
 <img src=".github/readme-assets/codex.svg" alt="" width="16" height="16" align="texttop" /> Codex,
 <img src=".github/readme-assets/opencode.svg" alt="" width="16" height="16" align="texttop" /> OpenCode,
 <img src=".github/readme-assets/cursor.svg" alt="" width="16" height="16" align="texttop" /> Cursor, Google Antigravity,
-Kimi Code, MiniMax Code, or ZCode into research agents that can review
+<img src=".github/readme-assets/kimi.svg" alt="" width="16" height="16" align="texttop" /> Kimi Code,
+<img src=".github/readme-assets/minimax.svg" alt="" width="16" height="16" align="texttop" /> MiniMax Code, or
+<img src=".github/readme-assets/zcode.svg" alt="" width="16" height="16" align="texttop" /> ZCode into research agents that can review
 literature, develop hypotheses, run experiments, and produce research artifacts.</p>
 
 <p>
@@ -89,7 +91,7 @@ updates and use managed OpenResearch compute.
 | **Parallel exploration** | Give each research direction an independent agent session and isolated git worktree. |
 | **Reproducible experiments** | Track variants in a git-native experiment tree; every run receives an immutable archive of its recorded commit. |
 | **Evidence in context** | Keep logs, diffs, files, results, and artifacts tied to the work that produced them. |
-| **Your choice of agent** | Use Claude Code, Codex, OpenCode, Cursor, or Google Antigravity, with the harness and model selected per session. |
+| **Your choice of agent** | Use Claude Code, Codex, OpenCode, Cursor, Google Antigravity, Kimi Code, MiniMax Code, or ZCode, with the harness and model selected per session. |
 | **Your choice of compute** | Run locally, on your own infrastructure, or with managed OpenResearch compute. |
 | **Local ownership** | Keep projects, conversations, experiments, runs, logs, code, and artifacts on your machine. |
 

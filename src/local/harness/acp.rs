@@ -458,16 +458,43 @@ async fn drive(
     ctx.set_native_session_id(&session_id);
     state.session_id = session_id.clone();
 
-    for (method, params) in session_setup(
+    // Thinking levels depend on the model (Kimi offers `off`/`on` for some,
+    // effort levels for others), so the level is picked from the options a
+    // model switch answers with, not from the ones the session opened with.
+    let mut options = opened.get("configOptions").cloned();
+    let mut setup = session_setup(
         &session_id,
         &opened,
         resumed,
         &settings,
         ctx.model.as_deref(),
-        ctx.reasoning_level.as_deref(),
-    ) {
-        if let Err(error) = call(ctx, conn, inbound, &mut state, method, params).await? {
-            eprintln!("{}: {method} failed: {error}", agent.harness_id);
+        None,
+    );
+    let mut thinking_pending = true;
+    while !setup.is_empty() || thinking_pending {
+        if setup.is_empty() {
+            thinking_pending = false;
+            let current = options
+                .as_ref()
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            setup.extend(thinking_call(
+                &session_id,
+                &current,
+                resumed,
+                ctx.reasoning_level.as_deref(),
+            ));
+            continue;
+        }
+        let (method, params) = setup.remove(0);
+        match call(ctx, conn, inbound, &mut state, method, params).await? {
+            Ok(result) => {
+                if let Some(updated) = result.get("configOptions").filter(|o| o.is_array()) {
+                    options = Some(updated.clone());
+                }
+            }
+            Err(error) => eprintln!("{}: {method} failed: {error}", agent.harness_id),
         }
     }
 
@@ -570,11 +597,6 @@ fn session_setup(
             wanted.push((option_id(option), model.to_string()));
         }
     }
-    if let Some(level) = reasoning.filter(|l| *l != super::options::REASONING_DEFAULT_ID) {
-        if let Some(option) = option_by(&options, "thought_level") {
-            wanted.push((option_id(option), level.to_string()));
-        }
-    }
     for (id, value) in wanted {
         let Some(option) = options
             .iter()
@@ -597,7 +619,45 @@ fn session_setup(
             ));
         }
     }
+    calls.extend(thinking_call(session_id, &options, resumed, reasoning));
     calls
+}
+
+/// The `set_config_option` call for the composer's reasoning level, checked
+/// against `options` as they stand for the session's current model. A model
+/// whose thinking is only `off`/`on` gets `on` for any level but `off`; a
+/// level the model does not offer at all is left alone.
+fn thinking_call(
+    session_id: &str,
+    options: &[Value],
+    resumed: bool,
+    reasoning: Option<&str>,
+) -> Option<(&'static str, Value)> {
+    let level = reasoning.filter(|l| *l != super::options::REASONING_DEFAULT_ID)?;
+    let option = option_by(options, "thought_level")?;
+    let offered: Vec<&str> = option
+        .get("options")
+        .and_then(Value::as_array)
+        .map(|all| {
+            all.iter()
+                .filter_map(|o| o.get("value").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+    let value = if offered.contains(&level) {
+        level
+    } else if level != "off" && offered.contains(&"on") {
+        "on"
+    } else {
+        return None;
+    };
+    let current = option.get("currentValue").and_then(Value::as_str);
+    (resumed || current != Some(value)).then(|| {
+        (
+            "session/set_config_option",
+            json!({"sessionId": session_id, "configId": option_id(option), "value": value}),
+        )
+    })
 }
 
 fn option_by<'a>(options: &'a [Value], category: &str) -> Option<&'a Value> {
@@ -1223,6 +1283,48 @@ pub(crate) mod tests {
             .filter_map(|p| p.text.as_deref())
             .collect();
         assert_eq!(texts, vec!["ab", "c"]);
+    }
+
+    #[test]
+    fn thinking_follows_the_current_models_levels() {
+        let thinking = |values: &[&str], current: &str| {
+            vec![json!({
+                "id": "thinking",
+                "category": "thought_level",
+                "currentValue": current,
+                "options": values.iter().map(|v| json!({"value": v})).collect::<Vec<_>>(),
+            })]
+        };
+        let efforts = thinking(&["off", "low", "high", "max"], "max");
+        assert_eq!(
+            thinking_call("s1", &efforts, false, Some("high")),
+            Some((
+                "session/set_config_option",
+                json!({"sessionId": "s1", "configId": "thinking", "value": "high"})
+            ))
+        );
+        // A model with only off/on: any level means on, which it already is.
+        let toggle = thinking(&["off", "on"], "on");
+        assert_eq!(thinking_call("s1", &toggle, false, Some("high")), None);
+        assert_eq!(
+            thinking_call("s1", &toggle, true, Some("high")).map(|(_, p)| p["value"].clone()),
+            Some(json!("on"))
+        );
+        assert_eq!(
+            thinking_call("s1", &toggle, false, Some("off")).map(|(_, p)| p["value"].clone()),
+            Some(json!("off"))
+        );
+        // Unknown levels and the composer default send nothing.
+        assert_eq!(thinking_call("s1", &efforts, false, Some("ultra")), None);
+        assert_eq!(
+            thinking_call(
+                "s1",
+                &efforts,
+                true,
+                Some(super::super::options::REASONING_DEFAULT_ID)
+            ),
+            None
+        );
     }
 
     #[test]
