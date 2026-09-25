@@ -211,9 +211,30 @@ fn route_line(
 // --- turn --------------------------------------------------------------------------
 
 fn first_turn_prompt(text: &str) -> String {
+    format!("{}\n\n{text}", playbook_pointer())
+}
+
+pub(crate) fn playbook_pointer() -> String {
     format!(
-        "Read and follow `{PLAYBOOK_REL}` before acting. It is the OpenResearch session playbook for this worktree.\n\n{text}"
+        "Read and follow `{PLAYBOOK_REL}` before acting. It is the OpenResearch session playbook for this worktree."
     )
+}
+
+/// The agent's session title with orx's preambles removed. Kimi Code and
+/// ZCode title a session with the start of its first prompt, which is the
+/// playbook pointer (and for a ZCode plan turn, its plan note) orx puts ahead
+/// of the user's text. A title that is only (a truncation of) a preamble is
+/// dropped so the chat keeps its own title.
+pub(crate) fn agent_title<'a>(title: &'a str, preambles: &[&str]) -> Option<&'a str> {
+    let mut rest = title.trim();
+    for preamble in preambles {
+        match rest.strip_prefix(preamble) {
+            Some(tail) => rest = tail.trim_start(),
+            None if preamble.starts_with(rest.trim_end_matches(['…', '.'])) => rest = "",
+            None => {}
+        }
+    }
+    (!rest.is_empty()).then_some(rest)
 }
 
 /// Run one chat turn against an ACP agent.
@@ -987,7 +1008,11 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
             }
         }
         Some("session_info_update") => {
-            if let Some(title) = update.get("title").and_then(Value::as_str) {
+            if let Some(title) = update
+                .get("title")
+                .and_then(Value::as_str)
+                .and_then(|title| agent_title(title, &[&playbook_pointer()]))
+            {
                 ctx.set_title(title);
             }
         }
@@ -1283,6 +1308,28 @@ pub(crate) mod tests {
             .filter_map(|p| p.text.as_deref())
             .collect();
         assert_eq!(texts, vec!["ab", "c"]);
+    }
+
+    #[test]
+    fn session_titles_drop_the_playbook_pointer() {
+        let pointer = playbook_pointer();
+        let t = |title: &str| agent_title(title, &[&pointer]).map(str::to_string);
+        let first = first_turn_prompt("Create hello.txt");
+        assert_eq!(t(&first).as_deref(), Some("Create hello.txt"));
+        // Agents truncate titles; a title inside the pointer is no title at all.
+        assert_eq!(t(&first[..80]), None);
+        assert_eq!(t(&format!("{}…", &first[..60])), None);
+        assert_eq!(
+            t("Fix the flaky test").as_deref(),
+            Some("Fix the flaky test")
+        );
+        assert_eq!(t("  "), None);
+        // Several preambles are removed in order.
+        let both = format!("{pointer}\n\nPlan first.\n\nWrite tests");
+        assert_eq!(
+            agent_title(&both, &[&pointer, "Plan first."]),
+            Some("Write tests")
+        );
     }
 
     #[test]

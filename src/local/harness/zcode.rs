@@ -34,7 +34,7 @@ use crate::local::chat::{
     find_part_mut, harness_log, prepare_env, set_chat_session_env, DeliveryState, PromptAnswer,
     ResumeCtx, TurnCtx, WirePart, WirePrompt, WireToolState,
 };
-use crate::local::opencode::{ensure_playbook, PLAYBOOK_REL};
+use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::{find_in_dir, find_on_path};
 
 const KEY: &str = "zcode";
@@ -330,15 +330,17 @@ fn zcode_mode(mode: Option<PermissionMode>, plan: bool) -> &'static str {
     }
 }
 
+const PLAN_NOTE: &str = "Plan mode: investigate read-only and reply with a concrete plan. Do not modify files or run commands that change state.";
+
 fn turn_prompt(text: &str, first: bool, plan: bool) -> String {
     let mut prompt = String::new();
     if first {
-        prompt.push_str(&format!(
-            "Read and follow `{PLAYBOOK_REL}` before acting. It is the OpenResearch session playbook for this worktree.\n\n"
-        ));
+        prompt.push_str(&super::acp::playbook_pointer());
+        prompt.push_str("\n\n");
     }
     if plan {
-        prompt.push_str("Plan mode: investigate read-only and reply with a concrete plan. Do not modify files or run commands that change state.\n\n");
+        prompt.push_str(PLAN_NOTE);
+        prompt.push_str("\n\n");
     }
     prompt.push_str(text);
     prompt
@@ -493,7 +495,12 @@ fn apply_event(ctx: &mut TurnCtx, state: &mut TurnState, event: &Value) {
             }
         }
         Some("session.titleUpdated") => {
-            if let Some(title) = payload.get("title").and_then(Value::as_str) {
+            let pointer = super::acp::playbook_pointer();
+            if let Some(title) = payload
+                .get("title")
+                .and_then(Value::as_str)
+                .and_then(|title| super::acp::agent_title(title, &[&pointer, PLAN_NOTE]))
+            {
                 ctx.set_title(title);
             }
         }
