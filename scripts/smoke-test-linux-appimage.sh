@@ -12,7 +12,7 @@ set -euo pipefail
 APPIMAGE="$(realpath "$1")"
 SANDBOX="$(mktemp -d)"
 LOG="$SANDBOX/app.log"
-export ORX_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config"
+export ORX_DATA_DIR="$SANDBOX/data" XDG_CONFIG_HOME="$SANDBOX/config" XDG_DATA_HOME="$SANDBOX/share"
 export ORX_NO_UPDATE_CHECK=1 ORX_TELEMETRY_ENV=off
 # No FUSE on CI runners; the AppImage runs from a temporary extraction instead.
 export APPIMAGE_EXTRACT_AND_RUN=1
@@ -63,13 +63,16 @@ visible=
 for _ in $(seq 1 30); do
   grep -q 'showing the window anyway' "$LOG" && fail "The dashboard never finished loading."
   # shellcheck disable=SC2086
-  if env $X_ENV xdotool search --onlyvisible --name '^OpenResearch$' >/dev/null 2>&1; then
+  if env $X_ENV xdotool search --onlyvisible --class '^OpenResearch$' >/dev/null 2>&1; then
     visible=1
     break
   fi
   sleep 1
 done
-[ -n "$visible" ] || fail "The window never appeared."
+[ -n "$visible" ] || fail "No window of class OpenResearch appeared."
+# What the dock matches the window to.
+grep -qxF "TryExec=$APPIMAGE" "$XDG_DATA_HOME/applications/openresearch.desktop" \
+  || fail "The app did not install its desktop entry."
 
 for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
   # WebKit may replace a web process between pgrep and here.
@@ -81,6 +84,9 @@ for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
   esac
   grep -q 'appimage_extracted_.*/libwebkit2gtk' <<<"$maps" \
     || fail "WebKit helper $pid did not load the AppImage's libwebkit2gtk."
+  if grep -q ' /usr/lib/[^ ]*/gio/modules/' <<<"$maps"; then
+    fail "WebKit helper $pid loaded the host's GIO modules."
+  fi
 done
 echo "The AppImage's WebKit loaded the dashboard:"
 pgrep -af 'WebKit(Web|Network)Process'

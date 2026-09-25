@@ -55,6 +55,68 @@ pub fn launched_with_app_arg() -> bool {
     args.next().is_some_and(|arg| arg == APP_ARG) && args.next().is_none()
 }
 
+/// Put the AppImage in the desktop's dock and app grid under its own name and
+/// icon, which only an installed desktop entry does. Rewritten whenever it points
+/// elsewhere, so a moved AppImage keeps it; `TryExec` hides it once the file goes.
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn install_desktop_entry() {
+    let (Some(appimage), Some(data)) = (std::env::var_os("APPIMAGE"), dirs::data_dir()) else {
+        return;
+    };
+    let icon = data.join("icons/hicolor/256x256/apps/openresearch.png");
+    let (Some(appimage), Some(icon_path)) = (appimage.to_str(), icon.to_str()) else {
+        return;
+    };
+    let entry = desktop_entry(appimage, icon_path);
+    let installed = write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))
+        .and_then(|()| {
+            write_if_changed(
+                &data.join("applications/openresearch.desktop"),
+                entry.as_bytes(),
+            )
+        });
+    if let Err(err) = installed {
+        eprintln!("openresearch app: could not add OpenResearch to your applications: {err}");
+    }
+}
+
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn write_if_changed(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|current| current == contents) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, contents)
+}
+
+/// linux/OpenResearch.desktop, launching the AppImage at `appimage` with the icon at `icon`.
+#[cfg_attr(not(all(desktop_app, target_os = "linux")), allow(dead_code))]
+fn desktop_entry(appimage: &str, icon: &str) -> String {
+    // Every value is a desktop-entry string, which escapes backslashes; Exec's
+    // quoted argument escapes these four first, and doubles `%`.
+    let string = |value: &str| value.replace('\\', "\\\\");
+    let mut arg = String::new();
+    for c in appimage.chars() {
+        match c {
+            '"' | '`' | '$' | '\\' => arg.extend(['\\', c]),
+            '%' => arg.push_str("%%"),
+            c => arg.push(c),
+        }
+    }
+    include_str!("../../linux/OpenResearch.desktop")
+        .lines()
+        .map(|line| match line.split_once('=') {
+            Some(("Exec", _)) => {
+                format!("Exec=\"{}\"\nTryExec={}\n", string(&arg), string(appimage))
+            }
+            Some(("Icon", _)) => format!("Icon={}\n", string(icon)),
+            _ => format!("{line}\n"),
+        })
+        .collect()
+}
+
 #[cfg(desktop_app)]
 const APP_PORT: u16 = 4792;
 
@@ -77,6 +139,8 @@ pub async fn run() {
     // which read the directories it may change.
     #[cfg(target_os = "linux")]
     hydrate_shell_env().await;
+    #[cfg(target_os = "linux")]
+    install_desktop_entry();
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
@@ -392,6 +456,10 @@ mod imp {
         #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
     ) {
         let origin = format!("http://127.0.0.1:{port}");
+        // Before GTK starts: the window class the dock matches to the desktop
+        // entry's StartupWMClass.
+        #[cfg(target_os = "linux")]
+        gtk::glib::set_prgname(Some("OpenResearch"));
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
         // Dashboard server on background workers (we're inside main's runtime).
@@ -579,10 +647,11 @@ mod imp {
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
             }
-            // Before the first load the window shows itself; while quitting it
-            // must stay hidden.
+            // Even before the page loads: a launch that brings nothing up looks
+            // like a broken app. While quitting it must stay hidden.
             #[cfg(not(target_os = "macos"))]
-            Event::UserEvent(UserEvent::Focus) if shown.get() && matches!(quit, Quit::No) => {
+            Event::UserEvent(UserEvent::Focus) if matches!(quit, Quit::No) => {
+                shown.set(true);
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -826,9 +895,24 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
+    use super::{desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
     use std::ffi::OsStr;
     use std::path::Path;
+
+    #[test]
+    fn the_desktop_entry_launches_the_appimage_wherever_it_is() {
+        let entry = desktop_entry(
+            r"/home/me/My Apps/Open$Re%1\x.AppImage",
+            "/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png",
+        );
+        assert!(entry.contains("\nExec=\"/home/me/My Apps/Open\\\\$Re%%1\\\\\\\\x.AppImage\"\n"));
+        assert!(entry.contains("\nTryExec=/home/me/My Apps/Open$Re%1\\\\x.AppImage\n"));
+        assert!(entry.contains(
+            "\nIcon=/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png\n"
+        ));
+        assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
+        assert!(!entry.contains("orx app"));
+    }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";
 

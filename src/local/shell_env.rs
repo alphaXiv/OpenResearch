@@ -138,12 +138,13 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
-/// What the Linux AppImage's GTK hook points at the image (keep in step with
-/// linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
-const APPIMAGE_GTK_VARS: [&str; 10] = [
+/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 11] = [
     "GDK_BACKEND",
     "GDK_PIXBUF_MODULE_FILE",
     "GI_TYPELIB_PATH",
+    "GIO_MODULE_DIR",
     "GSETTINGS_SCHEMA_DIR",
     "GTK_DATA_PREFIX",
     "GTK_EXE_PREFIX",

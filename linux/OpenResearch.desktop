@@ -6,4 +6,4 @@ Exec=orx app
 Icon=OpenResearch
 Categories=Development;
 Terminal=false
-StartupWMClass=orx
+StartupWMClass=OpenResearch

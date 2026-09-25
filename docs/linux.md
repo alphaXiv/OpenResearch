@@ -12,7 +12,11 @@ chmod +x OpenResearch-x86_64.AppImage
 ```
 
 The dashboard opens in its own window. Closing the window quits OpenResearch, and
-starting it again while it runs brings the window back. Keep the AppImage
+starting it again while it runs brings the window back. Each start adds
+OpenResearch to your applications, so the dock and app grid show its name and
+icon: `~/.local/share/applications/openresearch.desktop`, pointing at wherever the
+AppImage now is, and its icon under `~/.local/share/icons`. The entry hides itself
+once the AppImage is deleted; remove those two files to drop it entirely. Keep the AppImage
 somewhere you can write to, such as `~/Applications`: it updates itself by
 replacing that file, and Restart in the dashboard relaunches the new version.
 

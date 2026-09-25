@@ -8,7 +8,7 @@ export APPDIR="${APPDIR:-"$(dirname "$(realpath "$0")")"}"
 # The session's values of what the hook below overrides, as `=<value>` or `-` for
 # unset, so orx can hand them back to the host programs it opens
 # (shell_env::host_gui_env; keep the two lists in step).
-for var in GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH \
+for var in GDK_BACKEND GDK_PIXBUF_MODULE_FILE GI_TYPELIB_PATH GIO_MODULE_DIR \
   GSETTINGS_SCHEMA_DIR GTK_DATA_PREFIX GTK_EXE_PREFIX GTK_IM_MODULE_FILE GTK_PATH \
   GTK_THEME XDG_DATA_DIRS; do
   if [ -n "${!var+set}" ]; then
@@ -25,6 +25,8 @@ for hook in "$APPDIR"/apprun-hooks/*.sh; do
     . "$hook"
   fi
 done
+# Only the bundled GIO modules (TLS): the host's need a newer GLib than the image's.
+export GIO_MODULE_DIR="$APPDIR/usr/lib/gio/modules"
 
 # scripts/build-linux-appimage.sh rewrote libwebkit2gtk's /usr paths to ././,
 # so WebKit finds its bundled helper processes relative to this directory.

@@ -67,6 +67,10 @@ install -Dm755 "$ORX" "$APPDIR/usr/bin/orx"
 for helper in WebKitNetworkProcess WebKitWebProcess injected-bundle/libwebkit2gtkinjectedbundle.so; do
   install -Dm755 "$WEBKIT_DIR/$helper" "$APPDIR$WEBKIT_DIR/$helper"
 done
+# WebKit's TLS comes from this GIO module; AppRun keeps GIO off the host's, which
+# are built against a newer GLib than the bundled one.
+install -Dm755 "/usr/lib/$TRIPLET/gio/modules/libgiognutls.so" \
+  "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
 
 echo "==> Deploying libraries with linuxdeploy"
 DEPLOY_GTK_VERSION=3 linuxdeploy \
@@ -77,10 +81,11 @@ DEPLOY_GTK_VERSION=3 linuxdeploy \
   --custom-apprun "$ROOT/linux/AppRun" \
   --plugin gtk
 
-# linuxdeploy leaves the in-place helpers looking beside themselves, so they
-# would load the host's libwebkit (or none); point them at the bundled usr/lib.
+# linuxdeploy leaves files below usr/lib looking beside themselves, so they
+# would load the host's libraries (or none); point them at the bundled usr/lib.
 patchelf --set-rpath '$ORIGIN/../..' \
-  "$APPDIR$WEBKIT_DIR/WebKitNetworkProcess" "$APPDIR$WEBKIT_DIR/WebKitWebProcess"
+  "$APPDIR$WEBKIT_DIR/WebKitNetworkProcess" "$APPDIR$WEBKIT_DIR/WebKitWebProcess" \
+  "$APPDIR/usr/lib/gio/modules/libgiognutls.so"
 patchelf --set-rpath '$ORIGIN/../../..' \
   "$APPDIR$WEBKIT_DIR/injected-bundle/libwebkit2gtkinjectedbundle.so"
 
