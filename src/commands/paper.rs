@@ -342,26 +342,50 @@ fn biorxiv_doi(doi: &str) -> String {
     }
 }
 
-/// Normalize whatever the user passes (bare id, versioned id, or an arXiv /
-/// alphaXiv URL) into a canonical paper id like `2401.12345` or `2401.12345v2`.
+/// Normalize whatever the user passes (bare id, versioned id, citation line, or
+/// an arXiv / alphaXiv URL) into a canonical paper id like `2401.12345` or
+/// `2401.12345v2`.
 ///
 /// Handles `arxiv.org/abs/<id>`, `arxiv.org/pdf/<id>[.pdf]`,
-/// `alphaxiv.org/overview/<id>`, `alphaxiv.org/abs/<id>`, and bare ids — by
-/// taking the last path segment and stripping any `?`/`#` and `.pdf`/`.md` suffix.
-/// An old-style id (`hep-th/9711200`) keeps its archive segment, since the
-/// number alone is not an id.
+/// `alphaxiv.org/overview/<id>`, `alphaxiv.org/abs/<id>`, `arXiv:<id>` citations
+/// (with an optional `[cs.CL]` category tag), trailing slashes, `.html` html/ar5iv
+/// URLs, and bare ids. Takes the last path segment and strips any `?`/`#` and
+/// `.pdf`/`.html`/`.md` suffix. An old-style id (`hep-th/9711200`) keeps its
+/// archive segment, since the number alone is not an id.
 pub(crate) fn parse_paper_id(input: &str) -> String {
     let s = input.trim();
-    let s = s.split(['?', '#']).next().unwrap_or(s);
+    let s = s.split(['?', '#']).next().unwrap_or(s).trim();
+    let s = strip_arxiv_citation_prefix(s);
+    let s = strip_arxiv_category_tag(s);
+    let s = s.trim_end_matches('/');
     let mut segments = s.rsplit('/');
     let last = segments.next().unwrap_or(s);
-    let id = last.trim_end_matches(".pdf").trim_end_matches(".md");
+    let id = strip_arxiv_citation_prefix(
+        last.trim_end_matches(".pdf")
+            .trim_end_matches(".html")
+            .trim_end_matches(".md"),
+    );
     match segments.next() {
         Some(archive) if is_old_style_number(id) && is_archive(archive) => {
             format!("{archive}/{id}")
         }
         _ => id.to_string(),
     }
+}
+
+/// `arXiv:1706.03762` / `arxiv:hep-th/9711200` as they appear in citations.
+fn strip_arxiv_citation_prefix(s: &str) -> &str {
+    s.get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("arxiv:"))
+        .map(|_| s[6..].trim_start())
+        .unwrap_or(s)
+}
+
+/// Trailing `[cs.CL]` (and similar) on the arXiv abs-page citation line.
+fn strip_arxiv_category_tag(s: &str) -> &str {
+    s.split_once('[')
+        .map(|(head, _)| head.trim_end())
+        .unwrap_or(s)
 }
 
 /// The `YYMMNNN[vN]` half of an old-style arXiv id.
@@ -411,6 +435,31 @@ mod tests {
             ("https://www.alphaxiv.org/overview/2401.12345", "2401.12345"),
             ("https://alphaxiv.org/abs/2401.12345v2", "2401.12345v2"),
             ("https://arxiv.org/abs/2401.12345?foo=bar", "2401.12345"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(parse_paper_id(input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn parses_citation_forms_and_trailing_slashes() {
+        let cases = [
+            // The abs-page / bibtex citation line, not a URL.
+            ("arXiv:1706.03762", "1706.03762"),
+            ("arxiv:1706.03762v5", "1706.03762v5"),
+            ("ARXIV:1706.03762", "1706.03762"),
+            ("arXiv: 1706.03762", "1706.03762"),
+            ("arXiv:1706.03762 [cs.CL]", "1706.03762"),
+            ("arXiv:hep-th/9711200", "hep-th/9711200"),
+            ("arXiv:hep-th/9711200 [hep-th]", "hep-th/9711200"),
+            // Browsers and markdown links often keep a trailing slash.
+            ("https://arxiv.org/abs/1706.03762/", "1706.03762"),
+            ("https://arxiv.org/abs/hep-th/9711200/", "hep-th/9711200"),
+            ("https://arxiv.org/pdf/1706.03762.pdf/", "1706.03762"),
+            (
+                "https://ar5iv.labs.arxiv.org/html/1706.03762.html",
+                "1706.03762",
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(parse_paper_id(input), want, "input: {input}");
