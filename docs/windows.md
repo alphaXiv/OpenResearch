@@ -100,5 +100,5 @@ Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name
 published `orx.exe` and attaches it, once the repository variable
 `WINDOWS_APP_ENABLED` is `true`. Like the macOS app it follows a Release run
 dispatched by a token (see `macos/DISTRIBUTION.md`); to attach the installer to
-an existing release, dispatch the workflow with its tag. Every CI run on
-Windows also uploads an `openresearch-windows-installer` artifact to test with.
+an existing release, dispatch the workflow with its tag. CI on every pull
+request also uploads an `openresearch-windows-installer` artifact to test with.

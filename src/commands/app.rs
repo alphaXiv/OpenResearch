@@ -197,6 +197,11 @@ fn opens_in_browser(url: &str) -> bool {
         .any(|scheme| url.starts_with(scheme))
 }
 
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
 /// One app per user session on Windows, where nothing else enforces it: a
 /// second launch brings the running window forward and exits.
 #[cfg(windows)]
@@ -212,10 +217,6 @@ mod instance {
     const MUTEX: &str = r"Local\OpenResearchApp";
     const FOCUS_EVENT: &str = r"Local\OpenResearchAppFocus";
 
-    pub(super) fn wide(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(Some(0)).collect()
-    }
-
     /// Signalled by each later launch.
     pub(super) struct FocusRequests(HANDLE);
 
@@ -227,11 +228,13 @@ mod instance {
     pub(super) fn claim() -> Option<FocusRequests> {
         // SAFETY: plain syscalls on NUL-terminated names. The handles stay open
         // on purpose: the claim lasts until the process exits.
+        // Bound before the calls, so no drop runs between CreateMutexW and GetLastError.
+        let (event_name, mutex_name) = (super::wide(FOCUS_EVENT), super::wide(MUTEX));
         unsafe {
             // The event first, so it exists by the time anyone sees the claim.
             // For a second launch this opens the running app's event.
-            let event = CreateEventW(std::ptr::null(), 0, 0, wide(FOCUS_EVENT).as_ptr());
-            CreateMutexW(std::ptr::null(), 0, wide(MUTEX).as_ptr());
+            let event = CreateEventW(std::ptr::null(), 0, 0, event_name.as_ptr());
+            CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr());
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 // Windows lets the running app take the foreground only with our leave.
                 AllowSetForegroundWindow(ASFW_ANY);
@@ -524,7 +527,7 @@ mod imp {
     fn set_taskbar_identity() {
         use windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
 
-        let id = super::instance::wide("alphaXiv.OpenResearch");
+        let id = super::wide("alphaXiv.OpenResearch");
         // SAFETY: the string is NUL-terminated and outlives the call.
         unsafe { SetCurrentProcessExplicitAppUserModelID(id.as_ptr()) };
     }
@@ -590,8 +593,15 @@ mod imp {
     /// Without a handler WKWebView drops downloads and WebView2 saves them
     /// silently into Downloads; ask where, as a browser would.
     fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
-        // Owned by the window, which Windows disables while the dialog is up.
-        let mut dialog = rfd::FileDialog::new().set_parent(window);
+        let mut dialog = rfd::FileDialog::new();
+        // Owned by the window, which Windows disables while the dialog is up. On
+        // macOS a parent turns the panel into a sheet, which a hidden window can't show.
+        #[cfg(windows)]
+        {
+            dialog = dialog.set_parent(window);
+        }
+        #[cfg(not(windows))]
+        let _ = window;
         if let Some(dir) = path.parent() {
             dialog = dialog.set_directory(dir);
         }

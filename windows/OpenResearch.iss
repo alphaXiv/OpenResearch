@@ -100,7 +100,7 @@ begin
   try
     DownloadTemporaryFile(WebView2Bootstrapper, 'MicrosoftEdgeWebview2Setup.exe', '', nil);
     if not Exec(ExpandConstant('{tmp}\MicrosoftEdgeWebview2Setup.exe'), '/silent /install', '',
-      SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+      SW_HIDE, ewWaitUntilTerminated, ResultCode) or not WebView2Installed then
       ReportMissingWebView2;
   except
     ReportMissingWebView2;

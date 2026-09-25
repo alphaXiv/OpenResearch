@@ -330,6 +330,7 @@ fn portable_dir(exe: &Path) -> Option<PathBuf> {
 
 /// A zip-extracted or desktop-app `orx.exe` away from the CLI installer's prefix
 /// still updates itself when that installer's receipt exists too.
+// Un-gated so its test runs on CI's Linux runner; only Windows has a caller.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn portable_outside_prefix(exe: &Path, prefix: &Path) -> Option<PathBuf> {
     if exe_matches_prefix(exe, prefix) {
