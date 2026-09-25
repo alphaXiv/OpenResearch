@@ -1593,6 +1593,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn only_the_orx_inside_the_mount_is_the_appimage() {
         use std::ffi::OsStr;
         let (appdir, appimage) = (
