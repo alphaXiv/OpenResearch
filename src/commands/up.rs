@@ -595,6 +595,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(telemetry_settings).post(set_telemetry_settings),
         )
         .route("/api/telemetry/event", post(record_ui_event))
+        .route("/api/telemetry/locale", post(set_dashboard_locale))
         .route(
             "/api/settings/profile",
             get(profile_settings).post(set_profile_settings),
@@ -4899,6 +4900,29 @@ async fn set_telemetry_settings(Json(req): Json<SetTelemetryReq>) -> ApiResult {
     })
     .await
     .map_err(|e| ApiError::from(anyhow!("telemetry task failed: {e}")))?
+}
+
+#[derive(Deserialize)]
+struct SetLocaleReq {
+    locale: String,
+}
+
+async fn set_dashboard_locale(Json(SetLocaleReq { locale }): Json<SetLocaleReq>) -> ApiResult {
+    // Attached to every later batch, so a value the server rejects would drop them all.
+    let valid = (2..=16).contains(&locale.len())
+        && locale
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-');
+    if !valid {
+        return Err(bad_request(format!("invalid locale: {locale:?}")));
+    }
+    tokio::task::spawn_blocking(move || {
+        crate::telemetry::set_dashboard_locale(&locale)
+            .map_err(|e| ApiError::from(anyhow!("could not save the dashboard locale: {e}")))?;
+        Ok(Json(json!({ "locale": locale })))
+    })
+    .await
+    .map_err(|e| ApiError::from(anyhow!("locale task failed: {e}")))?
 }
 
 // --- updates -----------------------------------------------------------------
