@@ -1,7 +1,17 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import type { FilePresentation } from "../api";
+import { Spinner } from "./ui";
+
+// PDF.js is large, so it loads with the first PDF rather than the dashboard. A
+// tab left open across an update asks for a chunk the new build doesn't have.
+const PdfPreview = lazy(() =>
+  import("./PdfPreview").catch((error: unknown) => {
+    console.error("PDF viewer failed to load", error);
+    return { default: DownloadFallback };
+  }),
+);
 
 export type MediaPreviewKind = Exclude<FilePresentation, "text" | "unknown" | "download">;
 
@@ -82,15 +92,15 @@ export function MediaPreview({
     );
   } else {
     preview = (
-      <object
-        className="fpreview-pdf block min-h-0 flex-1 w-full border-0"
-        aria-label={name}
-        data={url}
-        type="application/pdf"
-        onError={() => setFailed(true)}
+      <Suspense
+        fallback={
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <Spinner />
+          </div>
+        }
       >
-        <DownloadFallback url={url} name={name} />
-      </object>
+        <PdfPreview key={url} url={url} name={name} onError={() => setFailed(true)} />
+      </Suspense>
     );
   }
 
