@@ -374,6 +374,7 @@ mod imp {
 
     enum UserEvent {
         ServerReady,
+        LoadTimedOut,
         #[cfg(target_os = "macos")]
         Menu(MenuId),
         #[cfg(not(target_os = "macos"))]
@@ -423,6 +424,8 @@ mod imp {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             let _ = ready.send_event(UserEvent::ServerReady);
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let _ = ready.send_event(UserEvent::LoadTimedOut);
         });
 
         #[cfg(not(target_os = "macos"))]
@@ -559,6 +562,14 @@ mod imp {
             },
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
                 let _ = webview.load_url(&format!("{origin}/"));
+            }
+            // A window that never appears is worse than a blank one.
+            Event::UserEvent(UserEvent::LoadTimedOut)
+                if matches!(quit, Quit::No) && !shown.replace(true) =>
+            {
+                eprintln!("openresearch app: the dashboard has not finished loading; showing the window anyway");
+                window.set_visible(true);
+                window.set_focus();
             }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {

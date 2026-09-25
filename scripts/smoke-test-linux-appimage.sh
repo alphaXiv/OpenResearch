@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Launch a built AppImage under a virtual display and prove its bundled WebKit
 # loads the dashboard: the server answers, WebKit's network process has connected
-# to it, a web process is up, and every WebKit helper runs from inside the image
-# on the image's libwebkit2gtk. Run it where WebKitGTK is not installed, or a
-# fallback to the host's copy would pass. Needs xvfb-run, curl, ss, and setsid.
+# to it, the window appears once the page has loaded, and every WebKit helper runs
+# from inside the image on the image's libwebkit2gtk. Run it where WebKitGTK is not
+# installed, or a fallback to the host's copy would pass. Needs xvfb-run, curl, ss,
+# setsid, and xdotool.
 #
 #   scripts/smoke-test-linux-appimage.sh <OpenResearch-<arch>.AppImage>
 set -euo pipefail
@@ -53,6 +54,22 @@ for _ in $(seq 1 60); do
 done
 [ -n "$connected" ] || fail "WebKit never connected to the dashboard."
 pgrep -f WebKitWebProcess >/dev/null || fail "No WebKit web process is running."
+
+# The app shows its window when the page finishes loading, or says it gave up.
+ORX_PID="$(pgrep -o -f 'usr/bin/orx app' || true)"
+[ -n "$ORX_PID" ] || fail "orx app is not running."
+X_ENV="$(tr '\0' '\n' <"/proc/$ORX_PID/environ" | grep -E '^(DISPLAY|XAUTHORITY)=' || true)"
+visible=
+for _ in $(seq 1 30); do
+  grep -q 'showing the window anyway' "$LOG" && fail "The dashboard never finished loading."
+  # shellcheck disable=SC2086
+  if env $X_ENV xdotool search --onlyvisible --name '^OpenResearch$' >/dev/null 2>&1; then
+    visible=1
+    break
+  fi
+  sleep 1
+done
+[ -n "$visible" ] || fail "The window never appeared."
 
 for pid in $(pgrep -f 'WebKit(Web|Network)Process'); do
   # WebKit may replace a web process between pgrep and here.
