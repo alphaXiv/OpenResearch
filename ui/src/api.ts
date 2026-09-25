@@ -1891,6 +1891,10 @@ export interface ChatSession {
   /** Session whose agent spawned this one with `orx agent spawn`; null for
    * sessions the user started themselves. */
   parentSessionId?: string | null;
+  /** Parent conversation for a disposable side chat; remains after promotion. */
+  sideChatParentId?: string | null;
+  /** Sliding 24-hour inactivity deadline; null after promotion. */
+  temporaryExpiresAt?: number | null;
   createdAt: number;
   updatedAt: number;
   busy: boolean;
@@ -1946,6 +1950,14 @@ export const createChatSession = (
   post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
     (r) => r.session,
   );
+
+export const createSideChat = (parentSessionId: string) =>
+  post<{ session: ChatSession }>(`/api/chat/sessions/${parentSessionId}/side-chat`, {})
+    .then((r) => r.session);
+
+export const promoteSideChat = (sessionId: string) =>
+  post<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}/promote`, {})
+    .then((r) => r.session);
 
 export const deleteChatSession = (sessionId: string) =>
   writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>

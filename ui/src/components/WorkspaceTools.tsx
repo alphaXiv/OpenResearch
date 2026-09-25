@@ -1,10 +1,10 @@
-import { type Experiment, type Run, runDisplayStatus, fmtNumber } from "../api";
+import { type ChatSession, type Experiment, type Run, runDisplayStatus, fmtNumber } from "../api";
 import { activeWorkspaceRuns } from "../workspaceRuns";
 import { statusLabel } from "./StatusBadge";
 import { getComputeSettingsQuery } from "../queries/settings";
 import { TARGET_LABELS } from "../computeTargets";
 import { useEffect, useMemo, useRef } from "react";
-import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, Terminal } from "lucide-react";
+import { FlaskConical, FolderOpen, Package, GitBranch, Cpu, Terminal, MessageSquareQuote } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { getSessionWorktreeQuery } from "../queries/files";
 import { countChanges, parseDiffFiles } from "./GitDiff";
@@ -12,13 +12,13 @@ import { m } from "../paraglide/messages.js";
 import { BackendLogo } from "./BackendLogos";
 import { IconButton, MenuItem, StatusIndicator } from "./ui";
 
-export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments }: {
+export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, rightOffset, activeView, projectId, onCompute, sessionId, busy, onChanges, onFiles, onTerminal, onArtifacts, onExperiments, sideChats, sideChatLabels, activeSideChatId, onNewSideChat, onOpenSideChat, creatingSideChat }: {
   expanded: boolean;
   experiments: Experiment[];
   runs: Run[];
   onOpenExperiment: (id: string, runId: string) => void;
   rightOffset?: number;
-  activeView: "files" | "artifacts" | "experiments" | "terminal" | null;
+  activeView: "files" | "artifacts" | "experiments" | "terminal" | "side-chat" | null;
   projectId: string;
   onCompute: () => void;
   sessionId: string | null;
@@ -28,6 +28,12 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
   onTerminal: () => void;
   onArtifacts: () => void;
   onExperiments: () => void;
+  sideChats: ChatSession[];
+  sideChatLabels: ReadonlyMap<string, string>;
+  activeSideChatId: string | null;
+  onNewSideChat: () => void;
+  onOpenSideChat: (id: string) => void;
+  creatingSideChat: boolean;
 }) {
   const experimentRows = activeWorkspaceRuns(experiments, runs, sessionId);
   const compute = useQuery({ ...getComputeSettingsQuery(projectId), enabled: expanded });
@@ -38,13 +44,14 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
     { id: "terminal", label: m.workspace_terminal(), Icon: Terminal, onClick: onTerminal },
     { id: "artifacts", label: m.app_artifacts(), Icon: Package, onClick: onArtifacts },
     { id: "experiments", label: m.app_experiments(), Icon: FlaskConical, onClick: onExperiments },
+    { id: "side-chat", label: m.chat_side_new(), Icon: MessageSquareQuote, onClick: onNewSideChat },
   ];
   return (
     <div className="workspace-tools absolute end-3.5 top-7 z-30" style={{ insetInlineEnd: rightOffset }}>
       {!expanded ? (
         <nav aria-label={m.workspace_tools_heading()} className="flex items-center justify-end gap-3">
           {items.map(({ id, label, Icon, onClick }) => (
-            <IconButton key={id} active={activeView === id} className="text-text [&.active]:text-text" data-tip={label} data-tip-align={id === "experiments" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick}>
+            <IconButton key={id} active={activeView === id} className="text-text [&.active]:text-text" data-tip={label} data-tip-align={id === "side-chat" ? "end" : undefined} aria-label={label} aria-pressed={activeView === id} onClick={onClick} disabled={id === "side-chat" && (creatingSideChat || !sessionId)}>
               <Icon size={15} />
             </IconButton>
           ))}
@@ -55,8 +62,15 @@ export function WorkspaceTools({ expanded, experiments, runs, onOpenExperiment, 
           {items.filter((item) => item.id !== "files" && item.id !== "terminal").map(({ id, label: itemLabel, Icon, onClick }) => (
             <MenuItem key={id} className="min-h-7 py-1"
               data-onboarding={id === "artifacts" ? "nav-artifacts" : undefined}
-              onClick={onClick}>
+              onClick={onClick}
+              disabled={id === "side-chat" && (creatingSideChat || !sessionId)}>
               <span className="flex items-center gap-4"><Icon size={15} />{itemLabel}</span>
+            </MenuItem>
+          ))}
+          {sideChats.map((chat) => (
+            <MenuItem key={chat.id} active={chat.id === activeSideChatId} className="min-h-7 py-1" onClick={() => onOpenSideChat(chat.id)} title={sideChatLabels.get(chat.id) ?? m.chat_side_new()}>
+              <span className="flex min-w-0 items-center gap-4"><MessageSquareQuote size={15} className="shrink-0" /><span className="truncate">{sideChatLabels.get(chat.id) ?? m.chat_side_new()}</span></span>
+              <span className="shrink-0 text-xs text-subtext">{new Date(chat.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
             </MenuItem>
           ))}
           <MenuItem className="py-1" onClick={onCompute}>

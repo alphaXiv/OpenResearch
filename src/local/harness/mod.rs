@@ -76,7 +76,7 @@ fn newest_utf8_tail(value: &str, max_bytes: usize) -> &str {
     &value[start..]
 }
 
-fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
+pub(crate) fn recovery_part_lines(parts: &[WirePart], lines: &mut Vec<String>) {
     for part in parts {
         match part.kind.as_str() {
             "text" => {

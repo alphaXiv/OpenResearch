@@ -372,6 +372,7 @@ impl ChatSpawnState {
 
 const RUN_WAKEUP_CLAIM_TTL_MS: i64 = 60 * 1000;
 pub(crate) const CHAT_TURN_LEASE_TTL_MS: i64 = 60 * 1000;
+pub(crate) const TEMPORARY_CHAT_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 const CHAT_SPAWN_CLAIM_TTL_MS: i64 = 60 * 1000;
 
 pub struct Store {
@@ -473,6 +474,8 @@ impl Store {
                 context_usage_json TEXT,
                 bootstrap_context TEXT,
                 parent_session_id TEXT,
+                side_chat_parent_id TEXT,
+                temporary_expires_at INTEGER,
                 created_at        INTEGER NOT NULL,
                 updated_at        INTEGER NOT NULL
             );
@@ -619,6 +622,8 @@ impl Store {
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN side_chat_parent_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN temporary_expires_at INTEGER",
             "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
             "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
@@ -1796,8 +1801,8 @@ impl Store {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
-                                        active_leaf_id, parent_session_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                        active_leaf_id, parent_session_id, side_chat_parent_id, temporary_expires_at, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 s.id,
                 s.project_id,
@@ -1815,6 +1820,8 @@ impl Store {
                 s.bootstrap_context,
                 s.active_leaf_id,
                 s.parent_session_id,
+                s.side_chat_parent_id,
+                s.temporary_expires_at,
                 s.created_at,
                 s.updated_at,
             ],
@@ -1846,7 +1853,7 @@ impl Store {
     /// long-lived install cannot turn one dialog open into a multi-megabyte read.
     pub fn list_all_chat_sessions(&self) -> Result<Vec<StoredChatSession>> {
         let mut stmt = self.conn.prepare(&format!(
-            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions ORDER BY updated_at DESC LIMIT 500"
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE temporary_expires_at IS NULL ORDER BY updated_at DESC LIMIT 500"
         ))?;
         let rows = stmt.query_map([], row_to_chat_session)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
@@ -1867,6 +1874,7 @@ impl Store {
             "WITH agent_counts AS (
                  SELECT project_id, COUNT(*) AS total_agents
                  FROM chat_sessions
+                 WHERE temporary_expires_at IS NULL
                  GROUP BY project_id
              ),
              experiment_counts AS (
@@ -1888,6 +1896,7 @@ impl Store {
                  FROM chat_messages
                  JOIN chat_sessions ON chat_sessions.id = chat_messages.session_id
                  WHERE chat_messages.role IN ('user', 'assistant')
+                   AND chat_sessions.temporary_expires_at IS NULL
                  GROUP BY chat_sessions.project_id
              )
              SELECT local_projects.id,
@@ -2125,10 +2134,29 @@ impl Store {
 
     pub fn touch_chat_session(&self, id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE chat_sessions SET updated_at = ?2 WHERE id = ?1",
-            params![id, now_ms()],
+            "UPDATE chat_sessions SET updated_at = ?2,
+             temporary_expires_at = CASE WHEN temporary_expires_at IS NOT NULL THEN ?2 + ?3 ELSE NULL END
+             WHERE id = ?1",
+            params![id, now_ms(), TEMPORARY_CHAT_TTL_MS],
         )?;
         Ok(())
+    }
+
+    pub fn promote_temporary_chat(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "UPDATE chat_sessions SET temporary_expires_at = NULL, updated_at = ?2
+             WHERE id = ?1 AND temporary_expires_at > ?2",
+            params![id, now_ms()],
+        )? > 0)
+    }
+
+    pub fn expired_temporary_chat_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM chat_sessions WHERE temporary_expires_at IS NOT NULL
+             AND temporary_expires_at <= ?1 ORDER BY temporary_expires_at LIMIT 100",
+        )?;
+        let rows = stmt.query_map(params![now_ms()], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Insert or replace a message's parts — assistant messages are rewritten
@@ -2925,6 +2953,10 @@ pub struct StoredChatSession {
     /// Session that spawned this one with `orx agent spawn`. `None` for
     /// sessions the user started from the dashboard.
     pub parent_session_id: Option<String>,
+    /// A disposable side chat branches from this user's conversation.
+    pub side_chat_parent_id: Option<String>,
+    /// Sliding inactivity deadline; NULL after promotion to a regular chat.
+    pub temporary_expires_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -3073,7 +3105,7 @@ fn row_to_chat_turn(
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
      created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id, \
-     goal";
+     goal, side_chat_parent_id, temporary_expires_at";
 
 fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
     Ok(ChatSpawn {
@@ -3110,6 +3142,8 @@ fn row_to_chat_session(
         active_leaf_id: row.get(17)?,
         parent_session_id: row.get(18)?,
         goal: row.get(19)?,
+        side_chat_parent_id: row.get(20)?,
+        temporary_expires_at: row.get(21)?,
     })
 }
 
@@ -4127,9 +4161,49 @@ mod tests {
             goal: None,
             active_leaf_id: None,
             parent_session_id: None,
+            side_chat_parent_id: None,
+            temporary_expires_at: None,
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn temporary_chat_is_separate_from_history_and_can_be_promoted() {
+        let dir = std::env::temp_dir().join(format!("orx-side-chat-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("parent"))
+            .unwrap();
+        let mut side = chat_session_fixture("side");
+        side.side_chat_parent_id = Some("parent".into());
+        side.temporary_expires_at = Some(now_ms() + TEMPORARY_CHAT_TTL_MS);
+        store.create_chat_session(&side).unwrap();
+
+        assert_eq!(store.list_all_chat_sessions().unwrap().len(), 1);
+        assert!(store.expired_temporary_chat_ids().unwrap().is_empty());
+        store
+            .conn
+            .execute(
+                "UPDATE chat_sessions SET temporary_expires_at = ?1 WHERE id = 'side'",
+                params![now_ms() - 1],
+            )
+            .unwrap();
+        assert_eq!(store.expired_temporary_chat_ids().unwrap(), vec!["side"]);
+        assert!(!store.promote_temporary_chat("side").unwrap());
+
+        store.touch_chat_session("side").unwrap();
+        assert!(store.expired_temporary_chat_ids().unwrap().is_empty());
+        assert!(store.promote_temporary_chat("side").unwrap());
+        assert_eq!(store.list_all_chat_sessions().unwrap().len(), 2);
+        assert!(store
+            .get_chat_session("side")
+            .unwrap()
+            .unwrap()
+            .temporary_expires_at
+            .is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn chat_spawn_fixture(session_id: &str, parent: &str) -> ChatSpawn {

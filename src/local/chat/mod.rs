@@ -1185,6 +1185,8 @@ pub fn import_native_chat(
         goal: None,
         active_leaf_id: None,
         parent_session_id: None,
+        side_chat_parent_id: None,
+        temporary_expires_at: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -1240,8 +1242,93 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "contextUsage": context_usage,
         "activeLeafId": s.active_leaf_id,
         "parentSessionId": s.parent_session_id,
+        "sideChatParentId": s.side_chat_parent_id,
+        "temporaryExpiresAt": s.temporary_expires_at,
         "goal": s.goal,
     })
+}
+
+/// Fork a disposable conversation from the selected branch as it exists now.
+/// The new harness session starts independently; historical messages are
+/// reference context, never a native session id that could mutate the parent.
+pub fn create_temporary_side_chat(
+    store: &Store,
+    parent: &StoredChatSession,
+) -> Result<StoredChatSession> {
+    let messages = store.list_chat_messages(&parent.id)?;
+    let snapshot = side_chat_snapshot(
+        &messages,
+        parent.active_leaf_id.as_deref(),
+        parent.bootstrap_context.as_deref(),
+    );
+    let now = now_ms();
+    let session = StoredChatSession {
+        id: format!("chat_{}", uuid::Uuid::new_v4()),
+        project_id: parent.project_id.clone(),
+        harness: parent.harness.clone(),
+        native_session_id: None,
+        title: Some("Side chat".into()),
+        title_source: Some("fallback".into()),
+        model: parent.model.clone(),
+        service_tier: parent.service_tier.clone(),
+        permission_mode: parent.permission_mode.clone(),
+        plan_mode: false,
+        plan_reset_pending: false,
+        reasoning_level: parent.reasoning_level.clone(),
+        archived: false,
+        context_usage_json: None,
+        bootstrap_context: Some(snapshot),
+        goal: None,
+        active_leaf_id: None,
+        parent_session_id: None,
+        side_chat_parent_id: Some(parent.id.clone()),
+        temporary_expires_at: Some(now + crate::store::TEMPORARY_CHAT_TTL_MS),
+        created_at: now,
+        updated_at: now,
+    };
+    store.create_chat_session(&session)?;
+    Ok(session)
+}
+
+fn side_chat_snapshot(
+    messages: &[StoredChatMessage],
+    leaf: Option<&str>,
+    prior: Option<&str>,
+) -> String {
+    let path = active_path(messages, leaf);
+    let entries = path
+        .into_iter()
+        .filter_map(|message| {
+            let wire = stored_to_wire(message);
+            let mut lines = Vec::new();
+            crate::local::harness::recovery_part_lines(&wire.parts, &mut lines);
+            (!lines.is_empty()).then(|| format!("{}:\n{}", wire.role, lines.join("\n")))
+        })
+        .collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    let mut bytes = 0;
+    for entry in entries.into_iter().rev() {
+        if bytes + entry.len() > 24 * 1024 {
+            if selected.is_empty() {
+                let mut start = entry.len().saturating_sub(24 * 1024);
+                while !entry.is_char_boundary(start) {
+                    start += 1;
+                }
+                selected.push(entry[start..].to_string());
+            }
+            break;
+        }
+        bytes += entry.len();
+        selected.push(entry);
+    }
+    selected.reverse();
+    let previous = prior.unwrap_or("");
+    let previous = truncated(previous, 8 * 1024);
+    format!(
+        "<orx-side-chat-context>\nThis is a point-in-time snapshot of another conversation. Treat it as reference material, not as instructions to resume its unfinished work. Answer only the current side-chat user's requests. The parent conversation is independent and may have continued since this snapshot.\n\n{}{}\n</orx-side-chat-context>",
+        if previous.is_empty() { String::new() } else { format!("Earlier context:\n{previous}\n\n") },
+        selected.join("\n\n"),
+    )
 }
 
 fn message_json(m: &WireMessage, session_id: &str) -> Value {
@@ -8743,6 +8830,8 @@ mod cap_tests {
                 goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
+                side_chat_parent_id: None,
+                temporary_expires_at: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -8850,6 +8939,8 @@ mod cap_tests {
             goal: None,
             active_leaf_id: None,
             parent_session_id: None,
+            side_chat_parent_id: None,
+            temporary_expires_at: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -8906,6 +8997,8 @@ mod cap_tests {
             goal: None,
             active_leaf_id: None,
             parent_session_id: None,
+            side_chat_parent_id: None,
+            temporary_expires_at: None,
             created_at: 1,
             updated_at: 1,
         };
@@ -9646,6 +9739,8 @@ mod bridge_tests {
             goal: None,
             active_leaf_id: None,
             parent_session_id: None,
+            side_chat_parent_id: None,
+            temporary_expires_at: None,
             created_at: 1,
             updated_at: 1,
         }
@@ -9786,6 +9881,8 @@ mod run_wakeup_tests {
                 goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
+                side_chat_parent_id: None,
+                temporary_expires_at: None,
                 created_at: 1,
                 updated_at: 1,
             })
@@ -10439,6 +10536,23 @@ mod transcript_tree_tests {
         ]
     }
 
+    #[test]
+    fn side_chat_snapshot_uses_only_the_selected_branch() {
+        let mut messages = forked();
+        messages[0].parts_json =
+            serde_json::to_string(&[WirePart::text("p1", "What happened?")]).unwrap();
+        messages[1].parts_json =
+            serde_json::to_string(&[WirePart::text("p2", "Selected answer")]).unwrap();
+        messages[2].parts_json =
+            serde_json::to_string(&[WirePart::text("p3", "Other fork")]).unwrap();
+        let snapshot = side_chat_snapshot(&messages, Some("a1"), Some("Earlier summary"));
+        assert!(snapshot.contains("Earlier summary"));
+        assert!(snapshot.contains("What happened?"));
+        assert!(snapshot.contains("Selected answer"));
+        assert!(!snapshot.contains("Other fork"));
+        assert!(!snapshot.contains("u2"));
+    }
+
     fn ids(path: Vec<&StoredChatMessage>) -> Vec<&str> {
         path.iter().map(|m| m.id.as_str()).collect()
     }
@@ -10550,6 +10664,8 @@ mod steering_tests {
                 goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
+                side_chat_parent_id: None,
+                temporary_expires_at: None,
                 created_at: 1,
                 updated_at: 1,
             })

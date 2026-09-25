@@ -2560,7 +2560,7 @@ function ToolGroup({
  * a permission leaves no trace, a plan collapses to an expandable
  * "Proposed plan" row, a question collapses to a compact record of the
  * chosen answer — all inline at the card's chronological position. */
-function PromptCard({
+export function PromptCard({
   part,
   onRespond,
   onOpenFile,
@@ -5208,7 +5208,7 @@ export function ChatPanel({
   const starterHarness = composerSelection?.harness ?? null;
   const starterModel = composerSelection?.model ?? null;
   const historyError = !historyQuery.data ? historyQuery.error : null;
-  const starterVisible = mainView === "chat" && !threadMounted && !historyLoading && !historyError;
+  const starterVisible = mainView === "chat" && !openSession?.temporaryExpiresAt && !threadMounted && !historyLoading && !historyError;
   const starterQuery = useQuery({
     ...getProjectStarterPromptsQuery(projectId, starterHarness ?? "claude-code", starterModel, getLocale()),
     enabled: starterVisible && starterHarness !== null,
@@ -5909,7 +5909,7 @@ export function ChatPanel({
     [activeId, projectId, queueSessionMutation, sessionsOptions],
   );
 
-  const visibleSessions = sessions.filter((s) => matchesFilter(sessionFilter, s.archived));
+  const visibleSessions = sessions.filter((s) => !s.temporaryExpiresAt && matchesFilter(sessionFilter, s.archived));
   const isApple = /Mac|iPhone|iPad/.test(navigator.platform);
   const newTaskShortcut = isApple ? "⌘ ⇧ ↵" : "Ctrl + Shift + ↵";
   const queueChord = isApple ? "⌘ Enter" : "Ctrl + Enter";
@@ -6090,6 +6090,12 @@ export function ChatPanel({
           </div>
         </div>
 
+        {activeSession?.temporaryExpiresAt && (
+          <div className="mx-auto w-full max-w-readable px-4 pb-2 text-xs text-subtext" role="status">
+            <Clock size={12} className="me-1 inline-block" />{m.chat_side_expires()}
+          </div>
+        )}
+
         {historyError ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5 text-subtext" role="alert">
             <p>{historyError.message}</p>
@@ -6105,12 +6111,12 @@ export function ChatPanel({
             <div className="chat-empty-mark w-10.5 h-10.5 mb-5.5 [&_svg]:block [&_svg]:w-full [&_svg]:h-full">
               <BrandMark />
             </div>
-            <h2>{m.chat_panel_what_should_we_research()}</h2>
+            <h2>{activeSession?.temporaryExpiresAt ? m.chat_side_ask() : m.chat_panel_what_should_we_research()}</h2>
             <div className="chat-empty-project inline-flex items-center gap-[7px] mt-3 py-1.5 px-3 border border-border rounded-full text-subtext bg-surface text-lg font-medium">
               <FolderOpen size={19} />
               <span>{projectName}</span>
             </div>
-            {starterLoading && (
+            {starterVisible && starterLoading && (
               <>
                 <div className={STARTER_GRID_CLASS} aria-hidden="true">
                   {STARTER_ICONS.map((Icon, index) => (
@@ -6132,7 +6138,7 @@ export function ChatPanel({
                 </LoadingRow>
               </>
             )}
-            {starterPrompts && starterPrompts.length > 0 && (
+            {starterVisible && starterPrompts && starterPrompts.length > 0 && (
               <div className={STARTER_GRID_CLASS} role="group" aria-label={m.chat_panel_starter_prompts()}>
                 {starterPrompts.map((item, index) => {
                   const Icon = STARTER_ICONS[index];

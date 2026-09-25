@@ -148,6 +148,36 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
         });
     }
+    {
+        let chat = state.chat.clone();
+        let moving = state.data_dir_move_in_progress.clone();
+        let gate = state.data_dir_gate.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                if moving.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let _gate = gate.lock().await;
+                if moving.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let expired = Store::open().and_then(|store| store.expired_temporary_chat_ids());
+                match expired {
+                    Ok(ids) => {
+                        for id in ids {
+                            if !chat.is_busy(&id).await {
+                                if let Err(error) = chat.delete_session(&id).await {
+                                    eprintln!("orx up: could not expire side chat {id}: {error}");
+                                }
+                            }
+                        }
+                    }
+                    Err(error) => eprintln!("orx up: could not scan expired side chats: {error}"),
+                }
+            }
+        });
+    }
 
     spawn_agent_preflight(state.clone());
     // A fresh install's demo worktree takes ~15 sequential git spawns — build
@@ -692,6 +722,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/chat/sessions/{id}",
             axum::routing::delete(delete_chat_session).patch(update_chat_session),
         )
+        .route("/api/chat/sessions/{id}/side-chat", post(create_side_chat))
+        .route("/api/chat/sessions/{id}/promote", post(promote_side_chat))
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
@@ -4976,6 +5008,20 @@ fn reject_if_stopping(state: &AppState) -> std::result::Result<(), ApiError> {
     Ok(())
 }
 
+async fn reject_expired_side_chat(
+    state: &AppState,
+    session: &StoredChatSession,
+) -> std::result::Result<(), ApiError> {
+    if session
+        .temporary_expires_at
+        .is_some_and(|expires_at| expires_at <= now_ms())
+        && !state.chat.is_busy(&session.id).await
+    {
+        return Err(bad_request("side chat has expired"));
+    }
+    Ok(())
+}
+
 // --- git settings -----------------------------------------------------------
 
 fn git_out(args: &[&str]) -> Option<String> {
@@ -7665,12 +7711,56 @@ async fn create_chat_session(
         goal: None,
         active_leaf_id: None,
         parent_session_id: None,
+        side_chat_parent_id: None,
+        temporary_expires_at: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
     store.create_chat_session(&session)?;
     Ok(Json(
         json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+async fn create_side_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let parent = store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    if parent.temporary_expires_at.is_some() {
+        return Err(bad_request("side chats cannot be branched again"));
+    }
+    let _admission = state
+        .project_lifecycle
+        .admit(&parent.project_id)
+        .ok_or_else(|| bad_request("project deletion is in progress"))?;
+    let session = local::chat::create_temporary_side_chat(&store, &parent)?;
+    let session = state
+        .chat
+        .emit_session(Some(session))
+        .await
+        .ok_or_else(|| not_found("chat session"))?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, false) }),
+    ))
+}
+
+async fn promote_side_chat(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    if !store.promote_temporary_chat(&id)? {
+        return Err(bad_request(
+            "side chat is missing, expired, or already permanent",
+        ));
+    }
+    let session = state
+        .chat
+        .emit_session(store.get_chat_session(&id)?)
+        .await
+        .ok_or_else(|| not_found("chat session"))?;
+    Ok(Json(
+        json!({ "session": local::chat::session_json(&session, state.chat.is_busy(&id).await) }),
     ))
 }
 
@@ -7937,6 +8027,7 @@ async fn send_chat_message(
     let session = store
         .get_chat_session(&id)?
         .ok_or_else(|| not_found("chat session"))?;
+    reject_expired_side_chat(&state, &session).await?;
     let project = store
         .get_local_project(&session.project_id)?
         .ok_or_else(|| not_found("project"))?;
@@ -8241,6 +8332,10 @@ async fn respond_chat(
     Json(req): Json<RespondReq>,
 ) -> ApiResult {
     reject_if_stopping(&state)?;
+    let session = Store::open()?
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    reject_expired_side_chat(&state, &session).await?;
     state
         .chat
         .respond(local::chat::PromptAnswer {
