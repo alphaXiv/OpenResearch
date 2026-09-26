@@ -15,7 +15,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tokio-util = { version = "0.7", features = ["io"] }
 # rustls instead of the default native-tls: avoids an OpenSSL dependency so the
 # static musl Linux builds link cleanly (native-tls/openssl won't build for musl).
-reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "http2", "rustls-tls", "stream"] }
+# Both root sets are enabled: webpki-roots keeps the bundled Mozilla list (so a
+# container with no OS trust store still works), and native-roots additionally
+# loads the OS store, which is where a TLS-inspecting proxy's CA lives. reqwest
+# merges both into one root store, so this is additive.
+reqwest = { version = "0.12", default-features = false, features = ["json", "charset", "http2", "rustls-tls-webpki-roots", "rustls-tls-native-roots", "stream"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -52,9 +56,10 @@ aes = "0.8"
 cbc = "0.1"
 pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 sha1 = "0.10"
-# Overleaf live sync speaks the editor's socket.io channel. rustls + webpki
-# roots for the same musl reasons as reqwest above; already in the tree via axum.
-tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
+# Overleaf live sync speaks the editor's socket.io channel. rustls for the same
+# musl reasons as reqwest above; already in the tree via axum. Native roots too,
+# so the websocket honors a corporate CA like the HTTP clients do.
+tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots"] }
 
 # File identity for Windows' hard-link fallback (native_store.rs); already in the tree via walkdir.
 same-file = "1.0"
