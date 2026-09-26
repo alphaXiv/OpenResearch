@@ -411,7 +411,7 @@ mod tests {
 
         let dir = run_job(&LocalJobSpec {
             run_id: "lifecycle".into(),
-            script: "[ -n \"$HF_TOKEN\" ] && [ -n \"$TINKER_API_KEY\" ] && [ \"$PYTHONUNBUFFERED\" = 1 ] && [ \"$PYTHONIOENCODING\" = utf-8 ] && echo hello-$ORX_TEST_VAR".into(),
+            script: "printf '%s\\n' \"$HF_TOKEN\" \"$TINKER_API_KEY\" \"$PYTHONUNBUFFERED\" \"$PYTHONIOENCODING\" \"$ORX_TEST_VAR\"".into(),
             env: HashMap::from([
                 ("ORX_TEST_VAR".to_string(), "42".to_string()),
                 ("HF_TOKEN".to_string(), "fake-hf-token-sentinel".to_string()),
@@ -432,8 +432,17 @@ mod tests {
 
         let mut lines = Vec::new();
         let seen = stream_logs(&dir, 0, &mut |l| lines.push(l.to_string())).unwrap();
-        assert_eq!(seen, 1);
-        assert_eq!(lines, ["hello-42"]);
+        assert_eq!(seen, 5);
+        assert_eq!(
+            lines,
+            [
+                "fake-hf-token-sentinel",
+                "fake-tinker-key-sentinel",
+                "1",
+                "utf-8",
+                "42",
+            ]
+        );
         // Re-poll past the consumed lines: nothing new.
         assert_eq!(stream_logs(&dir, seen, &mut |_| ()).unwrap(), seen);
         #[cfg(windows)]
