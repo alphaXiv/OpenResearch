@@ -1459,7 +1459,7 @@ mod tests {
         let root = temp_root();
         save_skill_md_in(&root, skill_md("greeter").as_bytes()).unwrap();
         let session_file = temp_root().join(".agents/skills/greeter/SKILL.md");
-        let source_file = store_dir(&root).join("greeter/SKILL.md");
+        let source_file = std::path::absolute(store_dir(&root).join("greeter/SKILL.md")).unwrap();
         assert_eq!(
             instructions_in(&root, &[], "greeter", Some(&session_file)).unwrap(),
             format!(
@@ -1488,11 +1488,15 @@ mod tests {
         let wt = temp_root();
         assert_eq!(
             session_skill_file("research-workflow", Some("codex"), Some(&wt)),
-            Some(wt.join(".agents/skills/research-workflow/SKILL.md"))
+            Some(
+                std::path::absolute(wt.join(".agents/skills/research-workflow/SKILL.md")).unwrap()
+            )
         );
         assert_eq!(
             session_skill_file("research-workflow", Some("claude-code"), Some(&wt)),
-            Some(wt.join(".claude/skills/research-workflow/SKILL.md"))
+            Some(
+                std::path::absolute(wt.join(".claude/skills/research-workflow/SKILL.md")).unwrap()
+            )
         );
         assert!(session_skill_file("research-workflow", None, Some(&wt)).is_none());
         assert!(session_skill_file("research-workflow", Some("codex"), None).is_none());
@@ -1527,7 +1531,8 @@ mod tests {
             &store_dir(&root).join("research-workflow"),
             &wt.join(".agents/skills/research-workflow")
         ));
-        let source_file = store_dir(&root).join("research-workflow/SKILL.md");
+        let source_file =
+            std::path::absolute(store_dir(&root).join("research-workflow/SKILL.md")).unwrap();
         assert_eq!(
             instructions_in(&root, &[], "research-workflow", Some(&session_file)).unwrap(),
             format!(
