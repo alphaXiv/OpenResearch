@@ -5,6 +5,9 @@
 # Security-sensitive: release CI and the macOS signing pipeline handle (or can
 # reach) the Developer ID certificate. Changes here must be reviewed.
 /.github/workflows/             @myles332 @sox8502
+/.github/actions/               @myles332 @sox8502
+/.github/build-setup.yml        @myles332 @sox8502
+/dist-workspace.toml            @myles332 @sox8502
 /scripts/build-macos-app.sh     @myles332 @sox8502
 /scripts/package-macos-app.sh   @myles332 @sox8502
 /macos/                         @myles332 @sox8502

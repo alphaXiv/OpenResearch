@@ -10,13 +10,15 @@
 //!     to the DOI and full-text PDF.
 //!   - **OpenAlex** (`W…` id or any other DOI): title/authors/date/citations +
 //!     abstract, with DOI and open-access PDF links.
+//!   - **PubMed** (PMID, `pmid:` id, or PubMed URL): title/authors/date/journal +
+//!     abstract, with PubMed, DOI, and PubMed Central links.
 //!
-//! OpenAlex/bioRxiv have no *extracted* full text, so `--full` on those just
-//! points you at the PDF.
+//! OpenAlex/bioRxiv/PubMed have no *extracted* full text, so `--full` on those
+//! just points you at the PDF or full-text link.
 
 use crate::client::{
-    fetch_biorxiv, fetch_openalex_work, fetch_paper_github, fetch_paper_markdown, versionless_id,
-    BiorxivDetail, OpenAlexWork,
+    fetch_biorxiv, fetch_openalex_work, fetch_paper_github, fetch_paper_markdown, fetch_pubmed,
+    versionless_id, BiorxivDetail, OpenAlexWork, PubmedArticle,
 };
 use crate::error::{anyhow, Result};
 use crate::LitSource;
@@ -28,6 +30,7 @@ pub async fn run(args: crate::PaperArgs) -> Result<()> {
         LitSource::Alphaxiv => run_alphaxiv(&args).await,
         LitSource::Openalex => run_openalex(&args.id, args.full).await,
         LitSource::Biorxiv => run_biorxiv(&args.id, args.full).await,
+        LitSource::Pubmed => run_pubmed(&args.id, args.full).await,
     }
 }
 
@@ -104,6 +107,21 @@ async fn run_biorxiv(raw: &str, full: bool) -> Result<()> {
         }
         None => Err(anyhow!(
             "No bioRxiv preprint found for {doi}. If it's a medRxiv or non-bioRxiv DOI, try `orx paper {doi} --source openalex`; or search with `orx discover biorxiv <query>`."
+        )),
+    }
+}
+
+async fn run_pubmed(raw: &str, full: bool) -> Result<()> {
+    let pmid = pubmed_id(raw).ok_or_else(|| {
+        anyhow!("{raw:?} is not a PubMed id. Pass a PMID such as 38308006, `pmid:38308006`, or a pubmed.ncbi.nlm.nih.gov URL.")
+    })?;
+    match fetch_pubmed(&pmid).await? {
+        Some(a) => {
+            print_pubmed(&a, full);
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "No PubMed record found for PMID {pmid}. Check the id, or search with `orx discover pubmed <query>`."
         )),
     }
 }
@@ -190,6 +208,41 @@ fn print_biorxiv(d: &BiorxivDetail, full: bool) {
     }
 }
 
+fn print_pubmed(a: &PubmedArticle, full: bool) {
+    println!("# {}", a.title);
+    if !a.authors.is_empty() {
+        println!("{}", format_authors(&a.authors));
+    }
+    let meta: Vec<&str> = [a.publication_date.as_deref(), Some(a.journal.as_str())]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !meta.is_empty() {
+        println!("{}", meta.join(" · "));
+    }
+    println!("PubMed: {}", pubmed_url(&a.pmid));
+    if let Some(doi) = &a.doi {
+        println!("DOI: https://doi.org/{doi}");
+    }
+    if let Some(pmcid) = &a.pmcid {
+        println!("Full text: https://pmc.ncbi.nlm.nih.gov/articles/{pmcid}/");
+    }
+    println!();
+    if a.abstract_.is_empty() {
+        println!("(No abstract available from PubMed.)");
+    } else {
+        println!("{}", a.abstract_);
+    }
+    if full {
+        eprintln!("PubMed has metadata + abstract only — open the DOI or PubMed Central link above for full text.");
+    }
+}
+
+fn pubmed_url(pmid: &str) -> String {
+    format!("https://pubmed.ncbi.nlm.nih.gov/{pmid}/")
+}
+
 /// Join author names, capping a long list so the header stays readable.
 fn format_authors(names: &[String]) -> String {
     const MAX: usize = 12;
@@ -205,9 +258,10 @@ fn format_authors(names: &[String]) -> String {
 }
 
 /// Decide which source an id belongs to, from its shape. Host hints
-/// (`biorxiv.org`, `openalex.org`) win first; then a `10.1101/…` DOI → bioRxiv,
-/// any other DOI → OpenAlex, a bare `W…` id → OpenAlex; everything else defaults
-/// to alphaXiv (arXiv ids and URLs), preserving prior behavior.
+/// (`biorxiv.org`, `openalex.org`, PubMed) and a `pmid:` prefix win first; then
+/// a `10.1101/…` DOI → bioRxiv, any other DOI → OpenAlex, a bare `W…` id →
+/// OpenAlex, a bare number → PubMed; everything else defaults to alphaXiv
+/// (arXiv ids and URLs), preserving prior behavior.
 fn detect_source(input: &str) -> LitSource {
     let lower = input.trim().to_ascii_lowercase();
     if lower.contains("biorxiv.org") {
@@ -215,6 +269,12 @@ fn detect_source(input: &str) -> LitSource {
     }
     if lower.contains("openalex.org") {
         return LitSource::Openalex;
+    }
+    if lower.contains("pubmed.ncbi.nlm.nih.gov")
+        || lower.contains("ncbi.nlm.nih.gov/pubmed")
+        || lower.starts_with("pmid:")
+    {
+        return LitSource::Pubmed;
     }
     if let Some(doi) = extract_doi(input) {
         return if doi.starts_with("10.1101/") {
@@ -227,7 +287,26 @@ fn detect_source(input: &str) -> LitSource {
     if is_openalex_id(last) {
         return LitSource::Openalex;
     }
+    if is_pmid(input.trim()) {
+        return LitSource::Pubmed;
+    }
     LitSource::Alphaxiv
+}
+
+/// A bare PubMed id: digits only. arXiv ids always carry a `.` or an archive prefix.
+fn is_pmid(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 9 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The PMID in a bare id, a `pmid:` id, or a PubMed URL, or `None` if there isn't one.
+fn pubmed_id(input: &str) -> Option<String> {
+    let s = input.trim();
+    let s = s.split(['?', '#']).next().unwrap_or(s);
+    let s = match s.get(..5) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("pmid:") => s[5..].trim(),
+        _ => s.trim_end_matches('/').rsplit('/').next().unwrap_or(s),
+    };
+    is_pmid(s).then(|| s.to_string())
 }
 
 /// A bare OpenAlex work id: `W`/`w` followed by digits.
@@ -269,13 +348,36 @@ fn biorxiv_doi(doi: &str) -> String {
 /// Handles `arxiv.org/abs/<id>`, `arxiv.org/pdf/<id>[.pdf]`,
 /// `alphaxiv.org/overview/<id>`, `alphaxiv.org/abs/<id>`, and bare ids — by
 /// taking the last path segment and stripping any `?`/`#` and `.pdf`/`.md` suffix.
+/// An old-style id (`hep-th/9711200`) keeps its archive segment, since the
+/// number alone is not an id.
 pub(crate) fn parse_paper_id(input: &str) -> String {
     let s = input.trim();
     let s = s.split(['?', '#']).next().unwrap_or(s);
-    let last = s.rsplit('/').next().unwrap_or(s);
-    last.trim_end_matches(".pdf")
-        .trim_end_matches(".md")
-        .to_string()
+    let mut segments = s.rsplit('/');
+    let last = segments.next().unwrap_or(s);
+    let id = last.trim_end_matches(".pdf").trim_end_matches(".md");
+    match segments.next() {
+        Some(archive) if is_old_style_number(id) && is_archive(archive) => {
+            format!("{archive}/{id}")
+        }
+        _ => id.to_string(),
+    }
+}
+
+/// The `YYMMNNN[vN]` half of an old-style arXiv id.
+fn is_old_style_number(s: &str) -> bool {
+    let number = versionless_id(s);
+    number.len() == 7 && number.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// Plausibly an old-style archive segment, optionally with a subject class:
+/// `hep-th`, `math`, `math.GT`. Route words (`abs`, `pdf`, `overview`) pass
+/// too — a 7-digit number after one only appears on URLs that are already
+/// invalid.
+fn is_archive(s: &str) -> bool {
+    s.bytes().next().is_some_and(|b| b.is_ascii_alphabetic())
+        && s.bytes()
+            .all(|b| b.is_ascii_alphabetic() || b == b'-' || b == b'.')
 }
 
 fn alphaxiv_paper_url(id: &str) -> String {
@@ -286,7 +388,7 @@ fn alphaxiv_paper_url(id: &str) -> String {
 mod tests {
     use super::{
         alphaxiv_paper_url, biorxiv_doi, detect_source, ensure_source_enabled, extract_doi,
-        fallback_markdown_kind, parse_paper_id,
+        fallback_markdown_kind, parse_paper_id, pubmed_id,
     };
     use crate::LitSource;
 
@@ -309,6 +411,37 @@ mod tests {
             ("https://www.alphaxiv.org/overview/2401.12345", "2401.12345"),
             ("https://alphaxiv.org/abs/2401.12345v2", "2401.12345v2"),
             ("https://arxiv.org/abs/2401.12345?foo=bar", "2401.12345"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(parse_paper_id(input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn keeps_the_archive_of_old_style_ids() {
+        let cases = [
+            // The id `orx discover` returns for a pre-2007 paper.
+            ("hep-th/9711200", "hep-th/9711200"),
+            ("hep-th/9711200v3", "hep-th/9711200v3"),
+            ("math.GT/0309136", "math.GT/0309136"),
+            ("https://arxiv.org/abs/hep-th/9711200", "hep-th/9711200"),
+            (
+                "https://arxiv.org/pdf/hep-th/9711200v3.pdf",
+                "hep-th/9711200v3",
+            ),
+            (
+                "https://www.alphaxiv.org/overview/math/0211159",
+                "math/0211159",
+            ),
+            ("https://arxiv.org/abs/math.GT/0309136", "math.GT/0309136"),
+            // No archive to keep.
+            ("9711200", "9711200"),
+            // A non-archive prefix — digits, or an empty segment — is dropped.
+            ("10.1234/9711200", "9711200"),
+            ("foo1/9711200", "9711200"),
+            ("x//9711200", "9711200"),
+            // Route words count as archives; pins the lenient behavior above.
+            ("https://arxiv.org/abs/9711200", "abs/9711200"),
         ];
         for (input, want) in cases {
             assert_eq!(parse_paper_id(input), want, "input: {input}");
@@ -356,10 +489,40 @@ mod tests {
             ("https://doi.org/10.1038/nature14539", LitSource::Openalex),
             ("W2919115771", LitSource::Openalex),
             ("https://openalex.org/W2919115771", LitSource::Openalex),
+            ("38308006", LitSource::Pubmed),
+            ("PMID:38308006", LitSource::Pubmed),
+            (
+                "https://pubmed.ncbi.nlm.nih.gov/38308006/",
+                LitSource::Pubmed,
+            ),
+            (
+                "https://www.ncbi.nlm.nih.gov/pubmed/38308006",
+                LitSource::Pubmed,
+            ),
         ];
         for (input, want) in cases {
             assert_eq!(detect_source(input), want, "input: {input}");
         }
+    }
+
+    #[test]
+    fn extracts_pubmed_ids() {
+        for input in [
+            "38308006",
+            " pmid: 38308006 ",
+            "PMID:38308006",
+            "https://pubmed.ncbi.nlm.nih.gov/38308006/",
+            "https://pubmed.ncbi.nlm.nih.gov/38308006/?from=search",
+            "https://www.ncbi.nlm.nih.gov/pubmed/38308006",
+        ] {
+            assert_eq!(
+                pubmed_id(input).as_deref(),
+                Some("38308006"),
+                "input: {input}"
+            );
+        }
+        assert_eq!(pubmed_id("2401.12345"), None);
+        assert_eq!(pubmed_id("https://pubmed.ncbi.nlm.nih.gov/"), None);
     }
 
     #[test]

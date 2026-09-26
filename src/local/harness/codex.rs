@@ -46,8 +46,9 @@ use super::options::{
     REASONING_DEFAULT_ID,
 };
 use super::{
-    should_synthesize_plan, synthesize_resume, Harness, OneShot, OneShotQuality, ResumeAction,
-    TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS, TURN_WATCHDOG,
+    should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
+    OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
+    TURN_WATCHDOG,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -147,7 +148,10 @@ fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
 /// caller falls back to the static table. Hidden catalog entries are skipped
 /// (the server already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
-    let fut = async {
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
         let mut cmd = Command::new(bin);
         cmd.arg("app-server")
             .stdin(Stdio::piped())
@@ -155,7 +159,7 @@ async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option
             .stderr(Stdio::null())
             .kill_on_drop(true);
         prepare_env(&mut cmd);
-        let mut child = cmd.spawn().ok()?;
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -505,31 +509,17 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
     }
 }
 
-#[async_trait]
-impl Harness for Codex {
-    fn id(&self) -> &'static str {
-        "codex"
-    }
-
-    fn name(&self) -> &'static str {
-        "Codex"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The app-server takes `turn/steer` against the active turn; `detect`
-    /// withholds it from installations that fall back to the exec path.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl Codex {
+    /// `snapshot` skips the `model/list` handshake and reports the static
+    /// table (or the custom provider's configured model) as pending; a
+    /// background full pass replaces it. It also skips the `--version` and
+    /// app-server capability spawns — install is decided by discovery alone
+    /// and auth is already a file read (`auth.json` / `config.toml`).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_codex_working().await {
-            info.record_bin(&bin, probe);
-        }
+        // The config/auth file reads run before selection: they cost nothing
+        // and their answer decides whether the app-server catalog child is
+        // worth spawning at all.
         let home = native_store::codex_home(NativeStore::Legacy);
         let config_raw = std::fs::read_to_string(home.join("config.toml")).ok();
         let custom_provider = config_raw.as_deref().and_then(parse_custom_provider);
@@ -566,6 +556,50 @@ impl Harness for Codex {
             }
         }
 
+        // The `model/list` handshake is only spawned where the auth evidence
+        // already says it can run — and for a custom provider, only when its
+        // config declares a catalog the bundled first-party one can't
+        // answer for. Either way it runs concurrently with the `--version`
+        // sweep instead of behind it.
+        let want_catalog = !snapshot
+            && info.authenticated
+            && custom_provider
+                .as_ref()
+                .is_none_or(|provider| provider.has_model_catalog);
+        let mut catalog = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "codex",
+                find_codex,
+                find_codex_working(),
+            )
+            .await;
+        } else {
+            let effort = configured_effort.clone();
+            let (selected, probed) = super::detect::select_and_speculate(
+                "codex",
+                codex_candidates(),
+                None,
+                move |bin| {
+                    let effort = effort.clone();
+                    async move {
+                        if want_catalog {
+                            codex_model_list(&bin, effort.as_deref()).await
+                        } else {
+                            None
+                        }
+                    }
+                },
+            )
+            .await;
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            catalog = probed.flatten();
+        }
+
         if info.installed && !info.install_broken {
             info.auth_state = if info.authenticated {
                 super::HarnessAuthState::Ready
@@ -580,36 +614,20 @@ impl Harness for Codex {
         }
         info.agent_ready = info.ready();
         if info.agent_ready {
-            // A custom provider's bundled first-party catalog is meaningless,
-            // so probe only when its config declares an explicit catalog.
-            let custom_catalog = match (
-                custom_provider.as_ref(),
-                info.bin_path.as_deref().map(Path::new),
-            ) {
-                (Some(provider), Some(bin)) if provider.has_model_catalog => {
-                    codex_model_list(bin, configured_effort.as_deref()).await
-                }
-                _ => None,
-            };
+            let catalog_answered = catalog.is_some();
             match custom_provider
                 .as_ref()
                 .map(|provider| provider.model.as_deref())
             {
                 Some(configured_model) => {
-                    info =
-                        info.with_models(custom_provider_models(configured_model, custom_catalog))
+                    info = info.with_models(custom_provider_models(configured_model, catalog))
                 }
                 None => {
-                    // First-party account: ask the installed CLI for its own
-                    // catalog (models + per-model efforts, the data codex's TUI
-                    // picker renders). The static table only covers a codex too
-                    // old to answer `model/list`.
-                    let bin = info.bin_path.as_deref().map(Path::new);
-                    let models = match bin {
-                        Some(bin) => codex_model_list(bin, configured_effort.as_deref()).await,
-                        None => None,
-                    };
-                    info = info.with_models(models.unwrap_or_else(|| {
+                    // First-party account: the speculated `model/list` answer
+                    // is codex's own catalog (models + per-model efforts, the
+                    // data its TUI picker renders). The static table covers a
+                    // codex too old to answer — and the snapshot pass.
+                    info = info.with_models(catalog.unwrap_or_else(|| {
                         CODEX_MODELS
                             .iter()
                             .map(|(id, levels)| ModelInfo::new(*id).with_reasoning(levels))
@@ -619,15 +637,24 @@ impl Harness for Codex {
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
-            // thread resume).
-            // `turn/steer` is an app-server method, so this must follow the
-            // dispatch predicate rather than the version alone.
-            info.supports_steering = runs_app_server().await;
-            let too_old = info
-                .version
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v < MIN_APP_SERVER_VERSION);
+            // thread resume). `turn/steer` is an app-server method, so this
+            // follows the dispatch predicate rather than the version alone —
+            // but a completed `model/list` handshake only proves the catalog
+            // method answered, not that the turn protocol is whole, so an
+            // explicitly too-old version still vetoes. Detection already
+            // holds the evidence — the probed version, or the handshake — so
+            // seeding the capability cell costs no extra spawn. The snapshot
+            // leaves it off.
+            let parsed = info.version.as_deref().and_then(parse_version);
+            let too_old = parsed.is_some_and(|v| v < MIN_APP_SERVER_VERSION);
+            let supported = !snapshot
+                && app_server_supported(Some(
+                    !too_old
+                        && (catalog_answered
+                            || parsed.is_some_and(|v| v >= MIN_APP_SERVER_VERSION)),
+                ))
+                .await;
+            info.supports_steering = !codex_exec_forced() && supported;
             if too_old {
                 info.agent_note = Some(
                     "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
@@ -649,6 +676,142 @@ impl Harness for Codex {
             );
         }
         Some(info)
+    }
+}
+
+/// Compaction re-reads a whole thread; a long one is not quick.
+const COMPACT_TURN_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[async_trait]
+impl Harness for Codex {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
+    fn name(&self) -> &'static str {
+        "Codex"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    /// The app server compacts a thread in place. The legacy `codex exec` path
+    /// spawns a fresh child per turn with no session-scoped RPC, so it — and a
+    /// session whose app-server child is gone — take the shared fallback.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(thread_id) = ctx.native_session_id.as_deref() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        if !runs_app_server().await {
+            return Ok(CompactOutcome::Fallback);
+        }
+        let Some(client) = ctx.host.codex.client_for(&ctx.session_id).await else {
+            // The thread is still resumable; summarizing would throw it away.
+            return Err(anyhow!(
+                "Codex is not running for this chat — send a message first, then compact"
+            ));
+        };
+        // A fresh child must `thread/resume` a thread before it can act on it.
+        if client.resumed_thread().as_deref() != Some(thread_id) {
+            return Err(anyhow!(
+                "Codex is not running this chat's thread — send a message first, then compact"
+            ));
+        }
+        // `thread/compact/start` only starts a turn: codex compacts in the
+        // background and reports through the same stream a prompt would, so the
+        // request returning is not the compaction being done.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let _route = client.register_turn(tx);
+        client
+            .request(
+                "thread/compact/start",
+                serde_json::json!({ "threadId": thread_id }),
+            )
+            .await?;
+        // The response carries no turn id, so it comes from this thread's own
+        // `turn/started`. Another turn's tail can still be streaming into the
+        // shared channel, and its `turn/completed` must not settle this one.
+        let mut compaction_turn: Option<String> = None;
+        let settle = async {
+            loop {
+                let Some(event) = rx.recv().await else {
+                    return Err(anyhow!("codex stopped reporting during compaction"));
+                };
+                let (method, params) = match event {
+                    TurnEvent::Notification { method, params } => (method, params),
+                    // Leaving an approval unanswered blocks the child.
+                    TurnEvent::Request { id, .. } => {
+                        let _ = client.respond_decline(&id).await;
+                        continue;
+                    }
+                    TurnEvent::Closed => return Err(anyhow!("codex closed during compaction")),
+                };
+                if params.get("threadId").and_then(Value::as_str) != Some(thread_id) {
+                    continue;
+                }
+                let event_turn = event_turn_id(&params);
+                match method.as_str() {
+                    "turn/started" if compaction_turn.is_none() => {
+                        compaction_turn = event_turn.map(str::to_string);
+                    }
+                    "turn/completed"
+                        if compaction_turn.is_some()
+                            && event_turn == compaction_turn.as_deref() =>
+                    {
+                        let turn = params.get("turn").cloned().unwrap_or(Value::Null);
+                        match turn.get("status").and_then(Value::as_str).unwrap_or("") {
+                            "completed" => return Ok(()),
+                            // Not final: codex would be regressing, but a
+                            // non-final status must not end the wait.
+                            "inProgress" => {}
+                            "failed" => {
+                                return Err(anyhow!(
+                                    "codex compaction failed: {}",
+                                    error_message(turn.get("error"))
+                                ))
+                            }
+                            other => {
+                                return Err(anyhow!("codex compaction ended as `{other}`"));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        match tokio::time::timeout(COMPACT_TURN_TIMEOUT, settle).await {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(turn_id) = compaction_turn {
+                    let _ = client
+                        .request(
+                            "turn/interrupt",
+                            serde_json::json!({ "threadId": thread_id, "turnId": turn_id }),
+                        )
+                        .await;
+                }
+                return Err(anyhow!(
+                    "codex did not finish compacting within {}s",
+                    COMPACT_TURN_TIMEOUT.as_secs()
+                ));
+            }
+        }
+        Ok(CompactOutcome::Native)
+    }
+
+    /// The app-server takes `turn/steer` against the active turn; `detect`
+    /// withholds it from installations that fall back to the exec path.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -944,30 +1107,39 @@ fn installed_plugin_skills_dirs(home: &Path, inventory: &Value) -> Vec<(String, 
 /// live spike). Older CLIs take the exec fallback below.
 const MIN_APP_SERVER_VERSION: (u64, u64, u64) = (0, 144, 0);
 
+/// ORX_CODEX_EXEC pins turns to the legacy exec path ("0"/empty don't count).
+fn codex_exec_forced() -> bool {
+    std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// Whether a turn will run over the app-server: a supported codex, unless
-/// ORX_CODEX_EXEC forces the legacy exec path ("0"/empty don't count).
+/// ORX_CODEX_EXEC forces the legacy exec path.
 /// Capability reporting reads the same answer, so the composer can't offer
 /// app-server-only features the exec path lacks.
 async fn runs_app_server() -> bool {
-    let force_exec = std::env::var("ORX_CODEX_EXEC").is_ok_and(|v| !v.is_empty() && v != "0");
-    !force_exec && app_server_supported().await
+    !codex_exec_forced() && app_server_supported(None).await
 }
 
 /// Whether the installed codex speaks the validated app-server protocol.
 /// Probed once per process (a codex upgrade mid-run takes an `orx up` restart
-/// to notice — acceptable).
-async fn app_server_supported() -> bool {
+/// to notice — acceptable). A caller that already holds the evidence —
+/// detection's probed version, or a completed `model/list` handshake — passes
+/// it as `known` and the cell seeds without paying another `--version` child.
+async fn app_server_supported(known: Option<bool>) -> bool {
     static SUPPORTED: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
     *SUPPORTED
-        .get_or_init(|| async {
-            let Some(bin) = find_codex() else {
-                return false;
-            };
-            bin_version(&bin)
-                .await
-                .as_deref()
-                .and_then(parse_version)
-                .is_some_and(|v| v >= MIN_APP_SERVER_VERSION)
+        .get_or_init(|| async move {
+            match known {
+                Some(known) => known,
+                None => match find_codex() {
+                    Some(bin) => bin_version(&bin)
+                        .await
+                        .as_deref()
+                        .and_then(parse_version)
+                        .is_some_and(|v| v >= MIN_APP_SERVER_VERSION),
+                    None => false,
+                },
+            }
         })
         .await
 }
@@ -2735,13 +2907,17 @@ fn event_turn_mismatch(expected: Option<&str>, params: &Value) -> bool {
     let Some(expected) = expected else {
         return false;
     };
-    let event_turn = params.get("turnId").and_then(Value::as_str).or_else(|| {
+    event_turn_id(params).is_some_and(|t| t != expected)
+}
+
+/// `item/*` events carry the turn id at the top level; `turn/*` nest it.
+fn event_turn_id(params: &Value) -> Option<&str> {
+    params.get("turnId").and_then(Value::as_str).or_else(|| {
         params
             .get("turn")
             .and_then(|t| t.get("id"))
             .and_then(Value::as_str)
-    });
-    event_turn.is_some_and(|t| t != expected)
+    })
 }
 
 /// PromptAnswer.approve → the codex decision string. Per-command `accept`

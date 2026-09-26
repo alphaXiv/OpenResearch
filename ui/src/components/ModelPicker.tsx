@@ -113,6 +113,7 @@ export function ModelPicker({
   defaultReasoningId,
   onSelectReasoning,
   lockHarness = false,
+  openRequest = 0,
   className,
 }: {
   value: ModelSelection | null;
@@ -128,6 +129,8 @@ export function ModelPicker({
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
   lockHarness?: boolean;
+  /** Bumped to open the picker from elsewhere (the composer's `/model`). */
+  openRequest?: number;
   className?: string;
 }) {
   const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
@@ -144,6 +147,16 @@ export function ModelPicker({
     setPage("root");
     setFilter("");
   };
+
+  // Seeded with the mount value so a remount doesn't replay an old request.
+  const handledOpenRequest = useRef(openRequest);
+  useEffect(() => {
+    if (openRequest === handledOpenRequest.current) return;
+    handledOpenRequest.current = openRequest;
+    setPage("models");
+    setFilter("");
+    setOpen(true);
+  }, [openRequest, setOpen]);
 
   useEffect(() => {
     if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
@@ -373,13 +386,13 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> {m.model_picker_unavailable()}
+                          {harness.catalogPending ? m.onboarding_checking() : <><Lock size={10} /> {m.model_picker_unavailable()}</>}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
+                        {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>

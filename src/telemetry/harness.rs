@@ -109,6 +109,87 @@ fn ensure_initial(settings: &mut Settings, install: &str, harnesses: &Value) {
     });
 }
 
+/// One detection pass — the boot snapshot or a catalog fill — sent as a
+/// single payload: a `harness_detect` row for the pass's own wall clock, then
+/// each probe the pass recorded as a `harness_detect_probe` event on the same
+/// `fillId`. `first_ready_ms` marks when the first `agentReady` entry
+/// committed — the span the onboarding gate actually waits on.
+pub(crate) fn capture_detect(
+    fill_id: uuid::Uuid,
+    pass: &'static str,
+    duration_ms: u64,
+    first_ready_ms: Option<u64>,
+    installed: usize,
+    ready: usize,
+    probes: Vec<crate::local::harness::ProbeTiming>,
+) {
+    if !is_enabled(flag()) {
+        return;
+    }
+    debug_assert!(contract::DETECT_PASSES.contains(&pass), "{pass}");
+    let Some(install) = install_id() else { return };
+    let event_id = uuid::Uuid::new_v4();
+    let payload = detect_payload(
+        &install,
+        event_id,
+        fill_id,
+        pass,
+        duration_ms,
+        first_ready_ms,
+        installed,
+        ready,
+        probes,
+    );
+    let path = persist_payload(event_id, &payload);
+    register_pending(tokio::spawn(deliver_payload(path, payload)));
+}
+
+#[expect(clippy::too_many_arguments)]
+fn detect_payload(
+    install: &str,
+    event_id: uuid::Uuid,
+    fill_id: uuid::Uuid,
+    pass: &str,
+    duration_ms: u64,
+    first_ready_ms: Option<u64>,
+    installed: usize,
+    ready: usize,
+    probes: Vec<crate::local::harness::ProbeTiming>,
+) -> Value {
+    let mut payload = build_payload_with_id(
+        "harness_detect",
+        install,
+        event_id,
+        json!({
+            "fillId": fill_id.to_string(),
+            "pass": pass,
+            "durationMs": duration_ms.min(9_007_199_254_740_991),
+            "firstReadyMs": first_ready_ms.map(|ms| ms.min(9_007_199_254_740_991)),
+            "installed": installed,
+            "ready": ready,
+        }),
+    );
+    let template = payload["events"][0].clone();
+    if let Some(events) = payload["events"].as_array_mut() {
+        // Ingestion caps a batch at 25 events; the pass row always survives.
+        for probe in probes.into_iter().take(24) {
+            debug_assert!(IDS.contains(&probe.harness), "{}", probe.harness);
+            debug_assert!(probe.probe.len() <= 64, "{}", probe.probe);
+            let mut event = template.clone();
+            event["eventId"] = json!(uuid::Uuid::new_v4().to_string());
+            event["name"] = json!("cli_harness_detect_probe");
+            event["properties"] = json!({
+                "fillId": fill_id.to_string(),
+                "harness": probe.harness,
+                "probe": probe.probe,
+                "durationMs": probe.ms.min(9_007_199_254_740_991),
+            });
+            events.push(event);
+        }
+    }
+    payload
+}
+
 pub(crate) struct SetupAttempt {
     id: uuid::Uuid,
     harness: String,
@@ -183,6 +264,24 @@ pub(super) async fn assert_production_contract() {
             "{harness}"
         );
     }
+    let fill_id = uuid::Uuid::new_v4().to_string();
+    for (name, properties) in [
+        (
+            "harness_detect",
+            json!({"fillId":fill_id,"pass":"full","durationMs":8200,"firstReadyMs":3200,"installed":4,"ready":1}),
+        ),
+        (
+            "harness_detect_probe",
+            json!({"fillId":fill_id,"harness":"opencode","probe":"models","durationMs":6900}),
+        ),
+    ] {
+        let payload = build_payload(name, "cli-release-contract-test", properties);
+        assert_eq!(
+            post_payload(&payload).await,
+            DeliveryOutcome::Acknowledged,
+            "{name}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -203,6 +302,8 @@ pub(crate) mod contract {
         "interrupted",
     ];
     pub(crate) const STAGES: &[&str] = &["detect", "command", "verify"];
+    /// `z.enum` in `zHarnessDetect` — the pass a `harness_detect` row covers.
+    pub(crate) const DETECT_PASSES: &[&str] = &["snapshot", "full"];
     pub(crate) const REASONS: &[&str] = &[
         "not_eligible",
         "not_installed",
@@ -311,6 +412,67 @@ fn safe_error_excerpt(output: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn detect_payload_batches_pass_and_probe_events_on_one_fill_id() {
+        let fill_id = uuid::Uuid::new_v4();
+        let payload = detect_payload(
+            "installation",
+            uuid::Uuid::new_v4(),
+            fill_id,
+            "full",
+            8_200,
+            Some(3_200),
+            4,
+            1,
+            vec![
+                crate::local::harness::ProbeTiming {
+                    harness: "opencode",
+                    probe: "models",
+                    ms: 6_900,
+                },
+                crate::local::harness::ProbeTiming {
+                    harness: "opencode",
+                    probe: "total",
+                    ms: 7_895,
+                },
+            ],
+        );
+        let events = payload["events"].as_array().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["name"], "cli_harness_detect");
+        assert_eq!(
+            events[0]["properties"],
+            json!({
+                "fillId": fill_id.to_string(), "pass": "full", "durationMs": 8_200,
+                "firstReadyMs": 3_200, "installed": 4, "ready": 1
+            })
+        );
+        for event in &events[1..] {
+            assert_eq!(event["name"], "cli_harness_detect_probe");
+            assert_eq!(event["properties"]["fillId"], fill_id.to_string());
+        }
+        assert_eq!(events[1]["properties"]["harness"], "opencode");
+        assert_eq!(events[2]["properties"]["probe"], "total");
+        // The batch must stay inside the ingestion cap even for a stray-heavy fill.
+        let payload = detect_payload(
+            "installation",
+            uuid::Uuid::new_v4(),
+            fill_id,
+            "snapshot",
+            3,
+            None,
+            0,
+            0,
+            (0..64)
+                .map(|_| crate::local::harness::ProbeTiming {
+                    harness: "codex",
+                    probe: "spec",
+                    ms: 1,
+                })
+                .collect(),
+        );
+        assert_eq!(payload["events"].as_array().unwrap().len(), 25);
+    }
     #[test]
     fn snapshot_survives_restart_and_does_not_change() {
         let mut settings = Settings::default();

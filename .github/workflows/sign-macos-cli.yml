@@ -1,0 +1,118 @@
+# Signs and notarizes the macOS CLI archives before dist's global build, which
+# derives installers and sha256.sum from each target's manifest checksums.
+# See macos/DISTRIBUTION.md.
+
+name: Sign macOS CLI
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Always runs: if every job here skipped, the caller would too, skipping all downstream release jobs.
+  targets:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - id: targets
+        env:
+          PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+          matrix="$(jq -c '{include: [.ci.github.artifacts_matrix.include[] | select(any(.targets[]; endswith("-apple-darwin"))) | {targets}]}' <<< "$PLAN")"
+          echo "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  sign:
+    name: sign (${{ join(matrix.targets, ', ') }})
+    needs: targets
+    # Dry runs build development binaries that are never published.
+    if: ${{ !fromJson(inputs.plan).announcement_tag_is_implicit }}
+    strategy:
+      matrix: ${{ fromJson(needs.targets.outputs.matrix) }}
+    runs-on: macos-14
+    timeout-minutes: 40
+    environment: release-signing
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/macos-signing
+        with:
+          cert-p12-base64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          cert-password: ${{ secrets.MACOS_CERT_PASSWORD }}
+          notary-apple-id: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          notary-team-id: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          notary-password: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: artifacts
+
+      - name: Sign, notarize, and repack
+        env:
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(artifacts/*.tar.xz)
+          manifests=(artifacts/*-dist-manifest.json)
+          if (( ${#archives[@]} != 1 || ${#manifests[@]} != 1 )); then
+            echo "::error::Expected one archive and one manifest, found ${#archives[@]} and ${#manifests[@]}"
+            exit 1
+          fi
+          archive="${archives[0]}"
+          manifest="${manifests[0]}"
+          name="$(basename "$archive")"
+
+          work="$RUNNER_TEMP/unpacked"
+          mkdir -p "$work"
+          tar -xf "$archive" -C "$work"
+          binary="$(find "$work" -type f -name orx -print -quit)"
+          if [[ -z "$binary" ]]; then
+            echo "::error::No orx binary found in $name"
+            exit 1
+          fi
+
+          codesign --force --options runtime --timestamp --sign "$MACOS_SIGN_IDENTITY" "$binary"
+          # Same requirement src/updates/macos_app.rs pins, so a wrong identity fails here.
+          codesign --verify --strict --verbose=2 \
+            -R='anchor apple generic and certificate leaf[subject.OU] = "9P69UXUJUK" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists' \
+            "$binary"
+
+          # A bare binary can't carry a stapled ticket; Gatekeeper finds it online.
+          ditto -c -k "$binary" "$RUNNER_TEMP/orx.zip"
+          result="$(xcrun notarytool submit "$RUNNER_TEMP/orx.zip" --keychain-profile orx-notary --wait --timeout 25m --output-format json)" || true
+          echo "$result"
+          if [[ "$(jq -r .status <<< "$result")" != Accepted ]]; then
+            xcrun notarytool log "$(jq -r .id <<< "$result")" --keychain-profile orx-notary || true
+            echo "::error::Notarization of $name was not accepted"
+            exit 1
+          fi
+
+          rm "$archive"
+          (cd "$work" && COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata -cJf "$GITHUB_WORKSPACE/$archive" $(ls -A))
+
+          # Same format dist writes, including its trailing blank line.
+          sum="$(shasum -a 256 "$archive" | cut -d' ' -f1)"
+          printf '%s *%s\n\n' "$sum" "$name" > "$archive.sha256"
+          jq --arg name "$name" --arg sum "$sum" \
+            'if .artifacts[$name].checksums.sha256 then .artifacts[$name].checksums.sha256 = $sum else error("\($name) has no sha256 in the manifest") end' \
+            "$manifest" > "$manifest.new"
+          mv "$manifest.new" "$manifest"
+          echo "$name signed and notarized; sha256 $sum"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: artifacts/
+          overwrite: true

@@ -107,6 +107,8 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
@@ -168,6 +170,9 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    /// Language the dashboard last reported it is displaying (e.g. `zh-CN`).
+    #[serde(default)]
+    pub dashboard_locale: Option<String>,
     #[serde(default)]
     harness_snapshot: Option<harness::InitialSnapshot>,
 }
@@ -315,8 +320,46 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
+fn dashboard_locale() -> Option<String> {
+    load_settings().and_then(|settings| settings.dashboard_locale)
+}
+
+pub(crate) fn set_dashboard_locale(locale: &str) -> std::io::Result<()> {
+    if dashboard_locale().as_deref() == Some(locale) {
+        return Ok(());
+    }
+    mutate_settings(|settings| settings.dashboard_locale = Some(locale.to_string()))
+}
+
 fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
+}
+
+pub(crate) fn ssh_settings() -> crate::error::Result<crate::config::SshSettings> {
+    let raw = match std::fs::read_to_string(settings_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: Settings = serde_json::from_str(&raw)
+        .map_err(|error| crate::error::anyhow!("Cannot read SSH settings: {error}"))?;
+    for options in settings.ssh.hosts.values() {
+        crate::jobs::ssh::validate_host_options(options)?;
+    }
+    Ok(settings.ssh)
+}
+
+pub(crate) fn set_ssh_host(
+    host: String,
+    options: crate::config::SshHostSettings,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        settings.ssh.hosts.insert(host, options);
+    })
+}
+
+pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.ssh.default_host = host)
 }
 
 fn outbox_dir() -> PathBuf {
@@ -459,7 +502,7 @@ fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
 /// one persisted on first use. Returns `None` only if the id can't be persisted
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
-fn install_id() -> Option<String> {
+pub(crate) fn install_id() -> Option<String> {
     // Fast path: already generated.
     if let Some(id) = load_settings().and_then(|s| s.install_id) {
         return Some(id);
@@ -615,7 +658,7 @@ fn build_payload_with_id(
     event_id: uuid::Uuid,
     properties: serde_json::Value,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "schemaVersion": 1,
         "installId": install_id,
         "context": {
@@ -633,7 +676,11 @@ fn build_payload_with_id(
             "occurredAt": iso8601_utc(crate::store::now_ms()),
             "properties": properties,
         }],
-    })
+    });
+    if let Some(locale) = dashboard_locale() {
+        payload["context"]["locale"] = json!(locale);
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -868,6 +915,22 @@ fn consent_distinct_id(agreed: bool) -> String {
     CONSENT_SENTINEL_ID.to_string()
 }
 
+fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> serde_json::Value {
+    let mut payload = build_payload_with_id(
+        "telemetry_consent",
+        distinct_id,
+        event_id,
+        json!({ "agreed": agreed }),
+    );
+    // An opt-out carries no dimension beyond the choice itself.
+    if !agreed {
+        if let Some(context) = payload["context"].as_object_mut() {
+            context.remove("locale");
+        }
+    }
+    payload
+}
+
 /// Record a telemetry toggle choice — `cli_telemetry_consent` with
 /// `{ agreed: bool }`. Within an eligible official build, this is the ONE event
 /// that ignores the user's telemetry preference: it must land even when the
@@ -888,14 +951,8 @@ pub(crate) async fn record_consent(agreed: bool) {
     if environment_disabled_reason().is_some() {
         return;
     }
-    let distinct_id = consent_distinct_id(agreed);
     let event_id = uuid::Uuid::new_v4();
-    let payload = build_payload_with_id(
-        "telemetry_consent",
-        &distinct_id,
-        event_id,
-        json!({ "agreed": agreed }),
-    );
+    let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
     let path = persist_payload(event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
@@ -1438,6 +1495,42 @@ mod tests {
     }
 
     #[test]
+    fn ssh_settings_preserve_siblings_and_reject_corrupt_config() {
+        use crate::config::SshHostSettings;
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-ssh-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert!(ssh_settings().unwrap().hosts.is_empty());
+        set_persisted_disabled(true).unwrap();
+        let options = SshHostSettings {
+            container: Some("research".into()),
+        };
+        set_ssh_host("lab".into(), options.clone()).unwrap();
+        set_ssh_default(Some("lab".into())).unwrap();
+        set_compute_default(Some("ssh".into()), None).unwrap();
+        let settings = ssh_settings().unwrap();
+        assert_eq!(settings.default_host.as_deref(), Some("lab"));
+        assert_eq!(settings.hosts["lab"], options);
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        set_ssh_host("lab".into(), SshHostSettings::default()).unwrap();
+        set_ssh_default(None).unwrap();
+        assert_eq!(
+            ssh_settings().unwrap().hosts["lab"],
+            SshHostSettings::default()
+        );
+        for raw in [
+            r#"{"ssh":null}"#,
+            r#"{"ssh":{"hosts":{"lab":{"container":""}}}}"#,
+            r#"{"ssh":{"hosts":[]}}"#,
+            "{",
+        ] {
+            std::fs::write(settings_path(), raw).unwrap();
+            assert!(ssh_settings().is_err(), "{raw}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn compute_default_roundtrip_preserves_siblings() {
         // Same single-writer contract as data_dir: the Compute settings persist
         // in the telemetry-owned settings.json, so a default-target write must
@@ -1966,7 +2059,9 @@ mod tests {
                 json!({ "kind": "run", "local": true, "computeTarget": "local" }),
             ),
         ];
-        for payload in payloads {
+        let mut localized = build_payload("app_started", "cli-release-contract-test", json!({}));
+        localized["context"]["locale"] = json!("zh-CN");
+        for payload in payloads.into_iter().chain([localized]) {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -1983,14 +2078,29 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_carries_the_dashboard_locale_once_reported() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-locale-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let before = build_payload("app_started", "did", json!({}));
+        assert!(before["context"].get("locale").is_none());
+        set_dashboard_locale("zh-CN").unwrap();
+        let after = build_payload("app_started", "did", json!({}));
+        assert_eq!(after["context"]["locale"], "zh-CN");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-agreed-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        set_dashboard_locale("es").unwrap();
         for agreed in [true, false] {
-            let p = build_payload("telemetry_consent", "did", json!({ "agreed": agreed }));
+            let p = consent_payload(agreed, "did", uuid::Uuid::new_v4());
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
+            assert_eq!(p["context"].get("locale").is_some(), agreed);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

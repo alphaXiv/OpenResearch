@@ -1,5 +1,5 @@
 //! Local SSH launch — the SSH twin of `local/k8s.rs`: run the experiment as a
-//! detached process on one of your own boxes over ssh. `--flavor` names an
+//! detached process on one of your own boxes over ssh. `--host` names an
 //! `~/.ssh/config` host alias (there's no hardware scheduler on a plain
 //! server). The run row lives in the local store only; a detached
 //! `orx supervise` watches the remote process.
@@ -16,7 +16,7 @@ use crate::store::{now_ms, Store, StoredRun};
 pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
     let run = submit_local_ssh(args).await?;
     let backend = BackendDescriptor::parse(&run.backend_json)?;
-    println!("\u{2713} SSH job started.");
+    println!("\u{2713} SSH run submitted.");
     println!(
         "  host {}  ({})",
         backend.namespace.as_deref().unwrap_or(""),
@@ -31,7 +31,7 @@ pub async fn launch_local_ssh(args: &crate::ExpRunArgs) -> Result<()> {
 }
 
 /// Submit the local experiment's run as a detached process on an ssh host and
-/// detach a supervisor. Requires `--backend ssh` and `--flavor <host>` where
+/// detach a supervisor. Requires `--backend ssh` and `--host <host>` where
 /// the host is an `~/.ssh/config` alias.
 pub async fn submit_local_ssh(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     crate::compute::submit(args).await
@@ -41,25 +41,8 @@ pub async fn submit_local_ssh_with_source(
     args: &crate::ExpRunArgs,
     source: SourceSnapshot,
     run_id: String,
+    launch: &ssh::ResolvedLaunch,
 ) -> Result<StoredRun> {
-    if args.flavor.is_some() {
-        return Err(anyhow!(
-            "--backend ssh has no flavors — a machine is an address, not a shape. \
-             Pass --host <alias> (an ~/.ssh/config alias)."
-        ));
-    }
-    if args.image.is_some() {
-        return Err(anyhow!(
-            "--image doesn't apply to --backend ssh — the run uses the host's own environment."
-        ));
-    }
-    let host = args.host.clone().ok_or_else(|| {
-        anyhow!(
-            "--backend ssh requires --host <alias> from the user's ~/.ssh/config. \
-             The host needs git and bash."
-        )
-    })?;
-
     let store = Store::open()?;
     let exp = store
         .get_local_experiment(&args.exp_id)?
@@ -75,8 +58,19 @@ pub async fn submit_local_ssh_with_source(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let target = ssh::SshTarget::alias(&host);
-    ssh::stage_source(&target, &run_id, &source.path, &source.digest).await?;
+    let target = launch.target.clone();
+    let container = launch
+        .container
+        .as_ref()
+        .map(|container| container.for_run(&run_id));
+    let remote_dir = ssh::stage_source(
+        &target,
+        &run_id,
+        &source.path,
+        &source.digest,
+        container.as_ref(),
+    )
+    .await?;
     let script = crate::compute::staged_script(&run_command);
 
     // The remote env: everything the user synced (API keys), plus the tokens
@@ -86,17 +80,12 @@ pub async fn submit_local_ssh_with_source(
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
 
-    let remote_dir = ssh::run_job(&ssh::SshJobSpec {
-        target: target.clone(),
-        run_id: run_id.clone(),
-        script,
-        env,
-    })
-    .await?;
-
     let mut descriptor = BackendDescriptor {
+        ssh_container: container.clone(),
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: "ssh_job".to_string(),
-        namespace: Some(host),
+        namespace: Some(target.dest.clone()),
         job_id: Some(remote_dir.clone()),
         flavor: None,
         image: None,
@@ -113,9 +102,38 @@ pub async fn submit_local_ssh_with_source(
         source_size: None,
     };
     source.apply_to_descriptor(&mut descriptor);
-    if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
-        let _ = ssh::cancel_job(&target, &remote_dir).await;
-        return Err(error);
+    if container.is_some() {
+        crate::compute::record_submission_handle(&run_id, &descriptor)?;
+    }
+    let submission = ssh::run_job(&ssh::SshJobSpec {
+        target: target.clone(),
+        run_id: run_id.clone(),
+        script,
+        env,
+        container: container.clone(),
+    })
+    .await;
+    match submission {
+        Err(error) if container.is_some() && error.is::<ssh::LaunchUncertain>() => {
+            eprintln!("SSH launch response failed for run {run_id}: {error:#}. Reconciling the saved container handle.");
+        }
+        Err(error) => {
+            store.update_status(
+                &run_id,
+                crate::store::RunStatus::Failed,
+                Some(now_ms()),
+                None,
+            )?;
+            store.set_result_markdown(&run_id, &format!("Compute submission failed: {error:#}"))?;
+            return Err(error);
+        }
+        Ok(_) if container.is_none() => {
+            if let Err(error) = crate::compute::record_submission_handle(&run_id, &descriptor) {
+                let _ = ssh::cancel_job(&target, &remote_dir, None).await;
+                return Err(error);
+            }
+        }
+        Ok(_) => {}
     }
     let run = StoredRun {
         id: run_id.clone(),

@@ -18,6 +18,7 @@ When changing authentication, organization, sandbox, or managed-compute APIs, in
 
 ## CI and release gates
 
-- GitHub protection for `main` must require the `fmt, clippy, test` and `version sanity` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
+- GitHub protection for `main` must require the `fmt, clippy, test`, `version sanity`, and `linked issue` checks from GitHub Actions, including for administrators. Do not require a merge queue or require branches to be up to date. These settings are managed in GitHub, not by this file.
+- `linked issue` fails PRs from forks unless the description links an issue in this repository (e.g. `Closes #N`). PRs from branches in this repository are exempt, since only people with write access can push them. It runs on `pull_request_target`, so it must never check out or run PR code.
 - PR CI must test GitHub's simulated merge (`refs/pull/<number>/merge`), which `actions/checkout` selects by default for `pull_request` events, rather than checking out the PR head alone. Each run tests its merge candidate; subsequent changes to `main` do not automatically rerun open PRs.
-- CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow.
+- CI also runs on `main`. Releases call the same CI workflow on the commit being packaged; publishing requires that run to succeed. Keep `./ci` in cargo-dist's `global-artifacts-jobs` when regenerating the release workflow; `allow-dirty` makes `dist generate` skip it, so follow the steps in `macos/DISTRIBUTION.md` ("CLI binaries").

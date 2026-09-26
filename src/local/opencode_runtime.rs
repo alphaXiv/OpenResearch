@@ -84,10 +84,14 @@ impl ProbeEnvironment {
 
 /// First opencode that resolves, in discovery order — picking the highest
 /// version instead would move a pinned 1.x install onto the 2.x protocol.
+/// The `--version` probes run in parallel (a cold node start can take
+/// seconds); only the pick stays discovery-ordered.
 pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
+    let candidates = super::opencode_candidates();
+    let results = futures::future::join_all(candidates.into_iter().map(resolve_binary_at)).await;
     let mut first_error = None;
-    for candidate in super::opencode_candidates() {
-        match resolve_binary_at(candidate).await {
+    for result in results {
+        match result {
             Ok(binary) => return Ok(binary),
             Err(error) => {
                 first_error.get_or_insert(error);
@@ -99,15 +103,22 @@ pub(crate) async fn resolve_binary() -> Result<ResolvedBinary> {
 
 pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     let path = crate::paths::canonicalize(path)?;
+    // The installer's layout pins the matching plugin release in
+    // `<install>/package.json` next to `bin/` — when that pin is at least as
+    // fresh as the binary it stands in for the multi-second `--version`
+    // child (one costs ~4s on Windows).
+    if let Some(binary) = resolve_binary_from_pin(&path) {
+        return Ok(binary);
+    }
     let metadata = std::fs::metadata(&path)?;
     let probe = ProbeEnvironment::new()?;
     let mut cmd = Command::new(&path);
     crate::local::chat::prepare_env(&mut cmd);
     probe.configure(&mut cmd);
     cmd.arg("--version");
-    let output = tokio::time::timeout(Duration::from_secs(15), cmd.output())
+    let output = crate::local::harness::detect_spawn_output_timed(cmd, Duration::from_secs(15))
         .await
-        .map_err(|_| anyhow!("OpenCode version check timed out"))??;
+        .ok_or_else(|| anyhow!("OpenCode version check timed out"))??;
     if !output.status.success() {
         return Err(anyhow!(
             "OpenCode version check failed: {}",
@@ -125,6 +136,52 @@ pub(crate) async fn resolve_binary_at(path: PathBuf) -> Result<ResolvedBinary> {
     };
     binary.check_unchanged()?;
     Ok(binary)
+}
+
+/// The opencode version pinned by the installer's own layout:
+/// `<install>/{package.json,bin/opencode.exe}` carries
+/// `dependencies."@opencode-ai/plugin"` written at install/upgrade time.
+/// A binary whose mtime sits outside the manifest's install burst was
+/// replaced without the pin following — distrust it and let the caller spawn
+/// `--version` instead. Any other layout returns `None` the same way.
+fn resolve_binary_from_pin(path: &Path) -> Option<ResolvedBinary> {
+    let install = path.parent()?.parent()?;
+    if !install
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.to_ascii_lowercase().contains("opencode"))
+    {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    let pin_path = install.join("package.json");
+    let pin_modified = std::fs::metadata(&pin_path).ok()?.modified().ok()?;
+    // The installer writes the manifest then extracts the binary, so a fresh
+    // install legitimately has the binary a few seconds newer; a *replaced*
+    // binary differs by days, and a manifest newer than the binary describes
+    // a different install. Five minutes separates the two, either direction.
+    let gap = match metadata.modified().ok()?.duration_since(pin_modified) {
+        Ok(gap) => gap,
+        Err(earlier) => earlier.duration(),
+    };
+    if gap > Duration::from_secs(300) {
+        return None;
+    }
+    let pkg: serde_json::Value = serde_json::from_slice(&std::fs::read(pin_path).ok()?).ok()?;
+    let deps = &pkg["dependencies"];
+    let version = deps["@opencode-ai/plugin"]
+        .as_str()
+        .or_else(|| deps["opencode-ai"].as_str())?
+        .trim_start_matches(['^', '~', 'v'])
+        .to_string();
+    let protocol = protocol_for_version(&version).ok()?;
+    Some(ResolvedBinary {
+        path: path.to_path_buf(),
+        version,
+        protocol,
+        modified: metadata.modified().ok()?,
+        size: metadata.len(),
+    })
 }
 
 fn protocol_for_version(version: &str) -> Result<Protocol> {
@@ -151,27 +208,41 @@ pub(crate) struct AgentEndpoint {
 
 impl AgentEndpoint {
     async fn check_health(&mut self) -> Result<bool> {
-        let path = match self.protocol {
-            Protocol::V1 => "/global/health",
-            Protocol::V2 => "/api/status",
-        };
-        let response = self
-            .client
+        if self.protocol == Protocol::V1 {
+            return Ok(self
+                .get("/global/health")
+                .send()
+                .await?
+                .status()
+                .is_success());
+        }
+        // V2's readiness route moved: /api/health (<=2.0.3) -> /api/status
+        // (2.0.4-2.0.5) -> /api/info (2.0.6+). Unknown routes can serve SPA
+        // HTML with a 200, so require JSON `version`; /api/health answering
+        // marks the pre-2.0.4 layout (export/generate off /api/experimental).
+        for path in ["/api/info", "/api/status", "/api/health"] {
+            let response = self.get(path).send().await?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                continue;
+            }
+            if !response.status().is_success() {
+                return Ok(false);
+            }
+            let Ok(body) = response.json::<serde_json::Value>().await else {
+                continue;
+            };
+            if body["version"].is_string() {
+                self.legacy_v2_api = path == "/api/health";
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        self.client
             .get(format!("{}{path}", self.base_url))
             .timeout(Duration::from_secs(2))
-            .send()
-            .await?;
-        if self.protocol == Protocol::V2 && response.status() == reqwest::StatusCode::NOT_FOUND {
-            let response = self
-                .client
-                .get(format!("{}/api/health", self.base_url))
-                .timeout(Duration::from_secs(2))
-                .send()
-                .await?;
-            self.legacy_v2_api = response.status().is_success();
-            return Ok(self.legacy_v2_api);
-        }
-        Ok(response.status().is_success())
     }
 
     pub fn v2_export_path(&self, session: &str) -> String {
@@ -243,7 +314,7 @@ pub(crate) async fn start_server(
     #[cfg(unix)]
     cmd.process_group(0);
     binary.check_unchanged()?;
-    let mut child = cmd.spawn()?;
+    let mut child = crate::local::harness::spawn_retrying_busy(|| cmd.spawn())?;
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .build()?;
@@ -456,24 +527,88 @@ mod tests {
     async fn health_negotiates_v2_routes_without_masking_server_errors() {
         use axum::{http::StatusCode, routing::get, Router};
 
-        for (protocol, status, health, ready, legacy) in [
-            (Protocol::V1, 404, 200, true, false),
-            (Protocol::V2, 200, 404, true, false),
-            (Protocol::V2, 404, 200, true, true),
-            (Protocol::V2, 401, 200, false, false),
-            (Protocol::V2, 503, 200, false, false),
-            (Protocol::V2, 404, 404, false, false),
+        let info = || async {
+            axum::Json(serde_json::json!({"version":"2.0.12","pid":1,"urls":[],"paths":{}}))
+        };
+        let status =
+            || async { axum::Json(serde_json::json!({"version":"2.0.5","pid":1,"urls":[]})) };
+        let health =
+            || async { axum::Json(serde_json::json!({"healthy":true,"version":"2.0.3","pid":1})) };
+        // The web UI's SPA fallback serves HTML with a 200 on unknown routes.
+        let spa = || async { axum::response::Html("<!doctype html><title>OpenCode</title>") };
+
+        for (protocol, app, ready, legacy) in [
+            // V1 keeps its single route.
+            (
+                Protocol::V1,
+                Router::new().route("/global/health", get(|| async { StatusCode::OK })),
+                true,
+                false,
+            ),
+            // 2.0.6+: /api/info only.
+            (
+                Protocol::V2,
+                Router::new().route("/api/info", get(info)),
+                true,
+                false,
+            ),
+            // 2.0.4-2.0.5: /api/status only.
+            (
+                Protocol::V2,
+                Router::new().route("/api/status", get(status)),
+                true,
+                false,
+            ),
+            // 2.0.0-2.0.3: /api/health only, the legacy route layout.
+            (
+                Protocol::V2,
+                Router::new().route("/api/health", get(health)),
+                true,
+                true,
+            ),
+            // A 200 carrying the SPA's HTML is not a health answer.
+            (Protocol::V2, Router::new().fallback(spa), false, false),
+            // The issue-341 shape: SPA HTML 200s on the newer routes with a
+            // real health route still answering underneath.
+            (
+                Protocol::V2,
+                Router::new()
+                    .route("/api/status", get(status))
+                    .fallback(spa),
+                true,
+                false,
+            ),
+            (
+                Protocol::V2,
+                Router::new()
+                    .route("/api/health", get(health))
+                    .fallback(spa),
+                true,
+                true,
+            ),
+            // Server errors are not masked by falling through to another route.
+            (
+                Protocol::V2,
+                Router::new()
+                    .route("/api/info", get(|| async { StatusCode::UNAUTHORIZED }))
+                    .route("/api/health", get(health)),
+                false,
+                false,
+            ),
+            (
+                Protocol::V2,
+                Router::new()
+                    .route(
+                        "/api/info",
+                        get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+                    )
+                    .route("/api/health", get(health)),
+                false,
+                false,
+            ),
+            // Nothing answering at all.
+            (Protocol::V2, Router::new(), false, false),
         ] {
-            let app = Router::new()
-                .route(
-                    "/api/status",
-                    get(move || async move { StatusCode::from_u16(status).unwrap() }),
-                )
-                .route(
-                    "/api/health",
-                    get(move || async move { StatusCode::from_u16(health).unwrap() }),
-                )
-                .route("/global/health", get(|| async { StatusCode::OK }));
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let mut endpoint = AgentEndpoint {
                 base_url: format!("http://{}", listener.local_addr().unwrap()),

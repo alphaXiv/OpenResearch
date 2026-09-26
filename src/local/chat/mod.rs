@@ -1092,6 +1092,126 @@ pub struct WireMessage {
     pub parent_id: Option<String>,
 }
 
+/// The synthetic tool part that marks an adopted chat in the transcript.
+const IMPORTED_TOOL: &str = "imported";
+
+/// The adopted transcript as stored rows, ending in the marker that says the
+/// chat continues in the agent's own history. Every row records the native
+/// session, so a rewind or a branch switch resumes it instead of unbinding it.
+fn imported_rows(
+    session_id: &str,
+    native_id: &str,
+    messages: Vec<crate::local::native_chats::NativeMessage>,
+) -> Result<Vec<StoredChatMessage>> {
+    let mut rows: Vec<StoredChatMessage> = Vec::with_capacity(messages.len() + 1);
+    let mut parent_id = None;
+    for message in messages {
+        let id = format!("msg_{}", uuid::Uuid::new_v4());
+        rows.push(StoredChatMessage {
+            session_id: session_id.to_string(),
+            role: message.role.to_string(),
+            parts_json: serde_json::to_string(&[WirePart::text(
+                format!("{id}-text"),
+                message.text,
+            )])?,
+            created_at: message.created_at,
+            completed_at: Some(message.created_at),
+            parent_id: parent_id.replace(id.clone()),
+            base_native_session_id: Some(native_id.to_string()),
+            result_native_session_id: None,
+            id,
+        });
+    }
+    rows.push(StoredChatMessage {
+        id: format!("msg_{}", uuid::Uuid::new_v4()),
+        session_id: session_id.to_string(),
+        role: "assistant".into(),
+        parts_json: serde_json::to_string(&[WirePart::tool(
+            IMPORTED_TOOL,
+            IMPORTED_TOOL,
+            "completed",
+            None,
+        )])?,
+        created_at: now_ms(),
+        completed_at: Some(now_ms()),
+        parent_id,
+        base_native_session_id: Some(native_id.to_string()),
+        result_native_session_id: Some(native_id.to_string()),
+    });
+    Ok(rows)
+}
+
+/// Adopt a chat from an agent's own CLI: a session bound to its native id, with
+/// the transcript backfilled. The messages are a readable copy — the agent
+/// resumes from its own session, not from these.
+///
+/// Idempotent: the picker filters chats orx already owns, but a stale list (or
+/// a second window) must not end up with two sessions driving one native chat.
+pub fn import_native_chat(
+    store: &Store,
+    project_id: &str,
+    harness: &str,
+    native_id: &str,
+    title: Option<String>,
+) -> Result<StoredChatSession> {
+    if let Some(existing) = store.chat_session_for_native_id(native_id)? {
+        return Ok(existing);
+    }
+    let project = store
+        .get_local_project(project_id)?
+        .ok_or_else(|| anyhow!("project is gone"))?;
+    let messages = crate::local::native_chats::transcript(harness, native_id)?;
+    let title = title
+        .map(|title| title.trim().to_string())
+        .filter(|title| !title.is_empty());
+    let session = StoredChatSession {
+        id: format!("chat_{}", uuid::Uuid::new_v4()),
+        project_id: project.id.clone(),
+        harness: harness.to_string(),
+        native_session_id: Some(native_id.to_string()),
+        // Not the user's own words, but the closest source there is: it must
+        // not be replaced by the auto-titler on the first turn.
+        title_source: title.is_some().then(|| "user".to_string()),
+        title,
+        model: None,
+        service_tier: None,
+        permission_mode: None,
+        plan_mode: false,
+        plan_reset_pending: false,
+        reasoning_level: None,
+        archived: false,
+        context_usage_json: None,
+        bootstrap_context: None,
+        goal: None,
+        active_leaf_id: None,
+        parent_session_id: None,
+        created_at: now_ms(),
+        updated_at: now_ms(),
+    };
+    let rows = imported_rows(&session.id, native_id, messages)?;
+    let leaf = rows
+        .last()
+        .map(|row| row.id.clone())
+        .ok_or_else(|| anyhow!("that chat has nothing to adopt"))?;
+
+    // One immediate transaction: a half-written import owns the native id,
+    // which would hide the chat from the picker with no way to adopt it again,
+    // and the ownership check above has to hold until the row is in.
+    let tx = store.begin_immediate()?;
+    if let Some(existing) = store.chat_session_for_native_id(native_id)? {
+        return Ok(existing);
+    }
+    store.create_chat_session(&session)?;
+    for row in &rows {
+        store.upsert_chat_message(row)?;
+    }
+    store.set_chat_session_active_leaf(&session.id, Some(&leaf))?;
+    tx.commit()?;
+    store
+        .get_chat_session(&session.id)?
+        .ok_or_else(|| anyhow!("chat session is gone"))
+}
+
 pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
     let context_usage = s
         .context_usage_json
@@ -1120,6 +1240,7 @@ pub fn session_json(s: &StoredChatSession, busy: bool) -> Value {
         "contextUsage": context_usage,
         "activeLeafId": s.active_leaf_id,
         "parentSessionId": s.parent_session_id,
+        "goal": s.goal,
     })
 }
 
@@ -1147,6 +1268,7 @@ fn is_initial_chat_message(transcript_text: Option<&str>, has_messages: bool) ->
 fn with_turn_context(
     native_session_id: Option<&str>,
     bootstrap_context: Option<&str>,
+    goal: Option<&str>,
     demo_evidence_context: Option<&str>,
     shell_context: Option<&str>,
     text: String,
@@ -1156,6 +1278,14 @@ fn with_turn_context(
         if let Some(context) = bootstrap_context {
             contexts.push(context);
         }
+    }
+    // The goal rides every turn: the agent has to be told it again each time,
+    // and it outlives compaction and a lost native session.
+    let goal = goal.map(|goal| {
+        format!("<orx-goal>\nKeep working toward this goal until it is met, across every turn:\n\n{goal}\n</orx-goal>")
+    });
+    if let Some(goal) = goal.as_deref() {
+        contexts.push(goal);
     }
     if let Some(context) = demo_evidence_context {
         contexts.push(context);
@@ -1196,6 +1326,31 @@ fn with_selected_chat_context(text: String, annotations: &[TextAnnotation]) -> S
 /// Tool name on the user-side transcript part recording a composer `!` command.
 /// Harness user messages never carry tool parts, so this alone marks one.
 const USER_SHELL_TOOL: &str = "bash";
+
+/// The synthetic tool part that marks a compaction in the transcript.
+const COMPACTED_TOOL: &str = "compacted";
+
+/// A cancelled compaction's row would otherwise sit at `running` forever, where
+/// it reads as one that succeeded.
+fn fail_running_compaction(parts: &mut [WirePart]) {
+    for part in parts {
+        if part.tool.as_deref() != Some(COMPACTED_TOOL) {
+            continue;
+        }
+        if let Some(state) = part.state.as_mut() {
+            if state.status == "running" {
+                state.status = "error".into();
+            }
+        }
+    }
+}
+
+/// A compaction summary is a whole transcript, not a title — it needs room.
+const COMPACT_SUMMARY_TIMEOUT: Duration = Duration::from_secs(180);
+
+const COMPACT_SYSTEM_PROMPT: &str = "You are compacting a coding chat so it can continue in a fresh session. \
+Summarize the transcript below: what the user is trying to do, the decisions taken and why, the files and commands that matter, \
+what is done, and what is still open. Keep specifics — paths, ids, names, numbers. Write the summary only.";
 
 const SHELL_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a killed group's pipes get to drain; a `setsid` grandchild that
@@ -1387,6 +1542,239 @@ const BASH_HINT: &str = " — install Git for Windows to run shell commands.";
 const BASH_HINT: &str = "";
 
 impl ChatHost {
+    /// Compact a session's context: the harness does it natively where it can,
+    /// and where it cannot (Cursor, legacy `codex exec`) we summarize the
+    /// transcript ourselves and reseed a fresh native session with it.
+    ///
+    /// Runs as a turn — it rewrites the state a turn would be reading, takes as
+    /// long as one, and Stop must be able to cancel it. Returns as soon as the
+    /// progress row is on the transcript; the work reports itself over events.
+    pub async fn compact_session(self: &Arc<Self>, session_id: &str) -> Result<WireMessage> {
+        let Some(guard) = TurnGuard::claim(self, session_id, None).await else {
+            return Err(anyhow!("session is busy — interrupt it first"));
+        };
+        let session = {
+            let store = Store::open()?;
+            store
+                .get_chat_session(session_id)?
+                .ok_or_else(|| anyhow!("chat session is gone"))?
+        };
+        if crate::local::harness::chat_harness(&session.harness).is_none() {
+            return Err(anyhow!("unknown harness `{}`", session.harness));
+        }
+        // Taken before the progress row exists, so the summary never describes
+        // its own compaction.
+        let snapshot = crate::local::harness::compaction_snapshot(session_id);
+        if snapshot.trim().is_empty() {
+            return Err(anyhow!("this chat has nothing to compact yet"));
+        }
+        let marker = {
+            let store = Store::open()?;
+            self.publish_compaction_marker(&store, session_id, None, "running", None)?
+        };
+
+        let host = self.clone();
+        let owned_session = session_id.to_string();
+        let owned_marker = marker.clone();
+        let mut turns = self.turns.lock().await;
+        let handle = tokio::spawn(async move {
+            host.run_compaction(owned_session, session, snapshot, owned_marker)
+                .await;
+        });
+        turns.insert(
+            session_id.to_string(),
+            TurnState::Active(ActiveTurn {
+                handle,
+                message_id: marker.id.clone(),
+                // No `chat_turns` row backs a compaction, so the id only has to
+                // be unique: `interrupt`'s lookup by it is a no-op by design.
+                turn_id: format!("compact_{}", marker.id),
+            }),
+        );
+        self.emit(
+            "chat.busy",
+            json!({ "sessionId": session_id, "busy": true }),
+        );
+        drop(turns);
+        guard.defuse();
+        Ok(marker)
+    }
+
+    /// The compaction itself, off the request that asked for it. Every write is
+    /// gated on still owning the turn slot: Stop frees it for a real turn, and
+    /// a late compaction must not rewrite that turn's session out from under it.
+    async fn run_compaction(
+        self: Arc<Self>,
+        session_id: String,
+        session: StoredChatSession,
+        snapshot: String,
+        marker: WireMessage,
+    ) {
+        let outcome = self
+            .compaction_outcome(&session_id, &session, &snapshot)
+            .await;
+        if self.owns_compaction(&session_id, &marker.id).await {
+            // Best-effort: whatever the harness did already happened, and a
+            // failed row update must not be reported as a failed compaction.
+            if let Ok(store) = Store::open() {
+                let settled = match outcome {
+                    Ok(reseed) => self.apply_compaction(&store, &session_id, reseed).err(),
+                    Err(error) => Some(error),
+                };
+                let (status, detail) = match &settled {
+                    Some(error) => ("error", Some(error.to_string())),
+                    None => ("completed", None),
+                };
+                // Stop can land mid-write; its `error` row is the truthful one.
+                if self.owns_compaction(&session_id, &marker.id).await {
+                    let _ = self.publish_compaction_marker(
+                        &store,
+                        &session_id,
+                        Some(&marker),
+                        status,
+                        detail,
+                    );
+                }
+            }
+        }
+        self.finish_turn(&session_id, Some(&marker.id)).await;
+        self.drain_queue(&session_id).await;
+    }
+
+    /// `Some(summary)` when the harness could not compact natively and the next
+    /// turn has to be reseeded with a summary instead.
+    async fn compaction_outcome(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: &StoredChatSession,
+        snapshot: &str,
+    ) -> Result<Option<String>> {
+        let harness = crate::local::harness::chat_harness(&session.harness)
+            .ok_or_else(|| anyhow!("unknown harness `{}`", session.harness))?;
+        let ctx = crate::local::harness::CompactCtx {
+            host: self.clone(),
+            session_id: session_id.to_string(),
+            native_session_id: session.native_session_id.clone(),
+            model: session.model.clone(),
+        };
+        match harness.compact(&ctx).await? {
+            crate::local::harness::CompactOutcome::Native => Ok(None),
+            crate::local::harness::CompactOutcome::Fallback => Ok(Some(
+                self.compaction_summary(session, harness.as_ref(), snapshot)
+                    .await?,
+            )),
+        }
+    }
+
+    fn apply_compaction(
+        &self,
+        store: &Store,
+        session_id: &str,
+        reseed: Option<String>,
+    ) -> Result<()> {
+        // Native id last: a crash before it lands leaves the summary unused
+        // rather than a session with no context at all.
+        if let Some(summary) = reseed {
+            // `bootstrap_context` is injected exactly while no native session
+            // exists, which is the state clearing the id leaves behind.
+            store.set_chat_session_bootstrap_context(session_id, Some(&summary))?;
+            store.set_chat_session_native_id(session_id, None)?;
+        }
+        store.clear_chat_session_context_usage(session_id)?;
+        // Compacting is activity, and activity unarchives as sending does.
+        store.set_chat_session_archived(session_id, false)?;
+        Ok(())
+    }
+
+    async fn owns_compaction(&self, session_id: &str, message_id: &str) -> bool {
+        matches!(
+            self.turns.lock().await.get(session_id),
+            Some(TurnState::Active(active)) if active.message_id == message_id
+        )
+    }
+
+    /// Summarize the transcript through a throwaway child, for the caller to
+    /// reseed the next turn with. Any `bootstrap_context` already on the session
+    /// (an earlier compaction, a demo seed) is summarized along with it rather
+    /// than dropped.
+    async fn compaction_summary(
+        &self,
+        session: &StoredChatSession,
+        harness: &dyn crate::local::harness::Harness,
+        snapshot: &str,
+    ) -> Result<String> {
+        let prior = session.bootstrap_context.as_deref().unwrap_or("");
+        let prompt = format!(
+            "<orx-transcript>\n{prior}{}{snapshot}\n</orx-transcript>",
+            if prior.is_empty() { "" } else { "\n\n" }
+        );
+        let summary = harness
+            .one_shot(crate::local::harness::OneShot {
+                system: COMPACT_SYSTEM_PROMPT,
+                prompt: &prompt,
+                quality: crate::local::harness::OneShotQuality::Standard,
+                model: session.model.as_deref(),
+                timeout: COMPACT_SUMMARY_TIMEOUT,
+            })
+            .await
+            .filter(|summary| !summary.trim().is_empty())
+            .ok_or_else(|| anyhow!("{} could not summarize this chat", session.harness))?;
+        Ok(format!(
+            "<orx-compacted-context>\nThis chat was compacted. Use this summary of the conversation so far as prior context; do not repeat completed tool actions.\n\n{}\n</orx-compacted-context>",
+            summary.trim()
+        ))
+    }
+
+    /// Write the compaction row and broadcast it. `previous` updates the row in
+    /// place; without it the row is appended to the active branch. Never
+    /// broadcasts a row that failed to persist — with no parent a live client
+    /// reads it as a new branch root and blanks the transcript.
+    fn publish_compaction_marker(
+        &self,
+        store: &Store,
+        session_id: &str,
+        previous: Option<&WireMessage>,
+        status: &str,
+        error: Option<String>,
+    ) -> Result<WireMessage> {
+        let mut message = match previous {
+            Some(previous) => previous.clone(),
+            None => WireMessage {
+                id: format!("msg_{}", uuid::Uuid::new_v4()),
+                role: "assistant".into(),
+                parts: Vec::new(),
+                created_at: now_ms(),
+                completed_at: None,
+                parent_id: None,
+            },
+        };
+        message.parts = vec![WirePart::tool(
+            COMPACTED_TOOL,
+            COMPACTED_TOOL,
+            status,
+            error,
+        )];
+        message.completed_at = (status != "running").then(now_ms);
+        let stored = StoredChatMessage {
+            id: message.id.clone(),
+            session_id: session_id.to_string(),
+            role: "assistant".into(),
+            parts_json: serde_json::to_string(&message.parts)?,
+            created_at: message.created_at,
+            completed_at: message.completed_at,
+            parent_id: message.parent_id.clone(),
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        if previous.is_some() {
+            store.upsert_chat_message(&stored)?;
+        } else {
+            message.parent_id = store.upsert_chat_message_on_branch(&stored)?;
+        }
+        self.emit("chat.message", message_json(&message, session_id));
+        Ok(message)
+    }
+
     /// Run a composer `!` command in `cwd` and record the exchange on the
     /// session's branch, where the next turn picks it up as context.
     pub async fn run_shell_command(
@@ -1613,7 +2001,14 @@ mod shell_command_tests {
         assert!(context.contains("status=\"exit 1\">\ncat missing\n</command>"));
         assert!(context.contains("<stderr>\nboom\n</stderr>"));
         assert!(context.find("ls\n</command>").unwrap() < context.find("cat missing").unwrap());
-        let turn = with_turn_context(Some("native"), None, None, Some(&context), "why?".into());
+        let turn = with_turn_context(
+            Some("native"),
+            None,
+            None,
+            None,
+            Some(&context),
+            "why?".into(),
+        );
         assert!(turn.starts_with("<user-shell-commands>"));
         assert!(turn.ends_with("<current-user-message>\nwhy?\n</current-user-message>"));
         assert!(shell_context(&[]).is_none());
@@ -1638,7 +2033,14 @@ mod initial_message_tests {
 
     #[test]
     fn bootstrap_context_is_injected_only_before_a_native_session_exists() {
-        let seeded = with_turn_context(None, Some("prior demo"), None, None, "continue".into());
+        let seeded = with_turn_context(
+            None,
+            Some("prior demo"),
+            None,
+            None,
+            None,
+            "continue".into(),
+        );
         assert!(seeded.contains("prior demo"));
         assert!(seeded.contains("<current-user-message>\ncontinue"));
         assert_eq!(
@@ -1647,12 +2049,34 @@ mod initial_message_tests {
                 Some("prior demo"),
                 None,
                 None,
+                None,
                 "continue".into()
             ),
             "continue"
         );
         assert_eq!(
-            with_turn_context(None, None, None, None, "continue".into()),
+            with_turn_context(None, None, None, None, None, "continue".into()),
+            "continue"
+        );
+    }
+
+    #[test]
+    fn the_goal_rides_every_turn_including_one_with_a_native_session() {
+        let seeded = with_turn_context(
+            Some("native"),
+            Some("prior demo"),
+            Some("ship the sweep"),
+            None,
+            None,
+            "continue".into(),
+        );
+        assert!(seeded.contains("ship the sweep"));
+        // Unlike bootstrap context, a goal is not dropped once the harness has
+        // a session of its own — it has to be restated every turn.
+        assert!(!seeded.contains("prior demo"));
+        assert!(seeded.contains("<current-user-message>\ncontinue"));
+        assert_eq!(
+            with_turn_context(Some("native"), None, None, None, None, "continue".into()),
             "continue"
         );
     }
@@ -1662,6 +2086,7 @@ mod initial_message_tests {
         let first = with_turn_context(
             None,
             Some("prior demo"),
+            None,
             Some("demo evidence"),
             None,
             "first".into(),
@@ -1669,6 +2094,7 @@ mod initial_message_tests {
         let follow_up = with_turn_context(
             Some("native"),
             Some("prior demo"),
+            None,
             Some("demo evidence"),
             None,
             "follow up".into(),
@@ -1680,7 +2106,7 @@ mod initial_message_tests {
         assert!(follow_up.contains("<current-user-message>\nfollow up"));
         assert_eq!(first.matches("<current-user-message>").count(), 1);
         assert_eq!(
-            with_turn_context(Some("native"), None, None, None, "ordinary".into()),
+            with_turn_context(Some("native"), None, None, None, None, "ordinary".into()),
             "ordinary"
         );
     }
@@ -4975,6 +5401,7 @@ impl ChatHost {
             with_turn_context(
                 session.native_session_id.as_deref(),
                 session.bootstrap_context.as_deref(),
+                session.goal.as_deref(),
                 super::demo::turn_context(&project.id),
                 shell_context.as_deref(),
                 expanded,
@@ -5375,6 +5802,7 @@ impl ChatHost {
                     let mut assistant = stored_to_wire(&stored);
                     assistant.completed_at = Some(now_ms());
                     assistant.parts.retain(|part| part.id != "turn-retry");
+                    fail_running_compaction(&mut assistant.parts);
                     let _ = store.upsert_chat_message(&StoredChatMessage {
                         id: assistant.id.clone(),
                         session_id: session_id.to_string(),
@@ -5718,7 +6146,10 @@ impl ChatHost {
     /// Takes the row rather than a `&Store`: `Store` is `!Sync`, so a `&Store`
     /// held across the await would make the spawned auto-title future
     /// non-`Send`. Callers do the read (propagating store errors).
-    async fn emit_session(&self, session: Option<StoredChatSession>) -> Option<StoredChatSession> {
+    pub(crate) async fn emit_session(
+        &self,
+        session: Option<StoredChatSession>,
+    ) -> Option<StoredChatSession> {
         let session = session?;
         let busy = self.is_busy(&session.id).await;
         self.emit(
@@ -5737,6 +6168,17 @@ impl ChatHost {
     ) -> Result<Option<StoredChatSession>> {
         let store = Store::open()?;
         store.set_chat_session_archived(session_id, archived)?;
+        Ok(self.emit_session(store.get_chat_session(session_id)?).await)
+    }
+
+    /// Set (or, with `None`, clear) the goal every turn is reminded of.
+    pub async fn set_goal(
+        &self,
+        session_id: &str,
+        goal: Option<&str>,
+    ) -> Result<Option<StoredChatSession>> {
+        let store = Store::open()?;
+        store.set_chat_session_goal(session_id, goal)?;
         Ok(self.emit_session(store.get_chat_session(session_id)?).await)
     }
 
@@ -8278,6 +8720,250 @@ mod cap_tests {
     }
 
     #[test]
+    fn the_compaction_row_updates_in_place_rather_than_branching() {
+        let dir = std::env::temp_dir().join(format!("orx-compact-row-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&StoredChatSession {
+                id: "session".into(),
+                project_id: "proj_1".into(),
+                harness: "claude-code".into(),
+                native_session_id: None,
+                title: None,
+                title_source: None,
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                plan_mode: false,
+                plan_reset_pending: false,
+                reasoning_level: None,
+                archived: false,
+                context_usage_json: None,
+                bootstrap_context: None,
+                goal: None,
+                active_leaf_id: None,
+                parent_session_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+
+        let running = host
+            .publish_compaction_marker(&store, "session", None, "running", None)
+            .unwrap();
+        assert_eq!(running.parts[0].state.as_ref().unwrap().status, "running");
+        assert!(running.completed_at.is_none());
+
+        let done = host
+            .publish_compaction_marker(&store, "session", Some(&running), "completed", None)
+            .unwrap();
+        assert_eq!(done.id, running.id, "the row is updated, not replaced");
+        assert_eq!(done.parent_id, running.parent_id);
+        assert!(done.completed_at.is_some());
+        assert_eq!(done.parts[0].state.as_ref().unwrap().status, "completed");
+        // One row on the branch: a second would read as a new branch root.
+        assert_eq!(store.list_chat_messages("session").unwrap().len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_adopted_row_records_the_agents_session() {
+        let spoken = |role: &'static str, text: &str| crate::local::native_chats::NativeMessage {
+            role,
+            text: text.into(),
+            created_at: 1_700_000_000_000,
+        };
+        let rows = imported_rows(
+            "chat_1",
+            "native-1",
+            vec![spoken("user", "run it"), spoken("assistant", "done")],
+        )
+        .unwrap();
+
+        assert_eq!(rows.len(), 3, "both messages plus the marker");
+        assert_eq!(rows[0].parent_id, None);
+        assert_eq!(rows[1].parent_id.as_deref(), Some(rows[0].id.as_str()));
+        assert_eq!(rows[2].parent_id.as_deref(), Some(rows[1].id.as_str()));
+        // The whole point: a rewind to the first row must resume the agent's
+        // own session rather than clear it.
+        assert!(rows
+            .iter()
+            .all(|row| row.base_native_session_id.as_deref() == Some("native-1")));
+        assert_eq!(
+            rows[2].result_native_session_id.as_deref(),
+            Some("native-1"),
+            "the leaf is what a branch switch reads",
+        );
+        assert_eq!(
+            rows[0].created_at, 1_700_000_000_000,
+            "kept when it was said"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adopted_chat_is_only_adopted_once() {
+        let dir = std::env::temp_dir().join(format!("orx-import-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "proj_1".into(),
+                name: "Test".into(),
+                slug: "test".into(),
+                github_owner: "owner".into(),
+                github_repo: "repo".into(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: dir.join("repo").display().to_string(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+
+        // No transcript on disk: the marker-only shape an emptied rollout gives.
+        let session = import_native_chat(&store, "proj_1", "claude-code", "native-1", None);
+        assert!(session.is_err(), "a chat orx cannot read is not adopted");
+
+        let adopted = StoredChatSession {
+            id: "chat_1".into(),
+            project_id: "proj_1".into(),
+            harness: "claude-code".into(),
+            native_session_id: Some("native-1".into()),
+            title: Some("Adopted".into()),
+            title_source: Some("user".into()),
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: false,
+            context_usage_json: None,
+            bootstrap_context: None,
+            goal: None,
+            active_leaf_id: None,
+            parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&adopted).unwrap();
+        // Adopting the same chat again returns the session that already owns
+        // it — two sessions driving one native chat would split the history.
+        let again = import_native_chat(&store, "proj_1", "claude-code", "native-1", None).unwrap();
+        assert_eq!(again.id, "chat_1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_compaction_row_is_failed_rather_than_left_running() {
+        let mut parts = vec![
+            WirePart::tool("compacted", COMPACTED_TOOL, "running", None),
+            WirePart::tool("other", "bash", "running", None),
+        ];
+        fail_running_compaction(&mut parts);
+        assert_eq!(parts[0].state.as_ref().unwrap().status, "error");
+        assert_eq!(parts[1].state.as_ref().unwrap().status, "running");
+
+        // A row that already settled keeps the status it settled with.
+        let mut done = vec![WirePart::tool(
+            "compacted",
+            COMPACTED_TOOL,
+            "completed",
+            None,
+        )];
+        fail_running_compaction(&mut done);
+        assert_eq!(done[0].state.as_ref().unwrap().status, "completed");
+    }
+
+    #[test]
+    fn the_reseed_hands_the_next_turn_a_summary_and_no_native_session() {
+        let dir = std::env::temp_dir().join(format!("orx-compact-reseed-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut session = StoredChatSession {
+            id: "session".into(),
+            project_id: "proj_1".into(),
+            harness: "cursor".into(),
+            native_session_id: Some("native-1".into()),
+            title: None,
+            title_source: None,
+            model: None,
+            service_tier: None,
+            permission_mode: None,
+            plan_mode: false,
+            plan_reset_pending: false,
+            reasoning_level: None,
+            archived: true,
+            context_usage_json: Some("{\"usedTokens\":9000}".into()),
+            bootstrap_context: None,
+            goal: None,
+            active_leaf_id: None,
+            parent_session_id: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        store.create_chat_session(&session).unwrap();
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+
+        host.apply_compaction(&store, "session", Some("the summary".into()))
+            .unwrap();
+
+        session = store.get_chat_session("session").unwrap().unwrap();
+        assert_eq!(session.bootstrap_context.as_deref(), Some("the summary"));
+        // Without clearing the native id the summary is never injected.
+        assert_eq!(session.native_session_id, None);
+        assert_eq!(session.context_usage_json, None);
+        assert!(
+            !session.archived,
+            "compacting is activity, which unarchives"
+        );
+        assert!(with_turn_context(
+            session.native_session_id.as_deref(),
+            session.bootstrap_context.as_deref(),
+            None,
+            None,
+            None,
+            "next".into(),
+        )
+        .contains("the summary"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn compaction_refuses_to_run_during_a_turn() {
+        let host = Arc::new(ChatHost::new(
+            Arc::new(AgentHost::new(None)),
+            Arc::new(crate::local::codex::CodexHost::new()),
+            Arc::new(crate::local::claude::ClaudeHost::new()),
+        ));
+        host.turns
+            .lock()
+            .await
+            .insert("session".into(), TurnState::Reserved { turn_id: None });
+
+        let error = host
+            .compact_session("session")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("busy"), "unexpected error: {error}");
+        // The live turn's slot survives the refusal.
+        assert!(host.turns.lock().await.contains_key("session"));
+    }
+
+    #[test]
     fn cap_tool_text_truncates_and_is_idempotent() {
         let mut short = "hello".to_string();
         cap_tool_text(&mut short);
@@ -8957,6 +9643,7 @@ mod bridge_tests {
             archived: false,
             context_usage_json: None,
             bootstrap_context: None,
+            goal: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,
@@ -9096,6 +9783,7 @@ mod run_wakeup_tests {
                 archived: false,
                 context_usage_json: None,
                 bootstrap_context: None,
+                goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
                 created_at: 1,
@@ -9859,6 +10547,7 @@ mod steering_tests {
                 archived: false,
                 context_usage_json: None,
                 bootstrap_context: None,
+                goal: None,
                 active_leaf_id: None,
                 parent_session_id: None,
                 created_at: 1,

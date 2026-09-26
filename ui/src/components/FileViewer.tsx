@@ -22,6 +22,7 @@ import {
   ExternalLink,
   FileOutput,
   FileText,
+  FolderOpen,
   GitBranch,
   X,
 } from "lucide-react";
@@ -32,6 +33,7 @@ import {
   FileChangedError,
   openFileInEditor,
   projectFileUrl,
+  revealFileInManager,
   saveProjectFile,
   type ArtifactEntry,
 } from "../api";
@@ -61,8 +63,9 @@ import { FileTypeIcon, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTyp
 import { HtmlPreview } from "./HtmlPreview";
 import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
+import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
-import { Button, IconButton, IconButtonLink, Spinner } from "./ui";
+import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
 export interface FileScrollPosition {
   top: number;
@@ -120,6 +123,24 @@ function CopyableCommand({ command }: { command: string }) {
       </IconButton>
     </div>
   );
+}
+
+/** Busy/error state for a detached OS file action; failures surface as a tooltip. */
+function useOsFileAction(run: () => Promise<unknown>) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trigger = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, trigger };
 }
 
 export function FileViewer({
@@ -221,6 +242,9 @@ export function FileViewer({
   const saveError = bufferSession.saveError;
   const setSaveError = bufferSession.setSaveError;
   const bodyRef = useRef<HTMLDivElement>(null);
+  const selectableContentRef = useRef<HTMLDivElement>(null);
+  const [copiedContents, setCopiedContents] = useState(false);
+  const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
   // A cited `artifacts/…` file can answer from either name in the checkout, so
@@ -375,6 +399,41 @@ export function FileViewer({
   const showingEditor = (editable || showingUnsafeDraft) &&
     !(rendersByDefault && !showSource) &&
     !showingPdf;
+  const canCopyContents = data !== null && !data.notFound && !data.binary && !mediaKind && !showingPdf;
+  const canSelectContents = canCopyContents && !showingEditor && (!isHtml || showSource);
+
+  const copyContents = async () => {
+    if (!data) return;
+    try {
+      if (data.truncated && !showingEditor) {
+        // WebKit requires the clipboard write to start during the click.
+        const content = fetch(rawFileUrl(filePath)).then(async (response) => {
+          if (!response.ok) throw new Error();
+          return new Blob([await response.text()], { type: "text/plain" });
+        });
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": content })]);
+      } else {
+        await navigator.clipboard.writeText(showingEditor ? draft : data.content);
+      }
+      setCopiedContents(true);
+      window.setTimeout(() => setCopiedContents(false), 1500);
+    } catch {
+      showAlert(m.file_viewer_copy_failed(), "error");
+    }
+  };
+
+  const selectViewerContents = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+    const content = selectableContentRef.current;
+    if (!content) return;
+    event.preventDefault();
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
 
   // `#toolbar=0` asks the browser's PDF viewer to drop its own chrome, so the
   // pane shows the document and this view's header owns the controls.
@@ -404,21 +463,23 @@ export function FileViewer({
     else await save();
   };
 
-  const [openingEditor, setOpeningEditor] = useState(false);
-  const [editorError, setEditorError] = useState<string | null>(null);
   // Hand the file to the OS, which opens it in the user's default app for the
   // type (their editor for source files) — no picker.
-  const openInEditor = async () => {
-    setOpeningEditor(true);
-    setEditorError(null);
-    try {
-      await openFileInEditor(projectId, filePath, { sessionId });
-    } catch (e) {
-      setEditorError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setOpeningEditor(false);
-    }
-  };
+  const openEditor = useOsFileAction(() =>
+    openFileInEditor(projectId, filePath, { sessionId }),
+  );
+  const revealManager = useOsFileAction(() =>
+    revealFileInManager(projectId, filePath, { sessionId }),
+  );
+  const osActionBlocker = remote
+    ? m.file_viewer_os_action_local_only()
+    : data?.notFound
+      ? m.file_viewer_not_found()
+      : gitRef
+        ? m.file_viewer_os_action_committed_version({ branch: ltr(gitRef) })
+        : onDisk
+          ? null
+          : m.file_viewer_os_action_not_on_disk();
   const reload = useCallback(() => {
     if (!bufferSession.saving) setNonce((value) => value + 1);
   }, [bufferSession]);
@@ -504,14 +565,14 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view flex flex-col h-full min-h-0 min-w-0">
-      <div className="file-view-header flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
+    <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
+      <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
         <FileTypeIcon name={filePath} />
         <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
           {filePath.split("/").pop() || filePath}
         </span>
         {branchLabel && (
-          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
@@ -532,6 +593,7 @@ export function FileViewer({
             )}
           </span>
         )}
+        <div ref={setMediaToolbarSlot} className="contents" />
         {isLatex && latex.compiled && (
           <IconButton
             size="small"
@@ -595,17 +657,42 @@ export function FileViewer({
             <Code size={13} />
           </IconButton>
         )}
-        {onDisk && !remote && (
+        {canCopyContents && (
           <IconButton
             size="small"
-            data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
+            data-tip={copiedContents ? m.common_copied() : m.file_viewer_copy_contents()}
             data-tip-align="end"
-            aria-label={m.file_viewer_open_in_default_editor()}
-            disabled={openingEditor}
-            onClick={() => void openInEditor()}
+            aria-label={copiedContents ? m.common_copied() : m.file_viewer_copy_contents()}
+            onClick={() => void copyContents()}
           >
-            {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
+            {copiedContents ? <Check size={13} /> : <Copy size={13} />}
           </IconButton>
+        )}
+        {data != null && (
+          <>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? openEditor.error ?? m.file_viewer_open_in_default_editor()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_open_in_default_editor()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={openEditor.busy || osActionBlocker != null}
+              onClick={() => void openEditor.trigger()}
+            >
+              {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
+            </IconButton>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={revealManager.busy || osActionBlocker != null}
+              onClick={() => void revealManager.trigger()}
+            >
+              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
+            </IconButton>
+          </>
         )}
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be
@@ -711,6 +798,7 @@ export function FileViewer({
       <div
         ref={bodyRef}
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
+        tabIndex={canSelectContents ? 0 : undefined}
         onScroll={(event) => {
           const position = {
             top: Math.max(0, event.currentTarget.scrollTop),
@@ -766,25 +854,29 @@ export function FileViewer({
             {loaded ? notFoundCopy(loaded) : m.file_viewer_not_found()}
           </div>
         ) : mediaKind ? (
-          <MediaPreview
-            kind={mediaKind}
-            url={rawUrl}
-            name={path.split("/").pop() ?? path}
-          />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              kind={mediaKind}
+              url={rawUrl}
+              name={path.split("/").pop() ?? path}
+            />
+          </MediaToolbarSlot.Provider>
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
           </div>
         ) : showingPdf && pdfPaneUrl && compiledPdfName ? (
-          <MediaPreview
-            key={pdfPaneUrl}
-            kind="pdf"
-            url={pdfPaneUrl}
-            name={compiledPdfName}
-            downloadBar={false}
-          />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              key={pdfPaneUrl}
+              kind="pdf"
+              url={pdfPaneUrl}
+              name={compiledPdfName}
+              download={false}
+            />
+          </MediaToolbarSlot.Provider>
         ) : isMarkdown && !showSource ? (
-          <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
+          <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
               <ArtifactMarkdown
                 projectId={projectId}
@@ -815,13 +907,15 @@ export function FileViewer({
           />
         ) : (
           <>
-            <CodeView
-              text={data.content}
-              path={path}
-              highlightLine={line}
-              scrollRequest={lineScrollRequest}
-              onScrollRequestHandled={onLineScrollRequestHandled}
-            />
+            <div ref={selectableContentRef}>
+              <CodeView
+                text={data.content}
+                path={path}
+                highlightLine={line}
+                scrollRequest={lineScrollRequest}
+                onScrollRequestHandled={onLineScrollRequestHandled}
+              />
+            </div>
             {data.truncated && (
               <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
             )}

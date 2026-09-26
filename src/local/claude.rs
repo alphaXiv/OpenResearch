@@ -290,6 +290,54 @@ impl ClaudeClient {
         }
     }
 
+    /// Run Claude's own `/compact` on the resident child and wait for the turn
+    /// it opens to finish. The child keeps its session id — the point of using
+    /// the native command rather than reseeding a new session.
+    pub(crate) async fn compact(
+        self: &Arc<Self>,
+        reaper_notify: Arc<Notify>,
+        timeout: Duration,
+    ) -> Result<()> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _route = self.register_turn(tx, reaper_notify);
+        self.send_user_message("/compact").await?;
+        let settle = async {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    TurnEvent::Line(line) => {
+                        if line.get("type").and_then(Value::as_str) != Some("result") {
+                            continue;
+                        }
+                        // Fail closed, and let `is_error` win over the subtype
+                        // as the turn path does: a shape we don't recognize
+                        // must not read as a compaction that happened.
+                        let subtype = line.get("subtype").and_then(Value::as_str);
+                        let failed = line
+                            .get("is_error")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(subtype != Some("success"));
+                        return if failed {
+                            Err(anyhow!(
+                                "claude /compact failed: {}",
+                                subtype.unwrap_or("no result status")
+                            ))
+                        } else {
+                            Ok(())
+                        };
+                    }
+                    TurnEvent::Closed => return Err(anyhow!("claude closed during /compact")),
+                }
+            }
+            Err(anyhow!("claude stopped reporting during /compact"))
+        };
+        tokio::time::timeout(timeout, settle).await.map_err(|_| {
+            anyhow!(
+                "claude did not finish /compact within {}s",
+                timeout.as_secs()
+            )
+        })?
+    }
+
     /// Retune the resident child's model in place via `set_model`. On success,
     /// record the new model in `config` so the reuse decision stays truthful.
     async fn set_model(&self, model: &str) -> Result<()> {
@@ -1038,6 +1086,40 @@ impl ClaudeHost {
             .insert(session_id.to_string(), epoch);
         if let Some(client) = self.inner.lock().await.remove(session_id) {
             stop_client(client, reason).await;
+        }
+    }
+
+    /// Compact a session through Claude's own `/compact` on the child that is
+    /// already running for it. `false` when none is — nothing to compact.
+    pub(crate) async fn compact_session(
+        &self,
+        session_id: &str,
+        timeout: Duration,
+    ) -> Result<bool> {
+        let Some(client) = self.client_for(session_id).await else {
+            return Ok(false);
+        };
+        if let Err(error) = client.compact(self.reaper_notify.clone(), timeout).await {
+            // The child is still mid-`/compact`; its trailing `result` would
+            // otherwise land in whatever turn registers next.
+            self.kill_session(session_id).await;
+            return Err(error);
+        }
+        Ok(true)
+    }
+
+    /// The live child for a session, if one is running. `/compact` uses it to
+    /// reach Claude's own compaction without spawning a second child.
+    async fn client_for(&self, session_id: &str) -> Option<Arc<ClaudeClient>> {
+        let mut guard = self.inner.lock().await;
+        let client = guard.get(session_id)?;
+        if !client.terminated.load(Ordering::Acquire)
+            && matches!(client.child.lock().await.try_wait(), Ok(None))
+        {
+            Some(client.clone())
+        } else {
+            guard.remove(session_id);
+            None
         }
     }
 

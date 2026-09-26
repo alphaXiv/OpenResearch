@@ -64,6 +64,24 @@ signature check — not the digest — is what makes an unattended swap safe, so
 **changing the signing identity breaks self-update for every installed app**:
 update `EXPECTED_TEAM_ID` and ship that release before retiring the old cert.
 
+## CLI binaries
+
+The `install.sh` archives for macOS are signed with the same Developer ID and
+notarized by `.github/workflows/sign-macos-cli.yml`, which dist runs between its
+local and global builds. It re-uploads each darwin archive under the same
+artifact name with a rewritten `.sha256` and per-target manifest checksum, so the
+installers and `sha256.sum` built afterwards match the signed archives. It uses
+the same `release-signing` environment, so a release waits on one approval for
+it, then another for the DMG. Unlike the DMG, it ignores `MACOS_SIGNING_ENABLED`:
+every published release needs those secrets and that approval. Dry runs skip it,
+so the first real release is its first end-to-end run.
+
+dist does not generate this job's `needs: build-local-artifacts`, so
+`dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
+skip `release.yml` entirely: dist config changes no longer reach CI on their own.
+To regenerate, remove `allow-dirty`, run the pinned `dist generate`, re-add that `needs`
+line to `custom-sign-macos-cli`, and restore `allow-dirty`.
+
 ## Configure signing (CI)
 
 Needs an Apple Developer Program account with a **Developer ID Application**

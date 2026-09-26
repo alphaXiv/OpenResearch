@@ -37,10 +37,25 @@ curl -LsSf https://openresearch.sh/install.sh | sh
 orx up
 ```
 
+`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
+
+On a managed Mac (for example, a work computer), use the macOS download above
+instead. Device-management policies may block the CLI that `install.sh`
+installs because it is not yet signed. The app is signed with a Developer ID
+and notarized by Apple. To use `orx` in your terminal, click **Install** under
+**Install the `orx` command** in the app's Settings → Updates, or run (adjusting
+the path if the app is not in `/Applications`):
+
+```sh
+/Applications/OpenResearch.app/Contents/MacOS/orx install-cli
+```
+
+Either way, `orx` is linked into `~/.local/bin`, with a hint to add it to your
+`PATH` if needed. If you already ran `install.sh`, remove `~/.cargo/bin/orx`
+first and open a new terminal.
+
 On Windows, use the beta download above after installing
 [Git for Windows](docs/windows.md).
-
-`orx up` opens the local dashboard at `http://127.0.0.1:4791`.
 
 [Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
 or a custom endpoint with OpenCode.
@@ -124,3 +139,11 @@ orx <command> --no-telemetry
 ```
 
 Source and development builds do not send analytics.
+
+Coding agents may also file product feedback with `orx feedback` when you hit
+a bug, wish for a feature, or get frustrated with OpenResearch. Each report is
+a short description of the workflow problem, written to omit your research
+details. Like analytics, reports are sent only from official release builds.
+They are linked to your account when you are logged in and turned off by
+`orx telemetry off`. The `--no-telemetry` flag covers only the command it is
+passed to.

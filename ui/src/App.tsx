@@ -653,18 +653,21 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     }
     previousTreeScope.current = { projectId, taskId: activeSessionId, scope: effectiveScope };
   }, [workspaceReady, experimentDataReady, destination?.kind, projectId, activeSessionId, effectiveScope]);
-  const onActiveSessionChange = useCallback((sessionId: string | null, options?: { replace?: boolean }) => {
-    if (!projectId) return;
-    if (sessionId) {
+  const onActiveSessionChange = useCallback((sessionId: string | null, options?: { replace?: boolean; projectId?: string }) => {
+    // `/resume` reaches chats in other projects; everything below is per-project.
+    const target = options?.projectId ?? projectId;
+    if (!target) return;
+    const sameProject = target === projectId;
+    if (sessionId && sameProject) {
       if (options?.replace && activeSessionId === null) {
         captureWorkspace();
-        inheritNewTaskWorkspace(projectId, sessionId);
+        inheritNewTaskWorkspace(target, sessionId);
       }
     }
-    const saved = getTaskWorkspace(getCachedProjectWorkspace(projectId), sessionId ?? "new");
-    const remembered = saved ? saved.active : (isDemoProjectId(projectId) ? defaultTaskWorkspace(sessionId ?? undefined, tourCompletedRef.current === false)?.active : undefined);
-    const nextPane = options?.replace && sessionId && activeSessionId === null ? navigationRef.current.pane : remembered;
-    void router.navigate({ href: taskLocation(projectId, sessionId, nextPane), replace: options?.replace });
+    const saved = getTaskWorkspace(getCachedProjectWorkspace(target), sessionId ?? "new");
+    const remembered = saved ? saved.active : (isDemoProjectId(target) ? defaultTaskWorkspace(sessionId ?? undefined, tourCompletedRef.current === false)?.active : undefined);
+    const nextPane = sameProject && options?.replace && sessionId && activeSessionId === null ? navigationRef.current.pane : remembered;
+    void router.navigate({ href: taskLocation(target, sessionId, nextPane), replace: sameProject && options?.replace });
   }, [router, projectId, activeSessionId, captureWorkspace]);
   useEffect(() => {
     if (workspaceReady && destination?.kind !== "task" && !rememberedSessionRef.current && workspaceRef.current.lastTaskId && sessions?.includes(workspaceRef.current.lastTaskId)) {

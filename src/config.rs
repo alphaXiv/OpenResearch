@@ -46,6 +46,20 @@ pub fn biorxiv_api_url() -> String {
     std::env::var("BIORXIV_API_URL").unwrap_or_else(|_| "https://api.biorxiv.org".to_string())
 }
 
+/// Base URL for NCBI E-utilities (PubMed search and records). Public, no
+/// token. Backs PubMed discovery and `orx paper <pmid>`. Override with
+/// `PUBMED_API_URL`.
+pub fn pubmed_api_url() -> String {
+    std::env::var("PUBMED_API_URL")
+        .unwrap_or_else(|_| "https://eutils.ncbi.nlm.nih.gov/entrez/eutils".to_string())
+}
+
+/// Contact address sent to NCBI as `email=` alongside `tool=orx`, which NCBI
+/// asks E-utilities clients to include. Override with `NCBI_EMAIL`.
+pub fn ncbi_email() -> String {
+    std::env::var("NCBI_EMAIL").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
+}
+
 /// Contact address sent to OpenAlex as `mailto=` to enter its faster "polite
 /// pool". OpenAlex asks API users to identify themselves this way. Override with
 /// `OPENALEX_MAILTO`.
@@ -429,5 +443,34 @@ pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostSettings {
+    pub container: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshSettings {
+    pub default_host: Option<String>,
+    #[serde(default)]
+    pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
+}
+
+pub fn ssh_settings() -> Result<SshSettings> {
+    crate::telemetry::ssh_settings()
+}
+
+pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
+    crate::jobs::ssh::validate_host_options(&options)?;
+    crate::telemetry::set_ssh_host(host, options)?;
+    Ok(())
+}
+
+pub fn set_ssh_default(host: Option<String>) -> Result<()> {
+    crate::telemetry::set_ssh_default(host)?;
     Ok(())
 }

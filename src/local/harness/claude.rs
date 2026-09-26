@@ -36,8 +36,8 @@ use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
-    Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure, TurnOutcome, TurnResult, Waited,
-    ORX_MAX_ATTEMPTS,
+    CompactCtx, CompactOutcome, Harness, OneShot, OneShotQuality, ResumeAction, TurnFailure,
+    TurnOutcome, TurnResult, Waited, ORX_MAX_ATTEMPTS,
 };
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
@@ -70,7 +70,7 @@ const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"
 /// keyword) or Codex's `ultra`. The CLI models it as a *mode*, not an effort
 /// level: `list_models` never includes it in `supportedEffortLevels`, even on
 /// versions whose `--effort` accepts it — which is why support is detected by
-/// [`claude_accepts_ultracode`] rather than read from the catalog.
+/// [`probe_auth_and_ultracode`] rather than read from the catalog.
 const CLAUDE_ULTRACODE: &str = "ultracode";
 
 /// Includes Anthropic's multi-process refresh-token and sleep/wake fixes.
@@ -130,8 +130,8 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     prepare_env(&mut cmd);
-    match tokio::time::timeout(AUTH_STATUS_TIMEOUT, cmd.output()).await {
-        Ok(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
+    match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => parse_auth_status(out.status.success(), &out.stdout),
         // A timeout or a spawn failure: no evidence of anything, least of all a
         // credential conflict.
         _ => AuthProbe {
@@ -142,12 +142,11 @@ async fn probe_auth(bin: &Path) -> AuthProbe {
     }
 }
 
-async fn effective_auth_probe(bin: &Path) -> AuthProbe {
-    let mut probe = probe_auth(bin).await;
-    // Headless Claude gives ANTHROPIC_* credentials precedence over a saved
-    // subscription login. If status still reports OAuth in that environment,
-    // it has only verified leftover OAuth metadata, not the credential the
-    // worker will actually send.
+/// The environment-credential overlay both auth paths share. Headless Claude
+/// gives ANTHROPIC_* credentials precedence over a saved subscription login.
+/// If status still reports OAuth in that environment, it has only verified
+/// leftover OAuth metadata, not the credential the worker will actually send.
+fn apply_env_credential_override(mut probe: AuthProbe) -> AuthProbe {
     if has_api_credential() && probe.method != Some("apiKey") {
         // Only a login the CLI reports as working proves the credential is
         // overriding it. A signed-out or unanswered probe proves nothing and
@@ -159,6 +158,119 @@ async fn effective_auth_probe(bin: &Path) -> AuthProbe {
         probe.method = Some("oauth");
     }
     probe
+}
+
+async fn effective_auth_probe(bin: &Path) -> AuthProbe {
+    apply_env_credential_override(probe_auth(bin).await)
+}
+
+/// What the snapshot pass's auth read concludes from evidence alone — the
+/// `auth status` child only runs where a login could live in a credential
+/// store the filesystem cannot see (macOS Keychain, Windows).
+#[derive(Debug, PartialEq, Eq)]
+enum SnapshotAuth {
+    /// An environment credential overrides any saved login — the same
+    /// precedence `effective_auth_probe` encodes. Presence is knowable from
+    /// the environment; validity is not, so this reports `Unknown` and leaves
+    /// verification to the fill's live probe.
+    UnverifiedApiKey,
+    /// `.credentials.json` holds a `claudeAiOauth` login. It counts even past
+    /// its `expiresAt`: that is the access token's expiry, and the CLI
+    /// refreshes it from the same file.
+    SavedOauth,
+    /// The file is the whole credential store and holds no login.
+    SignedOut,
+    /// No file evidence either way — a login could be in the OS store, so the
+    /// CLI itself must answer.
+    ProbeCli,
+}
+
+fn snapshot_auth_choice(
+    has_api_credential: bool,
+    has_oauth_file: bool,
+    file_is_store: bool,
+) -> SnapshotAuth {
+    if has_api_credential {
+        SnapshotAuth::UnverifiedApiKey
+    } else if has_oauth_file {
+        SnapshotAuth::SavedOauth
+    } else if file_is_store {
+        SnapshotAuth::SignedOut
+    } else {
+        SnapshotAuth::ProbeCli
+    }
+}
+
+async fn snapshot_auth_probe(bin: &Path) -> AuthProbe {
+    let choice = snapshot_auth_choice(
+        has_api_credential(),
+        has_oauth_credentials(),
+        credential_store_is_file_only(),
+    );
+    match choice {
+        SnapshotAuth::UnverifiedApiKey => AuthProbe {
+            state: HarnessAuthState::Unknown,
+            method: Some("apiKey"),
+            credential_conflict: false,
+        },
+        SnapshotAuth::SavedOauth => AuthProbe {
+            state: HarnessAuthState::Ready,
+            method: Some("oauth"),
+            credential_conflict: false,
+        },
+        SnapshotAuth::SignedOut => AuthProbe {
+            state: HarnessAuthState::NeedsLogin,
+            method: None,
+            credential_conflict: false,
+        },
+        SnapshotAuth::ProbeCli => effective_auth_probe(bin).await,
+    }
+}
+
+/// `.credentials.json` holds a saved OAuth login. Absence is not proof of a
+/// sign-out on platforms with an OS credential store — only Linux treats the
+/// file itself as the store.
+fn has_oauth_credentials() -> bool {
+    let path = native_store::claude_home(NativeStore::Legacy).join(".credentials.json");
+    read_json(path).is_some_and(|creds| creds.get("claudeAiOauth").is_some())
+}
+
+/// On Windows a login can live in Credential Manager (`Claude
+/// Code-credentials*` targets, DPAPI-encrypted — rolled out per-account via
+/// `tengu_windows_credman`), which is invisible to the filesystem but not to
+/// `CredEnumerateW`. A false negative here would hide a real login, so the
+/// filter errs wide: anything Claude-branded counts as evidence and sends the
+/// caller down the live-probe path.
+#[cfg(windows)]
+fn credman_holds_claude_login() -> bool {
+    use windows_sys::Win32::Security::Credentials::{CredEnumerateW, CredFree, CREDENTIALW};
+    let filter: Vec<u16> = "Claude*".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let mut count = 0u32;
+        let mut creds: *mut *mut CREDENTIALW = std::ptr::null_mut();
+        if CredEnumerateW(filter.as_ptr(), 0, &mut count, &mut creds) == 0 {
+            // ERROR_NOT_FOUND means the filter matched nothing — a real
+            // signed-out signal. Any other failure is inconclusive, so err
+            // toward "a login may exist" and let the live probe decide.
+            use windows_sys::Win32::Foundation::{GetLastError, ERROR_NOT_FOUND};
+            return GetLastError() != ERROR_NOT_FOUND;
+        }
+        CredFree(creds.cast());
+        count > 0
+    }
+}
+
+/// True where the filesystem-visible store is the *whole* credential store —
+/// so a missing `.credentials.json` proves signed-out without a child
+/// process. Linux qualifies outright; Windows qualifies only when Credential
+/// Manager holds nothing Claude-branded; macOS's Keychain stays opaque.
+fn credential_store_is_file_only() -> bool {
+    #[cfg(target_os = "linux")]
+    return true;
+    #[cfg(windows)]
+    return !credman_holds_claude_login();
+    #[allow(unreachable_code)]
+    false
 }
 
 fn gate_oauth_version(mut probe: AuthProbe, version: Option<&str>) -> AuthProbe {
@@ -192,54 +304,77 @@ pub(crate) fn auth_recovery_note() -> &'static str {
     }
 }
 
-/// Ask the installed CLI's own argument parser whether it accepts
-/// `--effort ultracode`. `--version` still runs the parser, which prints
-/// `Warning: Unknown --effort value …` for a value it doesn't know and exits
-/// without touching the network (~0.2s); absence of the warning is acceptance.
+/// One child answering both detection questions: `--effort ultracode`
+/// exercises the argument parser while `auth status` answers readiness — on
+/// Windows each spawn of the ~200MB binary costs seconds, so folding them
+/// halves the probe count. A CLI too old for `ultracode` prints the warning
+/// and exits before the subcommand runs; that case is detected by the
+/// missing JSON and the auth probe is retried without the flag.
 ///
-/// The parser is the only truthful surface. Every enumeration the CLI offers
-/// lies about this value: `--help` lists five tiers on versions that accept
-/// six; the warning's own "Valid values:" list omits `ultracode` on versions
-/// that accept it; and `list_models` never advertises it (see
-/// [`CLAUDE_ULTRACODE`]). Probing the parser replaces a hard-coded version
-/// gate — the boundary (2.1.202 rejects / 2.1.203 accepts, bisected across
-/// every published version in between) is now discovered per install instead
-/// of pinned.
+/// The parser is the only truthful surface for `ultracode` support. Every
+/// enumeration the CLI offers lies about this value: `--help` lists five
+/// tiers on versions that accept six; the warning's own "Valid values:"
+/// list omits `ultracode` on versions that accept it; and `list_models`
+/// never advertises it (see [`CLAUDE_ULTRACODE`]). Probing the parser
+/// replaces a hard-coded version gate — the boundary (2.1.202 rejects /
+/// 2.1.203 accepts, bisected across every published version in between) is
+/// now discovered per install instead of pinned.
 ///
 /// Any failure reports unsupported: a missing choice is a smaller harm than a
 /// choice that silently runs at the default effort.
-async fn claude_accepts_ultracode(bin: &Path) -> bool {
+async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
     let mut cmd = Command::new(bin);
-    cmd.args(["--effort", CLAUDE_ULTRACODE, "--version"])
-        .stdin(Stdio::null());
+    cmd.args(["--effort", CLAUDE_ULTRACODE, "auth", "status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     prepare_env(&mut cmd);
-    let fut = cmd.output();
-    match tokio::time::timeout(Duration::from_secs(10), fut).await {
-        Ok(Ok(out)) => {
-            let text = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            out.status.success() && !text.contains("Unknown --effort value")
+    let out = match super::detect::detect_spawn_output_timed(cmd, AUTH_STATUS_TIMEOUT).await {
+        Some(Ok(out)) => out,
+        _ => {
+            return (
+                AuthProbe {
+                    state: HarnessAuthState::Unknown,
+                    method: None,
+                    credential_conflict: false,
+                },
+                false,
+            )
         }
-        _ => false,
+    };
+    let warned = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+    .contains("Unknown --effort value");
+    let ultracode = out.status.success() && !warned;
+    let mut probe = parse_auth_status(out.status.success(), &out.stdout);
+    if warned && probe.state == HarnessAuthState::Unknown {
+        // The parser rejected `--effort` and never reached `auth status`.
+        probe = probe_auth(bin).await;
     }
+    (apply_env_credential_override(probe), ultracode)
 }
 
-/// Query the CLI's own model catalog — the `list_models` control request over
-/// `--print` stream-json, the same data its `/model` menu renders: every model
-/// with its `supportedEffortLevels`. This is the Claude analogue of codex's
-/// `model/list` and opencode's `models --verbose`; a curated table here shipped
-/// effort tiers on Haiku, which the catalog says supports none.
+/// The `list_models` transport — a control request over `--print`
+/// stream-json, the same data its `/model` menu renders. This is the Claude
+/// analogue of codex's `model/list` and opencode's `models --verbose`; a
+/// curated table here shipped effort tiers on Haiku, which the catalog says
+/// supports none.
 ///
 /// One shot: spawn, write the control request, read until its
 /// `control_response` (skipping stream noise), kill the child. Any failure —
 /// spawn, timeout, a CLI too old for the subtype — returns `None` and the
-/// caller falls back to the static table.
-async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo>> {
-    let fut = async {
-        let mut cmd = Command::new(bin);
+/// caller falls back to the static table. The raw `response` payload comes
+/// back unparsed: the ultracode probe decides the parse, and detection runs
+/// both children concurrently.
+async fn claude_models_response(bin: PathBuf) -> Option<Value> {
+    // Acquire the spawn lane before the deadline — queue time must not spend
+    // the child's execution budget.
+    let permit = super::detect::detect_spawn_permit().await;
+    let fut = async move {
+        let mut cmd = Command::new(&bin);
         cmd.args([
             "--print",
             "--input-format",
@@ -249,13 +384,11 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
             "--verbose",
         ]);
         prepare_env(&mut cmd);
-        let mut child = cmd
-            .stdin(Stdio::piped())
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .ok()?;
+            .kill_on_drop(true);
+        let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
         let mut stdin = child.stdin.take()?;
         let mut lines = BufReader::new(child.stdout.take()?).lines();
 
@@ -282,8 +415,7 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
             }
             // An `error` subtype has no inner response — `?` falls through to
             // the static fallback.
-            let models = parse_claude_model_list(resp.get("response")?, ultracode);
-            return (!models.is_empty()).then_some(models);
+            return resp.get("response").cloned();
         }
         None
     };
@@ -291,6 +423,68 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
         .await
         .ok()
         .flatten()
+}
+
+/// The Full pass's probes on one binary. Auth and the ultracode parser check
+/// share a single child (`probe_auth_and_ultracode`). The `list_models`
+/// catalog child is only useful to a signed-in CLI, so it launches
+/// speculatively only where file/env evidence says a login exists — a
+/// signed-out install would just abort it after burning seconds of CPU the
+/// other harnesses' probes need. When the live auth verdict surprises the
+/// evidence (e.g. a login in an OS credential store), the catalog child is
+/// launched late instead.
+async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
+    // No credential in any store a login could occupy means `auth status`
+    // could only answer `loggedIn: false` — skip the child entirely. This is
+    // the common first-install state, and the probe's several seconds of CPU
+    // (a ~200MB binary's startup) are better spent on harnesses that still
+    // have open questions. The ultracode verdict is likewise only consumed
+    // once the harness is ready, so it waits for the next fill.
+    if snapshot_auth_choice(
+        has_api_credential(),
+        has_oauth_credentials(),
+        credential_store_is_file_only(),
+    ) == SnapshotAuth::SignedOut
+    {
+        return (
+            AuthProbe {
+                state: HarnessAuthState::NeedsLogin,
+                method: None,
+                credential_conflict: false,
+            },
+            false,
+            None,
+        );
+    }
+    let login_evidence = has_oauth_credentials() || has_api_credential();
+    let models = login_evidence.then(|| {
+        super::detect::spawn_timed_probe(
+            "claude-code",
+            "models",
+            claude_models_response(bin.clone()),
+        )
+    });
+    let (auth, ultracode) = super::detect::timed_probe(
+        "claude-code",
+        "auth+ultracode",
+        probe_auth_and_ultracode(&bin),
+    )
+    .await;
+    let models = match (models, auth.state) {
+        (Some(task), HarnessAuthState::Ready) => task.await.ok().flatten(),
+        (Some(task), _) => {
+            task.abort();
+            // Await teardown so the aborted probe's timing row lands in the
+            // fill's sink before the pass can drain it.
+            let _ = task.await;
+            None
+        }
+        (None, HarnessAuthState::Ready) => {
+            super::detect::timed_probe("claude-code", "models", claude_models_response(bin)).await
+        }
+        (None, _) => None,
+    };
+    (auth, ultracode, models)
 }
 
 /// `list_models` response → per-model `ModelInfo`. Split from the transport
@@ -303,7 +497,7 @@ async fn claude_list_models(bin: &Path, ultracode: bool) -> Option<Vec<ModelInfo
 /// * A model without `supportedEffortLevels` (Haiku) gets an empty list, which
 ///   hides the reasoning picker — same absent-vs-empty contract as opencode.
 /// * `ultracode` is appended where the CLI accepts it (see
-///   [`claude_accepts_ultracode`]) and the model reaches `xhigh`, since the
+///   [`probe_auth_and_ultracode`]) and the model reaches `xhigh`, since the
 ///   mode is documented as `xhigh` + dynamic workflows.
 fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
     let Some(models) = result.get("models").and_then(Value::as_array) else {
@@ -475,40 +669,61 @@ pub(super) async fn find_claude_working() -> Option<(PathBuf, super::detect::Bin
         .await
 }
 
-#[async_trait]
-impl Harness for ClaudeCode {
-    fn id(&self) -> &'static str {
-        "claude-code"
-    }
-
-    fn name(&self) -> &'static str {
-        "Claude Code"
-    }
-
-    fn supports_chat(&self) -> bool {
-        true
-    }
-
-    /// The resident child holds stdin open, so a second stream-json user
-    /// message reaches the turn already running.
-    fn supports_steering(&self) -> bool {
-        true
-    }
-
-    async fn detect(&self) -> Option<HarnessInfo> {
+impl ClaudeCode {
+    /// `snapshot` skips the catalog probes (`ultracode`, `list_models`) and
+    /// reports the static model table as pending; a background full pass
+    /// replaces it. It also skips the `--version` spawn — install is decided
+    /// by discovery alone — and answers auth from files/env first, falling
+    /// back to `auth status` only where a login could live in a credential
+    /// store the filesystem cannot see (macOS Keychain, Windows).
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
         let mut info = HarnessInfo::new(self.id(), self.name());
-        if let Some((bin, probe)) = find_claude_working().await {
-            info.record_bin(&bin, probe);
+        // The Full pass overlaps the catalog/auth children with the
+        // `--version` sweep — each spawn costs seconds, so sequencing them
+        // made the fill their sum.
+        let mut spec_probes = None;
+        if snapshot {
+            super::detect::record_selected(
+                &mut info,
+                true,
+                "claude-code",
+                find_claude,
+                find_claude_working(),
+            )
+            .await;
+        } else {
+            let (selected, probes) = super::detect::select_and_speculate(
+                "claude-code",
+                claude_candidates(),
+                Some(MIN_CLAUDE_VERSION),
+                claude_spec_probes,
+            )
+            .await;
+            if let Some((bin, probe)) = selected {
+                info.record_bin(&bin, probe);
+            }
+            spec_probes = probes;
         }
+        let (spec_auth, ultracode, spec_models) = spec_probes
+            .map(|(auth, ultracode, models)| (Some(auth), ultracode, models))
+            .unwrap_or((None, false, None));
         // The CLI owns OAuth and Keychain refresh. Its live status decides
         // whether this harness can run; a broken binary would only fail it too.
         if info.installed && !info.install_broken {
             let bin = info.bin_path.as_deref().map(Path::new);
-            let probe = match bin {
-                Some(bin) => {
-                    gate_oauth_version(effective_auth_probe(bin).await, info.version.as_deref())
-                }
-                None => AuthProbe {
+            let probe = match (bin, snapshot) {
+                (Some(_), false) => gate_oauth_version(
+                    spec_auth.unwrap_or(AuthProbe {
+                        state: HarnessAuthState::Unknown,
+                        method: None,
+                        credential_conflict: false,
+                    }),
+                    info.version.as_deref(),
+                ),
+                // The snapshot has no probed version, so the OAuth minimum-
+                // version gate cannot run here — the Full pass re-checks it.
+                (Some(bin), true) => snapshot_auth_probe(bin).await,
+                (None, _) => AuthProbe {
                     state: HarnessAuthState::Unknown,
                     method: None,
                     credential_conflict: false,
@@ -540,19 +755,15 @@ impl Harness for ClaudeCode {
         if info.agent_ready {
             // The resident child is only spawnable once the CLI is ready.
             info.supports_steering = true;
-            // Ask the installed CLI for its own catalog: `list_models` for the
-            // models and their per-model effort tiers, and the parser probe for
-            // `ultracode` (a session mode the catalog never advertises — see
-            // `claude_accepts_ultracode`). The static table only covers a CLI
-            // too old to answer.
-            let bin = info.bin_path.as_deref().map(Path::new);
-            let (ultracode, models) = match bin {
-                Some(bin) => {
-                    let ultracode = claude_accepts_ultracode(bin).await;
-                    (ultracode, claude_list_models(bin, ultracode).await)
-                }
-                None => (false, None),
-            };
+            // The speculated `list_models` response is parsed here, where the
+            // ultracode verdict has landed (a session mode the catalog never
+            // advertises — see `probe_auth_and_ultracode`). The static table
+            // covers a CLI too old to answer — and the snapshot pass, which
+            // skips both probes.
+            let models = spec_models.and_then(|resp| {
+                let parsed = parse_claude_model_list(&resp, ultracode);
+                (!parsed.is_empty()).then_some(parsed)
+            });
             info = info.with_models(models.unwrap_or_else(|| {
                 let ids = claude_effort_ids(ultracode);
                 CLAUDE_MODELS
@@ -585,6 +796,60 @@ impl Harness for ClaudeCode {
             );
         }
         Some(info)
+    }
+}
+
+/// Compaction re-reads the whole conversation, so it needs more room than a
+/// control request but far less than a turn.
+const CLAUDE_COMPACT_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[async_trait]
+impl Harness for ClaudeCode {
+    fn id(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn supports_chat(&self) -> bool {
+        true
+    }
+
+    /// Claude compacts in place through its own `/compact`, keeping the session
+    /// id. Without a live child there is nothing to compact against, so the
+    /// shared fallback runs instead.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        if ctx
+            .host
+            .claude
+            .compact_session(&ctx.session_id, CLAUDE_COMPACT_TIMEOUT)
+            .await?
+        {
+            return Ok(CompactOutcome::Native);
+        }
+        if ctx.native_session_id.is_some() {
+            // The session is still resumable; summarizing would throw it away.
+            return Err(anyhow!(
+                "Claude Code is not running for this chat — send a message first, then compact"
+            ));
+        }
+        Ok(CompactOutcome::Fallback)
+    }
+
+    /// The resident child holds stdin open, so a second stream-json user
+    /// message reaches the turn already running.
+    fn supports_steering(&self) -> bool {
+        true
+    }
+
+    async fn detect(&self) -> Option<HarnessInfo> {
+        self.detect_at(false).await
+    }
+
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -2195,6 +2460,42 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
 mod tests {
     use super::super::options::REASONING_DEFAULT_ID;
     use super::*;
+
+    #[test]
+    fn snapshot_auth_choice_prefers_env_then_file_then_store() {
+        // The env credential overrides a saved login — the same precedence
+        // `effective_auth_probe` encodes — but its validity is unverified, so
+        // the choice is not a `Ready` answer.
+        assert_eq!(
+            snapshot_auth_choice(true, true, true),
+            SnapshotAuth::UnverifiedApiKey
+        );
+        assert_eq!(
+            snapshot_auth_choice(true, false, false),
+            SnapshotAuth::UnverifiedApiKey
+        );
+        // A saved OAuth login answers on every platform — an expired access
+        // token still refreshes from the same file.
+        assert_eq!(
+            snapshot_auth_choice(false, true, true),
+            SnapshotAuth::SavedOauth
+        );
+        assert_eq!(
+            snapshot_auth_choice(false, true, false),
+            SnapshotAuth::SavedOauth
+        );
+        // Where the file *is* the store (Linux), absent means signed out;
+        // elsewhere Keychain/the credential store could hold a login, so the
+        // CLI must answer.
+        assert_eq!(
+            snapshot_auth_choice(false, false, true),
+            SnapshotAuth::SignedOut
+        );
+        assert_eq!(
+            snapshot_auth_choice(false, false, false),
+            SnapshotAuth::ProbeCli
+        );
+    }
 
     #[test]
     fn local_mcp_config_contains_only_string_environment_values() {

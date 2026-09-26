@@ -57,6 +57,10 @@ pub enum SkillSet {
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "references/configuration.md",
+        content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
+    },
+    AgentSkillResource {
         path: "references/hf.md",
         content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
     },
@@ -103,6 +107,7 @@ const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
 const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
+const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
@@ -174,7 +179,7 @@ const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
 };
 const S_LIT: AgentSkill = AgentSkill {
     name: "orx-lit-review",
-    description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, and bioRxiv connectors; scale retrieval to the question.",
+    description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, bioRxiv, and PubMed connectors; scale retrieval to the question.",
     content: LIT,
     resources: &[],
 };
@@ -221,6 +226,13 @@ const S_INSTANCES: AgentSkill = AgentSkill {
     resources: &[],
 };
 
+const S_FEEDBACK: AgentSkill = AgentSkill {
+    name: "orx-feedback",
+    description: "Report product feedback about OpenResearch itself with `orx feedback`. Use when the user expresses frustration with an OpenResearch feature or bug, says a feature would be nice to have, or you hit a meaningful limitation or bug in the orx CLI, the agent harness, or the app. Not for research results, the user's own code, or minor nits.",
+    content: FEEDBACK,
+    resources: &[],
+};
+
 /// The modules for a given set, in a stable order. Full adds `create`; every
 /// shared module uses the same canonical `SKILL.md`.
 pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
@@ -237,6 +249,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
         SkillSet::Full => vec![
             &S_CREATE,
@@ -251,6 +264,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
     }
 }
