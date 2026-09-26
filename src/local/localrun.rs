@@ -82,7 +82,7 @@ async fn submit_controller_run(
         crate::compute::snapshot_script(&crate::local::bash::bash_path(&source.path), &run_command);
 
     // The run's env: everything the user synced (API keys), plus the tokens
-    // the run script expects. Exported inside run.sh (written owner-only).
+    // the run command expects. Passed only to the local launcher process.
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
@@ -97,24 +97,18 @@ async fn submit_controller_run(
     crate::local::shell_env::export_to(|key, value| {
         env.insert(key.to_string(), value.to_string_lossy().into_owned());
     });
-    let mut secret_env = HashMap::new();
-    // Every local controller inherits this key without persisting it in run.sh.
-    let tinker_key = if kind == "tinker_job" {
+    if kind == "tinker_job" {
         env.insert("ORX_RUN_ID".to_string(), run_id.clone());
-        Some(crate::jobs::tinker::resolve_api_key()?)
-    } else {
-        env.get(crate::jobs::tinker::API_KEY_ENV).cloned()
-    };
-    env.remove(crate::jobs::tinker::API_KEY_ENV);
-    if let Some(key) = tinker_key {
-        secret_env.insert(crate::jobs::tinker::API_KEY_ENV.to_string(), key);
+        env.insert(
+            crate::jobs::tinker::API_KEY_ENV.to_string(),
+            crate::jobs::tinker::resolve_api_key()?,
+        );
     }
 
     let dir = localbox::run_job(&localbox::LocalJobSpec {
         run_id: run_id.clone(),
         script,
         env,
-        secret_env,
     })?;
 
     let mut descriptor = BackendDescriptor {

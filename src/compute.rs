@@ -667,6 +667,28 @@ pub fn capabilities() -> Vec<Capabilities> {
 }
 
 pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
+    let backend_id = args.backend.as_deref().unwrap_or("local");
+    if args.timeout.is_some() {
+        match backend_id {
+            "local" => {
+                return Err(anyhow!(
+                    "--timeout is not supported with the local backend; local runs have no runtime limit."
+                ));
+            }
+            "ssh" => {
+                return Err(anyhow!(
+                    "--timeout is not supported with --backend ssh; SSH runs have no timeout mechanism."
+                ));
+            }
+            "ray" => {
+                return Err(anyhow!(
+                    "--timeout isn't supported on --backend ray — Ray Jobs have no time limit; \
+                     the job runs until the command exits. Bound the run in the command itself."
+                ));
+            }
+            _ => {}
+        }
+    }
     if (args.container.is_some() || args.no_container) && args.backend.as_deref() != Some("ssh") {
         return Err(anyhow!(
             "--container and --no-container only apply with --backend ssh."
@@ -1024,5 +1046,54 @@ mod tests {
         args.image = None;
         args.timeout = Some("1h".into());
         assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn local_rejects_timeout_for_explicit_and_default_backend() {
+        let mut args = tinker_args();
+        args.backend = Some("local".into());
+        args.timeout = Some("30m".into());
+        let error = validate_run_args(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--timeout is not supported with the local backend; local runs have no runtime limit."
+        );
+
+        args.backend = None;
+        let error = validate_run_args(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--timeout is not supported with the local backend; local runs have no runtime limit."
+        );
+    }
+
+    #[test]
+    fn ssh_and_ray_reject_timeout_during_validation() {
+        let mut args = tinker_args();
+        args.timeout = Some("30m".into());
+
+        args.backend = Some("ssh".into());
+        let error = validate_run_args(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--timeout is not supported with --backend ssh; SSH runs have no timeout mechanism."
+        );
+
+        args.backend = Some("ray".into());
+        let error = validate_run_args(&args).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "--timeout isn't supported on --backend ray — Ray Jobs have no time limit; the job runs until the command exits. Bound the run in the command itself."
+        );
+    }
+
+    #[test]
+    fn local_accepts_run_args_without_timeout() {
+        let mut args = tinker_args();
+        args.backend = Some("local".into());
+        assert!(validate_run_args(&args).is_ok());
+
+        args.backend = None;
+        assert!(validate_run_args(&args).is_ok());
     }
 }
