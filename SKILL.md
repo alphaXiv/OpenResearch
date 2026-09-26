@@ -39,11 +39,11 @@ expands on the why; these are the non-negotiables.
    *different code*, so their logged result summaries stay comparable.
 4. **Grow the tree downward, not sideways.** Fan a little *within* a round (the
    options of one decision), then **descend onto that round's winner** for the
-   next round. Root children from different decisions are the failure mode.
-   See "Shape the tree" in the `orx-experiment-tree` module.
+   next round. A root with a long row of direct children and no grandchildren is
+   the failure mode. See "Shape the tree" in the `orx-experiment-tree` module.
 
-If you're ever tempted to change the command, pass an env var, or start a later
-round on the root instead of branching a child, editing its branch, and
+If you're ever tempted to change the command, pass an env var, or pile another
+node onto the root instead of branching a child, editing its branch, and
 descending — stop. That's the anti-pattern, not a shortcut.
 
 ## Setup
