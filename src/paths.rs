@@ -10,6 +10,21 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(plain)
 }
 
+/// Whether the canonical `path` is inside the Linux AppImage mounted at `appdir`
+/// (its runtime's `APPDIR`, which every program the app starts inherits).
+pub fn in_appimage_mount(path: &Path, appdir: Option<&std::ffi::OsStr>) -> bool {
+    let Some(appdir) = appdir.map(Path::new) else {
+        return false;
+    };
+    // An empty or root APPDIR would claim every path on the machine.
+    if !appdir.is_absolute() || appdir.parent().is_none() {
+        return false;
+    }
+    // The runtime mounts under a temp dir that may be a symlink.
+    let appdir = canonicalize(appdir).unwrap_or_else(|_| appdir.to_path_buf());
+    path.starts_with(appdir)
+}
+
 #[cfg(not(windows))]
 fn plain(path: PathBuf) -> PathBuf {
     path

@@ -8,9 +8,10 @@
 //! machine uses whatever the user exported. Two OpenResearch installs then
 //! disagree about which database they are looking at.
 //!
-//! macOS app mode probes the shell once at startup ([`crate::commands::app`])
-//! and installs the answer here; every other entry point falls through to the
-//! process environment unchanged.
+//! App mode on macOS and Linux probes the shell once at startup
+//! ([`crate::commands::app`]) and installs the answer here; every other entry
+//! point falls through to the process environment unchanged. The Linux AppImage
+//! also hands host programs the session's GTK settings ([`host_gui_env`]).
 //!
 //! Scope is orx's own resolution, the children it spawns, and the dashboard's
 //! PTY terminals. The other things orx shells out to — `git`, `kubectl`, and
@@ -137,10 +138,51 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
+/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 12] = [
+    "GDK_BACKEND",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GI_TYPELIB_PATH",
+    "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_DATA_PREFIX",
+    "GTK_EXE_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GTK_PATH",
+    "GTK_THEME",
+    "XDG_DATA_DIRS",
+];
+
+/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// for host programs, which fail on the image's schemas. Empty outside the AppImage.
+pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
+    APPIMAGE_GTK_VARS
+        .iter()
+        .filter_map(|var| {
+            let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
+            let saved = saved.to_str()?;
+            // AppRun writes `=<value>` for a set variable and `-` for an unset one.
+            Some((*var, saved.strip_prefix('=').map(OsString::from)))
+        })
+        .collect()
+}
+
+/// [`host_gui_env`], applied to a command about to start a host program.
+pub fn restore_host_gui_env(command: &mut std::process::Command) {
+    for (var, value) in host_gui_env() {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
+}
+
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(target_os = "macos")]
+#[cfg(all(desktop_app, unix))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }

@@ -25,6 +25,14 @@ fn main() {
 
     println!("cargo:rustc-env=ORX_BUILD_CHANNEL={channel}");
 
+    // `desktop_app`: this build includes the windowed app (src/commands/app.rs).
+    println!("cargo:rustc-check-cfg=cfg(desktop_app)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let linux_desktop = os == "linux" && std::env::var_os("CARGO_FEATURE_DESKTOP").is_some();
+    if os == "macos" || os == "windows" || linux_desktop {
+        println!("cargo:rustc-cfg=desktop_app");
+    }
+
     embed_windows_icon();
 }
 

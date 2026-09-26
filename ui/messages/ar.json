@@ -722,6 +722,7 @@
   "compute_usage_openresearch": "تعمل التجربة على جهاز OpenResearch مؤقت، وتتحمل مؤسستك تكلفته، ويُحذف الجهاز عند انتهاء التشغيل.",
   "updates_channel_installer": "مثبّت عبر مُثبّت orx",
   "updates_channel_app": "تطبيق macOS",
+  "updates_channel_appimage": "تطبيق Linux ‏(AppImage)",
   "updates_channel_portable": "‏orx.exe المحمول",
   "updates_channel_cargo": "مثبّت عبر cargo",
   "updates_channel_homebrew": "مثبّت عبر Homebrew",

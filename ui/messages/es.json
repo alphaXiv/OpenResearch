@@ -723,6 +723,7 @@
   "compute_usage_openresearch": "Una máquina efímera de OpenResearch ejecuta el experimento, se factura a tu organización y se elimina al terminar la ejecución.",
   "updates_channel_installer": "Instalado con el instalador de orx",
   "updates_channel_app": "App de macOS",
+  "updates_channel_appimage": "Aplicación para Linux (AppImage)",
   "updates_channel_portable": "orx.exe portable",
   "updates_channel_cargo": "Instalado con cargo",
   "updates_channel_homebrew": "Instalado con Homebrew",

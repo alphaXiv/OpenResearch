@@ -38,6 +38,7 @@ fn openers(url: &str) -> Vec<Command> {
     {
         let mut xdg = Command::new("xdg-open");
         xdg.arg(url);
+        crate::local::shell_env::restore_host_gui_env(&mut xdg);
         if is_wsl() {
             // rundll32 first: it takes the URL as argv, while some wslview
             // builds re-parse it through `cmd /c start` and truncate at '&'

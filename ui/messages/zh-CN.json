@@ -717,6 +717,7 @@
   "compute_usage_openresearch": "临时 OpenResearch 主机运行实验，费用计入你的组织，并在运行结束后删除。",
   "updates_channel_installer": "通过 orx 安装程序安装",
   "updates_channel_app": "macOS 应用",
+  "updates_channel_appimage": "Linux 应用（AppImage）",
   "updates_channel_portable": "便携版 orx.exe",
   "updates_channel_cargo": "通过 cargo 安装",
   "updates_channel_homebrew": "通过 Homebrew 安装",

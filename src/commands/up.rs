@@ -265,7 +265,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
 /// server is waiting for one.
 static SHUTDOWN_REQUESTED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(desktop_app)]
 pub(crate) fn request_shutdown() {
     SHUTDOWN_REQUESTED.notify_one();
 }
@@ -5617,6 +5617,12 @@ fn start_pty_with_env(
         command.env("PATH", path);
     }
     local::shell_env::export_to(|key, value| command.env(key, value));
+    for (key, value) in local::shell_env::host_gui_env() {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        }
+    }
     command.env("TERM", "xterm-256color");
     command.env_remove("NO_COLOR");
     command.env_remove("FORCE_COLOR");

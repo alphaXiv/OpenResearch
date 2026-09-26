@@ -717,6 +717,7 @@
   "compute_usage_openresearch": "یک میزبان موقت OpenResearch آزمایش را اجرا می‌کند، هزینه به سازمان شما منظور می‌شود و میزبان پس از پایان حذف می‌گردد.",
   "updates_channel_installer": "نصب‌شده با نصب‌کنندهٔ orx",
   "updates_channel_app": "برنامهٔ macOS",
+  "updates_channel_appimage": "برنامه لینوکس (AppImage)",
   "updates_channel_portable": "orx.exe قابل‌حمل",
   "updates_channel_cargo": "نصب‌شده با cargo",
   "updates_channel_homebrew": "نصب‌شده با Homebrew",

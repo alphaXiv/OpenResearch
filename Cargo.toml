@@ -10,6 +10,12 @@ license = "MIT"
 name = "orx"
 path = "src/main.rs"
 
+[features]
+# The Linux desktop app: a glibc build linking WebKitGTK (see linux/). Off by
+# default so the static musl CLI builds stay free of GTK. macOS and Windows
+# always build the app.
+desktop = ["dep:tao", "dep:wry", "dep:gtk", "dep:png"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "fs", "process", "sync", "signal"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -76,11 +82,19 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [target.'cfg(any(target_os = "macos", windows))'.dependencies]
 # Desktop app mode (src/commands/app.rs): the dashboard in its own window. tao
 # owns the run loop on the main thread, wry hosts the dashboard in the system
-# webview (WKWebView, WebView2), and rfd shows the save panel. Not on Linux, so
-# the static musl builds are untouched.
+# webview (WKWebView, WebView2), and rfd shows the save panel.
 tao = "0.37"
 wry = "0.57"
 rfd = "0.17"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The same, behind the `desktop` feature: WebKitGTK, png for the window icon,
+# and gtk (tao's version) for the save dialog. Not rfd: its GTK backend runs on a
+# thread of its own, which deadlocks against tao's hold on the main context.
+tao = { version = "0.37", optional = true }
+wry = { version = "0.57", optional = true }
+gtk = { version = "0.18", optional = true }
+png = { version = "0.18", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # muda builds the menu bar, and objc2-app-kit's NSAlert backs `window.confirm`.

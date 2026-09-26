@@ -2649,6 +2649,7 @@ function AppearanceTab() {
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
   installer: m.updates_channel_installer,
   "app-bundle": m.updates_channel_app,
+  appimage: m.updates_channel_appimage,
   portable: m.updates_channel_portable,
   cargo: m.updates_channel_cargo,
   homebrew: m.updates_channel_homebrew,

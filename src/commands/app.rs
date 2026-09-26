@@ -3,12 +3,14 @@
 //! On macOS the `.app` bundle's executable IS the `orx` binary; launched from
 //! Finder with no arguments, `main` routes here instead of parsing CLI args. On
 //! Windows the installed `OpenResearch.exe` launcher (windows/launcher) starts
-//! the `orx.exe` beside it as `orx app`, in a hidden console its children share.
-//! Either way app mode owns the main thread with the window's run loop, while the
-//! `orx up` dashboard server runs on background tokio worker threads.
+//! the `orx.exe` beside it as `orx app`, in a hidden console its children share;
+//! on Linux the AppImage's AppRun (linux/AppRun) does the same. Either way app
+//! mode owns the main thread with the window's run loop, while the `orx up`
+//! dashboard server runs on background tokio worker threads.
 //!
 //! This is distinct from `orx up` launched in a terminal, which stays a plain
-//! CLI. The GUI parts are macOS- and Windows-only; other targets compile them away.
+//! CLI. The GUI parts build only under `cfg(desktop_app)`: macOS, Windows, and
+//! Linux with the `desktop` feature (see build.rs).
 
 /// True when `exe` is a `<name>.app/Contents/MacOS` bundle executable that was
 /// invoked under its own name — the signal to enter GUI app mode instead of
@@ -42,34 +44,103 @@ pub fn launched_as_app_bundle() -> bool {
     is_bundle_exe_launch(&exe, std::env::args_os().next().as_deref())
 }
 
-/// The whole argument list the Windows launcher starts `orx.exe` with; `orx app`
-/// with anything after it is not the app.
-#[cfg(windows)]
-pub const WINDOWS_APP_ARG: &str = "app";
+/// The whole argument list the Windows launcher and the Linux AppImage's AppRun
+/// start `orx` with; `orx app` with anything after it is not the app.
+#[cfg(all(desktop_app, not(target_os = "macos")))]
+pub const APP_ARG: &str = "app";
 
-#[cfg(windows)]
-pub fn launched_as_windows_app() -> bool {
+#[cfg(all(desktop_app, not(target_os = "macos")))]
+pub fn launched_with_app_arg() -> bool {
     let mut args = std::env::args_os().skip(1);
-    args.next().is_some_and(|arg| arg == WINDOWS_APP_ARG) && args.next().is_none()
+    args.next().is_some_and(|arg| arg == APP_ARG) && args.next().is_none()
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// The dock and app grid name and icon a window only through a desktop entry.
+/// Rewritten whenever it points elsewhere; `TryExec` hides it once the file goes.
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn install_desktop_entry() {
+    let (Some(appimage), Some(data)) = (crate::updates::running_appimage(), dirs::data_dir())
+    else {
+        return;
+    };
+    let icon = data.join("icons/hicolor/256x256/apps/openresearch.png");
+    let (Some(appimage), Some(icon_path)) = (appimage.to_str(), icon.to_str()) else {
+        return;
+    };
+    let entry = desktop_entry(appimage, icon_path);
+    let installed = || -> std::io::Result<()> {
+        write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))?;
+        write_if_changed(
+            &data.join("applications/openresearch.desktop"),
+            entry.as_bytes(),
+        )
+    };
+    if let Err(err) = installed() {
+        eprintln!("openresearch app: could not add OpenResearch to your applications: {err}");
+    }
+}
+
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn write_if_changed(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    if std::fs::read(path).is_ok_and(|current| current == contents) {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, contents)
+}
+
+/// linux/OpenResearch.desktop, launching the AppImage at `appimage` with the icon at `icon`.
+#[cfg_attr(not(all(desktop_app, target_os = "linux")), allow(dead_code))]
+fn desktop_entry(appimage: &str, icon: &str) -> String {
+    // Every value is a desktop-entry string, which escapes backslashes; Exec's
+    // quoted argument escapes these four first, and doubles `%`.
+    let string = |value: &str| value.replace('\\', "\\\\");
+    let mut arg = String::new();
+    for c in appimage.chars() {
+        match c {
+            '"' | '`' | '$' | '\\' => arg.extend(['\\', c]),
+            '%' => arg.push_str("%%"),
+            c => arg.push(c),
+        }
+    }
+    include_str!("../../linux/OpenResearch.desktop")
+        .lines()
+        .map(|line| match line.split_once('=') {
+            Some(("Exec", _)) => {
+                format!("Exec=\"{}\"\nTryExec={}\n", string(&arg), string(appimage))
+            }
+            Some(("Icon", _)) => format!("Icon={}\n", string(icon)),
+            _ => format!("{line}\n"),
+        })
+        .collect()
+}
+
+#[cfg(desktop_app)]
 const APP_PORT: u16 = 4792;
 
 /// Enter GUI app mode: pick a port, start the dashboard server on background
 /// threads, and hand the main thread to the window's run loop. Returns only if
 /// setup fails; quitting exits the process.
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(desktop_app)]
 pub async fn run() {
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     let focus_requests = {
-        // A relaunched app first waits out its predecessor, which holds the claim.
+        // A relaunched Windows app first waits out its predecessor, which holds
+        // the claim (Linux relaunches by exec, which releases it).
         crate::updates::await_replaced_parent();
         match instance::claim() {
             Some(requests) => requests,
             None => return,
         }
     };
+    // A launcher's environment lacks .bashrc's PATH. Before storage and telemetry,
+    // which read the directories it may change.
+    #[cfg(target_os = "linux")]
+    hydrate_shell_env().await;
+    #[cfg(target_os = "linux")]
+    install_desktop_entry();
     // After the claim, so a launch that only brings the window forward isn't a
     // start. The durable outbox covers a quit before delivery.
     let _telemetry = crate::telemetry::TelemetrySession::start_app();
@@ -112,12 +183,12 @@ pub async fn run() {
         });
     #[cfg(target_os = "macos")]
     imp::run_event_loop(port);
-    #[cfg(windows)]
+    #[cfg(not(target_os = "macos"))]
     imp::run_event_loop(port, focus_requests);
 }
 
-/// Adopt the user's shell environment in place of the one launchd handed us
-/// (see [`crate::local::shell_env`]).
+/// Adopt the user's shell environment in place of the one launchd or the desktop
+/// session handed us (see [`crate::local::shell_env`]).
 ///
 /// `-ilc`, not `-lc`: zsh reads `.zshrc` only for *interactive* shells, and
 /// that is where these exports overwhelmingly live. The inner `sh -c` keeps the
@@ -125,23 +196,31 @@ pub async fn run() {
 /// inherited, where fish would have printed its own list-valued `$PATH`
 /// space-separated. NUL separates them because a PATH or a directory may
 /// contain spaces, colons, and newlines, but never NUL.
-#[cfg(target_os = "macos")]
+#[cfg(all(desktop_app, unix))]
 pub(crate) async fn hydrate_shell_env() {
     // Nonce, so rc-file chatter can't forge the fence around the values. The
     // leading `_` is load-bearing: `printf` reads `\0` plus up to three octal
     // digits, so a marker starting with a digit would be eaten by the escape.
     let marker = format!("__ORX_ENV_{}__", uuid::Uuid::new_v4().simple());
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    let fallback = if cfg!(target_os = "macos") {
+        "/bin/zsh"
+    } else {
+        "/bin/sh"
+    };
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| fallback.into());
     let reads = crate::local::shell_env::IMPORTED
         .map(|key| format!(r#""${key}""#))
         .join(" ");
     let template = "%s\\0".repeat(crate::local::shell_env::IMPORTED.len());
     let script = format!(r#"/bin/sh -c 'printf "{marker}{template}{marker}" {reads}'"#);
-    let fut = tokio::process::Command::new(&shell)
+    let mut probe = tokio::process::Command::new(&shell);
+    probe
         .args(["-ilc".to_string(), script])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    // Anything the rc files start is a host program.
+    crate::local::shell_env::restore_host_gui_env(probe.as_std_mut());
+    let fut = probe.output();
     // A slow rc file (nvm, conda) delays the dashboard, so cap the wait; the
     // inherited environment stays in force when the probe doesn't answer.
     let out = match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
@@ -182,7 +261,7 @@ pub(crate) async fn hydrate_shell_env() {
 /// True when `url` is a page of the dashboard at `origin`, as opposed to the
 /// `about:blank` the window holds before the server is up and while quitting.
 // Un-gated so its tests run on CI's Linux runner; only the desktop targets call it.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+#[cfg_attr(not(desktop_app), allow(dead_code))]
 fn is_dashboard_url(url: &str, origin: &str) -> bool {
     url.strip_prefix(origin)
         .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
@@ -190,7 +269,7 @@ fn is_dashboard_url(url: &str, origin: &str) -> bool {
 
 /// Schemes a pop-up may hand to the system browser. A browser asks before
 /// launching the app behind any other scheme (`ssh:`, `vscode:`); `open` would not.
-#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
+#[cfg_attr(not(desktop_app), allow(dead_code))]
 fn opens_in_browser(url: &str) -> bool {
     ["http:", "https:", "mailto:"]
         .iter()
@@ -265,7 +344,70 @@ mod instance {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+/// One app per user session on Linux, where nothing else enforces it either: a
+/// second launch connects to the running app's socket, which brings its window
+/// forward, and exits.
+#[cfg(all(desktop_app, target_os = "linux"))]
+mod instance {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::PathBuf;
+
+    /// `None` when the socket couldn't be bound: the app still runs, just
+    /// without the one-instance guard.
+    pub(super) struct FocusRequests(Option<UnixListener>);
+
+    fn socket_path() -> PathBuf {
+        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        // SAFETY: getuid has no failure mode.
+        dir.join(format!("openresearch-app-{}.sock", unsafe {
+            libc::getuid()
+        }))
+    }
+
+    /// Claims the app for this process. `None` means another instance has it
+    /// and was asked to come forward.
+    pub(super) fn claim() -> Option<FocusRequests> {
+        let path = socket_path();
+        // The running app takes the connection itself as the request.
+        if UnixStream::connect(&path).is_ok() {
+            return None;
+        }
+        // Nothing answered, so a file there is left from an app that didn't
+        // exit cleanly (or one that exec'd itself into an update).
+        let _ = std::fs::remove_file(&path);
+        match UnixListener::bind(&path) {
+            Ok(listener) => Some(FocusRequests(Some(listener))),
+            Err(error) => {
+                eprintln!(
+                    "openresearch app: could not bind {}: {error}; a second launch will open \
+                     another window",
+                    path.display()
+                );
+                Some(FocusRequests(None))
+            }
+        }
+    }
+
+    impl FocusRequests {
+        /// Calls `on_request` for every later launch, from a thread of its own.
+        pub(super) fn listen(self, on_request: impl Fn() + Send + 'static) {
+            let Some(listener) = self.0 else {
+                return;
+            };
+            std::thread::spawn(move || {
+                for connection in listener.incoming() {
+                    if connection.is_ok() {
+                        on_request();
+                    }
+                }
+            });
+        }
+    }
+}
+
+#[cfg(desktop_app)]
 mod imp {
     use std::cell::Cell;
     use std::path::PathBuf;
@@ -296,9 +438,10 @@ mod imp {
 
     enum UserEvent {
         ServerReady,
+        LoadTimedOut,
         #[cfg(target_os = "macos")]
         Menu(MenuId),
-        #[cfg(windows)]
+        #[cfg(not(target_os = "macos"))]
         Focus,
     }
 
@@ -310,9 +453,13 @@ mod imp {
 
     pub(super) fn run_event_loop(
         port: u16,
-        #[cfg(windows)] focus_requests: super::instance::FocusRequests,
+        #[cfg(not(target_os = "macos"))] focus_requests: super::instance::FocusRequests,
     ) {
         let origin = format!("http://127.0.0.1:{port}");
+        // Before GTK starts: the window class the dock matches to the desktop
+        // entry's StartupWMClass.
+        #[cfg(target_os = "linux")]
+        gtk::glib::set_prgname(Some("OpenResearch"));
         let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
         // Dashboard server on background workers (we're inside main's runtime).
@@ -345,16 +492,19 @@ mod imp {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             let _ = ready.send_event(UserEvent::ServerReady);
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let _ = ready.send_event(UserEvent::LoadTimedOut);
         });
 
-        #[cfg(windows)]
+        #[cfg(not(target_os = "macos"))]
         {
             let focus = event_loop.create_proxy();
             focus_requests.listen(move || {
                 let _ = focus.send_event(UserEvent::Focus);
             });
-            set_taskbar_identity();
         }
+        #[cfg(windows)]
+        set_taskbar_identity();
 
         #[cfg(target_os = "macos")]
         let (menu, quit_item, reload_item) = {
@@ -385,7 +535,7 @@ mod imp {
             .with_title("OpenResearch")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
-            // Shown once the dashboard has loaded, so it never flashes blank.
+            // Shown once the dashboard has loaded, so it rarely flashes blank.
             .with_visible(false);
         #[cfg(windows)]
         let window = {
@@ -393,6 +543,8 @@ mod imp {
             // Resource 1 is the icon build.rs embeds in orx.exe.
             window.with_window_icon(tao::window::Icon::from_resource(1, None).ok())
         };
+        #[cfg(target_os = "linux")]
+        let window = window.with_window_icon(linux_window_icon());
         let window = match window.build(&event_loop) {
             Ok(window) => Rc::new(window),
             Err(err) => {
@@ -402,7 +554,7 @@ mod imp {
         };
 
         let shown = Rc::new(Cell::new(false));
-        let webview = WebViewBuilder::new()
+        let builder = WebViewBuilder::new()
             .with_accept_first_mouse(true)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
             .with_initialization_script("window.__ORX_DESKTOP__ = true;")
@@ -435,8 +587,19 @@ mod imp {
                         window.set_focus();
                     }
                 }
-            })
-            .build(&*window);
+            });
+        #[cfg(not(target_os = "linux"))]
+        let webview = builder.build(&*window);
+        // `build` supports only X11 on Linux.
+        #[cfg(target_os = "linux")]
+        let webview = {
+            use tao::platform::unix::WindowExtUnix;
+            use wry::WebViewBuilderExtUnix;
+            let vbox = window
+                .default_vbox()
+                .expect("tao gives every window a default vbox");
+            builder.build_gtk(vbox)
+        };
         let webview = match webview {
             Ok(webview) => webview,
             Err(err) => {
@@ -468,6 +631,14 @@ mod imp {
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
                 let _ = webview.load_url(&format!("{origin}/"));
             }
+            // A window that never appears is worse than a blank one.
+            Event::UserEvent(UserEvent::LoadTimedOut)
+                if matches!(quit, Quit::No) && !shown.replace(true) =>
+            {
+                eprintln!("openresearch app: the dashboard has not finished loading; showing the window anyway");
+                window.set_visible(true);
+                window.set_focus();
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
                 begin_quit(&mut quit, &window, &webview, control_flow);
@@ -476,10 +647,11 @@ mod imp {
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
             }
-            // Before the first load the window shows itself; while quitting it
-            // must stay hidden.
-            #[cfg(windows)]
-            Event::UserEvent(UserEvent::Focus) if shown.get() && matches!(quit, Quit::No) => {
+            // Even before the page loads: a launch that brings nothing up looks
+            // like a broken app. While quitting it must stay hidden.
+            #[cfg(not(target_os = "macos"))]
+            Event::UserEvent(UserEvent::Focus) if matches!(quit, Quit::No) => {
+                shown.set(true);
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -491,11 +663,12 @@ mod imp {
                 // Closing hides, like other Mac apps; the Dock icon brings it back.
                 #[cfg(target_os = "macos")]
                 window.set_visible(false);
-                #[cfg(windows)]
+                #[cfg(not(target_os = "macos"))]
                 begin_quit(&mut quit, &window, &webview, control_flow);
             }
             #[cfg(target_os = "macos")]
             Event::Reopen { .. } => {
+                shown.set(true);
                 window.set_visible(true);
                 window.set_focus();
             }
@@ -519,6 +692,20 @@ mod imp {
         let _ = webview.load_url("about:blank");
         *quit = Quit::Flushing;
         *control_flow = ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(300));
+    }
+
+    /// The AppImage's icon, for the title bar and a taskbar that doesn't match
+    /// the window to an installed desktop entry.
+    #[cfg(target_os = "linux")]
+    fn linux_window_icon() -> Option<tao::window::Icon> {
+        let png = include_bytes!("../../linux/OpenResearch.png");
+        let mut reader = png::Decoder::new(std::io::Cursor::new(png))
+            .read_info()
+            .ok()?;
+        let mut rgba = vec![0; reader.output_buffer_size()?];
+        let frame = reader.next_frame(&mut rgba).ok()?;
+        rgba.truncate(frame.buffer_size());
+        tao::window::Icon::from_rgba(rgba, frame.width, frame.height).ok()
     }
 
     /// Matches the Start menu shortcut's AppUserModelID, so the taskbar groups
@@ -593,6 +780,20 @@ mod imp {
     /// Without a handler WKWebView drops downloads and WebView2 saves them
     /// silently into Downloads; ask where, as a browser would.
     fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
+        let Some(chosen) = ask_save_path(window, path) else {
+            return false;
+        };
+        // No webview writes over an existing file, and the dialog has already
+        // confirmed replacing it.
+        if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
+            return false;
+        }
+        *path = chosen;
+        true
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn ask_save_path(window: &Window, suggested: &std::path::Path) -> Option<PathBuf> {
         let mut dialog = rfd::FileDialog::new();
         // Owned by the window, which Windows disables while the dialog is up. On
         // macOS a parent turns the panel into a sheet, which a hidden window can't show.
@@ -602,24 +803,43 @@ mod imp {
         }
         #[cfg(not(windows))]
         let _ = window;
-        if let Some(dir) = path.parent() {
+        if let Some(dir) = suggested.parent() {
             dialog = dialog.set_directory(dir);
         }
-        if let Some(name) = path.file_name() {
+        if let Some(name) = suggested.file_name() {
             dialog = dialog.set_file_name(name.to_string_lossy());
         }
-        match dialog.save_file() {
-            Some(chosen) => {
-                // Neither webview writes over an existing file, and the panel
-                // has already confirmed replacing it.
-                if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
-                    return false;
-                }
-                *path = chosen;
-                true
-            }
-            None => false,
+        dialog.save_file()
+    }
+
+    /// On the main thread, which owns GTK here: WebKit asks from a signal
+    /// handler there, and the modal loop keeps the window painting.
+    #[cfg(target_os = "linux")]
+    fn ask_save_path(window: &Window, suggested: &std::path::Path) -> Option<PathBuf> {
+        use gtk::prelude::*;
+        use tao::platform::unix::WindowExtUnix;
+
+        let dialog = gtk::FileChooserDialog::with_buttons(
+            None,
+            Some(window.gtk_window()),
+            gtk::FileChooserAction::Save,
+            &[
+                ("_Cancel", gtk::ResponseType::Cancel),
+                ("_Save", gtk::ResponseType::Accept),
+            ],
+        );
+        dialog.set_do_overwrite_confirmation(true);
+        if let Some(dir) = suggested.parent() {
+            dialog.set_current_folder(dir);
         }
+        if let Some(name) = suggested.file_name() {
+            dialog.set_current_name(&name.to_string_lossy());
+        }
+        let chosen = (dialog.run() == gtk::ResponseType::Accept)
+            .then(|| dialog.filename())
+            .flatten();
+        dialog.close();
+        chosen
     }
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
@@ -676,9 +896,24 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
+    use super::{desktop_entry, is_bundle_exe_launch, is_dashboard_url, opens_in_browser};
     use std::ffi::OsStr;
     use std::path::Path;
+
+    #[test]
+    fn the_desktop_entry_launches_the_appimage_wherever_it_is() {
+        let entry = desktop_entry(
+            r"/home/me/My Apps/Open$Re%1\x.AppImage",
+            "/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png",
+        );
+        assert!(entry.contains("\nExec=\"/home/me/My Apps/Open\\\\$Re%%1\\\\\\\\x.AppImage\"\n"));
+        assert!(entry.contains("\nTryExec=/home/me/My Apps/Open$Re%1\\\\x.AppImage\n"));
+        assert!(entry.contains(
+            "\nIcon=/home/me/.local/share/icons/hicolor/256x256/apps/openresearch.png\n"
+        ));
+        assert!(entry.contains("\nStartupWMClass=OpenResearch\n"));
+        assert!(!entry.contains("orx app"));
+    }
 
     const EXE: &str = "/Applications/OpenResearch.app/Contents/MacOS/OpenResearch";
 

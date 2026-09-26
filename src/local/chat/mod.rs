@@ -8164,6 +8164,8 @@ pub fn prepare_env(cmd: &mut tokio::process::Command) {
     crate::local::shell_env::export_to(|key, value| {
         cmd.env(key, value);
     });
+    // Agents open browsers and editors themselves.
+    crate::local::shell_env::restore_host_gui_env(cmd.as_std_mut());
     for (key, value) in crate::config::list_synced_env() {
         if crate::local::shell_env::var(&key).is_none() {
             cmd.env(key, value);

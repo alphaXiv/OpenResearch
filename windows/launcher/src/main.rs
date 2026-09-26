@@ -13,7 +13,7 @@ fn main() {
 
     let started = std::env::current_exe().and_then(|exe| {
         std::process::Command::new(exe.with_file_name("orx.exe"))
-            // WINDOWS_APP_ARG in src/commands/app.rs.
+            // APP_ARG in src/commands/app.rs.
             .arg("app")
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()

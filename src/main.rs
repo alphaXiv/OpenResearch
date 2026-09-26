@@ -867,9 +867,10 @@ async fn main() {
         commands::app::run().await;
         return;
     }
-    // Started by the Windows app's launcher, OpenResearch.exe. See commands::app.
-    #[cfg(windows)]
-    if commands::app::launched_as_windows_app() {
+    // Started by the Windows app's launcher, OpenResearch.exe, or the Linux
+    // AppImage's AppRun. See commands::app.
+    #[cfg(all(desktop_app, not(target_os = "macos")))]
+    if commands::app::launched_with_app_arg() {
         telemetry::set_flag(false);
         commands::app::run().await;
         return;
@@ -996,7 +997,7 @@ fn show_error_dialog(message: &str) {
 
     // The app's console is hidden, and shared with the agents it runs, so it
     // doesn't own it.
-    if !owns_its_console() && !commands::app::launched_as_windows_app() {
+    if !owns_its_console() && !commands::app::launched_with_app_arg() {
         return;
     }
     let wide = |text: &str| text.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
@@ -1027,7 +1028,31 @@ fn show_error_dialog(message: &str) {
         .output();
 }
 
-#[cfg(not(any(windows, target_os = "macos")))]
+/// A launcher-started AppImage has no terminal to read, so show the error with
+/// whichever desktop's dialog tool is installed, as the folder picker does.
+#[cfg(all(desktop_app, target_os = "linux"))]
+fn show_error_dialog(message: &str) {
+    if !commands::app::launched_with_app_arg() {
+        return;
+    }
+    eprintln!("OpenResearch: {message}");
+    for (program, args) in [
+        (
+            "zenity",
+            &["--error", "--no-markup", "--title=OpenResearch", "--text"][..],
+        ),
+        ("kdialog", &["--title", "OpenResearch", "--error"][..]),
+    ] {
+        let mut dialog = std::process::Command::new(program);
+        dialog.args(args).arg(message);
+        local::shell_env::restore_host_gui_env(&mut dialog);
+        if dialog.status().is_ok() {
+            return;
+        }
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos", all(desktop_app, target_os = "linux"))))]
 fn show_error_dialog(_message: &str) {}
 
 /// Main thread only: a worker's panic has a running dashboard to report through.
