@@ -11,8 +11,9 @@ rules this depends on — **never edit a node a run has answered** and
 **the run command + env is a fixed contract** — are the cardinal rules;
 everything below assumes them.
 
-Create a node only for a baseline or hypothesis you will run and measure.
-Routine code changes are not experiments.
+Create a node only when the planned run will establish a baseline or test a
+hypothesis. A code change belongs on that node only if it serves that
+baseline or hypothesis.
 
 ## Before the first launch
 
@@ -23,9 +24,8 @@ setup and execution recipe in the project's run command.
 
 ## Provisional until it answers — repair, don't branch
 
-Every node exists to establish a baseline or test a hypothesis. A run that dies
-on an error does **neither** — nothing was established, nothing was tested — so
-there is nothing to protect: fix that node's branch in place and re-run the
+A run that dies on an error establishes no baseline and tests no hypothesis,
+so there is nothing to protect: fix that node's branch in place and re-run the
 same node. Successive runs on one node are how you get it working.
 
 Once a run *does* answer the node — it produced the result the node was after,
@@ -47,21 +47,19 @@ is a repair. If the same failure hits a second node, that is one setup problem
 ## Shape the tree — stacked bushes, not a flat fan or a noodle
 
 The single most common way to drive a project badly is to get the **shape** wrong.
-There are two opposite failures, and the right shape sits between them:
+The right shape descends from each round's winner:
 
 ```
-FLAT FAN (wrong)            NOODLE (wrong)            STACKED BUSHES (right)
-root                        root                      root
-├ a ├ b ├ c ... ├ n         └ a                       └ lr-head        ┐ round 1:
-                              └ b                        ├ lr 2e-5     │ a small fan of
-                                └ c                      └ lr 3e-5     ┘ co-equal options
-                                  └ d ...                   └ winner ── arch-head   ┐ round 2
-                                                               ├ arch-A             │ descends onto
-                                                               └ arch-B             ┘ round 1's winner
+root
+├ lr 2e-5               ┐ round 1
+└ lr 3e-5 (winner)      ┘
+  ├ arch-A              ┐ round 2
+  └ arch-B              ┘
 ```
 
-- **Flat fan** (your whole sweep hanging off the root): every result is measured
-  against the *start*, so wins never accumulate and the tree never makes progress.
+- **Flat fan** (options from different decisions all hanging off the root):
+  every result is measured against the *start*, so wins never accumulate and
+  the tree never makes progress.
 - **Noodle** (a long single-child chain): depth manufactured for its own sake —
   each step doesn't actually build on the one above it.
 - **Stacked bushes** (correct): a *small fan within a round* (the options of one
@@ -77,15 +75,15 @@ what Y established that X builds on:
   the same bush. Fan, don't chain.
 
 So: **width = the open options of one decision** (fan freely — a 3-way LR sweep
-*should* be three siblings under a common head); **depth = decisions already
-resolved, stacked** (one level down per winner kept). A new *round* never hangs off
-the root — it hangs off the previous round's winner. That keeps the tree moving
-**downward** as research progresses, without stringing unrelated nodes into a line.
+*should* be three siblings under a common parent); **depth = decisions already
+resolved, stacked** (one level down per winner kept). After the first round,
+use the previous round's confirmed winner as parent; without one, continue
+the round or stop.
 
 Re-read the tree each round — `orx project view <projectId>` lists every node
-(id, title, branch; roots marked `[root]`) — and check the shape: a wide row of
-direct children off the root with no grandchildren means you're fanning when you
-should be descending; a long depth-N chain with no branching means you're chaining
+(id, title, branch; roots marked `[root]`) — and check the shape: direct children
+of the root from different decisions mean you're fanning when you should be
+descending; a long depth-N chain with no branching means you're chaining
 co-equal variants that should have been siblings.
 
 ## The auto-research loop

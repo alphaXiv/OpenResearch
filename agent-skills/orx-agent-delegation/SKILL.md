@@ -33,8 +33,10 @@ must inspect and rank the combined literature candidates itself.
 
 ## Protect branches and compute
 
-- Never give a helper a branch checked out by this session. If it must change
-  experiment code, tell it to create its own node and work on that node's branch.
+- Never give a helper a branch checked out by this session. If the helper will
+  establish a baseline or test a separate hypothesis, tell it to create its own
+  node and work on that node's branch. Other code edits belong on a new Git
+  branch outside `orx/`.
 - A frozen experiment node may not be edited by either session.
 - State exactly which `orx exp run` calls the helper may launch. Explicitly
   forbid launches when none are authorized; otherwise the helper may infer that

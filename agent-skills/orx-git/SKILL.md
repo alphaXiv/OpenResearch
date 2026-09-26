@@ -17,7 +17,7 @@ learn so sibling sessions can orient from them.
 One branch has one worktree owner. If checkout says a branch is already checked
 out, keep working only when the named path is your worktree; otherwise leave that
 branch to its owning session. Session worktrees start detached on the baseline,
-so check out the experiment branch before editing.
+so check out a node's branch before editing that experiment.
 
 Each experiment node has a local `orx/<slug>` branch. `orx
 create-experiment` creates it from its parent. Work in the session worktree,
@@ -29,6 +29,9 @@ git status --short
 git add <changed files>
 git commit -m "describe the experiment change"
 ```
+
+Code that does not serve a node's baseline or hypothesis belongs on a new
+Git branch outside `orx/`.
 
 The runner builds an immutable source archive from the recorded commit, so
 committed work is sufficient on every backend. Uncommitted files are never
@@ -42,7 +45,6 @@ git diff <parent-branch>...orx/<child-slug>
 git log --oneline <parent-branch>..orx/<child-slug>
 ```
 
-Once a run answers an experiment, its branch and history are immutable. Never
-merge or rebase it. To incorporate other work, merge it into the next
-experiment's branch only if that experiment needs it. Never rebase experiment
-history; it records the exact code that ran.
+Never rebase experiment history; it records the exact code that ran. Commit
+or merge into an experiment branch only while its node is provisional and
+has no run in flight. Merge other work only if that node needs it.
