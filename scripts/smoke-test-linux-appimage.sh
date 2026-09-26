@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Launch a built AppImage under a virtual display and prove its bundled WebKit
 # loads the dashboard: the server answers, WebKit's network process has connected
-# to it, the window appears once the page has loaded, and every WebKit helper runs
-# from inside the image on the image's libwebkit2gtk. Run it where WebKitGTK is not
-# installed, or a fallback to the host's copy would pass. Needs xvfb-run, curl, ss,
-# setsid, and xdotool.
+# to it, the window appears once the page has loaded, the desktop entry points at
+# this AppImage, and every WebKit helper runs from inside the image on the image's
+# libwebkit2gtk and no host GIO modules. Run it where WebKitGTK is not installed,
+# or a fallback to the host's copy would pass. Needs xvfb-run, curl, ss, setsid,
+# and xdotool.
 #
 #   scripts/smoke-test-linux-appimage.sh <OpenResearch-<arch>.AppImage>
 set -euo pipefail
@@ -70,7 +71,7 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 [ -n "$visible" ] || fail "No window of class OpenResearch appeared."
-# What the dock matches the window to.
+grep -q 'showing the window anyway' "$LOG" && fail "The dashboard never finished loading."
 grep -qxF "TryExec=$APPIMAGE" "$XDG_DATA_HOME/applications/openresearch.desktop" \
   || fail "The app did not install its desktop entry."
 

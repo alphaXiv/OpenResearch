@@ -15,10 +15,11 @@ The dashboard opens in its own window. Closing the window quits OpenResearch, an
 starting it again while it runs brings the window back. Each start adds
 OpenResearch to your applications, so the dock and app grid show its name and
 icon: `~/.local/share/applications/openresearch.desktop`, pointing at wherever the
-AppImage now is, and its icon under `~/.local/share/icons`. The entry hides itself
-once the AppImage is deleted; remove those two files to drop it entirely. Keep the AppImage
-somewhere you can write to, such as `~/Applications`: it updates itself by
-replacing that file, and Restart in the dashboard relaunches the new version.
+AppImage now is, and its icon under `~/.local/share/icons`. The entry hides
+itself once the AppImage is deleted; remove those two files to drop it entirely.
+Keep the AppImage somewhere you can write to, such as `~/Applications`: it
+updates itself by replacing that file, and Restart in the dashboard relaunches
+the new version.
 
 The AppImage bundles WebKitGTK, so it needs nothing installed beyond glibc 2.35
 or newer (Ubuntu 22.04, Debian 12, Fedora 36, and later) and `fusermount` to
@@ -29,8 +30,8 @@ The app starts `orx app` from inside the image. Agents find `orx` because its
 folder leads their `PATH`, and because a desktop launcher doesn't read your
 shell's startup files, the app asks your login shell for `PATH` and the other
 variables orx cares about when it starts. The browser, file manager, editors,
-terminals, and agents it opens get your session's GTK settings back, not the AppImage's. It uses port
-4792, or a free port if something else holds it.
+terminals, and agents it opens get your session's GTK settings back, not the
+AppImage's. It uses port 4792, or a free port if something else holds it.
 
 ## The CLI
 
@@ -45,6 +46,7 @@ browser.
 | Audio and video previews | WebKitGTK plays media through GStreamer, which the AppImage doesn't bundle. |
 | Error dialogs | If the app can't start, it says why through `zenity` or `kdialog`, and on stderr; without either, run the AppImage from a terminal to see it. |
 | Wayland | The bundled GTK runs under XWayland, as linuxdeploy's GTK plugin sets it up to. |
+| HTTPS in the window | The bundled TLS reads certificates from `/etc/ssl/certs/ca-certificates.crt`, as on Debian, Ubuntu, and Arch; on Fedora and openSUSE, HTTPS pages inside the window fail. The dashboard itself is local HTTP. |
 
 ## Releasing the app
 

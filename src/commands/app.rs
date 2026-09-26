@@ -55,12 +55,12 @@ pub fn launched_with_app_arg() -> bool {
     args.next().is_some_and(|arg| arg == APP_ARG) && args.next().is_none()
 }
 
-/// Put the AppImage in the desktop's dock and app grid under its own name and
-/// icon, which only an installed desktop entry does. Rewritten whenever it points
-/// elsewhere, so a moved AppImage keeps it; `TryExec` hides it once the file goes.
+/// The dock and app grid name and icon a window only through a desktop entry.
+/// Rewritten whenever it points elsewhere; `TryExec` hides it once the file goes.
 #[cfg(all(desktop_app, target_os = "linux"))]
 fn install_desktop_entry() {
-    let (Some(appimage), Some(data)) = (std::env::var_os("APPIMAGE"), dirs::data_dir()) else {
+    let (Some(appimage), Some(data)) = (crate::updates::running_appimage(), dirs::data_dir())
+    else {
         return;
     };
     let icon = data.join("icons/hicolor/256x256/apps/openresearch.png");
@@ -68,14 +68,14 @@ fn install_desktop_entry() {
         return;
     };
     let entry = desktop_entry(appimage, icon_path);
-    let installed = write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))
-        .and_then(|()| {
-            write_if_changed(
-                &data.join("applications/openresearch.desktop"),
-                entry.as_bytes(),
-            )
-        });
-    if let Err(err) = installed {
+    let installed = || -> std::io::Result<()> {
+        write_if_changed(&icon, include_bytes!("../../linux/OpenResearch.png"))?;
+        write_if_changed(
+            &data.join("applications/openresearch.desktop"),
+            entry.as_bytes(),
+        )
+    };
+    if let Err(err) = installed() {
         eprintln!("openresearch app: could not add OpenResearch to your applications: {err}");
     }
 }
@@ -535,7 +535,7 @@ mod imp {
             .with_title("OpenResearch")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
-            // Shown once the dashboard has loaded, so it never flashes blank.
+            // Shown once the dashboard has loaded, so it rarely flashes blank.
             .with_visible(false);
         #[cfg(windows)]
         let window = {
@@ -668,6 +668,7 @@ mod imp {
             }
             #[cfg(target_os = "macos")]
             Event::Reopen { .. } => {
+                shown.set(true);
                 window.set_visible(true);
                 window.set_focus();
             }

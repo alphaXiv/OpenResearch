@@ -303,6 +303,16 @@ fn appimage_file(
     crate::paths::in_appimage_mount(exe, appdir).then(|| PathBuf::from(appimage))
 }
 
+/// The `.AppImage` file this process runs from, if it is the AppImage's own orx.
+#[cfg(all(desktop_app, target_os = "linux"))]
+pub fn running_appimage() -> Option<PathBuf> {
+    appimage_file(
+        &current_exe().ok()?,
+        std::env::var_os("APPDIR").as_deref(),
+        std::env::var_os("APPIMAGE").as_deref(),
+    )
+}
+
 /// Classify `exe`. The app tests come first: an app's binary has no receipt,
 /// so every later branch would misfile it. A malformed receipt is an error
 /// rather than "no receipt" for the reason [`load_receipt`] gives — the wrong
@@ -928,17 +938,7 @@ pub fn relaunch(port: u16) -> std::io::Error {
     if crate::commands::app::launched_with_app_arg() {
         // The update replaced the `.AppImage` file, not this mount of it, and its
         // AppRun adds `app`, which the exec below's `--no-browser` would undo.
-        let Ok(exe) = std::env::current_exe() else {
-            return std::io::Error::other("could not resolve the running executable");
-        };
-        let appimage = crate::paths::canonicalize(&exe).ok().and_then(|exe| {
-            appimage_file(
-                &exe,
-                std::env::var_os("APPDIR").as_deref(),
-                std::env::var_os("APPIMAGE").as_deref(),
-            )
-        });
-        let mut app = match appimage {
+        let mut app = match running_appimage() {
             Some(appimage) => {
                 let mut app = std::process::Command::new(appimage);
                 // Or the new AppRun would save this image's GTK settings as the session's.
@@ -946,6 +946,9 @@ pub fn relaunch(port: u16) -> std::io::Error {
                 app
             }
             None => {
+                let Ok(exe) = std::env::current_exe() else {
+                    return std::io::Error::other("could not resolve the running executable");
+                };
                 let mut app = std::process::Command::new(relaunch_target(exe));
                 app.arg(crate::commands::app::APP_ARG);
                 app
