@@ -2015,7 +2015,7 @@ fn remote_installer(version: &str) -> String {
 /// A trailing `:PORT` is only recognized when it's `1..=65535` and the address
 /// isn't a raw (unbracketed) IPv6 literal — so IPv6 hosts and aliases containing
 /// colons are left untouched rather than mis-split into host + bogus port.
-fn parse_remote_target(host: &str) -> SshTarget {
+pub(crate) fn parse_remote_target(host: &str) -> SshTarget {
     match split_host_port(host) {
         Some((dest, port)) => {
             let policy = if host_is_ip_literal(&dest) {

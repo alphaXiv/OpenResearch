@@ -21,6 +21,7 @@ pub mod compute;
 pub mod create_experiment;
 pub mod delete;
 pub mod discover;
+pub mod down;
 pub mod exp;
 pub mod feedback;
 mod file_serve;

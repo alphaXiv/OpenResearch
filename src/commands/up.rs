@@ -50,6 +50,9 @@ mod harness_setup;
 use compute_settings::*;
 
 pub async fn run(args: UpArgs) -> Result<()> {
+    if args.detach {
+        return run_detached(args).await;
+    }
     let port = args.port;
     let persistent_host = args.remote_host;
     let remote_auth = if persistent_host {
@@ -124,7 +127,12 @@ pub async fn run(args: UpArgs) -> Result<()> {
         stopping: stopping.clone(),
         dashboard_lock: Arc::new(std::sync::Mutex::new(Some(dashboard_lock))),
         restart: Arc::new(tokio::sync::Notify::new()),
+        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     };
+    let _up_pid_file = crate::commands::down::UpPidFile::record(
+        &crate::commands::remote_host::canonical_data_dir()?,
+        actual_port,
+    );
     // Plan-mode turns hand this port to the `orx mcp-gate` permission bridge.
     state.chat.set_up_port(actual_port);
     state.chat.resume_persisted_queues();
@@ -222,6 +230,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     // delivers SIGHUP here as the channel tears down — without handling it the
     // remote server would leak, staying bound to its port after the tunnel dies.
     let restart = state.restart.clone();
+    let shutdown_notify = state.shutdown_notify.clone();
     let mut restarting = false;
     let explicit_stop = if persistent_host {
         tokio::select! {
@@ -231,15 +240,18 @@ pub async fn run(args: UpArgs) -> Result<()> {
             }
             changed = stop_rx.changed() => changed.is_ok() && *stop_rx.borrow(),
             _ = restart.notified() => { restarting = true; false }
+            _ = shutdown_notify.notified() => true,
             _ = persistent_shutdown_signal() => false,
         }
     } else {
+        let mut stopped = false;
         tokio::select! {
             r = axum::serve(listener, app) => r.map_err(|e| anyhow!("orx up: server error: {e}"))?,
             _ = restart.notified() => restarting = true,
+            _ = shutdown_notify.notified() => stopped = true,
             _ = shutdown_signal() => eprintln!("orx up: shutting down"),
         }
-        false
+        stopped
     };
     if persistent_host {
         stopping.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -318,6 +330,84 @@ async fn persistent_shutdown_signal() {
     }
 }
 
+async fn run_detached(args: UpArgs) -> Result<()> {
+    let executable = std::env::current_exe()
+        .map_err(|e| anyhow!("Could not locate the orx binary to start detached server: {e}"))?;
+    let data_dir = crate::commands::remote_host::canonical_data_dir()?;
+    std::fs::create_dir_all(&data_dir)?;
+    let log_path = data_dir.join("orx-up.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow!("Could not open log file at {}: {e}", log_path.display()))?;
+
+    let mut cmd = std::process::Command::new(executable);
+    cmd.arg("up")
+        .arg("--port")
+        .arg(args.port.to_string())
+        .arg("--no-browser");
+
+    if let Some(model) = &args.model {
+        cmd.arg("--model").arg(model);
+    }
+    if args.no_agent {
+        cmd.arg("--no-agent");
+    }
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file.try_clone()?))
+        .stderr(std::process::Stdio::from(log_file));
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt as _;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow!("Could not spawn detached orx up: {e}"))?;
+    let child_pid = child.id();
+
+    let port = args.port;
+    let start_time = std::time::Instant::now();
+    let mut started = false;
+    while start_time.elapsed() < Duration::from_secs(5) {
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(anyhow!(
+                "orx up process exited prematurely with {status}. See log at {}",
+                log_path.display()
+            ));
+        }
+
+        if dashboard_is_serving(port).await {
+            started = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    if started {
+        eprintln!(
+            "orx up: dashboard started in background on http://127.0.0.1:{port} (pid {child_pid})"
+        );
+        eprintln!("Use 'orx down --port {port}' to stop the server.");
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Timed out waiting for detached orx up to start on port {port}. See log at {}",
+            log_path.display()
+        ))
+    }
+}
+
 #[derive(Clone)]
 struct AppState {
     agent: Arc<AgentHost>,
@@ -344,6 +434,8 @@ struct AppState {
     dashboard_lock: Arc<std::sync::Mutex<Option<DashboardLock>>>,
     /// Fired by `POST /api/update/restart`; the serve loop relaunches on it.
     restart: Arc<tokio::sync::Notify>,
+    /// Fired by `POST /api/down` or `POST /api/shutdown`; the serve loop terminates on it.
+    shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 async fn project_publication_lock(
@@ -605,6 +697,8 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/update/restart", post(restart_after_update))
         .route("/api/update/auto", post(set_auto_update))
         .route("/api/update/install-cli", post(install_cli))
+        .route("/api/down", post(shutdown_dashboard))
+        .route("/api/shutdown", post(shutdown_dashboard))
         .route("/api/settings/ui-state", get(ui_state).post(set_ui_state))
         .route(
             "/api/projects/{id}/ui-state",
@@ -750,7 +844,7 @@ async fn require_remote_auth(
         )
         .into_response();
     }
-    if path == "/api/internal/permissions" {
+    if path == "/api/internal/permissions" || path == "/api/down" || path == "/api/shutdown" {
         return next.run(request).await;
     }
     let provided = request
@@ -910,6 +1004,7 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "dashboardProtocol": crate::commands::up_remote::DASHBOARD_PROTOCOL,
         "instanceId": state.remote_instance_id,
+        "pid": std::process::id(),
     }))
 }
 
@@ -4976,6 +5071,15 @@ async fn restart_after_update(State(state): State<AppState>) -> ApiResult {
         restart.notify_one();
     });
     Ok(Json(json!({ "restarting": true, "version": version })))
+}
+
+async fn shutdown_dashboard(State(state): State<AppState>) -> ApiResult {
+    let notify = state.shutdown_notify.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        notify.notify_one();
+    });
+    Ok(Json(json!({ "ok": true, "stopping": true })))
 }
 
 #[derive(Deserialize)]
