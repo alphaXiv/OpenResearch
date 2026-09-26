@@ -3,6 +3,18 @@
 Windows support is in beta. The CLI and dashboard work, including local
 experiment runs and the nanochat demo. The gaps are listed at the bottom.
 
+## Project folders
+
+The dashboard's **Existing Folder** flow browses folders inside the page. Use
+**This PC** to see all logical drives, **Home** for your user directory, or enter
+a full path (including an accessible UNC share). At a drive root, **Parent folder**
+returns to the drive list. Browsing and cancelling do not create a project.
+
+For a **Blank Project**, select a parent folder and enter a new subfolder name.
+The form previews the complete destination and rejects an existing folder. The
+new folder is created only when you click **Create Project**. SSH workspaces
+continue to use a typed path on the remote host.
+
 ## Prerequisites
 
 **Git for Windows is required**, and for more than git. It is the only source of

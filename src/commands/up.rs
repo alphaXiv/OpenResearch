@@ -448,6 +448,7 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
         .route("/api/health", get(health))
         .route("/api/onboarding/complete", post(complete_onboarding))
         .route("/api/project-path/status", get(project_path_status))
+        .route("/api/project-path/browse", get(browse_project_folder))
         .route("/api/project-path/pick", post(pick_project_folder))
         .route("/api/projects", get(list_projects).post(create_project))
         .route(
@@ -781,6 +782,7 @@ fn remote_route_forbidden(path: &str) -> bool {
     matches!(
         path,
         "/api/project-path/pick"
+            | "/api/project-path/browse"
             | "/api/update"
             | "/api/update/apply"
             | "/api/update/restart"
@@ -1315,6 +1317,24 @@ async fn pick_project_folder() -> ApiResult {
     Ok(Json(json!({
         "path": path.map(|path| path.to_string_lossy().into_owned()),
     })))
+}
+
+async fn browse_project_folder(Query(q): Query<ProjectPathStatusQ>) -> ApiResult {
+    // Filesystem calls to disconnected network drives cannot be cancelled;
+    // bound the wait so a wedged listing cannot hold the request open.
+    let task = tokio::task::spawn_blocking(move || {
+        crate::folder_browser::browse(q.path.as_deref().unwrap_or("~")).map(Json)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(8), task)
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::REQUEST_TIMEOUT,
+                "Folder took too long to respond. Try another path.".into(),
+            )
+        })?
+        .map_err(|error| ApiError::from(anyhow!("folder browser task failed: {error}")))?
+        .map_err(bad_request)
 }
 
 // --- papers (new-project "from a paper" flow; proxies alphaXiv) ------------
@@ -7684,6 +7704,7 @@ mod tests {
     fn ssh_workspace_blocks_local_machine_actions_but_keeps_config_editing() {
         for path in [
             "/api/project-path/pick",
+            "/api/project-path/browse",
             "/api/update",
             "/api/update/apply",
             "/api/update/restart",
@@ -7703,6 +7724,24 @@ mod tests {
         }
         assert!(!remote_route_forbidden("/api/settings/ssh/config"));
         assert!(!remote_route_forbidden("/api/projects/p1/file"));
+    }
+
+    #[tokio::test]
+    async fn folder_browser_api_returns_locations_and_rejects_missing_paths() {
+        let response = browse_project_folder(Query(ProjectPathStatusQ {
+            path: Some(String::new()),
+        }))
+        .await
+        .unwrap_or_else(|error| panic!("{}", error.1));
+        assert!(response.0["path"].is_null());
+        assert!(!response.0["folders"].as_array().unwrap().is_empty());
+        let missing = std::env::temp_dir().join(format!("orx-missing-{}", uuid::Uuid::new_v4()));
+        let error = browse_project_folder(Query(ProjectPathStatusQ {
+            path: Some(missing.to_string_lossy().into_owned()),
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
     }
 
     #[test]

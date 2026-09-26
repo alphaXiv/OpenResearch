@@ -249,8 +249,13 @@ export const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
   return get<ProjectPathStatus>(`/api/project-path/status${query}`, signal);
 };
 
-export const pickProjectFolder = () =>
-  post<{ path: string | null }>("/api/project-path/pick").then((result) => result.path);
+export interface FolderListing {
+  path: string | null;
+  parent: string | null;
+  folders: { name: string; path: string }[];
+}
+export const browseProjectFolder = (path: string, signal?: AbortSignal) =>
+  get<FolderListing>(`/api/project-path/browse?path=${encodeURIComponent(path)}`, signal);
 
 export interface NewProject {
   name: string;
