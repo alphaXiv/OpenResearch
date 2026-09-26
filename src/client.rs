@@ -208,6 +208,28 @@ pub struct SshKeyEnvelope {
 // Core request helper — preserves TS error semantics exactly.
 // ---------------------------------------------------------------------------
 
+/// Render a transport failure with its full `source()` chain.
+///
+/// `main` prints an error's `Display`, not its `{:#}` alternate form, so an
+/// `anyhow` context layer alone would hide the cause. `reqwest`'s own
+/// `Display` is just `error sending request for url (...)`; the actionable
+/// part — `invalid peer certificate: UnknownIssuer`, a DNS failure, a refused
+/// connection — only appears in the chain. Flatten it into the message so the
+/// user sees it without a debug build.
+fn transport_error(base: &str, err: reqwest::Error) -> crate::error::Error {
+    let mut detail = err.to_string();
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&err);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !detail.contains(&text) {
+            detail.push_str(": ");
+            detail.push_str(&text);
+        }
+        source = std::error::Error::source(cause);
+    }
+    anyhow!("Could not reach alphaXiv at {}: {}", base, detail)
+}
+
 fn http() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(Client::new)
@@ -480,7 +502,7 @@ async fn discover_papers(
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+        .map_err(|e| transport_error(&base, e))?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -541,7 +563,7 @@ pub async fn search_papers_fast(query: &str) -> Result<Vec<FastPaperHit>> {
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+        .map_err(|e| transport_error(&base, e))?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -578,7 +600,7 @@ pub async fn resolve_paper(paper_id: &str) -> Result<ResolvedPaper> {
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+        .map_err(|e| transport_error(&base, e))?;
     let status = res.status();
     if !status.is_success() {
         return Err(anyhow!(
@@ -737,7 +759,7 @@ pub async fn fetch_paper_github(paper_id: &str) -> Result<Option<String>> {
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+        .map_err(|e| transport_error(&base, e))?;
     let status = res.status();
     if !status.is_success() {
         let reason = status.canonical_reason().unwrap_or("");
@@ -772,7 +794,7 @@ pub async fn fetch_paper_markdown(kind: &str, paper_id: &str) -> Result<Option<S
         .header("user-agent", ALPHAXIV_UA)
         .send()
         .await
-        .map_err(|e| anyhow!("Could not reach alphaXiv at {}: {}", base, e))?;
+        .map_err(|e| transport_error(&base, e))?;
     let status = res.status();
     if status.as_u16() == 404 {
         return Ok(None);
@@ -2275,5 +2297,32 @@ mod tests {
         assert_eq!(latest.version, "2");
         assert_eq!(latest.abstract_, "new");
         assert_eq!(latest.published, "10.1000/j.x");
+    }
+
+    /// A transport failure must surface its underlying cause, not just
+    /// reqwest's generic "error sending request" wrapper. Regression guard for
+    /// TLS failures behind an inspecting proxy, where `UnknownIssuer` is the
+    /// only actionable detail and lives two levels down the source chain.
+    #[tokio::test]
+    async fn transport_error_includes_the_source_chain() {
+        // Port 1 is reserved and never listening, so this fails at connect
+        // with an OS-level cause nested under reqwest's wrapper.
+        let err = reqwest::Client::new()
+            .get("http://127.0.0.1:1/unreachable")
+            .send()
+            .await
+            .expect_err("connection to port 1 must fail");
+
+        let rendered = super::transport_error("https://api.example.test", err).to_string();
+
+        assert!(
+            rendered.starts_with("Could not reach alphaXiv at https://api.example.test: "),
+            "prefix preserved: {rendered}"
+        );
+        // The cause chain contributed detail beyond reqwest's own Display.
+        assert!(
+            rendered.matches(": ").count() >= 2,
+            "cause chain appended: {rendered}"
+        );
     }
 }
