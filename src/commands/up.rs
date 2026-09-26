@@ -5473,7 +5473,11 @@ async fn ssh_connect_socket(
     };
 
     match status {
-        Ok(status) if status.success() => {}
+        Ok(status) if status.success() => {
+            if !cfg!(test) {
+                let _ = crate::jobs::ssh::sync_managed_ssh_host(&target);
+            }
+        }
         Ok(status) => {
             send_ssh_connect_error(
                 &mut socket,
