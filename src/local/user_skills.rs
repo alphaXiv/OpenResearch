@@ -1491,7 +1491,7 @@ mod tests {
             Some(wt.join(".agents/skills/research-workflow/SKILL.md"))
         );
         assert_eq!(
-            session_skill_file("research-workflow", Some("claude"), Some(&wt)),
+            session_skill_file("research-workflow", Some("claude-code"), Some(&wt)),
             Some(wt.join(".claude/skills/research-workflow/SKILL.md"))
         );
         assert!(session_skill_file("research-workflow", None, Some(&wt)).is_none());
