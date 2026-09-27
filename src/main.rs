@@ -81,7 +81,7 @@ enum Command {
     /// List a project's runs.
     Runs(RunsArgs),
 
-    /// Read a run's terminal log (tail by default).
+    /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
     /// Add an experiment node to a local `orx up` project.
