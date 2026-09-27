@@ -1,4 +1,4 @@
-use std::io::{Read as _, Seek, SeekFrom, Write};
+use std::io::{Read as _, SeekFrom, Write};
 
 use crate::error::Result;
 use crate::plane::{resolve_run, LogRequest};
@@ -22,6 +22,27 @@ fn parse_integer(s: &str) -> Option<i64> {
     } else {
         None
     }
+}
+
+fn read_preview_suffix(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    total_bytes: u64,
+) -> std::io::Result<Vec<u8>> {
+    let start = total_bytes.saturating_sub(PREVIEW_SUFFIX_BYTES as u64);
+    reader.seek(SeekFrom::Start(start))?;
+    let expected_bytes = total_bytes - start;
+    let mut bytes = Vec::with_capacity(expected_bytes as usize);
+    reader.take(expected_bytes).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != expected_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "log changed while reading preview: expected {expected_bytes} bytes, read {}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn trailing_char_preview(bytes: &[u8]) -> String {
@@ -56,26 +77,39 @@ fn print_compact_summary(path: &std::path::Path, total_bytes: u64, preview: &str
     Ok(())
 }
 
-async fn stream_full_log(run_id: &str, total: i64) -> Result<()> {
-    let path = log_path(run_id);
-    let mut file = std::fs::File::open(&path)?;
-    let mut stdout = std::io::stdout();
+fn stream_full_log_to<R: std::io::Read, W: std::io::Write>(
+    reader: R,
+    total: u64,
+    stdout: &mut W,
+) -> Result<()> {
+    let mut reader = reader.take(total);
     let mut buf = [0u8; STREAM_CHUNK];
-    let mut wrote_any = false;
+    let mut bytes_read = 0u64;
     let mut last_byte: Option<u8> = None;
     loop {
-        let n = file.read(&mut buf)?;
+        let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        wrote_any = true;
+        bytes_read += n as u64;
         last_byte = Some(buf[n - 1]);
         stdout.write_all(&buf[..n])?;
     }
-    if wrote_any && last_byte != Some(b'\n') {
+    if bytes_read != total {
+        return Err(anyhow::anyhow!(
+            "log changed while reading: expected {total} bytes, read {bytes_read}"
+        ));
+    }
+    if bytes_read > 0 && last_byte != Some(b'\n') {
         stdout.write_all(b"\n")?;
     }
     stdout.flush()?;
+    Ok(())
+}
+
+async fn stream_full_log(file: std::fs::File, total: u64) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    stream_full_log_to(file, total, &mut stdout)?;
     eprintln!("[local file] bytes 0–{} of {}", total, total);
     Ok(())
 }
@@ -92,36 +126,32 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
 
     if !explicit_raw {
         let path = log_path(&args.run_id);
-        let meta = match std::fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => {
+        let mut file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("[local file] no log captured yet for this run.");
                 return Ok(());
             }
+            Err(error) => return Err(error.into()),
         };
-        let total = meta.len();
-        let start = total.saturating_sub(PREVIEW_SUFFIX_BYTES as u64);
-        let to_read = (total - start) as usize;
-        let mut suffix = vec![0u8; to_read];
-        if to_read > 0 {
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(SeekFrom::Start(start))?;
-            file.read_exact(&mut suffix)?;
-        }
-        let preview = trailing_char_preview(&suffix);
+        let total = file.metadata()?.len();
+        let bytes = read_preview_suffix(&mut file, total)?;
+        let preview = trailing_char_preview(&bytes);
         return print_compact_summary(&path, total, &preview);
     }
 
     if args.full {
         let path = log_path(&args.run_id);
-        let total = match std::fs::metadata(&path) {
-            Ok(m) => m.len() as i64,
-            Err(_) => {
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 eprintln!("[local file] no log captured yet for this run.");
                 return Ok(());
             }
+            Err(error) => return Err(error.into()),
         };
-        return stream_full_log(&args.run_id, total).await;
+        let total = file.metadata()?.len();
+        return stream_full_log(file, total).await;
     }
 
     let mut mode: &str = if args.head { "head" } else { "tail" };
@@ -181,4 +211,99 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
 
     eprintln!("{}", log.footer());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_preview_suffix, stream_full_log_to, STREAM_CHUNK};
+    use std::io::{Cursor, Read};
+
+    struct AppendingReader {
+        original: Cursor<Vec<u8>>,
+        appended: Cursor<Vec<u8>>,
+        appended_after_first_read: bool,
+        original_remaining_at_append: Option<usize>,
+    }
+
+    impl AppendingReader {
+        fn new(original: Vec<u8>, appended: Vec<u8>) -> Self {
+            Self {
+                original: Cursor::new(original),
+                appended: Cursor::new(appended),
+                appended_after_first_read: false,
+                original_remaining_at_append: None,
+            }
+        }
+    }
+
+    impl Read for AppendingReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            if !self.appended_after_first_read {
+                let count = self.original.read(buffer)?;
+                self.appended_after_first_read = true;
+                self.original_remaining_at_append =
+                    Some(self.original.get_ref().len() - self.original.position() as usize);
+                return Ok(count);
+            }
+
+            let count = self.original.read(buffer)?;
+            if count > 0 {
+                Ok(count)
+            } else {
+                self.appended.read(buffer)
+            }
+        }
+    }
+
+    #[test]
+    fn full_stream_excludes_bytes_appended_before_original_eof() {
+        let mut original = vec![b'x'; 4 * STREAM_CHUNK];
+        *original.last_mut().unwrap() = b'\n';
+        let total = original.len() as u64;
+        let appended = b"APPENDED_AFTER_CAPTURE".to_vec();
+        let mut reader = AppendingReader::new(original.clone(), appended.clone());
+        let mut output = Vec::new();
+
+        stream_full_log_to(&mut reader, total, &mut output).unwrap();
+
+        assert!(reader.appended_after_first_read);
+        assert!(reader.original_remaining_at_append.unwrap() > 0);
+        assert!(
+            !output
+                .windows(appended.len())
+                .any(|window| window == appended.as_slice()),
+            "full stream included appended bytes"
+        );
+        assert_eq!(output, original);
+
+        let mut unread = Vec::new();
+        reader.read_to_end(&mut unread).unwrap();
+        assert_eq!(unread, appended);
+    }
+
+    #[test]
+    fn preview_excludes_bytes_appended_after_length_capture() {
+        let captured = b"log bytes present at metadata capture".to_vec();
+        let captured_len = captured.len() as u64;
+        let mut file = Cursor::new(captured.clone());
+
+        file.get_mut()
+            .extend_from_slice(b" appended after metadata capture");
+
+        let preview = read_preview_suffix(&mut file, captured_len).unwrap();
+        assert_eq!(preview, captured);
+    }
+
+    #[test]
+    fn preview_rejects_a_short_read_after_length_capture() {
+        let mut file = Cursor::new(b"log bytes at metadata capture".to_vec());
+        let captured_len = file.get_ref().len() as u64;
+        file.get_mut().clear();
+
+        let error = read_preview_suffix(&mut file, captured_len).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(error
+            .to_string()
+            .contains(&format!("expected {captured_len} bytes, read 0")));
+    }
 }
