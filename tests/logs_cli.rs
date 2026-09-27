@@ -73,23 +73,41 @@ fn lossy_stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+fn compact_preview(stdout: &str) -> String {
+    const HINT: &str = "Use targeted search on this path";
+    let (before_hint, _) = stdout
+        .split_once(HINT)
+        .expect("compact summary should include targeted-search hint");
+    let after_size = before_hint
+        .split_once(" bytes\n\n")
+        .map(|(_, tail)| tail)
+        .expect("compact summary should include byte size and blank line");
+    after_size.trim_end().to_string()
+}
+
 #[test]
 fn default_summary_shows_path_size_tail_hint_not_whole_tail() {
     let sandbox = Sandbox::new();
     let run_id = "run-default-summary";
     sandbox.seed_run(run_id);
-    let early = "EARLY_SENTINEL_";
     let late = "LATE_SENTINEL_END";
-    let filler = "x".repeat(70 * 1024 - early.len() - late.len());
-    let body = format!("{early}{filler}{late}");
-    let path = sandbox.write_log(run_id, body.as_bytes());
+    let mid = "MID_OUTSIDE_PREVIEW_SENTINEL";
+    let total = 70 * 1024;
+    let mut body = vec![b'x'; total];
+    body[total - late.len()..].copy_from_slice(late.as_bytes());
+    let mid_pos = total - 1000;
+    body[mid_pos..mid_pos + mid.len()].copy_from_slice(mid.as_bytes());
+    let path = sandbox.write_log(run_id, &body);
     let output = sandbox.run(&["logs", run_id]);
     assert!(output.status.success(), "{}", lossy_stdout(&output));
     let stdout = lossy_stdout(&output);
     assert!(stdout.contains(path.to_str().unwrap()));
     assert!(stdout.contains(&format!("{} bytes", body.len())));
-    assert!(stdout.contains(late));
-    assert!(!stdout.contains(early));
+    let preview = compact_preview(&stdout);
+    assert!(preview.contains(late));
+    assert!(!preview.contains(mid));
+    assert_eq!(preview.chars().count(), 500);
+    assert!(stdout.len() < 4096);
     assert!(stdout.contains("targeted search"));
     assert!(output.stderr.is_empty());
 }
@@ -128,19 +146,66 @@ fn explicit_raw_modes_keep_stdout_clean_and_stderr_footer() {
 }
 
 #[test]
+fn full_on_large_file_without_trailing_newline() {
+    let sandbox = Sandbox::new();
+    let run_id = "run-full-no-nl";
+    sandbox.seed_run(run_id);
+    let body: Vec<u8> = (0..70 * 1024).map(|i| (i % 256) as u8).collect();
+    sandbox.write_log(run_id, &body);
+    let full = sandbox.run(&["logs", run_id, "--full"]);
+    assert!(full.status.success(), "{}", lossy_stdout(&full));
+    let mut expected = body.clone();
+    expected.push(b'\n');
+    assert_eq!(full.stdout, expected);
+    let len = body.len();
+    assert_eq!(
+        String::from_utf8_lossy(&full.stderr).trim(),
+        format!("[local file] bytes 0–{len} of {len}")
+    );
+}
+
+#[test]
+fn head_bytes_and_range_precedence_over_head() {
+    let sandbox = Sandbox::new();
+    let run_id = "run-head-selectors";
+    sandbox.seed_run(run_id);
+    let body: Vec<u8> = (0..10_000).map(|i| (i % 256) as u8).collect();
+    sandbox.write_log(run_id, &body);
+
+    let head_bytes = sandbox.run(&["logs", run_id, "--head", "--bytes", "128"]);
+    assert!(head_bytes.status.success());
+    let mut expected_head = body[..128].to_vec();
+    expected_head.push(b'\n');
+    assert_eq!(head_bytes.stdout, expected_head);
+
+    let ranged = sandbox.run(&["logs", run_id, "--head", "--range", "50:150"]);
+    assert!(ranged.status.success());
+    let mut expected_range = body[50..150].to_vec();
+    expected_range.push(b'\n');
+    assert_eq!(ranged.stdout, expected_range);
+}
+
+#[test]
 fn utf8_preview_respects_character_boundaries_and_raw_modes_stay_lossless() {
     let sandbox = Sandbox::new();
     let run_id = "run-utf8";
     sandbox.seed_run(run_id);
-    let marker = "🚀";
-    let prefix = "a".repeat(600);
-    let body = format!("{prefix}{marker}");
-    sandbox.write_log(run_id, body.as_bytes());
+    let total_bytes = 5200usize;
+    let boundary = total_bytes - 2048;
+    let mut original = "a".repeat(boundary - 1);
+    original.push('🚀');
+    original.push_str(&"b".repeat(total_bytes - original.len()));
+    assert!(original.len() > 2048);
+    sandbox.write_log(run_id, original.as_bytes());
+    let expected: String = original
+        .chars()
+        .skip(original.chars().count().saturating_sub(500))
+        .collect();
     let output = sandbox.run(&["logs", run_id]);
     assert!(output.status.success());
-    let stdout = lossy_stdout(&output);
-    assert!(stdout.contains(marker));
-    assert!(stdout.chars().filter(|c| *c == '🚀').count() >= 1);
+    let preview = compact_preview(&lossy_stdout(&output));
+    assert_eq!(preview, expected);
+    assert!(!preview.contains('\u{FFFD}'));
 
     let invalid = b"ok\xff\xfeok";
     sandbox.write_log(run_id, invalid);

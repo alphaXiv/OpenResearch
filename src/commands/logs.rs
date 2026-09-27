@@ -1,4 +1,4 @@
-use std::io::{Read as _, Write};
+use std::io::{Read as _, Seek, SeekFrom, Write};
 
 use crate::error::Result;
 use crate::plane::{resolve_run, LogRequest};
@@ -100,8 +100,15 @@ pub async fn run(args: crate::LogsArgs) -> Result<()> {
             }
         };
         let total = meta.len();
-        let bytes = std::fs::read(&path)?;
-        let preview = trailing_char_preview(&bytes);
+        let start = total.saturating_sub(PREVIEW_SUFFIX_BYTES as u64);
+        let to_read = (total - start) as usize;
+        let mut suffix = vec![0u8; to_read];
+        if to_read > 0 {
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(&mut suffix)?;
+        }
+        let preview = trailing_char_preview(&suffix);
         return print_compact_summary(&path, total, &preview);
     }
 
