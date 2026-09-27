@@ -77,28 +77,72 @@ pub fn managed_ssh_config_path() -> PathBuf {
 }
 
 #[cfg(unix)]
-fn render_managed_host_entry(host: &str, socket_path: &Path) -> String {
-    format!(
-        "Host {host}\n  ControlMaster auto\n  ControlPath {}\n",
-        socket_path.display()
-    )
+fn target_details(target: &SshTarget) -> (String, Option<String>, Option<u16>) {
+    let (dest_user, dest_host) = match target.dest.split_once('@') {
+        Some((u, h)) => (Some(u.to_string()), h),
+        None => (None, target.dest.as_str()),
+    };
+
+    let (host, dest_port) = match dest_host.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') => (h.to_string(), p.parse::<u16>().ok()),
+        _ => (dest_host.to_string(), None),
+    };
+
+    let opt_port = target.extra_opts.windows(2).find_map(|w| {
+        if w[0] == "-p" {
+            w[1].parse::<u16>().ok()
+        } else {
+            None
+        }
+    });
+
+    let port = opt_port.or(dest_port);
+    (host, dest_user, port)
 }
 
 #[cfg(unix)]
-pub(crate) fn upsert_managed_host_entry(content: &str, host: &str, socket_path: &Path) -> String {
+fn render_managed_host_entry(
+    host: &str,
+    user: Option<&str>,
+    port: Option<u16>,
+    socket_path: &Path,
+) -> String {
+    let mut out = format!("Host {host}\n");
+    if let Some(user) = user {
+        out.push_str(&format!("  User {user}\n"));
+    }
+    if let Some(port) = port {
+        out.push_str(&format!("  Port {port}\n"));
+    }
+    out.push_str(&format!(
+        "  ControlMaster auto\n  ControlPath {}\n",
+        socket_path.display()
+    ));
+    out
+}
+
+#[cfg(unix)]
+pub(crate) fn upsert_managed_host_entry(
+    content: &str,
+    target: &SshTarget,
+    socket_path: &Path,
+) -> String {
+    let (host, user, port) = target_details(target);
     let mut entries: Vec<(String, String)> = Vec::new();
     let mut current_host: Option<String> = None;
     let mut current_body = Vec::new();
 
     for line in content.lines() {
         let trimmed = line.trim();
+        if trimmed == "Match all" {
+            continue;
+        }
         if let Some(host_name) = trimmed.strip_prefix("Host ") {
             if let Some(h) = current_host.take() {
                 entries.push((h, current_body.join("\n")));
                 current_body.clear();
             }
-            let h = host_name.trim().to_string();
-            current_host = Some(h);
+            current_host = Some(host_name.trim().to_string());
         } else if current_host.is_some() {
             current_body.push(line);
         }
@@ -113,7 +157,12 @@ pub(crate) fn upsert_managed_host_entry(content: &str, host: &str, socket_path: 
 
     for (h, body) in entries {
         if h == host {
-            out.push_str(&render_managed_host_entry(host, socket_path));
+            out.push_str(&render_managed_host_entry(
+                &host,
+                user.as_deref(),
+                port,
+                socket_path,
+            ));
             out.push('\n');
             found = true;
         } else {
@@ -122,10 +171,46 @@ pub(crate) fn upsert_managed_host_entry(content: &str, host: &str, socket_path: 
     }
 
     if !found {
-        out.push_str(&render_managed_host_entry(host, socket_path));
+        out.push_str(&render_managed_host_entry(
+            &host,
+            user.as_deref(),
+            port,
+            socket_path,
+        ));
+        out.push('\n');
     }
 
+    out.push_str("Match all\n");
     out
+}
+
+#[cfg(unix)]
+fn is_matching_include(target: &str, managed_path: &Path) -> bool {
+    let target = target.trim().trim_matches('"').trim_matches('\'');
+    if target == managed_path.to_string_lossy() {
+        return true;
+    }
+    if let Some(home) = dirs::home_dir() {
+        if let Some(stripped) = target.strip_prefix("~/") {
+            if home.join(stripped) == managed_path {
+                return true;
+            }
+        }
+        if let Ok(rel) = managed_path.strip_prefix(&home) {
+            if target == format!("~/{}", rel.display()) {
+                return true;
+            }
+        }
+    }
+    if let (Ok(target_canon), Ok(managed_canon)) = (
+        std::fs::canonicalize(target),
+        std::fs::canonicalize(managed_path),
+    ) {
+        if target_canon == managed_canon {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(unix)]
@@ -150,43 +235,83 @@ pub(crate) fn ensure_ssh_config_include_in(
         Err(e) => return Err(anyhow!("Could not read SSH config: {e}")),
     };
 
-    let managed_str = managed_path.to_string_lossy();
-    let managed_name = managed_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let target_spec = include_line.strip_prefix("Include ").unwrap_or("").trim();
-
     for line in current.lines() {
         let trimmed = line.trim();
-        if let Some(target) = trimmed.strip_prefix("Include ") {
-            let target = target.trim();
-            if target == target_spec
-                || (!managed_str.is_empty() && target.contains(&*managed_str))
-                || (target.contains("openresearch") && target.contains("ssh_config"))
-                || (!managed_name.is_empty() && target.ends_with(&managed_name))
-            {
+        let stripped = trimmed
+            .strip_prefix("Include ")
+            .or_else(|| trimmed.strip_prefix("include "));
+        if let Some(target) = stripped {
+            if is_matching_include(target, managed_path) {
                 return Ok(false);
             }
         }
     }
 
-    let updated = if current.trim().is_empty() {
-        format!("{include_line}\n")
-    } else {
-        format!("{include_line}\n\n{current}")
+    let lines: Vec<&str> = current.lines().collect();
+    let first_section_idx = lines.iter().position(|l| {
+        let t = l.trim_start();
+        t.starts_with("Host ")
+            || t.starts_with("host ")
+            || t.starts_with("Match ")
+            || t.starts_with("match ")
+    });
+
+    let updated = match first_section_idx {
+        Some(idx) => {
+            let mut buf = String::new();
+            for &l in &lines[..idx] {
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            if !buf.is_empty() && !buf.ends_with("\n\n") {
+                buf.push('\n');
+            }
+            buf.push_str(&include_line);
+            buf.push_str("\n\n");
+            for &l in &lines[idx..] {
+                buf.push_str(l);
+                buf.push('\n');
+            }
+            buf
+        }
+        None => {
+            if current.trim().is_empty() {
+                format!("{include_line}\n")
+            } else {
+                format!("{}\n\n{include_line}\n", current.trim_end())
+            }
+        }
     };
 
-    if let Some(parent) = user_config_path.parent() {
+    let write_path = if let Ok(real_path) = std::fs::canonicalize(user_config_path) {
+        real_path
+    } else if user_config_path.is_symlink() {
+        if let Ok(target) = std::fs::read_link(user_config_path) {
+            if target.is_relative() {
+                user_config_path
+                    .parent()
+                    .unwrap_or(Path::new(""))
+                    .join(target)
+            } else {
+                target
+            }
+        } else {
+            user_config_path.to_path_buf()
+        }
+    } else {
+        user_config_path.to_path_buf()
+    };
+
+    if let Some(parent) = write_path.parent() {
         let existed = parent.exists();
-        std::fs::create_dir_all(parent)?;
         if !existed {
+            std::fs::create_dir_all(parent)?;
             use std::os::unix::fs::PermissionsExt as _;
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
     }
 
-    crate::local::git::atomic_write_with_mode(user_config_path, updated.as_bytes(), Some(0o600))?;
+    crate::local::git::atomic_write_with_mode(&write_path, updated.as_bytes(), Some(0o600))?;
     Ok(true)
 }
 
@@ -202,6 +327,10 @@ pub(crate) fn ensure_ssh_config_include() -> Result<bool> {
 /// Syncs the target's control socket to the managed SSH config.
 #[cfg(unix)]
 pub(crate) fn sync_managed_ssh_host(target: &SshTarget) -> Result<()> {
+    let lock_path = crate::config::config_dir().join("managed_ssh_config.lock");
+    let mut lock = crate::store::open_lifecycle_lock_at(&lock_path)?;
+    let _guard = lock.write()?;
+
     let managed_path = managed_ssh_config_path();
     if let Some(parent) = managed_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -214,9 +343,11 @@ pub(crate) fn sync_managed_ssh_host(target: &SshTarget) -> Result<()> {
         Err(e) => return Err(anyhow!("Could not read managed SSH config: {e}")),
     };
 
-    let updated = upsert_managed_host_entry(&current, &target.dest, &sock);
+    let updated = upsert_managed_host_entry(&current, target, &sock);
     crate::local::git::atomic_write_with_mode(&managed_path, updated.as_bytes(), Some(0o600))?;
-    let _ = ensure_ssh_config_include();
+    if let Err(e) = ensure_ssh_config_include() {
+        eprintln!("orx: warning: could not update SSH config include: {e}");
+    }
     Ok(())
 }
 
@@ -416,9 +547,6 @@ pub(crate) fn forward_args(
     remote_cmd: &str,
 ) -> Result<Vec<String>> {
     prepare_control_dir()?;
-    if !cfg!(test) {
-        let _ = sync_managed_ssh_host(target);
-    }
     let mut args = ssh_opts(target, true);
     for option in [
         "ExitOnForwardFailure=yes",
@@ -446,9 +574,6 @@ pub(crate) fn forward_args(
 /// master, so this only proves the host reachable and primes nothing.
 pub(crate) fn interactive_args(target: &SshTarget) -> Result<Vec<String>> {
     prepare_control_dir()?;
-    if !cfg!(test) {
-        let _ = sync_managed_ssh_host(target);
-    }
     let mut args = ssh_opts(target, false);
     args.extend(["--".into(), target.dest.clone(), "true".into()]);
     Ok(args)
@@ -1174,20 +1299,37 @@ mod tests {
         let sock2 = Path::new("/tmp/sock2");
         let sock1_updated = Path::new("/tmp/sock1_updated");
 
-        let out = upsert_managed_host_entry("", "node1", sock1);
+        let target1 = SshTarget::alias("node1");
+        let target2 = SshTarget::alias("node2");
+
+        let out = upsert_managed_host_entry("", &target1, sock1);
         assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
         assert!(out.starts_with("# Managed automatically by OpenResearch (orx)"));
+        assert!(out.ends_with("Match all\n"));
 
-        let out = upsert_managed_host_entry(&out, "node2", sock2);
+        let out = upsert_managed_host_entry(&out, &target2, sock2);
         assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
         assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(out.ends_with("Match all\n"));
 
-        let out = upsert_managed_host_entry(&out, "node1", sock1_updated);
+        let out = upsert_managed_host_entry(&out, &target1, sock1_updated);
         assert!(
             out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n")
         );
         assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
         assert!(!out.contains("/tmp/sock1\n"));
+        assert!(out.ends_with("Match all\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_managed_host_entry_handles_user_and_port() {
+        let sock = Path::new("/tmp/sock1");
+        let target =
+            SshTarget::host_port("root@ssh3.vast.ai".into(), 22022, HostKeyPolicy::UserConfig);
+        let out = upsert_managed_host_entry("", &target, sock);
+        assert!(out.contains("Host ssh3.vast.ai\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.ends_with("Match all\n"));
     }
 
     #[cfg(unix)]
@@ -1211,7 +1353,7 @@ mod tests {
         let content2 = std::fs::read_to_string(&user_ssh).unwrap();
         assert_eq!(content, content2);
 
-        // 3. Existing config without Include: prepends Include
+        // 3. Existing config without Include: inserts Include before Host
         let user_ssh2 = temp_dir.join("config2");
         std::fs::write(&user_ssh2, "Host foo\n  HostName 1.2.3.4\n").unwrap();
         let added = ensure_ssh_config_include_in(&user_ssh2, &managed).unwrap();
@@ -1219,6 +1361,86 @@ mod tests {
         let content3 = std::fs::read_to_string(&user_ssh2).unwrap();
         assert!(content3.starts_with("Include "));
         assert!(content3.contains("Host foo\n  HostName 1.2.3.4\n"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_ssh_config_include_does_not_false_positive_on_other_includes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-include-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let user_ssh = temp_dir.join("config");
+        let managed = temp_dir.join("managed_ssh_config");
+
+        // Existing config contains unrelated /etc/ssh/ssh_config
+        std::fs::write(
+            &user_ssh,
+            "Include /etc/ssh/ssh_config\nHost foo\n  HostName 1.2.3.4\n",
+        )
+        .unwrap();
+        let added = ensure_ssh_config_include_in(&user_ssh, &managed).unwrap();
+        assert!(added);
+
+        let content = std::fs::read_to_string(&user_ssh).unwrap();
+        assert!(content.contains(&format!("Include {}", managed.display())));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_ssh_config_include_preserves_global_settings_before_hosts() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-include-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let user_ssh = temp_dir.join("config");
+        let managed = temp_dir.join("managed_config");
+
+        std::fs::write(
+            &user_ssh,
+            "ServerAliveInterval 30\n\nHost foo\n  HostName 1.2.3.4\n",
+        )
+        .unwrap();
+        ensure_ssh_config_include_in(&user_ssh, &managed).unwrap();
+
+        let content = std::fs::read_to_string(&user_ssh).unwrap();
+        let global_pos = content.find("ServerAliveInterval 30").unwrap();
+        let include_pos = content.find("Include ").unwrap();
+        let host_pos = content.find("Host foo").unwrap();
+
+        assert!(
+            global_pos < include_pos,
+            "Global settings must remain before Include"
+        );
+        assert!(
+            include_pos < host_pos,
+            "Include must appear before Host definitions"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_ssh_config_include_supports_symlink() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-include-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let real_config = temp_dir.join("real_config");
+        let symlink_config = temp_dir.join("symlink_config");
+        let managed = temp_dir.join("managed_config");
+
+        std::fs::write(&real_config, "Host bar\n  HostName 5.6.7.8\n").unwrap();
+        std::os::unix::fs::symlink(&real_config, &symlink_config).unwrap();
+
+        let added = ensure_ssh_config_include_in(&symlink_config, &managed).unwrap();
+        assert!(added);
+        assert!(symlink_config.is_symlink());
+
+        let content = std::fs::read_to_string(&real_config).unwrap();
+        assert!(content.contains(&format!("Include {}", managed.display())));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
