@@ -39,7 +39,7 @@ pub struct Org {
 /// enum because serde's tagged enums can't key on a bool discriminator, and an
 /// untagged enum would not apply the container's `camelCase` rename to variant
 /// fields. The unused payload is simply `None`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Disk {
     pub sizable: bool,
@@ -48,7 +48,7 @@ pub struct Disk {
 }
 
 /// A single GPU offer from the compute catalog (`GET /compute/catalog`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GpuOffer {
     pub provider: String,
@@ -71,7 +71,7 @@ pub struct ListCatalog {
 
 /// A single CPU-only offer from the CPU catalog (`GET /compute/catalog/cpu`).
 /// Sibling to [`GpuOffer`]; CPU instances live in their own RunPod-only catalog.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuOffer {
     pub provider: String,

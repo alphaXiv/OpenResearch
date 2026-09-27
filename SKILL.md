@@ -24,8 +24,8 @@ expands on the why; these are the non-negotiables.
    a run establishes its baseline or tests its hypothesis — that includes the
    root — and freezing is permanent: a disappointing result is still a result.
    Until then it is **provisional**: seeding it, fixing its deps, and making it
-   run all happen on its own branch (`orx-experiment-tree`). To try an idea,
-   branch a **child** and edit the child.
+   run all happen on its own branch (`orx-experiment-tree`). To test a new
+   hypothesis, branch a **child** and edit the child.
 2. **The run command *and* the environment are a fixed contract — identical on
    every node.** A child inherits its parent's run command verbatim; leave it
    alone. Do **not** give nodes different start commands, and do **not** vary
@@ -90,6 +90,9 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 | `orx up` | Open the local dashboard to import or create a local project. |
 | `orx project edit <localProjectId> [--name "<n>"] [--run-command "<cmd>"]` | Edit a local project's name or fixed run command. |
 | `orx create-experiment <localProjectId> --title "<t>" [...]` | Add a local experiment node; prints its Git branch. |
+| `orx compute status` / `show <backend>` / `test <backend>` | Inspect machine-wide compute configuration and readiness. |
+| `orx compute configure <backend> --help` / `default set <backend>` / `connect <backend>` | Configure compute or authenticate; load `orx-compute`. |
+| `orx compute instructions show --json` | Read the machine-wide custom recipe and its revision before configuring or launching. |
 | `orx compute [--gpu <id>] [--count <n>] [--provider <name>]` / `orx compute --cpu` | List the GPU/CPU compute catalog. |
 | `orx instance create <orgId> (--gpu <id> … \| --cpu <flavor> …)` | Spin up a standalone instance in an org; see `orx-instances`. |
 | `orx exp status/run/cancel/wait/wake <localExpId>` | Inspect, run, cancel, wait on, or register a wake-up for a local experiment node. |

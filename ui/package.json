@@ -25,6 +25,7 @@
     "@xyflow/react": "^12.6.0",
     "katex": "^0.16.22",
     "lucide-react": "^1.23.0",
+    "pdfjs-dist": "6.3.289",
     "react": "^19.1.0",
     "react-diff-view": "^3.3.3",
     "react-dom": "^19.1.0",

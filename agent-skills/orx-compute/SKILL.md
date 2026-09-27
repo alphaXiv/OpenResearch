@@ -16,6 +16,34 @@ orx exp run <expId>                    # launch on the configured default
 orx exp cancel <expId>                 # cancel the in-flight run
 ```
 
+## Inspect configuration and custom instructions first
+
+Before configuring compute or constructing a launch command:
+
+```sh
+orx compute status --json
+orx compute instructions show --json
+```
+
+`instructions show` returns the machine-wide `CUSTOM.md` content, absolute path,
+and revision. Missing or blank content means there are no custom instructions.
+Read the section for the selected backend/host, then its backend guide below.
+For configuration, connection tests, login, or instruction updates, read
+[references/configuration.md](references/configuration.md)
+(`orx skill compute/configuration` is the fallback).
+
+Usually leave `CUSTOM.md` empty. Add verified, consistently repeated bespoke
+compute instructions only when standard CLI settings and committed project
+scripts cannot express the workflow and the agent truly needs extra steps.
+Keep any such guidance short: working commands, environment paths, cluster
+constraints, and documentation links.
+Use `orx compute instructions set --file - --expected-revision <revision from show>`;
+never write the file directly with file-edit tools or shell redirects.
+Preserve the user's guidance; replace obsolete steps instead of appending run
+logs. Never store credentials or invent cluster commands. Read linked cluster
+instructions before using unfamiliar scheduler options. Instructions do not
+change the configured backend or authorize bypassing the launch contract.
+
 ## Universal launch contract
 
 - **Launch all experiment compute with `orx exp run`.** Never invoke provider

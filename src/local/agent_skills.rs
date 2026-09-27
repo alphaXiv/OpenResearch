@@ -57,6 +57,10 @@ pub enum SkillSet {
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "references/configuration.md",
+        content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
+    },
+    AgentSkillResource {
         path: "references/hf.md",
         content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
     },
