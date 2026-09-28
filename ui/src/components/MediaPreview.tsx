@@ -1,7 +1,19 @@
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useContext, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import type { FilePresentation } from "../api";
+import { MediaDownloadButton, MediaToolbarSlot } from "./mediaToolbar";
+import { Spinner } from "./ui";
+
+// PDF.js is large, so it loads with the first PDF rather than the dashboard. A
+// tab left open across an update asks for a chunk the new build doesn't have.
+const PdfPreview = lazy(() =>
+  import("./PdfPreview").catch((error: unknown) => {
+    console.error("PDF viewer failed to load", error);
+    return { default: DownloadFallback };
+  }),
+);
 
 export type MediaPreviewKind = Exclude<FilePresentation, "text" | "unknown" | "download">;
 
@@ -32,16 +44,16 @@ export function MediaPreview({
   kind,
   url,
   name,
-  downloadBar = true,
+  download = true,
 }: {
   kind: MediaPreviewKind;
   url: string;
   name: string;
-  /** The footer download strip. Off where the surrounding view offers its own
-   * download control and the preview should fill the pane. */
-  downloadBar?: boolean;
+  /** Off where the surrounding view already offers its own download control. */
+  download?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
+  const toolbarSlot = useContext(MediaToolbarSlot);
 
   useEffect(() => setFailed(false), [kind, url]);
 
@@ -82,26 +94,24 @@ export function MediaPreview({
     );
   } else {
     preview = (
-      <object
-        className="fpreview-pdf block min-h-0 flex-1 w-full border-0"
-        aria-label={name}
-        data={url}
-        type="application/pdf"
-        onError={() => setFailed(true)}
+      <Suspense
+        fallback={
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <Spinner />
+          </div>
+        }
       >
-        <DownloadFallback url={url} name={name} />
-      </object>
+        <PdfPreview key={url} url={url} name={name} download={download} onError={() => setFailed(true)} />
+      </Suspense>
     );
   }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       {preview}
-      {downloadBar && (
-        <div className="shrink-0 border-t border-border-variant py-1.5 px-3 text-end text-sm">
-          <a href={url} download={name}>{m.media_preview_download()} {name}</a>
-        </div>
-      )}
+      {/* PdfPreview renders its own so the button stays after its lazily mounted controls. */}
+      {download && kind !== "pdf" && toolbarSlot &&
+        createPortal(<MediaDownloadButton url={url} name={name} />, toolbarSlot)}
     </div>
   );
 }

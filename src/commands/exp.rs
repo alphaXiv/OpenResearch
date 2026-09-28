@@ -18,10 +18,10 @@ use crate::ExpCommand;
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
     let store = Store::open()?;
     match args.command {
-        ExpCommand::Status { exp_id } => {
+        ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
-                .experiment_status()
+                .experiment_status(scheduler)
                 .await
         }
         ExpCommand::Desc { exp_id, set, stdin } => {

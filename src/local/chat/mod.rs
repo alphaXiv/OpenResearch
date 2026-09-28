@@ -7698,7 +7698,7 @@ fn run_wakeup_text(run: &crate::store::StoredRun) -> Option<String> {
     matches!(run.status.as_str(), "done" | "failed").then(|| {
         format!(
             "[orx] Run `{}` finished with status **{}**. You can compare this result with other \
-             project runs using `orx runs {}` and inspect this run's logs using `orx logs {}`.",
+             project runs using `orx runs {}` and inspect the file located by `orx logs {}`.",
             run.id, run.status, run.project_id, run.id
         )
     })
@@ -9824,14 +9824,14 @@ mod run_wakeup_tests {
             run_wakeup_text(&run("done")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **done**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`."
+with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
             )
         );
         assert_eq!(
             run_wakeup_text(&run("failed")).as_deref(),
             Some(
                 "[orx] Run `run_x` finished with status **failed**. You can compare this result \
-with other project runs using `orx runs p1` and inspect this run's logs using `orx logs run_x`."
+with other project runs using `orx runs p1` and inspect the file located by `orx logs run_x`."
             )
         );
         assert!(run_wakeup_text(&run("cancelled")).is_none());

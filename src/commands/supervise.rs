@@ -1073,14 +1073,13 @@ fn cancel_local(dir: &std::path::Path, run_id: &str, cancel_sent: &mut bool) {
 // The ssh loop with a scheduler: state comes from the run dir's exit_code file
 // first, then squeue/sacct; cancel is `scancel`. Logs reuse `tail_logs_ssh` —
 // Slurm appends the job's output to the same `<run dir>/log` file the ssh
-// backend uses. A scancel'd job leaves the queue without an exit_code, which
-// inspect reports as CANCELED (or ERROR via the GONE fallback) — either way,
-// once cancel is sent the terminal state maps to `cancelled`.
+// backend uses. Accepted cancellation also finishes when the controller
+// confirms the job is absent, even without accounting or an exit_code.
 
 async fn run_slurm(
     store: Store,
     stored: crate::store::StoredRun,
-    descriptor: BackendDescriptor,
+    mut descriptor: BackendDescriptor,
     run_id: String,
 ) -> Result<()> {
     let (host, job_id) = descriptor.slurm_ref()?;
@@ -1101,38 +1100,40 @@ async fn run_slurm(
     ));
 
     let mut last_status = status_of(&stored)?;
-    let mut cancel_sent = false;
-    // "GONE" (scheduler doesn't know the job, no exit_code) must persist for
-    // a full minute before it's believed: it also fires during slurmctld
-    // restarts and while the exit_code write is NFS-lagged behind the compute
-    // node. Any other observation resets the count.
-    const GONE_POLLS_TO_FAIL: u32 = (60 / POLL_INTERVAL.as_secs()) as u32;
-    let mut gone_polls = 0u32;
+    let mut cancel_sent = descriptor.cancellation_accepted;
 
     loop {
-        let mut job = match slurm::inspect_job(&host, &run_id, &job_id).await {
-            Ok(j) => j,
-            Err(err) => {
-                eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-        };
-        if job.stage == "GONE" {
-            gone_polls += 1;
-            if gone_polls < GONE_POLLS_TO_FAIL {
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-            job = slurm::JobState {
-                stage: "ERROR".to_string(),
-                message: Some(
-                    "job left the queue without an exit code (killed or node lost?)".to_string(),
-                ),
-            };
-        } else {
-            gone_polls = 0;
+        if !cancel_sent && local_cancel_requested(&store, &run_id) {
+            cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
         }
+        let mut observed = slurm::inspect_job(&host, &run_id, &job_id).await;
+        if let Ok(job) = &mut observed {
+            if cancel_sent && job.stage == "GONE" {
+                job.stage = "CANCELED".into();
+            }
+        }
+        let error = match &observed {
+            Err(err) => Some(format!("Monitoring unavailable: {err}. Reconnect with orx compute connect slurm --host {}. The job has not been declared stopped.", ssh::sh_quote(&host))),
+            Ok(job) if matches!(job.stage.as_str(), "GONE" | "UNAVAILABLE") => Some("Monitoring unavailable: no exit status or scheduler record. Check cluster/accounting availability; the job has not been declared stopped.".into()),
+            _ => None,
+        };
+        if error != descriptor.monitoring_error || cancel_sent != descriptor.cancellation_accepted {
+            if let Some(error) = &error {
+                eprintln!("supervise {run_id}: {error}");
+            }
+            let mut updated = descriptor.clone();
+            updated.monitoring_error = error.clone();
+            updated.cancellation_accepted = cancel_sent;
+            match store.set_backend_json(&run_id, &updated.to_json()) {
+                Ok(()) => descriptor = updated,
+                Err(err) => eprintln!("supervise {run_id}: could not save monitoring state: {err}"),
+            }
+        }
+        if error.is_some() {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+        let job = observed?;
         let stage = job.stage.as_str();
         let status = run_status_for_stage(&store, &run_id, cancel_sent, stage);
 
@@ -1159,14 +1160,8 @@ async fn run_slurm(
         }
 
         if status != last_status && store.update_status(&run_id, status, None, None)? {
-            let cancel_requested = local_cancel_requested(&store, &run_id);
             eprintln!("supervise {run_id}: {last_status} -> {status} (stage {stage})");
             last_status = status;
-            if cancel_requested && !cancel_sent {
-                cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
-            }
-        } else if !cancel_sent && local_cancel_requested(&store, &run_id) {
-            cancel_slurm(&host, &job_id, &run_id, &mut cancel_sent).await;
         }
 
         tokio::time::sleep(POLL_INTERVAL).await;

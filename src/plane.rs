@@ -42,38 +42,6 @@ impl Run {
     }
 }
 
-pub struct RunLog {
-    pub content: Vec<u8>,
-    pub start_byte: i64,
-    pub end_byte: i64,
-    pub total_bytes: i64,
-    pub source: String,
-    pub truncated_before: bool,
-    pub truncated_after: bool,
-    pub missing_local: bool,
-}
-
-impl RunLog {
-    pub fn footer(&self) -> String {
-        let mut more = Vec::new();
-        if self.truncated_before {
-            more.push("more above");
-        }
-        if self.truncated_after {
-            more.push("more below");
-        }
-        let suffix = if more.is_empty() {
-            String::new()
-        } else {
-            format!(" ({})", more.join(", "))
-        };
-        format!(
-            "[{}] bytes {}–{} of {}{}",
-            self.source, self.start_byte, self.end_byte, self.total_bytes, suffix
-        )
-    }
-}
-
 pub enum DescInput {
     Set(String),
     Get,
@@ -103,13 +71,6 @@ pub struct ProjectEdit {
 pub struct RunListing {
     pub runs: Vec<Run>,
     pub titles: std::collections::HashMap<String, String>,
-}
-
-pub struct LogRequest {
-    pub mode: String,
-    pub max_bytes: Option<i64>,
-    pub start_byte: Option<i64>,
-    pub end_byte: Option<i64>,
 }
 
 pub struct CreateExperimentSpec {
