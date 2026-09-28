@@ -76,6 +76,13 @@ pub fn managed_ssh_config_path() -> PathBuf {
     crate::config::config_dir().join("ssh_config")
 }
 
+/// Extracts the hostname, optional user, and optional port from an [`SshTarget`].
+///
+/// OpenSSH `Host` stanzas match against the hostname argument provided on the CLI
+/// without any `user@` prefix. Therefore, we split user from host and emit `User` as
+/// an inner directive in the managed host block. We also parse any explicit port
+/// (`-p <port>` in `extra_opts` or `:port` in destination) so that commands connecting
+/// to an alias on a custom port attach only to the matching master socket.
 #[cfg(unix)]
 fn target_details(target: &SshTarget) -> (String, Option<String>, Option<u16>) {
     let (dest_user, dest_host) = match target.dest.split_once('@') {
@@ -100,6 +107,8 @@ fn target_details(target: &SshTarget) -> (String, Option<String>, Option<u16>) {
     (host, dest_user, port)
 }
 
+/// Renders an OpenSSH `Host` stanza configuring `ControlMaster auto` and `ControlPath`
+/// pointing to `orx`'s active session socket.
 #[cfg(unix)]
 fn render_managed_host_entry(
     host: &str,
@@ -121,6 +130,11 @@ fn render_managed_host_entry(
     out
 }
 
+/// Updates or inserts a managed `Host` entry in the `orx`-managed SSH config.
+///
+/// Preserves any other host blocks present in the config. The rendered configuration
+/// always ends with `Match all` to prevent directives in parent configs that include
+/// this file from leaking into the last `Host` block on OpenSSH versions prior to 8.4.
 #[cfg(unix)]
 pub(crate) fn upsert_managed_host_entry(
     content: &str,
@@ -184,6 +198,12 @@ pub(crate) fn upsert_managed_host_entry(
     out
 }
 
+/// Checks whether an `Include` target in the user's SSH config points to the
+/// `orx` managed SSH config.
+///
+/// Matches exact paths, tilde-prefixed paths (`~/.config/...`), and canonicalized
+/// paths to avoid false positives on unrelated files with similar basenames
+/// (e.g., `/etc/ssh/ssh_config`).
 #[cfg(unix)]
 fn is_matching_include(target: &str, managed_path: &Path) -> bool {
     let target = target.trim().trim_matches('"').trim_matches('\'');
@@ -213,6 +233,15 @@ fn is_matching_include(target: &str, managed_path: &Path) -> bool {
     false
 }
 
+/// Ensures that `user_config_path` contains an `Include` directive for `managed_path`.
+///
+/// To preserve global SSH configuration settings (e.g., options specified before any
+/// `Host` or `Match` blocks), the `Include` line is inserted immediately before the
+/// first `Host` or `Match` section, rather than at the very top of the file. If no
+/// sections exist, it is appended.
+///
+/// If `user_config_path` is a symlink (common for managed dotfiles), the real canonical
+/// destination is written to directly so the symlink remains intact and atomic writes succeed.
 #[cfg(unix)]
 pub(crate) fn ensure_ssh_config_include_in(
     user_config_path: &Path,
@@ -325,6 +354,9 @@ pub(crate) fn ensure_ssh_config_include() -> Result<bool> {
 }
 
 /// Syncs the target's control socket to the managed SSH config.
+///
+/// Serializes concurrent syncs using an exclusive lockfile (`managed_ssh_config.lock`)
+/// to prevent race conditions when multiple `orx` sessions initialize hosts in parallel.
 #[cfg(unix)]
 pub(crate) fn sync_managed_ssh_host(target: &SshTarget) -> Result<()> {
     let lock_path = crate::config::config_dir().join("managed_ssh_config.lock");
@@ -1334,7 +1366,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn ensure_ssh_config_include_in_prepends_and_is_idempotent() {
+    fn ensure_ssh_config_include_in_inserts_and_is_idempotent() {
         let temp_dir =
             std::env::temp_dir().join(format!("orx-ssh-include-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_dir).unwrap();
