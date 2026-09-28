@@ -1484,6 +1484,11 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
+/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
+export const reportLocale = (locale: string): void => {
+  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
+};
+
 export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
 export interface HarnessModel {

@@ -81,14 +81,14 @@ enum Command {
     /// List a project's runs.
     Runs(RunsArgs),
 
-    /// Read a run's terminal log (tail by default).
+    /// Show a run's compact log summary (path, size, and preview) by default.
     Logs(LogsArgs),
 
     /// Add an experiment node to a local `orx up` project.
     #[command(name = "create-experiment")]
     CreateExperiment(CreateExperimentArgs),
 
-    /// List the GPU compute catalog.
+    /// Configure compute backends, test connections, and browse offers.
     Compute(ComputeArgs),
 
     /// Spin up standalone compute in an organization (no experiment).
@@ -241,15 +241,6 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
-    /// Read from the start instead of the tail.
-    #[arg(long)]
-    pub head: bool,
-    /// Max bytes to read.
-    #[arg(long)]
-    pub bytes: Option<String>,
-    /// Exact byte window `<start>:<end>`.
-    #[arg(long)]
-    pub range: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -277,19 +268,13 @@ pub struct CreateExperimentArgs {
 
 #[derive(Args, Debug)]
 pub struct ComputeArgs {
-    /// List CPU-only instance offers instead of the GPU catalog. CPU instances
-    /// suit GPU-less experiments (data prep, eval harnesses, CPU-bound papers).
-    #[arg(long)]
-    pub cpu: bool,
-    /// Filter to one GPU id (e.g. `H100_SXM`). Case-insensitive. GPU mode only.
-    #[arg(long)]
-    pub gpu: Option<String>,
-    /// Filter to a specific GPU count per instance. GPU mode only.
-    #[arg(long)]
-    pub count: Option<i64>,
-    /// Filter to one provider (e.g. `runpod`, `vast`, `lambda`). Case-insensitive. GPU mode only.
-    #[arg(long)]
-    pub provider: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<commands::compute::ComputeCommand>,
+    /// Machine-readable output.
+    #[arg(long, global = true)]
+    pub json: bool,
+    #[command(flatten)]
+    pub catalog: commands::compute::CatalogArgs,
 }
 
 #[derive(Args, Debug)]
@@ -412,7 +397,12 @@ pub struct ExpArgs {
 #[derive(Subcommand, Debug)]
 pub enum ExpCommand {
     /// Show the experiment's status, run command, and latest run.
-    Status { exp_id: String },
+    Status {
+        exp_id: String,
+        /// Query live Slurm accounting in addition to locally stored status.
+        #[arg(long)]
+        scheduler: bool,
+    },
 
     /// View the experiment's description/notes, or overwrite it with `--set` / `--stdin`.
     Desc {

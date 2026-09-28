@@ -124,6 +124,8 @@ pub async fn submit_local_ray_with_source(
 
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: "ray_job".to_string(),
         namespace: Some(address.clone()),
         job_id: Some(submission_id.clone()),

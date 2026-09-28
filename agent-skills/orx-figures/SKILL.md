@@ -26,9 +26,10 @@ gets remade the week before the deadline.
    under the zoom every reviewer uses. PNG is correct only for genuinely
    raster content: a photograph, a sample image grid, an attention map at
    pixel resolution.
-3. **Every number comes from a run.** Read metrics with `orx logs` (see the
-   `orx-evidence` module). Never plot a remembered, rounded, or plausible
-   number, and never leave synthetic demo data in a script that ships.
+3. **Every number comes from a run.** Read metrics from the file located by
+   `orx logs` (see the `orx-evidence` module). Never plot a remembered,
+   rounded, or plausible number, and never leave synthetic demo data in a
+   script that ships.
 4. **The caption is the title.** No `ax.set_title` on a paper figure — a title
    duplicates the caption and steals vertical space. Panel letters (**a**,
    **b**) are how you name parts of a multi-panel figure.
