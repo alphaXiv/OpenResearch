@@ -99,8 +99,33 @@ fn login_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
             "mcode login --region global",
             vec!["login".into(), "--region".into(), "global".into()],
         )),
+        // ZCode's own browser launch cuts the URL at its first `&` on Windows
+        // (`cmd /c start`), so orx opens the printed URL itself.
+        "zcode" => Some(("zcode login", vec!["login".into(), "--no-browser".into()])),
         _ => None,
     }
+}
+
+/// Whether `action` has a command for `harness`. ZCode ships inside its
+/// desktop app, so it has a login but no install or update command.
+fn has_command(harness: &str, action: Action) -> bool {
+    match action {
+        Action::Install => install_command(harness, cfg!(windows)).is_some(),
+        Action::Login => login_command(harness).is_some(),
+        Action::Update => update_command(harness).is_some(),
+    }
+}
+
+/// The sign-in URL `zcode login --no-browser` prints after "Open this URL".
+fn zcode_login_url(output: &str) -> Option<&str> {
+    let (_, rest) = output.split_once("Open this URL")?;
+    let start = rest.find("https://")?;
+    let url = &rest[start..];
+    Some(
+        &url[..url
+            .find(|c: char| c.is_whitespace() || c == '\u{1b}')
+            .unwrap_or(url.len())],
+    )
 }
 
 fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
@@ -119,28 +144,28 @@ fn update_command(harness: &str) -> Option<(&'static str, Vec<String>)> {
 pub(super) async fn commands() -> Json<Value> {
     let mut result = serde_json::Map::new();
     for harness in crate::telemetry::harness::IDS {
-        if let (Some(install), Some((login, _)), Some((update, _))) = (
-            install_command(harness, cfg!(windows)),
-            login_command(harness),
-            update_command(harness),
-        ) {
-            result.insert(
-                harness.into(),
-                json!({
-                    "install": install,
-                    // The vendor bootstrap URL, so the UI can recognise an
-                    // install note that quotes the one-liner form of it. Unix
-                    // only: on Windows `install` is the PowerShell form, so a
-                    // note quoting this URL would run a different command.
-                    "installUrl": (!cfg!(windows))
-                        .then(|| unix_bootstrap(harness).map(|(url, _)| url))
-                        .flatten(),
-                    "login": login,
-                    "update": update,
-                    "requiresNpm": cfg!(windows) && install.starts_with("npm "),
-                }),
-            );
-        }
+        let Some((login, _)) = login_command(harness) else {
+            continue;
+        };
+        let install = install_command(harness, cfg!(windows));
+        result.insert(
+            harness.into(),
+            json!({
+                // Absent for an agent orx cannot install or update (ZCode).
+                "install": install,
+                // The vendor bootstrap URL, so the UI can recognise an
+                // install note that quotes the one-liner form of it. Unix
+                // only: on Windows `install` is the PowerShell form, so a
+                // note quoting this URL would run a different command.
+                "installUrl": (!cfg!(windows))
+                    .then(|| unix_bootstrap(harness).map(|(url, _)| url))
+                    .flatten(),
+                "login": login,
+                "update": update_command(harness).map(|(update, _)| update),
+                "requiresNpm": cfg!(windows)
+                    && install.as_deref().is_some_and(|install| install.starts_with("npm ")),
+            }),
+        );
     }
     Json(Value::Object(result))
 }
@@ -193,7 +218,7 @@ pub(super) async fn connect(
     }
     // On Unix this also rejects anything `unix_bootstrap` does not know, since
     // that is the table it renders from.
-    if install_command(&request.harness, cfg!(windows)).is_none() {
+    if !has_command(&request.harness, request.action) {
         return bad_request("Unknown coding agent").into_response();
     }
     if request.trigger == Trigger::Automatic
@@ -282,6 +307,7 @@ async fn run(
         run_command = install;
     }
     if run_command {
+        let mut zcode_env = Vec::new();
         let (program, args) = match request.action {
             #[cfg(windows)]
             Action::Install => {
@@ -307,6 +333,24 @@ async fn run(
                 (
                     "bash".to_string(),
                     vec!["-c".into(), unix_install_script(url, interpreter)],
+                )
+            }
+            // The runtime inside the desktop app runs through ZCode.exe as Node.
+            Action::Login if request.harness == "zcode" => {
+                let Some(launch) = crate::local::harness::zcode::find_launch() else {
+                    attempt.record("failed", "detect", Some("not_installed"), None, None);
+                    return Err("Agent not found. Install it, then retry.".into());
+                };
+                let (_, args) = login_command("zcode").unwrap();
+                zcode_env = launch.env.clone();
+                (
+                    launch.program.to_string_lossy().into_owned(),
+                    launch
+                        .prefix
+                        .iter()
+                        .map(|arg| arg.to_string_lossy().into_owned())
+                        .chain(args)
+                        .collect(),
                 )
             }
             Action::Login | Action::Update => {
@@ -372,6 +416,7 @@ async fn run(
                 env.push(("PATH", path));
             }
         }
+        env.extend(zcode_env);
         attempt.record("command_started", "command", None, None, None);
         let pty_size = *size;
         let shell_env = env.clone();
@@ -398,11 +443,23 @@ async fn run(
         };
         *follow_up = Some(shell_env);
         let mut output = String::new();
-        let completed =
-            if request.harness == "antigravity" && matches!(request.action, Action::Login) {
-                Some(antigravity_prompt_ready as fn(&str) -> bool)
-            } else {
-                None
+        let login = matches!(request.action, Action::Login);
+        let mut antigravity = |output: &str| antigravity_prompt_ready(output);
+        let mut zcode_opened = false;
+        let mut zcode = |output: &str| {
+            if !zcode_opened {
+                if let Some(url) = zcode_login_url(output) {
+                    zcode_opened = true;
+                    crate::browser::open_browser(url);
+                }
+            }
+            false
+        };
+        let completed: Option<&mut (dyn FnMut(&str) -> bool + Send)> =
+            match request.harness.as_str() {
+                "antigravity" if login => Some(&mut antigravity),
+                "zcode" if login => Some(&mut zcode),
+                _ => None,
             };
         match super::relay_pty(socket, session, Some(&mut output), size, completed).await {
             Some(Ok(status)) if status.success() => attempt.record(
@@ -808,6 +865,7 @@ mod tests {
 
     /// Agents the dashboard deliberately cannot install, sign in or update:
     /// ZCode ships inside its desktop app, whose executable is the GUI.
+    /// Agents orx signs in but cannot install or update (ZCode ships in its app).
     const NO_SETUP: &[&str] = &["zcode"];
 
     fn with_setup() -> impl Iterator<Item = &'static str> {
@@ -855,6 +913,23 @@ mod tests {
     }
 
     #[test]
+    fn zcode_login_url_is_the_whole_printed_url() {
+        let url = "https://chat.z.ai/oauth/authorize?response_type=code&redirect_uri=http%3A%2F%2F127.0.0.1%3A5173&state=abc";
+        let output = format!("Open this URL to sign in with Z.AI:\r\n{url}\r\n\u{1b}[0m");
+        assert_eq!(zcode_login_url(&output), Some(url));
+        let colored = format!("Open this URL to sign in:\n\u{1b}[36m{url}\u{1b}[0m\n");
+        assert_eq!(zcode_login_url(&colored), Some(url));
+        let tail = format!("Open this URL to sign in:\n{url}\u{1b}[0m\n");
+        assert_eq!(zcode_login_url(&tail), Some(url));
+        assert_eq!(zcode_login_url("Signing in...\r\n"), None);
+        assert_eq!(zcode_login_url("see https://example.com first"), None);
+        assert_eq!(
+            login_command("zcode").unwrap().1,
+            vec!["login", "--no-browser"]
+        );
+    }
+
+    #[test]
     fn output_tail_is_bounded_and_preserves_utf8() {
         let mut output = "é".repeat(40000);
         append_output(&mut output, b"Permission denied");
@@ -873,9 +948,13 @@ mod tests {
         for harness in NO_SETUP {
             assert!(install_command(harness, false).is_none(), "{harness}");
             assert!(install_command(harness, true).is_none(), "{harness}");
-            assert!(login_command(harness).is_none(), "{harness}");
+            assert!(login_command(harness).is_some(), "{harness}");
             assert!(update_command(harness).is_none(), "{harness}");
+            assert!(has_command(harness, Action::Login), "{harness}");
+            assert!(!has_command(harness, Action::Install), "{harness}");
+            assert!(!has_command(harness, Action::Update), "{harness}");
         }
+        assert!(!has_command("sh", Action::Login));
         assert!(install_command("codex; touch /tmp/injected", false).is_none());
         assert!(!install_command("codex", true).unwrap().starts_with("npm "));
         assert!(login_command("sh").is_none());

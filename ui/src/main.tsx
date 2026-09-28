@@ -6,11 +6,13 @@ import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { Toaster } from "./components/ui";
 import { getLocale } from "./paraglide/runtime.js";
+import { reportLocale } from "./api";
 import "./tailwind.css";
 
 const locale = getLocale();
 document.documentElement.lang = locale;
 document.documentElement.dir = "ltr";
+reportLocale(locale);
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

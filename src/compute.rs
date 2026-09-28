@@ -756,6 +756,8 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         .unwrap_or_default();
     let mut descriptor = BackendDescriptor {
         ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,

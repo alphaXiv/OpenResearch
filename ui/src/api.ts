@@ -1484,6 +1484,11 @@ export const captureUiEvent = (event: UiEvent): void => {
   void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
 };
 
+/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
+export const reportLocale = (locale: string): void => {
+  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
+};
+
 export type HarnessId =
   | "claude-code"
   | "codex"
@@ -1682,12 +1687,13 @@ export interface Harness {
 }
 
 export interface HarnessSetupCommands {
-  install: string;
+  /** Absent for an agent orx signs in but does not install or update (ZCode). */
+  install?: string;
   /** The vendor bootstrap URL an install note quotes; `install` runs the
    * platform's own installer, which on Windows is a PowerShell script. */
   installUrl?: string;
   login: string;
-  update: string;
+  update?: string;
   requiresNpm: boolean;
 }
 

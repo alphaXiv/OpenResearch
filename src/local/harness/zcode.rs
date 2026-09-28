@@ -41,7 +41,7 @@ const KEY: &str = "zcode";
 const INSTALL_HINT: &str =
     "Install the ZCode desktop app from https://zcode.z.ai and sign in there, then re-check this harness.";
 const LOGIN_HINT: &str =
-    "Sign in to Z.ai in the ZCode desktop app (or configure a provider in ~/.zcode/v2/provider_config.json), then re-check this harness.";
+    "Sign in for command-line use with `zcode login` (Z.ai Individual or Team Coding Plan), or enable a provider with an API key in the ZCode app, then re-check this harness. Start Plan works only inside the ZCode app.";
 const VERSION_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct ZCode;
@@ -159,15 +159,21 @@ fn zcode_home() -> Option<PathBuf> {
         .map(|base| base.join(".zcode"))
 }
 
-/// Whether ZCode has model access: a desktop/CLI Z.ai login, or a personal
-/// provider with an API key.
+/// Whether ZCode's command-line runtime can reach a model: a plan key saved
+/// by `zcode login` (the desktop app's own sign-in alone leaves none), or an
+/// enabled provider with an API key.
 fn has_access(home: &Path) -> bool {
     let v2 = home.join("v2");
-    if v2
-        .join("credentials.json")
-        .metadata()
-        .is_ok_and(|meta| meta.len() > 2)
-    {
+    let signed_in = super::detect::read_json(v2.join("credentials.json"))
+        .and_then(|store| {
+            store.as_object().map(|store| {
+                store
+                    .keys()
+                    .any(|key| key.starts_with("account-provider:") && key.ends_with(":identity"))
+            })
+        })
+        .unwrap_or(false);
+    if signed_in {
         return true;
     }
     let Some(config) = super::detect::read_json(v2.join("provider_config.json")) else {
@@ -429,7 +435,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .map_err(|_| anyhow!("ZCode did not exit after its response"))??;
     let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
     if let Some(message) = state.failure.take() {
-        ctx.mark_terminal_failure("zcode_turn_failed", message);
+        ctx.mark_terminal_failure("zcode_turn_failed", explain_failure(message, &log_path));
     } else if !state.completed {
         let detail = std::fs::read_to_string(&log_path)
             .ok()
@@ -456,6 +462,32 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     }
     let _ = ctx.flush();
     Ok(())
+}
+
+/// ZCode's own wording for a turn that found no model says nothing about why.
+const NO_MODEL: &str = "Select a model before continuing";
+
+/// What a turn outside the ZCode app can use, for failures that stem from
+/// the account rather than the chat.
+const COMMAND_LINE_ACCESS: &str = "Outside its app ZCode reaches models through its own \
+     sign-in (`zcode login`, for a Z.ai Individual or Team Coding Plan) or a provider with an \
+     API key, such as Z.ai API billed from your balance. Start Plan works only inside the \
+     ZCode app.";
+
+fn explain_failure(message: String, log_path: &Path) -> String {
+    if message.contains(NO_MODEL) {
+        return format!(
+            "ZCode found no model it can use from the command line ({NO_MODEL}). \
+             {COMMAND_LINE_ACCESS} Log: {}",
+            log_path.display()
+        );
+    }
+    // Z.ai's "Insufficient balance or no resource package": the chosen
+    // provider has no plan or balance behind it for this model.
+    if message.contains("[1113]") {
+        return format!("{message}\n\nZ.ai has no plan quota or balance for this request. {COMMAND_LINE_ACCESS}");
+    }
+    message
 }
 
 #[derive(Default)]
@@ -677,6 +709,33 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_without_a_model_says_what_zcode_needs() {
+        let (_, state) = fold(include_str!("fixtures/zcode_stream_no_model.jsonl"));
+        let message = explain_failure(state.failure.unwrap(), Path::new("agent-zcode-x.log"));
+        assert!(
+            message.contains("Select a model before continuing"),
+            "{message}"
+        );
+        assert!(message.contains("`zcode login`"), "{message}");
+        assert!(
+            message.contains("Start Plan works only inside the ZCode app"),
+            "{message}"
+        );
+        assert!(message.ends_with("Log: agent-zcode-x.log"), "{message}");
+        let quota = explain_failure(
+            "[1113][Insufficient balance or no resource package. Please recharge.][r1]".into(),
+            Path::new("x"),
+        );
+        assert!(quota.starts_with("[1113][Insufficient balance"), "{quota}");
+        assert!(
+            quota.contains("Start Plan works only inside the ZCode app"),
+            "{quota}"
+        );
+        let other = explain_failure("Model creation failed".into(), Path::new("x"));
+        assert_eq!(other, "Model creation failed");
+    }
+
+    #[test]
     fn a_denied_tool_shows_the_reason() {
         let (ctx, state) = fold(include_str!("fixtures/zcode_stream_denied.jsonl"));
         assert!(state.completed);
@@ -740,13 +799,31 @@ mod tests {
     #[test]
     fn access_comes_from_a_login_or_a_keyed_provider() {
         let dir = std::env::temp_dir().join(format!("orx-zcode-home-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(dir.join("v2")).unwrap();
+        let v2 = dir.join("v2");
+        std::fs::create_dir_all(&v2).unwrap();
+        assert!(!has_access(&dir));
+        // The desktop app's sign-in alone: OAuth tokens and plan keys, but no
+        // identity the command-line runtime can pair them with.
+        let app_only = r#"{"oauth:zai:access_token":"enc:v1:a.b.c","zcodejwttoken":"enc:v1:a.b.c",
+            "account-provider:coding-plan:account:zai-team-coding-plan:account:u1:api-key":"enc:v1:a.b.c"}"#;
+        std::fs::write(v2.join("credentials.json"), app_only).unwrap();
+        assert!(!has_access(&dir));
+        let disabled = r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"zai-api","enabled":false,"config":{"access":{"type":"zhipu-coding-plan-api-key","apiKey":"id.secret"}}}]}}}"#;
+        std::fs::write(v2.join("provider_config.json"), disabled).unwrap();
         assert!(!has_access(&dir));
         std::fs::write(
-            dir.join("v2").join("provider_config.json"),
+            v2.join("provider_config.json"),
             r#"{"config":{"providerConfigRules":{"providerRules":[{"providerId":"c","config":{"access":{"type":"api-key","apiKey":"sk"}}}]}}}"#,
         )
         .unwrap();
+        assert!(has_access(&dir));
+        std::fs::remove_file(v2.join("provider_config.json")).unwrap();
+        // `zcode login` adds the identity for its plan.
+        let cli = app_only.replace(
+            "}",
+            r#","account-provider:account:zai-individual-coding-plan:identity":"enc:v1:a.b.c"}"#,
+        );
+        std::fs::write(v2.join("credentials.json"), cli).unwrap();
         assert!(has_access(&dir));
         let _ = std::fs::remove_dir_all(dir);
     }
