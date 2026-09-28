@@ -173,8 +173,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
      exit condition. Don't keep calling it into a timeout.
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
-   **actually read its results** with `orx logs <runId>` (see `orx-evidence`). To
-   see exactly what a finished node changed, diff its branch against its parent's
+   **actually read its results** from the file reported by `orx logs <runId>`
+   (see `orx-evidence`). To see exactly what a finished node changed, diff its
+   branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and

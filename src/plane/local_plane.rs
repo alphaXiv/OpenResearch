@@ -1,13 +1,12 @@
 //! Local implementations of project, experiment, run, and log commands.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Seek as _};
 use std::time::{Duration, Instant};
 
-use super::{CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog};
+use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, Store};
+use crate::store::Store;
 use crate::ExpRunArgs;
 
 /// The local-store plane. `project`/`experiment` carry the row the resolver
@@ -19,8 +18,6 @@ pub struct LocalPlane {
     pub(super) experiment: Option<LocalExperiment>,
     pub(super) id: String,
 }
-
-const LOCAL_DEFAULT_BYTES: i64 = 64 * 1024;
 
 impl LocalPlane {
     /// The resolved project row, or an error when called on a plane built by a
@@ -50,54 +47,6 @@ impl LocalPlane {
         let runs = store.list_runs_by_project(project_id)?;
         let runs: Vec<Run> = runs.iter().map(Run::from).collect();
         Ok(RunListing { runs, titles })
-    }
-
-    pub async fn read_log(&self, req: LogRequest) -> Result<RunLog> {
-        let run_id = &self.id;
-        let path = log_path(run_id);
-        let total = match std::fs::metadata(&path) {
-            Ok(m) => m.len() as i64,
-            Err(_) => {
-                return Ok(RunLog {
-                    content: Vec::new(),
-                    start_byte: 0,
-                    end_byte: 0,
-                    total_bytes: 0,
-                    source: "local file".to_string(),
-                    truncated_before: false,
-                    truncated_after: false,
-                    missing_local: true,
-                });
-            }
-        };
-
-        let max = req.max_bytes.unwrap_or(LOCAL_DEFAULT_BYTES).max(0);
-        let (start, end) = match req.mode.as_str() {
-            "range" => (
-                req.start_byte.unwrap_or(0).clamp(0, total),
-                req.end_byte.unwrap_or(total).clamp(0, total),
-            ),
-            "head" => (0, max.min(total)),
-            _ => ((total - max).max(0), total),
-        };
-
-        let mut content = Vec::new();
-        if end > start {
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(std::io::SeekFrom::Start(start as u64))?;
-            file.take((end - start) as u64).read_to_end(&mut content)?;
-        }
-
-        Ok(RunLog {
-            content,
-            start_byte: start,
-            end_byte: end,
-            total_bytes: total,
-            source: "local file".to_string(),
-            truncated_before: start > 0,
-            truncated_after: end < total,
-            missing_local: false,
-        })
     }
 
     pub async fn view_project(&self) -> Result<()> {

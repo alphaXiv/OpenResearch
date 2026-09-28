@@ -241,18 +241,6 @@ pub struct RunsArgs {
 #[derive(Args, Debug)]
 pub struct LogsArgs {
     pub run_id: String,
-    /// Stream the entire log on stdout (metadata on stderr).
-    #[arg(long, conflicts_with_all = ["head", "bytes", "range"])]
-    pub full: bool,
-    /// Read from the start instead of the tail.
-    #[arg(long)]
-    pub head: bool,
-    /// Max bytes to read.
-    #[arg(long)]
-    pub bytes: Option<String>,
-    /// Exact byte window `<start>:<end>`.
-    #[arg(long)]
-    pub range: Option<String>,
 }
 
 #[derive(Args, Debug)]

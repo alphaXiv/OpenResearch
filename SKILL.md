@@ -82,7 +82,7 @@ group below has a module (`orx skill <name>`) with the full flags and rules.
 ### Run evidence (run-scoped) — module `orx-evidence`
 | Command | What it does |
 |---|---|
-| `orx logs <runId> [--head] [--bytes <n>] [--range <s>:<e>]` | Read a run's terminal log. |
+| `orx logs <runId>` | Show the local log path, size, and short preview; inspect the file for full evidence. |
 
 ### Create and run experiments (write) — modules `orx-create`, `orx-compute`, `orx-git`
 | Command | What it does |
@@ -153,7 +153,7 @@ orx projects                     # find the project id
 orx project view <projectId>     # see the tree, pick an experiment id
 orx skill experiment-tree        # the model + the auto-research loop
 orx runs <projectId>             # find a run id
-orx logs <runId>                 # read its output
+orx logs <runId>                 # locate its log, then inspect the file
 ```
 
 To actually **drive** a project toward a goal — edit each node's code on its Git
