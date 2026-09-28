@@ -122,7 +122,9 @@ pub async fn update(
         ));
     }
 
-    // Beside the target, so the final move is a same-filesystem rename.
+    // Beside the target, so the final move is a same-filesystem rename. A killed
+    // update leaves its full-size staged copy, so clear older ones first.
+    super::macos_app::sweep_leftovers(parent, appimage);
     let staged = parent.join(format!(
         ".OpenResearch-update-{}.AppImage",
         uuid::Uuid::new_v4()

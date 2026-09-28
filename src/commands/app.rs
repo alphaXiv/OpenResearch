@@ -350,44 +350,99 @@ mod instance {
 /// forward, and exits.
 #[cfg(all(desktop_app, target_os = "linux"))]
 mod instance {
+    use std::fs::{OpenOptions, TryLockError};
     use std::os::unix::net::{UnixListener, UnixStream};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
 
     /// `None` when the socket couldn't be bound: the app still runs, just
     /// without the one-instance guard.
     pub(super) struct FocusRequests(Option<UnixListener>);
 
-    fn socket_path() -> PathBuf {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
+    /// Where the lock and socket live, and their name. Private to the user: in a
+    /// shared directory another user could create the socket first.
+    fn claim_paths() -> Option<(PathBuf, String)> {
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        // SAFETY: getuid has no failure mode.
-        dir.join(format!("openresearch-app-{}.sock", unsafe {
-            libc::getuid()
-        }))
+            .filter(|dir| dir.is_absolute());
+        if let Some(dir) = runtime {
+            return Some((dir, "openresearch-app".to_string()));
+        }
+        // A home on NFS is shared across machines, and so would be a lock in it.
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+        let dir = dirs::cache_dir()?.join("openresearch");
+        Some((dir, format!("openresearch-app-{}", host.trim())))
     }
 
     /// Claims the app for this process. `None` means another instance has it
     /// and was asked to come forward.
     pub(super) fn claim() -> Option<FocusRequests> {
-        let path = socket_path();
-        // The running app takes the connection itself as the request.
-        if UnixStream::connect(&path).is_ok() {
-            return None;
-        }
-        // Nothing answered, so a file there is left from an app that didn't
-        // exit cleanly (or one that exec'd itself into an update).
-        let _ = std::fs::remove_file(&path);
-        match UnixListener::bind(&path) {
-            Ok(listener) => Some(FocusRequests(Some(listener))),
+        let Some((dir, name)) = claim_paths() else {
+            return Some(FocusRequests(None));
+        };
+        let socket = dir.join(format!("{name}.sock"));
+        let lock_path = dir.join(format!("{name}.lock"));
+        let lock = std::fs::create_dir_all(&dir).and_then(|()| {
+            OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&lock_path)
+        });
+        let lock = match lock.map(|file| (file.try_lock(), file)) {
+            Ok((Ok(()), file)) => Some(file),
+            Ok((Err(TryLockError::WouldBlock), _)) => {
+                ask_running_app_to_focus(&socket);
+                return None;
+            }
+            Ok((Err(TryLockError::Error(error)), _)) | Err(error) => {
+                eprintln!(
+                    "openresearch app: could not lock {}: {error}; two launches at once may \
+                     both open a window",
+                    lock_path.display()
+                );
+                // Unguarded, so only the socket can say whether an app is running.
+                if UnixStream::connect(&socket).is_ok() {
+                    return None;
+                }
+                None
+            }
+        };
+        // The lock (or, unguarded, the failed connect) says no app is listening, so a
+        // file there is left from one that didn't exit cleanly or exec'd into an update.
+        let _ = std::fs::remove_file(&socket);
+        match UnixListener::bind(&socket) {
+            Ok(listener) => {
+                // Held until exit, or the exec into an update: files are close-on-exec.
+                std::mem::forget(lock);
+                Some(FocusRequests(Some(listener)))
+            }
+            // The lock drops here, so a later launch opens a window rather than
+            // waiting on a socket that will never answer.
             Err(error) => {
                 eprintln!(
                     "openresearch app: could not bind {}: {error}; a second launch will open \
                      another window",
-                    path.display()
+                    socket.display()
                 );
                 Some(FocusRequests(None))
             }
+        }
+    }
+
+    /// The running app takes the connection itself as the request. It may have
+    /// the lock but not the socket yet, when both launched together.
+    fn ask_running_app_to_focus(socket: &Path) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while UnixStream::connect(socket).is_err() {
+            if Instant::now() >= deadline {
+                eprintln!(
+                    "openresearch app: OpenResearch is already running but did not answer at {}",
+                    socket.display()
+                );
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 

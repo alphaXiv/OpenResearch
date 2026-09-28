@@ -333,13 +333,14 @@ fn swap_bundle(root: &Path, staged: &Path) -> Result<()> {
 }
 
 /// Remove staging, backup, and probe litter an interrupted update left next to
-/// the bundle. Matches only our own `.`-prefixed names, so the live bundle and
-/// anything else in `/Applications` are never candidates.
+/// the app (the macOS bundle, or the Linux AppImage). Matches only our own
+/// `.`-prefixed names, so the live app and anything else beside it are never
+/// candidates.
 ///
-/// The age floor keeps this off a *concurrent* updater's staging directory: the
-/// lock lives under `config_dir()`, so two user accounts sharing one
-/// `/Applications` are not serialized against each other.
-fn sweep_leftovers(parent: &Path, root: &Path) {
+/// The age floor keeps this off a *concurrent* updater's staging: the lock
+/// lives under `config_dir()`, so two user accounts sharing one folder are not
+/// serialized against each other.
+pub(super) fn sweep_leftovers(parent: &Path, root: &Path) {
     const MIN_AGE: Duration = Duration::from_secs(60 * 60);
     let bundle = root.file_name().unwrap_or_default().to_string_lossy();
     let Ok(entries) = std::fs::read_dir(parent) else {
