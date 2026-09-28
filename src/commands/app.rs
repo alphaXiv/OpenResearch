@@ -214,6 +214,7 @@ mod instance {
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{AllowSetForegroundWindow, ASFW_ANY};
 
+    // Also the installer's AppMutex (windows/OpenResearch.iss).
     const MUTEX: &str = r"Local\OpenResearchApp";
     const FOCUS_EVENT: &str = r"Local\OpenResearchAppFocus";
 
@@ -296,6 +297,7 @@ mod imp {
 
     enum UserEvent {
         ServerReady,
+        LoadTimedOut,
         #[cfg(target_os = "macos")]
         Menu(MenuId),
         #[cfg(windows)]
@@ -345,6 +347,8 @@ mod imp {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
             let _ = ready.send_event(UserEvent::ServerReady);
+            tokio::time::sleep(Duration::from_secs(15)).await;
+            let _ = ready.send_event(UserEvent::LoadTimedOut);
         });
 
         #[cfg(windows)]
@@ -385,7 +389,7 @@ mod imp {
             .with_title("OpenResearch")
             .with_inner_size(LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(LogicalSize::new(720.0, 480.0))
-            // Shown once the dashboard has loaded, so it never flashes blank.
+            // Shown once the dashboard has loaded, so it rarely flashes blank.
             .with_visible(false);
         #[cfg(windows)]
         let window = {
@@ -468,6 +472,14 @@ mod imp {
             Event::UserEvent(UserEvent::ServerReady) if matches!(quit, Quit::No) => {
                 let _ = webview.load_url(&format!("{origin}/"));
             }
+            // A window that never appears is worse than a blank one.
+            Event::UserEvent(UserEvent::LoadTimedOut)
+                if matches!(quit, Quit::No) && !shown.replace(true) =>
+            {
+                eprintln!("openresearch app: the dashboard has not finished loading; showing the window anyway");
+                window.set_visible(true);
+                window.set_focus();
+            }
             #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::Menu(id)) if id == quit_item.id() => {
                 begin_quit(&mut quit, &window, &webview, control_flow);
@@ -476,10 +488,11 @@ mod imp {
             Event::UserEvent(UserEvent::Menu(id)) if id == reload_item.id() => {
                 let _ = webview.reload();
             }
-            // Before the first load the window shows itself; while quitting it
-            // must stay hidden.
+            // Even before the page loads: a launch that brings nothing up looks
+            // like a broken app. While quitting it must stay hidden.
             #[cfg(windows)]
-            Event::UserEvent(UserEvent::Focus) if shown.get() && matches!(quit, Quit::No) => {
+            Event::UserEvent(UserEvent::Focus) if matches!(quit, Quit::No) => {
+                shown.set(true);
                 window.set_minimized(false);
                 window.set_visible(true);
                 window.set_focus();
@@ -496,6 +509,7 @@ mod imp {
             }
             #[cfg(target_os = "macos")]
             Event::Reopen { .. } => {
+                shown.set(true);
                 window.set_visible(true);
                 window.set_focus();
             }

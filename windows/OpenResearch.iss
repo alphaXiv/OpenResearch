@@ -38,6 +38,9 @@ OutputBaseFilename=OpenResearch-Setup
 SetupIconFile=OpenResearch.ico
 UninstallDisplayIcon={app}\OpenResearch.exe
 UninstallDisplayName=OpenResearch
+; The app's single-instance mutex (src/commands/app.rs): replacing files under a
+; running app would kill it without its quit path, which stops the agents.
+AppMutex=Local\OpenResearchApp
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
