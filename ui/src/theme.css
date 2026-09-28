@@ -200,7 +200,10 @@
   --syntax-cyan: #56b6c2;
   --syntax-purple: #a626a4;
   --syntax-blue: #4078f2;
+}
 
+/* Outranks the bare `:root { color-scheme: light dark }` in PDF.js's stylesheet. */
+:root[data-theme="light"] {
   color-scheme: light;
 }
 

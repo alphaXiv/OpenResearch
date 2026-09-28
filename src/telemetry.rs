@@ -170,6 +170,9 @@ pub(crate) struct Settings {
     /// cannot re-report a later action as the user's first one.
     #[serde(default)]
     pub first_action_reported: Vec<String>,
+    /// Language the dashboard last reported it is displaying (e.g. `zh-CN`).
+    #[serde(default)]
+    pub dashboard_locale: Option<String>,
     #[serde(default)]
     harness_snapshot: Option<harness::InitialSnapshot>,
 }
@@ -315,6 +318,17 @@ pub(crate) fn github_default_prompt_seen() -> bool {
 
 pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> {
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
+}
+
+fn dashboard_locale() -> Option<String> {
+    load_settings().and_then(|settings| settings.dashboard_locale)
+}
+
+pub(crate) fn set_dashboard_locale(locale: &str) -> std::io::Result<()> {
+    if dashboard_locale().as_deref() == Some(locale) {
+        return Ok(());
+    }
+    mutate_settings(|settings| settings.dashboard_locale = Some(locale.to_string()))
 }
 
 fn settings_path() -> PathBuf {
@@ -644,7 +658,7 @@ fn build_payload_with_id(
     event_id: uuid::Uuid,
     properties: serde_json::Value,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "schemaVersion": 1,
         "installId": install_id,
         "context": {
@@ -662,7 +676,11 @@ fn build_payload_with_id(
             "occurredAt": iso8601_utc(crate::store::now_ms()),
             "properties": properties,
         }],
-    })
+    });
+    if let Some(locale) = dashboard_locale() {
+        payload["context"]["locale"] = json!(locale);
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -897,6 +915,22 @@ fn consent_distinct_id(agreed: bool) -> String {
     CONSENT_SENTINEL_ID.to_string()
 }
 
+fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> serde_json::Value {
+    let mut payload = build_payload_with_id(
+        "telemetry_consent",
+        distinct_id,
+        event_id,
+        json!({ "agreed": agreed }),
+    );
+    // An opt-out carries no dimension beyond the choice itself.
+    if !agreed {
+        if let Some(context) = payload["context"].as_object_mut() {
+            context.remove("locale");
+        }
+    }
+    payload
+}
+
 /// Record a telemetry toggle choice — `cli_telemetry_consent` with
 /// `{ agreed: bool }`. Within an eligible official build, this is the ONE event
 /// that ignores the user's telemetry preference: it must land even when the
@@ -917,14 +951,8 @@ pub(crate) async fn record_consent(agreed: bool) {
     if environment_disabled_reason().is_some() {
         return;
     }
-    let distinct_id = consent_distinct_id(agreed);
     let event_id = uuid::Uuid::new_v4();
-    let payload = build_payload_with_id(
-        "telemetry_consent",
-        &distinct_id,
-        event_id,
-        json!({ "agreed": agreed }),
-    );
+    let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
     let path = persist_payload(event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
@@ -2031,7 +2059,9 @@ mod tests {
                 json!({ "kind": "run", "local": true, "computeTarget": "local" }),
             ),
         ];
-        for payload in payloads {
+        let mut localized = build_payload("app_started", "cli-release-contract-test", json!({}));
+        localized["context"]["locale"] = json!("zh-CN");
+        for payload in payloads.into_iter().chain([localized]) {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -2048,14 +2078,29 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_carries_the_dashboard_locale_once_reported() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-locale-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let before = build_payload("app_started", "did", json!({}));
+        assert!(before["context"].get("locale").is_none());
+        set_dashboard_locale("zh-CN").unwrap();
+        let after = build_payload("app_started", "did", json!({}));
+        assert_eq!(after["context"]["locale"], "zh-CN");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-agreed-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        set_dashboard_locale("es").unwrap();
         for agreed in [true, false] {
-            let p = build_payload("telemetry_consent", "did", json!({ "agreed": agreed }));
+            let p = consent_payload(agreed, "did", uuid::Uuid::new_v4());
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
+            assert_eq!(p["context"].get("locale").is_some(), agreed);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
