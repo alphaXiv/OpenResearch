@@ -55,6 +55,7 @@ VOLNAME="OpenResearch"
 # APP_X/APPS_X/ICON_Y/ICON constrain the ARROW it draws — change these together.
 WIN_W=640 WIN_H=320 ICON=128
 APP_X=160 APPS_X=480 ICON_Y=150     # Finder icon-center positions in the window
+TITLEBAR_H=28                        # Finder bounds include the title bar; WIN_H is the content area
 
 STAGE="$(mktemp -d)"
 BUILD="$(mktemp -d)"
@@ -93,12 +94,18 @@ tell application "Finder"
     set current view of container window to icon view
     set toolbar visible of container window to false
     set statusbar visible of container window to false
-    set the bounds of container window to {200, 140, 200 + $WIN_W, 140 + $WIN_H}
+    set the bounds of container window to {200, 140, 200 + $WIN_W, 140 + $WIN_H + $TITLEBAR_H}
     set opts to the icon view options of container window
     set arrangement of opts to not arranged
     set icon size of opts to $ICON
     set text size of opts to 13
     set background picture of opts to POSIX file "$BG_POSIX"
+    -- Where Finder shows dot-files, park them off-window; otherwise Finder shifts every icon down to clear them.
+    repeat with dotName in {".background", ".fseventsd"}
+      try
+        set position of item (contents of dotName) of container window to {$WIN_W + 100, $ICON_Y}
+      end try
+    end repeat
     set position of item "$(basename "$APP")" of container window to {$APP_X, $ICON_Y}
     set position of item "Applications" of container window to {$APPS_X, $ICON_Y}
     close
