@@ -234,7 +234,7 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** before launching"
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
     );
     let project_state = project_state_md(project, state);
     let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)

@@ -11,6 +11,11 @@ rules this depends on — **never edit a node a run has answered** and
 **the run command + env is a fixed contract** — are the cardinal rules;
 everything below assumes them.
 
+Create a node only when a planned run will establish a baseline or test a
+hypothesis relevant to the project. Put a code change on that node only if it
+serves that baseline or hypothesis. Do not create nodes for unrelated cleanup,
+refactors, bug fixes, or dependency updates.
+
 ## Before the first launch
 
 Follow the session playbook's Python policy. Before launching, resolve the
@@ -23,8 +28,7 @@ setup and execution recipe in the project's run command.
 Every node exists to establish a baseline or test a hypothesis. A run that dies
 on an error does **neither** — nothing was established, nothing was tested — so
 there is nothing to protect: fix that node's branch in place and re-run the
-same node. Successive runs on one node are how you get it working; a new node
-is for a new question.
+same node. Successive runs on one node are how you get it working.
 
 Once a run *does* answer the node — it produced the result the node was after,
 good, bad, or `nan` — the node is **frozen**. Its branch is the code that
@@ -169,8 +173,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
      exit condition. Don't keep calling it into a timeout.
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
-   **actually read its results** with `orx logs <runId>` (see `orx-evidence`). To
-   see exactly what a finished node changed, diff its branch against its parent's
+   **actually read its results** from the file reported by `orx logs <runId>`
+   (see `orx-evidence`). To see exactly what a finished node changed, diff its
+   branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and

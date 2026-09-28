@@ -1,89 +1,109 @@
-use std::io::Write;
+use std::io::{Read as _, SeekFrom, Write};
 
 use crate::error::Result;
-use crate::plane::{resolve_run, LogRequest};
-use crate::store::Store;
+use crate::plane::resolve_run;
+use crate::store::{log_path, Store};
 
-/// Parses a string the way JS `Number(s)` does for our purposes and returns it
-/// only if it represents an integer (matching `Number.isInteger`). An empty or
-/// non-numeric string yields `None` (JS produces NaN, which is not an integer).
-fn parse_integer(s: &str) -> Option<i64> {
-    let trimmed = s.trim();
-    // JS Number("") === 0, but that branch never matters here because the inputs
-    // either come from a non-empty flag value or a split that produced a piece.
-    let value: f64 = trimmed.parse().ok()?;
-    if value.is_finite() && value.fract() == 0.0 {
-        Some(value as i64)
+const PREVIEW_CHARS: usize = 500;
+const PREVIEW_SUFFIX_BYTES: usize = 2048;
+
+fn read_preview_suffix(
+    reader: &mut (impl std::io::Read + std::io::Seek),
+    total_bytes: u64,
+) -> std::io::Result<Vec<u8>> {
+    let start = total_bytes.saturating_sub(PREVIEW_SUFFIX_BYTES as u64);
+    reader.seek(SeekFrom::Start(start))?;
+    let expected_bytes = total_bytes - start;
+    let mut bytes = Vec::with_capacity(expected_bytes as usize);
+    reader.take(expected_bytes).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != expected_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!(
+                "log changed while reading preview: expected {expected_bytes} bytes, read {}",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
+fn trailing_char_preview(bytes: &[u8]) -> String {
+    let suffix = if bytes.len() > PREVIEW_SUFFIX_BYTES {
+        &bytes[bytes.len() - PREVIEW_SUFFIX_BYTES..]
     } else {
-        None
+        bytes
+    };
+    let text = String::from_utf8_lossy(suffix);
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= PREVIEW_CHARS {
+        chars.into_iter().collect()
+    } else {
+        chars[chars.len() - PREVIEW_CHARS..].iter().collect()
     }
 }
 
-/// Prints a run's terminal log. Tail by default (the end is usually what you
-/// want); `--head` reads from the start, `--range <start>:<end>` an exact byte
-/// window.
+fn print_compact_summary(path: &std::path::Path, total_bytes: u64, preview: &str) -> Result<()> {
+    let mut stdout = std::io::stdout();
+    writeln!(
+        stdout,
+        "This is the path to the full log file: {}",
+        path.display()
+    )?;
+    writeln!(stdout, "It is {} bytes.", total_bytes)?;
+    writeln!(stdout)?;
+    writeln!(stdout, "Here are the last 500 characters of the log file:")?;
+    stdout.write_all(preview.as_bytes())?;
+    if preview.is_empty() || !preview.ends_with('\n') {
+        writeln!(stdout)?;
+    }
+    writeln!(
+        stdout,
+        "Use targeted search on this path (for example `rg PATTERN` or an editor) to inspect portions of the log. This preview is not proof of absence."
+    )?;
+    writeln!(stdout, "Avoid reading the entire log file at once into the context window; search it and read only the relevant portions.")?;
+    stdout.flush()?;
+    Ok(())
+}
+
+/// Prints a run's local log path, size, and bounded preview.
 pub async fn run(args: crate::LogsArgs) -> Result<()> {
     crate::local::chat::record_chat_target("runs", &args.run_id);
-    let mut mode: &str = if args.head { "head" } else { "tail" };
-    let mut start_byte: Option<i64> = None;
-    let mut end_byte: Option<i64> = None;
+    resolve_run(Store::open()?, &args.run_id)?;
 
-    if let Some(range) = args.range.as_deref() {
-        let mut parts = range.splitn(2, ':');
-        let s = parts.next().unwrap_or("");
-        let e = parts.next().unwrap_or("");
-        let sb = parse_integer(s);
-        let eb = parse_integer(e);
-        match (sb, eb) {
-            (Some(sb), Some(eb)) if eb > sb => {
-                start_byte = Some(sb);
-                end_byte = Some(eb);
-            }
-            _ => {
-                eprintln!("--range must be <start>:<end> byte offsets with end > start.");
-                std::process::exit(1);
-            }
+    let path = log_path(&args.run_id);
+    let mut file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("[local file] no log captured yet for this run.");
+            return Ok(());
         }
-        mode = "range";
-    }
-
-    let max_bytes = match args.bytes.as_deref() {
-        Some(b) => match parse_integer(b) {
-            Some(v) => Some(v),
-            None => {
-                eprintln!("--bytes must be an integer.");
-                std::process::exit(1);
-            }
-        },
-        None => None,
+        Err(error) => return Err(error.into()),
     };
+    let total = file.metadata()?.len();
+    let bytes = read_preview_suffix(&mut file, total)?;
+    let preview = trailing_char_preview(&bytes);
+    print_compact_summary(&path, total, &preview)
+}
 
-    let store = Store::open()?;
-    let plane = resolve_run(store, &args.run_id)?;
-    let log = plane
-        .read_log(LogRequest {
-            mode: mode.to_string(),
-            max_bytes,
-            start_byte,
-            end_byte,
-        })
-        .await?;
+#[cfg(test)]
+mod tests {
+    use super::read_preview_suffix;
+    use std::io::Cursor;
 
-    // A local run whose log file doesn't exist yet: one line, no body/footer.
-    if log.missing_local {
-        eprintln!("[local file] no log captured yet for this run.");
-        return Ok(());
+    #[test]
+    fn preview_uses_captured_length_and_rejects_truncation() {
+        let captured = b"log bytes at metadata capture".to_vec();
+        let captured_len = captured.len() as u64;
+        let mut file = Cursor::new(captured.clone());
+        file.get_mut().extend_from_slice(b" appended later");
+        assert_eq!(
+            read_preview_suffix(&mut file, captured_len).unwrap(),
+            captured
+        );
+
+        file.get_mut().clear();
+        let error = read_preview_suffix(&mut file, captured_len).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
     }
-
-    // The log itself goes to stdout (pipe-friendly); metadata to stderr so it
-    // doesn't pollute a `| grep` or a redirect.
-    let mut stdout = std::io::stdout();
-    stdout.write_all(&log.content)?;
-    if !log.content.is_empty() && !log.content.ends_with(b"\n") {
-        stdout.write_all(b"\n")?;
-    }
-    stdout.flush()?;
-
-    eprintln!("{}", log.footer());
-    Ok(())
 }

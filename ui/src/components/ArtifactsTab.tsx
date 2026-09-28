@@ -31,6 +31,7 @@ import {
 import { CodeView } from "./CodeView";
 import { FileTypeIcon, isMarkdownFile } from "./FileTypeIcon";
 import { MediaPreview, mediaPreviewKind, type MediaPreviewKind } from "./MediaPreview";
+import { MediaToolbarSlot } from "./mediaToolbar";
 import { normalizeMarkdownForRendering } from "../markdownNormalization";
 import { useFileVersion } from "../useFileVersion";
 import { mdCodeComponents, remarkMathOptions } from "./Md";
@@ -248,13 +249,18 @@ function PreviewPane({
   const version = useFileVersion(artifactUrl(projectId, entry.path));
   const { text, binary, truncated, error, wantsText } = useTextBody(projectId, entry, kind, version);
   const [showSource, setShowSource] = useState(false);
+  const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const isDoc = kind === "markdown";
   const mdFolder = entry.path.split("/").slice(0, -1).join("/");
   const rawUrl = `${artifactUrl(projectId, entry.path)}&v=${encodeURIComponent(version ?? `${entry.modifiedAt}:${entry.size}`)}`;
 
   let body: ReactNode;
   if (kind === "image" || kind === "audio" || kind === "video" || kind === "pdf") {
-    body = <MediaPreview kind={kind} url={rawUrl} name={entry.name} />;
+    body = (
+      <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+        <MediaPreview kind={kind} url={rawUrl} name={entry.name} />
+      </MediaToolbarSlot.Provider>
+    );
   } else if (kind === "download" || !wantsText || binary) {
     body = (
       <div className="file-view-note py-2.5 px-4 text-sm text-muted">
@@ -288,18 +294,19 @@ function PreviewPane({
   return (
     // `file-view` scopes the shared syntax-token colors onto the code view.
     <div className="fpreview flex-1 min-w-0 bg-background file-view flex flex-col h-full min-h-0 [@container((max-width:_720px))]:hidden">
-      <div className="fpreview-head flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-subtext shrink-0">
+      <div className="fpreview-head @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-subtext shrink-0">
         <FileTypeIcon name={entry.name} />
         <span className="fpreview-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(entry.path)}>
           {entry.name}
         </span>
-        <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0">
+        <span dir="auto" className="fpreview-date text-xs text-muted whitespace-nowrap shrink-0 @max-xl:hidden">
           {m.artifacts_tab_modified()}{" "}
           {new Date(entry.modifiedAt).toLocaleString(getLocale(), {
             dateStyle: "medium",
             timeStyle: "short",
           })}
         </span>
+        <div ref={setMediaToolbarSlot} className="contents" />
         {(kind === "text" || kind === "download") && (
           <span className="fpreview-size text-xs text-muted whitespace-nowrap shrink-0">{fmtBytes(entry.size)}</span>
         )}
