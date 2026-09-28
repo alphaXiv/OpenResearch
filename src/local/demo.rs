@@ -904,7 +904,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "setup-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 12000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Using CPython 3.10.19\nCreating virtual environment at: .venv\nResolved 105 packages\nPrepared 40 packages\nInstalled 40 packages"),
         Some("Read environment setup"),
     ));
@@ -915,7 +915,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "dataset-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 16000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Downloading 9 shards using 4 workers...\nSuccessfully downloaded shard_00000.parquet\nSuccessfully downloaded shard_00001.parquet\nSuccessfully downloaded shard_00002.parquet\nSuccessfully downloaded shard_00003.parquet\nSuccessfully downloaded shard_00004.parquet\nSuccessfully downloaded shard_00005.parquet\nSuccessfully downloaded shard_00006.parquet\nSuccessfully downloaded shard_00007.parquet\nSuccessfully downloaded shard_06542.parquet\nDone! Downloaded: 9/9 shards"),
         Some("Stream dataset setup"),
     ));
@@ -926,7 +926,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "tokenizer-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 32000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Starting BPE training: 32503 merges to compute\nProgress: 25% (8126/32503 merges)\nProgress: 50% (16251/32503 merges)\nProgress: 75% (24378/32503 merges)\nProgress: 100% (32503/32503 merges)\nFinished training: 32503 merges completed\nTraining time: 42.69s\nclimbmix-val 3024593 bytes 644939 tokens 4.69 bytes/token"),
         Some("Stream tokenizer training"),
     ));
@@ -937,7 +937,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "base-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Autodetected device type: mps\nCOMPUTE_DTYPE: torch.float32 (auto-detected: no CUDA (CPU/MPS))\nWARNING: Flash Attention 3 not available, using PyTorch SDPA fallback\nVocab size: 32,768\nNumber of parameters: 73,454,976\nTraining for 5,000 steps / 81,920,000 tokens"),
         Some("Stream base training"),
     ));
@@ -947,7 +947,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "base-eval-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Total training time: 131.55m\nMinimum validation bpb: 1.165758\n\nBPB Evaluation\ntrain bpb: 1.152185\nval bpb: 1.119301\n\nCORE Evaluation\nbigbench_qa_wikidata accuracy: 0.0000\nopenbook_qa accuracy: 0.2500\nwinogrande accuracy: 0.5625 | centered: 0.1250\nbigbench_operators accuracy: 0.0000"),
         Some("Read base evaluation"),
     ));
@@ -958,7 +958,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "sft-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Autodetected device type: mps\nLoading model from $ORX_RUN_DIR/repo/.cache/nanochat/base_checkpoints/d6 with step 5000\nTraining mixture: 789,759 rows (MMLU x3, GSM8K x4)\nStep 00000 | Validation bpb: 1.0174\nstep 00001 | loss: 1.817033\nstep 00004 | loss: 6.121520\nstep 00017 | loss: 5.378817\nstep 00100 | loss: 3.2589"),
         Some("Stream supervised fine-tuning"),
     ));
@@ -972,7 +972,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "sft-complete-log",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 100000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("step 01498 (99.93%) | loss: 2.052968 | total time: 39.04m\nstep 01499 (100.00%) | loss: 2.026530 | total time: 39.07m\nStep 01499 | Validation bpb: 0.7389\nSaved model parameters to: $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6/model_001499.pt\nTotal training time: 39.07m\nMinimum validation bpb: 0.7389"),
         Some("Read final SFT checkpoint"),
     ));
@@ -983,7 +983,7 @@ fn assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "confirm",
         shell_name,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 12000" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; tail -n 100 \"$log\"" }),
         Some("Using completed SFT checkpoint model_001499.pt\nAutodetected device type: mps\nLoading model from $ORX_RUN_DIR/repo/.cache/nanochat/chatsft_checkpoints/d6 with step 1499\n\nAssistant:\n\nParis\nParis is a city known for its historical and cultural significance. The capital of France is Paris."),
         Some("Confirm the trained chat model"),
     ));
@@ -1088,7 +1088,7 @@ fn figure_assistant_parts(harness: &str) -> Vec<WirePart> {
     parts.push(tool_part(
         "figure-parse-logs",
         shell_tool,
-        json!({ "command": "orx logs demo_nanochat_run_v1 --bytes 2000000 | python $TMPDIR/create_nanochat_publication_figures.py --summarize" }),
+        json!({ "command": "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; python $TMPDIR/create_nanochat_publication_figures.py --summarize < \"$log\"" }),
         Some("base loss rows: 5000\nsft loss rows: 1499\nbase validation: 3.195800 → 1.165758\nsft validation: 1.0174 → 0.7389\nbase median throughput: 10466 tok/s\nsft median throughput: 10551 tok/s\nCORE rows: 4"),
         Some("Parse complete training logs"),
     ));
@@ -1207,13 +1207,13 @@ fn literature_assistant_parts(harness: &str) -> Vec<WirePart> {
         ),
         (
             "inspect-base-log",
-            "orx logs demo_nanochat_run_v1 --bytes 1000000 | rg 'Validation bpb|CORE|step 05000'",
+            "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; rg 'Validation bpb|CORE|step 05000' \"$log\"",
             "Step 04000 | Validation bpb: 1.187774\nStep 04500 | Validation bpb: 1.1743\nStep 05000 | Validation bpb: 1.165758\nCORE: Wikidata 0.0000, OpenBookQA 0.2500, Winogrande 0.5625 (centered 0.1250), Operators 0.0000",
             "Read base-training evidence",
         ),
         (
             "inspect-sft-log",
-            "orx logs demo_nanochat_run_v1 --bytes 1000000 | rg 'SFT|Validation bpb|Paris'",
+            "log=$(orx logs demo_nanochat_run_v1 | head -n 1); log=${log#*: }; rg 'SFT|Validation bpb|Paris' \"$log\"",
             "SFT validation bpb: 1.0174 → 0.7389\nfinal checkpoint: model_001499.pt\nfixed prompt answer: Paris, followed by repetitive continuation",
             "Read SFT and generation evidence",
         ),

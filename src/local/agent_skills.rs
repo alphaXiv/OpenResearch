@@ -57,6 +57,10 @@ pub enum SkillSet {
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "references/configuration.md",
+        content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
+    },
+    AgentSkillResource {
         path: "references/hf.md",
         content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
     },
@@ -211,7 +215,7 @@ const S_FIGURES: AgentSkill = AgentSkill {
 };
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
-    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
+    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, locate persisted logs with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
     content: EVIDENCE,
     resources: &[],
 };
