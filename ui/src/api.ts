@@ -1687,12 +1687,13 @@ export interface Harness {
 }
 
 export interface HarnessSetupCommands {
-  install: string;
+  /** Absent for an agent orx signs in but does not install or update (ZCode). */
+  install?: string;
   /** The vendor bootstrap URL an install note quotes; `install` runs the
    * platform's own installer, which on Windows is a PowerShell script. */
   installUrl?: string;
   login: string;
-  update: string;
+  update?: string;
   requiresNpm: boolean;
 }
 

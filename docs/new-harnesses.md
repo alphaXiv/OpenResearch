@@ -19,10 +19,22 @@
   `/plan`. There is no Ask: MiniMax's own `default` mode ran commands outside
   the project without asking.
 - **ZCode**: uses the runtime bundled with the ZCode desktop app (or a `zcode`
-  CLI on PATH). Sign in through the app. Modes: Edit, YOLO, and `/plan`.
-  Print mode cannot ask for approval, so there is no Ask. The model is the one
-  configured in ZCode. An account without a plan or balance fails with
-  `1113 Insufficient balance`.
+  CLI on PATH). Modes: Edit, YOLO, and `/plan`. Print mode cannot ask for
+  approval, so there is no Ask. The model is ZCode's default model.
+  - Signing in to the app is not enough: outside the app the runtime needs its
+    own sign-in, `zcode login` (Settings → Harnesses → ZCode → Sign in), which
+    saves the Coding Plan key and a default model. It covers the Z.ai
+    Individual Coding Plan. Alternatively enable a provider with an API key in
+    the app (Z.ai API billed from the balance, or Z.ai Coding Plan with an
+    active Coding Plan).
+  - Start Plan works only inside the app: its endpoint
+    (`zcode.z.ai/api/v1/zcode-plan`) needs a captcha token the app obtains, and
+    the Coding Plan endpoints answer `1113` for a Start Plan account.
+  - On Windows `zcode login` opens the browser through `cmd /c start`, which
+    cuts the URL at its first `&`; orx runs `zcode login --no-browser` and
+    opens the printed URL itself.
+  - With no usable provider a turn fails with "Select a model before
+    continuing"; a provider without a plan or balance fails with `1113`.
 
 The rest of this file is the integration notes.
 
