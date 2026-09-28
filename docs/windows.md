@@ -33,6 +33,8 @@ administrator prompt, into `%LOCALAPPDATA%\Programs\OpenResearch`, adds
 OpenResearch to the Start menu, and installs the Microsoft Edge WebView2 Runtime
 if Windows lacks it. The dashboard opens in its own window; closing the window
 quits OpenResearch, and starting it again while it runs brings the window back.
+Running the installer or uninstaller while OpenResearch is open asks you to
+close it first.
 
 The install holds two programs. `OpenResearch.exe` is what the Start menu runs:
 it starts `orx.exe app` in a hidden console, which `orx` and the git, shell, and

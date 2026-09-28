@@ -38,6 +38,9 @@ OutputBaseFilename=OpenResearch-Setup
 SetupIconFile=OpenResearch.ico
 UninstallDisplayIcon={app}\OpenResearch.exe
 UninstallDisplayName=OpenResearch
+; The app's single-instance mutex (src/commands/app.rs): replacing files under a
+; running app would kill it without its quit path, which stops the agents.
+AppMutex=Local\OpenResearchApp
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -104,5 +107,16 @@ begin
       ReportMissingWebView2;
   except
     ReportMissingWebView2;
+  end;
+end;
+
+// Without the runtime the app can't open its window, so don't offer to start it.
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and not WebView2Installed
+    and (WizardForm.RunList.Items.Count > 0) then
+  begin
+    WizardForm.RunList.Checked[0] := False;
+    WizardForm.RunList.Visible := False;
   end;
 end;
