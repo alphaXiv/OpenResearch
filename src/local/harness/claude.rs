@@ -49,20 +49,7 @@ use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::find_on_path;
 
-/// FALLBACK model list, used only when the `list_models` control request fails
-/// (a CLI too old to answer it, or a spawn/timeout failure). The primary source
-/// is [`claude_list_models`]: the same catalog the CLI's own `/model` menu
-/// renders, with per-model `supportedEffortLevels`.
-const CLAUDE_MODELS: [&str; 4] = [
-    "claude-fable-5",
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-haiku-4-5",
-];
-
-/// FALLBACK effort tiers, paired with `CLAUDE_MODELS` above — the base five
-/// every supported CLI accepts. The primary source is per-model
-/// `supportedEffortLevels` from `list_models`.
+/// Harness-wide effort choices when no model-specific catalog is available.
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// `ultracode` — the session mode that selects `xhigh` effort plus standing
@@ -366,7 +353,7 @@ async fn probe_auth_and_ultracode(bin: &Path) -> (AuthProbe, bool) {
 /// One shot: spawn, write the control request, read until its
 /// `control_response` (skipping stream noise), kill the child. Any failure —
 /// spawn, timeout, a CLI too old for the subtype — returns `None` and the
-/// caller falls back to the static table. The raw `response` payload comes
+/// caller reports an unavailable catalog. The raw `response` payload comes
 /// back unparsed: the ultracode probe decides the parse, and detection runs
 /// both children concurrently.
 async fn claude_models_response(bin: PathBuf) -> Option<Value> {
@@ -413,8 +400,7 @@ async fn claude_models_response(bin: PathBuf) -> Option<Value> {
             if resp.get("request_id").and_then(Value::as_str) != Some("orx_list_models") {
                 continue;
             }
-            // An `error` subtype has no inner response — `?` falls through to
-            // the static fallback.
+            // An `error` subtype has no inner response.
             return resp.get("response").cloned();
         }
         None
@@ -549,16 +535,6 @@ fn parse_claude_model_list(result: &Value, ultracode: bool) -> Vec<ModelInfo> {
         .collect()
 }
 
-/// The FALLBACK effort ids (see `CLAUDE_EFFORT_LEVELS`), plus `ultracode` when
-/// the parser probe accepted it.
-fn claude_effort_ids(ultracode: bool) -> Vec<&'static str> {
-    let mut ids: Vec<&'static str> = CLAUDE_EFFORT_LEVELS.to_vec();
-    if ultracode {
-        ids.push(CLAUDE_ULTRACODE);
-    }
-    ids
-}
-
 pub struct ClaudeCode;
 
 /// Either credential Claude Code accepts. `ANTHROPIC_AUTH_TOKEN` is the one a
@@ -671,7 +647,7 @@ pub(super) async fn find_claude_working() -> Option<(PathBuf, super::detect::Bin
 
 impl ClaudeCode {
     /// `snapshot` skips the catalog probes (`ultracode`, `list_models`) and
-    /// reports the static model table as pending; a background full pass
+    /// leaves models empty until the background full pass
     /// replaces it. It also skips the `--version` spawn — install is decided
     /// by discovery alone — and answers auth from files/env first, falling
     /// back to `auth status` only where a login could live in a credential
@@ -756,21 +732,15 @@ impl ClaudeCode {
             // The resident child is only spawnable once the CLI is ready.
             info.supports_steering = true;
             // The speculated `list_models` response is parsed here, where the
-            // ultracode verdict has landed (a session mode the catalog never
-            // advertises — see `probe_auth_and_ultracode`). The static table
-            // covers a CLI too old to answer — and the snapshot pass, which
-            // skips both probes.
+            // ultracode verdict has landed.
             let models = spec_models.and_then(|resp| {
                 let parsed = parse_claude_model_list(&resp, ultracode);
                 (!parsed.is_empty()).then_some(parsed)
             });
-            info = info.with_models(models.unwrap_or_else(|| {
-                let ids = claude_effort_ids(ultracode);
-                CLAUDE_MODELS
-                    .iter()
-                    .map(|id| ModelInfo::new(*id).with_reasoning(&ids))
-                    .collect()
-            }));
+            if models.is_none() && !snapshot {
+                info.agent_note = Some("Could not load Claude Code models. Re-check this harness or update Claude Code; the CLI default model is still available.".to_string());
+            }
+            info = info.with_models(models.unwrap_or_default());
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(CLAUDE_REINSTALL));
         } else if info.auth_state == HarnessAuthState::Unsupported {
@@ -2644,19 +2614,6 @@ mod tests {
         assert!(parse_claude_model_list(&serde_json::json!({ "models": "nope" }), true).is_empty());
     }
 
-    /// The fallback tiers gain `ultracode` only when the parser probe said so.
-    #[test]
-    fn fallback_effort_ids_follow_the_probe() {
-        assert_eq!(
-            claude_effort_ids(false),
-            ["low", "medium", "high", "xhigh", "max"]
-        );
-        assert_eq!(
-            claude_effort_ids(true),
-            ["low", "medium", "high", "xhigh", "max", "ultracode"]
-        );
-    }
-
     /// Only the sentinel is withheld; everything else forwards. The composer
     /// offers only catalog-reported tiers (plus a probe-verified `ultracode`),
     /// and Claude merely warns-and-defaults on a value it doesn't know, so an
@@ -2674,11 +2631,10 @@ mod tests {
         assert_eq!(claude_effort(None), None);
     }
 
-    /// Every id the composer can offer must survive the mapper — catalog
-    /// tiers and the probe-gated fallback alike.
+    /// Every harness-wide effort id the composer can offer reaches the CLI.
     #[test]
     fn advertised_effort_ids_all_map_back() {
-        for id in claude_effort_ids(true) {
+        for id in CLAUDE_EFFORT_LEVELS.into_iter().chain([CLAUDE_ULTRACODE]) {
             assert_eq!(claude_effort(Some(id)), Some(id), "{id} was dropped");
         }
     }

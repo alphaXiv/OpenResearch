@@ -2348,6 +2348,23 @@ impl Store {
             .optional()?)
     }
 
+    pub fn chat_native_thread_has_named_model(
+        &self,
+        session_id: &str,
+        native_session_id: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM chat_turns t
+                JOIN chat_messages m ON m.id = t.assistant_message_id
+                WHERE t.session_id = ?1 AND m.result_native_session_id = ?2
+                  AND json_extract(t.settings_json, '$.model') IS NOT NULL
+            )",
+            params![session_id, native_session_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn insert_queued_chat_message(&self, message: &StoredQueuedChatMessage) -> Result<()> {
         let changed = self.conn.execute(
             "INSERT INTO chat_queued_messages
@@ -3534,6 +3551,38 @@ mod tests {
             created_at: 2,
             updated_at: 2,
         }
+    }
+
+    #[test]
+    fn named_model_history_is_scoped_to_the_native_thread() {
+        let dir = std::env::temp_dir().join(format!("orx-store-model-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("one", "client-1");
+        turn.settings_json = r#"{"model":"gpt-6-astra-canary-invalid"}"#.into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: turn.assistant_message_id,
+                session_id: "chat_1".into(),
+                role: "assistant".into(),
+                parts_json: "[]".into(),
+                created_at: 2,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: Some("old-thread".into()),
+            })
+            .unwrap();
+        assert!(store
+            .chat_native_thread_has_named_model("chat_1", "old-thread")
+            .unwrap());
+        assert!(!store
+            .chat_native_thread_has_named_model("chat_1", "fresh-thread")
+            .unwrap());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

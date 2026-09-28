@@ -50,8 +50,8 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct Cursor;
 
 impl Cursor {
-    /// `snapshot` skips `cursor_model_list` and reports the static fallback
-    /// table as pending; the account-details lookup stays deferred either way.
+    /// `snapshot` skips `cursor_model_list` and leaves models empty until the
+    /// background full pass; the account-details lookup stays deferred.
     /// It also skips the `--version` and `agent status` spawns — install is
     /// discovery alone, and auth reads `CURSOR_API_KEY` instead of asking the
     /// CLI (`authInfo` feeds `account` only; it survives `agent logout`).
@@ -123,7 +123,10 @@ impl Cursor {
         // `account` only.
         info.agent_ready = info.ready();
         if info.agent_ready {
-            info = info.with_models(models.unwrap_or_else(fallback_models));
+            if models.is_none() && !snapshot {
+                info.agent_note = Some("Could not load Cursor models. Re-check this harness or update Cursor; the CLI default model is still available.".to_string());
+            }
+            info = info.with_models(models.unwrap_or_default());
         } else if info.install_broken {
             info.agent_note = Some(info.broken_note(CURSOR_REINSTALL));
         } else if info.installed {
@@ -504,10 +507,6 @@ async fn cursor_model_list(bin: PathBuf) -> Option<Vec<ModelInfo>> {
     let text = String::from_utf8_lossy(&out.stdout);
     let parsed = parse_cursor_model_list(&text);
     (!parsed.is_empty()).then_some(parsed)
-}
-
-fn fallback_models() -> Vec<ModelInfo> {
-    vec![ModelInfo::new("auto").with_label(Some("Auto"), None)]
 }
 
 // `agent models` lists `id - display name`, followed by a usage tip.
@@ -1360,7 +1359,6 @@ mod tests {
         assert_eq!(models[2].id, "claude-opus-4-8[effort=high]");
         assert!(models.iter().all(|model| model.reasoning_levels.is_none()));
         assert!(parse_cursor_model_list("No models available for this account.").is_empty());
-        assert_eq!(fallback_models()[0].id, "auto");
     }
 
     #[test]

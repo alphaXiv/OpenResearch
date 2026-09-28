@@ -6796,7 +6796,8 @@ async fn chat_messages(State(state): State<AppState>, Path(id): Path<String>) ->
 struct SendChatReq {
     text: String,
     client_turn_id: Option<String>,
-    model: Option<String>,
+    #[serde(default, deserialize_with = "present_nullable_string")]
+    model: Option<Option<String>>,
     service_tier: Option<String>,
     permission_mode: Option<String>,
     plan_mode: Option<bool>,
@@ -6908,7 +6909,8 @@ async fn send_chat_message(
         return Err(bad_request("text is required"));
     }
     let overrides = local::chat::TurnOverrides {
-        model: req.model,
+        clear_model: req.model == Some(None),
+        model: req.model.flatten(),
         service_tier: req.service_tier,
         permission_mode: req.permission_mode,
         permission_revision: None,
@@ -7566,6 +7568,15 @@ pub(crate) async fn spa(uri: Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_model_distinguishes_cli_default_from_no_override() {
+        let omitted: SendChatReq = serde_json::from_value(json!({ "text": "hello" })).unwrap();
+        let default: SendChatReq =
+            serde_json::from_value(json!({ "text": "hello", "model": null })).unwrap();
+        assert_eq!(omitted.model, None);
+        assert_eq!(default.model, Some(None));
+    }
 
     #[test]
     fn harness_payload_predicates_read_the_wire_shape() {

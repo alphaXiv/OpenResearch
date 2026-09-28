@@ -504,7 +504,7 @@ function HarnessesTab({ remote }: { remote: boolean }) {
                 ? m.onboarding_checking()
                 : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
-                : m.settings_none()}
+                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
           <RunnableNote

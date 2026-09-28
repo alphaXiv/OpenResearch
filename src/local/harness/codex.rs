@@ -42,8 +42,7 @@ use super::detect::{
     HarnessInfo, ModelInfo,
 };
 use super::options::{
-    resolve_reasoning, HarnessOptions, OptionChoice, PermissionMode, PlanActivation,
-    REASONING_DEFAULT_ID,
+    HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
 use super::{
     should_synthesize_plan, synthesize_resume, CompactCtx, CompactOutcome, Harness, OneShot,
@@ -61,32 +60,6 @@ use crate::local::native_store::{self, NativeStore};
 use crate::local::opencode::ensure_playbook;
 use crate::local::shell_env::find_on_path;
 use crate::store::{Store, StoredChatMessage};
-
-// FALLBACK model table, used only when the app-server catalog is unreachable
-// (codex < 0.144's legacy exec path, or a failed/timed-out `model/list`). The
-// primary source is `codex_model_list`: the app-server's `model/list` reports
-// every model with its `supportedReasoningEfforts`, exactly like opencode's
-// `models --verbose` — so models and tiers are normally *queried*, not curated.
-//
-// Each entry is `(model id, the `model_reasoning_effort` values it accepts)`,
-// mirroring the catalog as of codex-cli 0.144. Sol/Terra reach `ultra`; Luna
-// stops at `max`; 5.5 stops at `xhigh`. (A live `codex exec` turn on Luna
-// tolerated `ultra`, but the catalog is what codex's own picker offers — the
-// catalog wins for what WE offer.) Getting a tier wrong is not cosmetic: codex
-// forwards the value unvalidated and an unsupported one comes back as a 400
-// that kills the turn (observed: 5.5 + `max`).
-const CODEX_MODELS: [(&str, &[&str]); 4] = [
-    (
-        "gpt-5.6-sol",
-        &["low", "medium", "high", "xhigh", "max", "ultra"],
-    ),
-    (
-        "gpt-5.6-terra",
-        &["low", "medium", "high", "xhigh", "max", "ultra"],
-    ),
-    ("gpt-5.6-luna", &["low", "medium", "high", "xhigh", "max"]),
-    ("gpt-5.5", &["low", "medium", "high", "xhigh"]),
-];
 
 /// Codex usage occupying the context window: `input_tokens + output_tokens`
 /// (`cached_input_tokens` is a subset of `input_tokens`, not additive). Returns
@@ -114,38 +87,20 @@ fn token_count_usage(info: &Value) -> (Option<u64>, Option<u64>) {
     (codex_used_tokens(usage), window)
 }
 
-/// The harness-wide fallback list — the conservative intersection, used for a
-/// model that isn't in `CODEX_MODELS` (a `-c model=…` override, or a newer id
-/// this build doesn't know).
 const CODEX_REASONING_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 
 /// Deliberately channel-neutral: `find_codex` takes whatever is on PATH, and
 /// naming one installer would send a brew or standalone install to npm.
 const CODEX_REINSTALL: &str = "Reinstall Codex (developers.openai.com/codex)";
 
-/// The effort ids a given codex model accepts per the FALLBACK table, or the
-/// conservative intersection. Send-time validation only — detection prefers
-/// the live catalog (`codex_model_list`).
-fn codex_model_reasoning(model: &str) -> Option<&'static [&'static str]> {
-    CODEX_MODELS
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, levels)| *levels)
-}
-
 /// Query the app-server's `model/list` — codex's own catalog, the same data its
 /// TUI picker renders: every model with its `supportedReasoningEfforts` and
-/// default. This is the primary model source for first-party accounts and for
-/// custom providers that declare an explicit model catalog (the static table is
-/// only the fallback), for the same reason opencode parses `models --verbose`:
-/// the installed CLI knows its catalog and we don't — a curated table here
-/// shipped missing three models and a wrong Luna tier before this existed.
+/// default. The installed CLI owns its catalog and per-model effort choices.
 ///
 /// Protocol: spawn `codex app-server`, `initialize` → `initialized` (the same
 /// handshake `local::codex` uses, incl. `experimentalApi` — `model/list` is
-/// part of the v2 surface), then one `model/list` request. Any failure —
-/// spawn, timeout, old codex without the method — returns `None` and the
-/// caller falls back to the static table. Hidden catalog entries are skipped
+/// part of the v2 surface), then one `model/list` request. Any failure returns
+/// `None`. Hidden catalog entries are skipped
 /// (the server already filters them by default; the guard is belt-and-braces).
 async fn codex_model_list(bin: &Path, configured_effort: Option<&str>) -> Option<Vec<ModelInfo>> {
     // Acquire the spawn lane before the deadline — queue time must not spend
@@ -289,7 +244,6 @@ pub struct Codex;
 /// Only the fields detection needs off `config.toml`; codex has many more.
 #[derive(Deserialize)]
 struct CodexConfig {
-    model: Option<String>,
     model_provider: Option<String>,
     /// The user's configured effort override. Codex resolves it above the
     /// catalog's per-model `defaultReasoningEffort`, so the picker's
@@ -312,32 +266,6 @@ fn parse_configured_effort(raw: &str) -> Option<String> {
         .model_reasoning_effort
 }
 
-/// Keep the configured model first without discarding catalog metadata.
-/// With either input absent, preserve the other as-is.
-fn custom_provider_models(
-    configured_model: Option<&str>,
-    catalog: Option<Vec<ModelInfo>>,
-) -> Vec<ModelInfo> {
-    let Some(configured_model) = configured_model else {
-        return catalog.unwrap_or_default();
-    };
-    let Some(mut models) = catalog else {
-        return vec![ModelInfo::new(configured_model)];
-    };
-    match models.iter().position(|model| model.id == configured_model) {
-        Some(0) => {}
-        Some(index) => {
-            let configured = models.remove(index);
-            models.insert(0, configured);
-        }
-        None => {
-            // Unknown catalog metadata keeps "no override", so Codex applies configured effort.
-            models.insert(0, ModelInfo::new(configured_model));
-        }
-    }
-    models
-}
-
 #[derive(Deserialize)]
 struct CodexProvider {
     env_key: Option<String>,
@@ -346,7 +274,6 @@ struct CodexProvider {
 }
 
 struct CustomProvider {
-    model: Option<String>,
     env_key: Option<String>,
     has_model_catalog: bool,
 }
@@ -372,7 +299,6 @@ fn parse_custom_provider(raw: &str) -> Option<CustomProvider> {
         return None;
     }
     Some(CustomProvider {
-        model: cfg.model.filter(|model| !model.trim().is_empty()),
         env_key: provider.env_key.clone(),
         has_model_catalog: cfg
             .model_catalog_json
@@ -510,8 +436,8 @@ fn exec_line_agent_message(line: &str) -> Option<String> {
 }
 
 impl Codex {
-    /// `snapshot` skips the `model/list` handshake and reports the static
-    /// table (or the custom provider's configured model) as pending; a
+    /// `snapshot` skips the `model/list` handshake and leaves the catalog empty;
+    /// a
     /// background full pass replaces it. It also skips the `--version` and
     /// app-server capability spawns — install is decided by discovery alone
     /// and auth is already a file read (`auth.json` / `config.toml`).
@@ -615,25 +541,9 @@ impl Codex {
         info.agent_ready = info.ready();
         if info.agent_ready {
             let catalog_answered = catalog.is_some();
-            match custom_provider
-                .as_ref()
-                .map(|provider| provider.model.as_deref())
-            {
-                Some(configured_model) => {
-                    info = info.with_models(custom_provider_models(configured_model, catalog))
-                }
-                None => {
-                    // First-party account: the speculated `model/list` answer
-                    // is codex's own catalog (models + per-model efforts, the
-                    // data its TUI picker renders). The static table covers a
-                    // codex too old to answer — and the snapshot pass.
-                    info = info.with_models(catalog.unwrap_or_else(|| {
-                        CODEX_MODELS
-                            .iter()
-                            .map(|(id, levels)| ModelInfo::new(*id).with_reasoning(levels))
-                            .collect()
-                    }));
-                }
+            info = info.with_models(catalog.unwrap_or_default());
+            if want_catalog && !catalog_answered {
+                info.agent_note = Some("Could not load Codex models. Re-check this harness or update Codex; the CLI default model is still available.".to_string());
             }
             // Old CLIs still work via the legacy exec path, but miss the
             // app-server wins (permission prompts on sandbox escalations;
@@ -656,9 +566,11 @@ impl Codex {
                 .await;
             info.supports_steering = !codex_exec_forced() && supported;
             if too_old {
-                info.agent_note = Some(
-                    "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.".to_string(),
-                );
+                let legacy_note = "This Codex version chats via the legacy exec path — update to 0.144+ for plan mode & permission prompts.";
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(note) => format!("{note} {legacy_note}"),
+                    None => legacy_note.to_string(),
+                });
             }
         } else if info.install_broken {
             // Outranks both notes below: neither signing in nor a provider key
@@ -862,11 +774,7 @@ impl Harness for Codex {
                 "approve-for-me",
                 PlanActivation::Command,
             )
-            // Harness-wide fallback only — the real per-model lists ride on each
-            // `ModelInfo` (see `CODEX_MODELS`). The default is
-            // `Default`, so a configured `model_reasoning_effort` in
-            // `~/.codex/config.toml` is no longer overridden by an implicit
-            // per-turn `high` (issue #123).
+            // Unknown models use the CLI default unless the user picks an effort.
             .with_reasoning_levels(&CODEX_REASONING_LEVELS)
     }
 
@@ -2462,6 +2370,11 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         thread_setup["model"] = Value::String(model.clone());
     }
+    if ctx.reset_codex_model {
+        // Codex keeps the old thread model when a turn omits its model override.
+        append_native_recovery_context(ctx, &mut thread_setup);
+        ctx.native_session_id = None;
+    }
     let thread_id = match (ctx.native_session_id.clone(), native_session.as_ref()) {
         (Some(id), _) if client.resumed_thread().as_deref() == Some(id.as_str()) => id,
         (Some(_), None) => {
@@ -2522,7 +2435,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     if let Some(model) = &ctx.model {
         turn_params["model"] = Value::String(model.clone());
     }
-    let effort = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref());
+    let effort = codex_reasoning(ctx.reasoning_level.as_deref());
     if let Some(effort) = effort {
         turn_params["effort"] = Value::String(effort.to_string());
     }
@@ -3427,29 +3340,9 @@ fn ensure_orx_lifecycle_lock() -> Option<PathBuf> {
     crate::paths::canonicalize(crate::store::lifecycle_lock_path()).ok()
 }
 
-/// Session reasoning id → Codex `model_reasoning_effort` value. See
-/// [`resolve_reasoning`] for what a `None` result means.
-///
-/// Validation is per model, from the fallback table:
-///   * a model the table knows → validate against its tiers;
-///   * a model it doesn't (the catalog is discovered live now, so this is any
-///     model outside the frozen four) → forward the value. The composer only
-///     offered what `model/list` reported for that model, so an allowlist here
-///     would drop genuinely supported tiers — the same reasoning as
-///     `opencode_variant`. A stale/wrong value comes back as a codex 400,
-///     which is surfaced to the chat, not swallowed;
-///   * no model at all → the CLI's own configured default model, whose tiers
-///     we can't know. Conservative intersection; matches what the composer
-///     offers in that state, so nothing advertised is dropped.
-fn codex_reasoning<'a>(level: Option<&'a str>, model: Option<&str>) -> Option<&'a str> {
-    match model {
-        Some(m) => match codex_model_reasoning(m) {
-            Some(allowed) => resolve_reasoning(level, allowed),
-            // Catalog-discovered model: forward anything but the sentinel.
-            None => level.filter(|l| *l != REASONING_DEFAULT_ID),
-        },
-        None => resolve_reasoning(level, &CODEX_REASONING_LEVELS),
-    }
+/// Session reasoning id → Codex `model_reasoning_effort` value.
+fn codex_reasoning(level: Option<&str>) -> Option<&str> {
+    level.filter(|l| *l != REASONING_DEFAULT_ID)
 }
 
 fn command_string(v: &Value) -> String {
@@ -3648,7 +3541,7 @@ async fn run_turn_exec(ctx: &mut TurnCtx) -> Result<()> {
         }
     };
     // Reasoning level → Codex's own `model_reasoning_effort` config override.
-    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref(), ctx.model.as_deref()) {
+    if let Some(effort) = codex_reasoning(ctx.reasoning_level.as_deref()) {
         cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
     }
     if let Some(service_tier) = &ctx.service_tier {
@@ -3959,12 +3852,8 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
-    fn model_ids(models: &[ModelInfo]) -> Vec<&str> {
-        models.iter().map(|model| model.id.as_str()).collect()
-    }
-
     #[test]
-    fn custom_provider_uses_its_env_key_and_configured_model() {
+    fn custom_provider_uses_its_env_key() {
         // The exact shape from the bug report: a gateway provider that opts out
         // of OpenAI auth, so there is deliberately no auth.json to find.
         let provider = parse_custom_provider(
@@ -3980,7 +3869,6 @@ requires_openai_auth = false
 "#,
         )
         .unwrap();
-        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
         assert_eq!(provider.env_key.as_deref(), Some("CUSTOM_API_KEY"));
 
         // A provider that still wants OpenAI auth falls through to auth.json.
@@ -4026,7 +3914,6 @@ requires_openai_auth = false
             .and_then(parse_custom_provider)
             .expect("config.toml should yield a custom provider");
 
-        assert_eq!(provider.model.as_deref(), Some("gateway-model"));
         // The credential is absent, so detection reports not-ready and the note
         // names the variable to set instead of telling the user to run
         // `codex login` (which would be the wrong instruction here).
@@ -4089,42 +3976,6 @@ requires_openai_auth = false
             .has_model_catalog
         );
         assert!(parse_custom_provider("not toml ===").is_none());
-    }
-
-    #[test]
-    fn custom_provider_models_keep_the_configured_model_first() {
-        let models = custom_provider_models(
-            Some("configured"),
-            Some(vec![
-                ModelInfo::new("first"),
-                ModelInfo::new("configured").with_label(Some("Configured model"), None),
-                ModelInfo::new("last"),
-            ]),
-        );
-
-        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
-        assert_eq!(models[0].display_name.as_deref(), Some("Configured model"));
-
-        let models = custom_provider_models(
-            Some("configured"),
-            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
-        );
-        assert_eq!(model_ids(&models), ["configured", "first", "last"]);
-        assert!(models[0].reasoning_levels.is_none());
-        assert!(models[0].default_reasoning_level.is_none());
-    }
-
-    #[test]
-    fn custom_provider_models_preserve_catalog_fallbacks() {
-        let models = custom_provider_models(Some("configured"), None);
-        assert_eq!(model_ids(&models), ["configured"]);
-
-        let models = custom_provider_models(
-            None,
-            Some(vec![ModelInfo::new("first"), ModelInfo::new("last")]),
-        );
-        assert_eq!(model_ids(&models), ["first", "last"]);
-        assert!(custom_provider_models(None, None).is_empty());
     }
 
     #[test]
@@ -5324,52 +5175,11 @@ requires_openai_auth = false
     }
 
     #[test]
-    fn reasoning_accepts_only_codex_ids() {
-        let sol = Some("gpt-5.6-sol");
-        assert_eq!(codex_reasoning(Some("low"), sol), Some("low"));
-        assert_eq!(codex_reasoning(Some("high"), sol), Some("high"));
-        assert_eq!(codex_reasoning(Some("xhigh"), sol), Some("xhigh"));
-        // Junk is dropped (the flag is omitted → CLI default), never forwarded
-        // as an invalid `model_reasoning_effort`.
-        assert_eq!(codex_reasoning(Some("nonsense"), sol), None);
-        assert_eq!(codex_reasoning(None, sol), None);
-    }
-
-    /// The point of issue #123: the top tiers are model-specific, so the same
-    /// stored level resolves differently per model rather than being clamped to
-    /// one hard-coded intersection.
-    #[test]
-    fn reasoning_is_model_specific() {
-        // Sol/Terra reach `ultra`; Luna stops at `max` (the catalog's word —
-        // codex's own picker doesn't offer Luna `ultra`, so neither do we).
-        for model in ["gpt-5.6-sol", "gpt-5.6-terra"] {
-            assert_eq!(codex_reasoning(Some("ultra"), Some(model)), Some("ultra"));
-        }
-        assert_eq!(
-            codex_reasoning(Some("max"), Some("gpt-5.6-luna")),
-            Some("max")
-        );
-        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-5.6-luna")), None);
-        // 5.5 stops at `xhigh`. An unsupported tier is dropped rather than sent
-        // — this is the "changing models clears a stale effort" guarantee,
-        // enforced backend-side too, and it matters because codex answers an
-        // unsupported effort with a 400 that kills the turn.
-        assert_eq!(
-            codex_reasoning(Some("xhigh"), Some("gpt-5.5")),
-            Some("xhigh")
-        );
-        assert_eq!(codex_reasoning(Some("max"), Some("gpt-5.5")), None);
-        // A model outside the fallback table is catalog-discovered: the
-        // composer offered only what `model/list` reported for it, so the value
-        // is forwarded rather than clamped (same reasoning as opencode).
-        assert_eq!(codex_reasoning(Some("ultra"), Some("gpt-9")), Some("ultra"));
-        assert_eq!(
-            codex_reasoning(Some(REASONING_DEFAULT_ID), Some("gpt-9")),
-            None
-        );
-        // No model at all → the conservative fallback intersection.
-        assert_eq!(codex_reasoning(Some("xhigh"), None), Some("xhigh"));
-        assert_eq!(codex_reasoning(Some("max"), None), None);
+    fn reasoning_forwards_explicit_effort_without_model_assumptions() {
+        assert_eq!(codex_reasoning(Some("max")), Some("max"));
+        assert_eq!(codex_reasoning(Some("ultra")), Some("ultra"));
+        assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID)), None);
+        assert_eq!(codex_reasoning(None), None);
     }
 
     /// The `model/list` parser against the live 0.144 response shape (headers
@@ -5476,27 +5286,7 @@ requires_openai_auth = false
     /// by the composer (the concrete bug in issue #123).
     #[test]
     fn reasoning_default_sends_no_override() {
-        for model in [Some("gpt-5.6-sol"), Some("gpt-5.5"), None] {
-            assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID), model), None);
-        }
-    }
-
-    /// Every advertised per-model choice must survive the mapper for that same
-    /// model — the picker can never offer an effort `run_turn` would drop.
-    /// Iterating `CODEX_MODELS` also means a model added without tiers fails
-    /// here rather than silently degrading to the fallback.
-    #[test]
-    fn advertised_model_choices_all_map_back() {
-        for (model, levels) in CODEX_MODELS {
-            assert!(!levels.is_empty(), "{model} has no reasoning tiers");
-            for level in levels {
-                assert_eq!(
-                    codex_reasoning(Some(level), Some(model)),
-                    Some(*level),
-                    "{model} advertises {level} but the mapper drops it"
-                );
-            }
-        }
+        assert_eq!(codex_reasoning(Some(REASONING_DEFAULT_ID)), None);
     }
 
     fn answer(

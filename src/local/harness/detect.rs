@@ -140,7 +140,7 @@ pub struct ModelInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_levels: Option<Vec<super::options::OptionChoice>>,
     /// The catalog's own human name for the model (`Opus`, `GPT-5.6 Sol`,
-    /// `Big Pickle`). Absent for statically-listed fallback models, where the
+    /// `Big Pickle`). Absent when the CLI does not provide a display name; then
     /// UI derives a label from the id instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
