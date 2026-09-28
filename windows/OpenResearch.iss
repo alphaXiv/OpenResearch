@@ -109,3 +109,14 @@ begin
     ReportMissingWebView2;
   end;
 end;
+
+// Without the runtime the app can't open its window, so don't offer to start it.
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and not WebView2Installed
+    and (WizardForm.RunList.Items.Count > 0) then
+  begin
+    WizardForm.RunList.Checked[0] := False;
+    WizardForm.RunList.Visible := False;
+  end;
+end;

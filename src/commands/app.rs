@@ -268,8 +268,9 @@ mod instance {
 
 #[cfg(any(target_os = "macos", windows))]
 mod imp {
-    use std::cell::Cell;
-    use std::path::PathBuf;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
     use std::time::{Duration, Instant};
 
@@ -406,6 +407,7 @@ mod imp {
         };
 
         let shown = Rc::new(Cell::new(false));
+        let replaced = Rc::new(RefCell::new(HashMap::new()));
         let webview = WebViewBuilder::new()
             .with_accept_first_mouse(true)
             // Lets the dashboard tell it is in the app, where pop-ups open in the browser.
@@ -420,7 +422,11 @@ mod imp {
             })
             .with_download_started_handler({
                 let window = window.clone();
-                move |_url, path| choose_download_path(&window, path)
+                let replaced = replaced.clone();
+                move |url, path| choose_download_path(&window, url, path, &replaced)
+            })
+            .with_download_completed_handler(move |url, _path, success| {
+                finish_replacing(&url, success, &replaced)
             })
             .with_document_title_changed_handler({
                 let window = window.clone();
@@ -606,7 +612,12 @@ mod imp {
 
     /// Without a handler WKWebView drops downloads and WebView2 saves them
     /// silently into Downloads; ask where, as a browser would.
-    fn choose_download_path(window: &Window, path: &mut PathBuf) -> bool {
+    fn choose_download_path(
+        window: &Window,
+        url: String,
+        path: &mut PathBuf,
+        replaced: &RefCell<HashMap<String, PathBuf>>,
+    ) -> bool {
         let mut dialog = rfd::FileDialog::new();
         // Owned by the window, which Windows disables while the dialog is up. On
         // macOS a parent turns the panel into a sheet, which a hidden window can't show.
@@ -625,15 +636,40 @@ mod imp {
         match dialog.save_file() {
             Some(chosen) => {
                 // Neither webview writes over an existing file, and the panel
-                // has already confirmed replacing it.
-                if chosen.exists() && std::fs::remove_file(&chosen).is_err() {
-                    return false;
+                // has already confirmed replacing it; the original waits aside
+                // until the download completes, or comes back if it doesn't.
+                if chosen.exists() {
+                    let original = set_aside_path(&chosen);
+                    if std::fs::rename(&chosen, &original).is_err() {
+                        return false;
+                    }
+                    replaced.borrow_mut().insert(url, chosen.clone());
                 }
                 *path = chosen;
                 true
             }
             None => false,
         }
+    }
+
+    /// Keyed by URL: wry reports no path on a finished macOS download, nor on
+    /// a failed Linux one.
+    fn finish_replacing(url: &str, success: bool, replaced: &RefCell<HashMap<String, PathBuf>>) {
+        let Some(path) = replaced.borrow_mut().remove(url) else {
+            return;
+        };
+        let original = set_aside_path(&path);
+        let _ = if success {
+            std::fs::remove_file(original)
+        } else {
+            std::fs::rename(original, path)
+        };
+    }
+
+    fn set_aside_path(path: &Path) -> PathBuf {
+        let mut name = path.file_name().unwrap_or_default().to_os_string();
+        name.push(".orx-replaced");
+        path.with_file_name(name)
     }
 
     /// wry's WKUIDelegate has no confirm panel, and without one WebKit answers
