@@ -773,7 +773,14 @@ async fn handle_permission(
         return conn.respond(id, selected_outcome(allow.as_deref())).await;
     }
     let tool_call = params.get("toolCall").cloned().unwrap_or(Value::Null);
-    let (tool, input) = permission_tool(&tool_call);
+    // Kimi's request carries only the tool's name; its arguments arrived
+    // earlier as updates to the same tool call.
+    let known = tool_call
+        .get("toolCallId")
+        .and_then(Value::as_str)
+        .and_then(|id| find_part_mut(&mut ctx.assistant.parts, id))
+        .map(|part| part.clone());
+    let (tool, input) = permission_tool(&tool_call, known.as_ref());
     let host = ctx.host.clone();
     let session_id = ctx.session_id.clone();
     let token = state.gate_token.clone();
@@ -814,19 +821,44 @@ fn selected_outcome(option: Option<&str>) -> Value {
 
 /// The tool name and input a permission card shows. Names follow the Claude
 /// vocabulary so plan-mode's read-only policy recognizes reads and edits.
-fn permission_tool(tool_call: &Value) -> (String, Value) {
+/// `known` is the tool part streamed so far for this call, which fills in
+/// what the request leaves out.
+fn permission_tool(tool_call: &Value, known: Option<&WirePart>) -> (String, Value) {
     let kind = tool_call.get("kind").and_then(Value::as_str).unwrap_or("");
     let title = tool_call.get("title").and_then(Value::as_str).unwrap_or("");
+    let tool = match (kind, known.and_then(|part| part.tool.as_deref())) {
+        ("", Some(tool)) => tool.to_string(),
+        _ => tool_name(kind, title),
+    };
     let mut input = tool_call
         .get("rawInput")
+        .or_else(|| known?.state.as_ref()?.input.as_ref())
+        .filter(|input| input.is_object())
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if let (Some(object), false) = (input.as_object_mut(), title.is_empty()) {
+    // A title that only repeats the tool's name ("Bash") explains nothing;
+    // the request's own text ("Requesting approval to Running: …") does.
+    let description = Some(title)
+        .filter(|title| !title.is_empty() && !title.eq_ignore_ascii_case(&tool))
+        .map(str::to_string)
+        .or_else(|| tool_call.get("content").and_then(tool_content_text));
+    if let (Some(object), Some(description)) = (input.as_object_mut(), description) {
         object
             .entry("description")
-            .or_insert_with(|| Value::String(title.to_string()));
+            .or_insert(Value::String(description));
     }
-    (tool_name(kind, title), input)
+    (tool, input)
+}
+
+/// Arguments some agents stream as a running tool call's text (Kimi sends
+/// `{"command": …}` before its `rawInput`).
+fn streamed_input(status: Option<&str>, output: Option<&str>) -> Option<Value> {
+    if matches!(status, Some("completed" | "failed")) {
+        return None;
+    }
+    serde_json::from_str::<Value>(output?.trim())
+        .ok()
+        .filter(Value::is_object)
 }
 
 /// ACP tool `kind` → the tool name the UI renders.
@@ -880,7 +912,19 @@ fn raw_output_text(raw: &Value) -> Option<String> {
     match raw {
         Value::Null => None,
         Value::String(text) => Some(text.clone()),
-        other => Some(other.to_string()),
+        // MiniMax: `{"content": [{"type": "text", "text": …}], "details": …}`.
+        other => other
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| block.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .filter(|text| !text.is_empty())
+            .or_else(|| Some(other.to_string())),
     }
 }
 
@@ -934,11 +978,16 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
             };
             let kind = update.get("kind").and_then(Value::as_str).unwrap_or("");
             let title = update.get("title").and_then(Value::as_str).unwrap_or("");
-            let status = tool_status(update.get("status").and_then(Value::as_str));
-            let output = update
+            let raw_status = update.get("status").and_then(Value::as_str);
+            let status = tool_status(raw_status);
+            let mut output = update
                 .get("content")
                 .and_then(tool_content_text)
                 .or_else(|| update.get("rawOutput").and_then(raw_output_text));
+            let streamed = streamed_input(raw_status, output.as_deref());
+            if streamed.is_some() {
+                output = None;
+            }
             ctx.upsert_part(WirePart {
                 id: call_id.to_string(),
                 kind: "tool".into(),
@@ -946,7 +995,7 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
                 tool: Some(tool_name(kind, title)),
                 state: Some(WireToolState {
                     status: status.into(),
-                    input: update.get("rawInput").cloned(),
+                    input: update.get("rawInput").cloned().or(streamed),
                     output: (status != "error").then(|| output.clone()).flatten(),
                     error: (status == "error").then_some(output).flatten(),
                     title: (!title.is_empty()).then(|| title.to_string()),
@@ -965,10 +1014,14 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
                 ctx.upsert_part(WirePart::tool(call_id, "Tool", "running", None));
             }
             let status = update.get("status").and_then(Value::as_str);
-            let output = update
+            let mut output = update
                 .get("content")
                 .and_then(tool_content_text)
                 .or_else(|| update.get("rawOutput").and_then(raw_output_text));
+            let streamed = streamed_input(status, output.as_deref());
+            if streamed.is_some() {
+                output = None;
+            }
             if let Some(part) = find_part_mut(&mut ctx.assistant.parts, call_id) {
                 if let Some(kind) = update.get("kind").and_then(Value::as_str) {
                     let title = update.get("title").and_then(Value::as_str).unwrap_or("");
@@ -987,8 +1040,8 @@ fn apply_update(ctx: &mut TurnCtx, state: &mut TurnState, update: &Value) {
                 if let Some(title) = update.get("title").and_then(Value::as_str) {
                     part_state.title = Some(title.to_string());
                 }
-                if let Some(input) = update.get("rawInput") {
-                    part_state.input = Some(input.clone());
+                if let Some(input) = update.get("rawInput").cloned().or(streamed) {
+                    part_state.input = Some(input);
                 }
                 if let Some(output) = output {
                     if part_state.status == "error" {
@@ -1472,8 +1525,69 @@ pub(crate) mod tests {
         );
         let (tool, input) = permission_tool(
             &json!({"kind": "edit", "title": "Edit a.py", "rawInput": {"path": "a.py"}}),
+            None,
         );
         assert_eq!(tool, "Edit");
         assert_eq!(input, json!({"path": "a.py", "description": "Edit a.py"}));
+    }
+
+    /// Kimi Code 2.1.1's approval flow, as recorded: the request names only
+    /// the tool, and the command arrived as the running call's text.
+    #[test]
+    fn kimi_permission_cards_show_the_streamed_command() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut state = TurnState::default();
+        apply_update(
+            &mut ctx,
+            &mut state,
+            &json!({
+                "sessionUpdate": "tool_call", "toolCallId": "0:call_1", "title": "Bash", "kind": "execute",
+                "status": "pending", "content": [{"type": "content", "content": {"type": "text", "text": ""}}]
+            }),
+        );
+        apply_update(
+            &mut ctx,
+            &mut state,
+            &json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": "0:call_1", "status": "in_progress",
+                "content": [{"type": "content", "content": {"type": "text",
+                    "text": "{\"command\": \"printf 'Hello!\\\\n' > hello.txt\", \"description\": \"Write hello.txt\"}"}}]
+            }),
+        );
+        let tool_state = ctx.assistant.parts[0].state.as_ref().unwrap();
+        assert_eq!(tool_state.output, None, "arguments are not output");
+        let request = json!({
+            "toolCallId": "0:call_1", "title": "Bash",
+            "content": [{"type": "content", "content": {"type": "text",
+                "text": "Requesting approval to Running: printf 'Hello!\\n' > hello.txt"}}]
+        });
+        let known = ctx.assistant.parts[0].clone();
+        let (tool, input) = permission_tool(&request, Some(&known));
+        assert_eq!(tool, "Bash");
+        assert_eq!(
+            input,
+            json!({"command": "printf 'Hello!\\n' > hello.txt", "description": "Write hello.txt"})
+        );
+
+        // Nothing streamed yet: the request's own text explains the card.
+        let (tool, input) = permission_tool(&request, None);
+        assert_eq!(tool, "Bash");
+        assert_eq!(
+            input,
+            json!({"description": "Requesting approval to Running: printf 'Hello!\\n' > hello.txt"})
+        );
+    }
+
+    #[test]
+    fn minimax_raw_output_shows_its_text() {
+        let raw = json!({
+            "content": [{"type": "text", "text": "?? hello.txt\n"}],
+            "details": {"execution": {"status": "succeeded", "exitCode": 0}}
+        });
+        assert_eq!(raw_output_text(&raw).as_deref(), Some("?? hello.txt\n"));
+        assert_eq!(
+            raw_output_text(&json!({"exitCode": 1})).as_deref(),
+            Some(r#"{"exitCode":1}"#)
+        );
     }
 }

@@ -429,7 +429,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         .map_err(|_| anyhow!("ZCode did not exit after its response"))??;
     let log_path = crate::store::data_dir().join(format!("agent-{log_name}.log"));
     if let Some(message) = state.failure.take() {
-        ctx.mark_terminal_failure("zcode_turn_failed", message);
+        ctx.mark_terminal_failure("zcode_turn_failed", explain_failure(message, &log_path));
     } else if !state.completed {
         let detail = std::fs::read_to_string(&log_path)
             .ok()
@@ -456,6 +456,22 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     }
     let _ = ctx.flush();
     Ok(())
+}
+
+/// ZCode's own wording for a turn that found no model says nothing about why.
+const NO_MODEL: &str = "Select a model before continuing";
+
+fn explain_failure(message: String, log_path: &Path) -> String {
+    if !message.contains(NO_MODEL) {
+        return message;
+    }
+    format!(
+        "ZCode found no model it can use from the command line ({NO_MODEL}). Outside its app \
+         the ZCode runtime reaches models through its own Z.ai sign-in (`zcode login`, for an \
+         Individual Coding Plan) or a provider with an API key in \
+         ~/.zcode/v2/provider_config.json. Log: {}",
+        log_path.display()
+    )
 }
 
 #[derive(Default)]
@@ -674,6 +690,20 @@ mod tests {
             .failure
             .as_deref()
             .is_some_and(|message| message.contains("Insufficient balance")));
+    }
+
+    #[test]
+    fn a_turn_without_a_model_says_what_zcode_needs() {
+        let (_, state) = fold(include_str!("fixtures/zcode_stream_no_model.jsonl"));
+        let message = explain_failure(state.failure.unwrap(), Path::new("agent-zcode-x.log"));
+        assert!(
+            message.contains("Select a model before continuing"),
+            "{message}"
+        );
+        assert!(message.contains("provider_config.json"), "{message}");
+        assert!(message.ends_with("Log: agent-zcode-x.log"), "{message}");
+        let other = explain_failure("[1113] Insufficient balance".into(), Path::new("x"));
+        assert_eq!(other, "[1113] Insufficient balance");
     }
 
     #[test]
