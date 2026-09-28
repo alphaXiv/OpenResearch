@@ -107,7 +107,7 @@ orx exp wait <expId> --interval 10 --timeout 3600
 - The default interval is 5 seconds and timeout is 1800 seconds. Timeout exits
   non-zero and means nothing changed yet, not that the run failed.
 - Failed runs include a `reason:` line. Provider-capacity failures are often
-  retryable; failures after startup require reading `orx logs <runId>`.
+  retryable; failures after startup require reading the file located by `orx logs <runId>`.
 - A failed run is not a new node. Repair and relaunch the same experiment as
   described by `orx-experiment-tree`.
 

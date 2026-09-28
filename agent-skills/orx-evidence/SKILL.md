@@ -1,6 +1,6 @@
 ---
 name: orx-evidence
-description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results."
+description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, locate persisted logs with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results."
 ---
 
 Run logs are the evidence channel. Make the run command print everything needed
