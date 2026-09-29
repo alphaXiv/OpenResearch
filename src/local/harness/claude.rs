@@ -289,15 +289,32 @@ const CLAUDE_THIRD_PARTY_PROVIDERS: [(&str, &str); 2] = [
 /// `prepare_env` hands the child (process env, then orx's synced env file), and
 /// reads any variable, not only credentials.
 fn third_party_provider() -> Option<&'static str> {
-    CLAUDE_THIRD_PARTY_PROVIDERS
+    third_party_note(|key| {
+        [claude_settings_env(key), super::detect::api_key(key)]
+            .into_iter()
+            .flatten()
+            .any(|value| env_flag_enabled(&value))
+    })
+}
+
+/// Repair advice for a setup with two providers switched on at once: which one
+/// Claude Code follows is its own precedence to change, and naming the wrong
+/// cloud sends the user to refresh credentials that were never the problem.
+const CLAUDE_THIRD_PARTY_AMBIGUOUS: &str = "Claude Code could not authenticate with its third-party model provider. Leave only one of `CLAUDE_CODE_USE_BEDROCK` and `CLAUDE_CODE_USE_VERTEX` enabled, refresh that cloud's credentials, then re-check this harness.";
+
+/// Split from [`third_party_provider`] so the selection is testable without the
+/// real settings files and environment behind it: `enabled` decides one switch,
+/// from the union of both sources.
+fn third_party_note(enabled: impl Fn(&str) -> bool) -> Option<&'static str> {
+    let mut on = CLAUDE_THIRD_PARTY_PROVIDERS
         .into_iter()
-        .find(|(key, _)| {
-            [claude_settings_env(key), super::detect::api_key(key)]
-                .into_iter()
-                .flatten()
-                .any(|value| env_flag_enabled(&value))
-        })
-        .map(|(_, note)| note)
+        .filter(|(key, _)| enabled(key));
+    let (_, note) = on.next()?;
+    Some(if on.next().is_some() {
+        CLAUDE_THIRD_PARTY_AMBIGUOUS
+    } else {
+        note
+    })
 }
 
 /// Claude Code's truthiness for a boolean env switch: set, and not an explicit
@@ -2635,6 +2652,66 @@ mod tests {
         assert!(!env_flag_enabled(""));
         assert!(!env_flag_enabled(" 0 "));
         assert!(!env_flag_enabled("False"));
+    }
+
+    /// The selection `third_party_provider` performs over both of its sources.
+    /// It is driven through [`third_party_note`] because the real function reads
+    /// the user's own `~/.claude` settings, login-shell environment, and synced
+    /// env file — a machine configured for Bedrock (the reported setup) would
+    /// otherwise decide the result.
+    #[test]
+    fn third_party_selection_unions_settings_and_environment() {
+        let note = |settings: serde_json::Value, env: &[(&str, &str)]| {
+            third_party_note(|key| {
+                [
+                    settings_env_value(&settings, key),
+                    env.iter()
+                        .find(|(name, _)| *name == key)
+                        .map(|(_, value)| (*value).to_owned()),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|value| env_flag_enabled(&value))
+            })
+        };
+        // The reported setup: the switch sits in settings only, where orx's own
+        // environment cannot see it.
+        assert!(note(
+            serde_json::json!({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}),
+            &[]
+        )
+        .is_some_and(|note| note.contains("Amazon Bedrock")));
+        // Environment only, and the other provider.
+        assert!(
+            note(serde_json::json!({}), &[("CLAUDE_CODE_USE_VERTEX", "true")])
+                .is_some_and(|note| note.contains("Google Cloud"))
+        );
+        // Off in one source and on in the other: either enabling it counts,
+        // because a third-party provider is then in play whichever the CLI
+        // follows.
+        assert!(note(
+            serde_json::json!({"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}}),
+            &[("CLAUDE_CODE_USE_BEDROCK", "1")]
+        )
+        .is_some());
+        // Explicitly off, and absent: Claude Code talks to Anthropic, and the
+        // credential stores this pass reads are the whole answer again.
+        assert_eq!(
+            note(
+                serde_json::json!({"env": {"CLAUDE_CODE_USE_BEDROCK": "0"}}),
+                &[("CLAUDE_CODE_USE_VERTEX", "false")]
+            ),
+            None
+        );
+        assert_eq!(note(serde_json::json!({}), &[]), None);
+        // Both switched on: name neither cloud rather than send the user to
+        // refresh the credentials of the one Claude Code is not using.
+        let ambiguous = note(
+            serde_json::json!({"env": {"CLAUDE_CODE_USE_BEDROCK": "1"}}),
+            &[("CLAUDE_CODE_USE_VERTEX", "1")],
+        )
+        .unwrap();
+        assert!(!ambiguous.contains("Amazon Bedrock") && !ambiguous.contains("Google"));
     }
 
     #[test]
