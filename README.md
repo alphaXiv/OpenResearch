@@ -63,7 +63,7 @@ On Linux, the desktop app is an AppImage for
 [x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage)
 or [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage).
 Keep it somewhere you can write to, such as `~/Applications`, so it can update
-itself, then run `chmod +x OpenResearch-*.AppImage` and open it. See
+itself, then change to that directory, run `chmod +x OpenResearch-*.AppImage`, and open it. See
 [Linux](docs/linux.md) for requirements.
 
 [Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
