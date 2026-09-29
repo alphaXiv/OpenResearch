@@ -2,8 +2,8 @@ import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
-import { useState } from "react";
-import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
+import { useEffect, useState } from "react";
+import { fmtDuration, fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button } from "./ui";
@@ -32,6 +32,18 @@ export function ExperimentsTable({
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
   const [cancelError, setCancelError] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const hasLiveRun = runs.some(
+    (run) => run.status === "running" || run.status === "starting",
+  );
+
+  useEffect(() => {
+    if (!hasLiveRun) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [hasLiveRun]);
+
   const runsByExperiment = new Map<string, Run[]>();
   for (const run of runs) {
     const experimentRuns = runsByExperiment.get(run.experimentId);
@@ -137,6 +149,11 @@ export function ExperimentsTable({
                 </div>
                 <div className="experiment-table-latest flex items-center gap-1.5 min-w-0 text-subtext text-sm font-medium whitespace-nowrap">
                   <span>{latestRun ? timeAgo(latestRun.createdAt) : m.experiments_not_run_yet()}</span>
+                  {latestRun && (
+                    <span title={m.experiment_overview_duration()}>
+                      {fmtDuration((latestRun.endedAt ?? now) - latestRun.createdAt)}
+                    </span>
+                  )}
                 </div>
               </div>
               <div
