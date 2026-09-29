@@ -17,7 +17,10 @@
 //!
 //! Detection: `claude auth status --json` is the readiness source of truth.
 //! `~/.claude.json` contributes display metadata only after that live check;
-//! `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` remain credential fallbacks.
+//! `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` remain credential fallbacks. A
+//! third-party provider (Bedrock, Vertex — see [`third_party_provider`]) holds
+//! its credential outside every store orx can read, so it is evidence that the
+//! CLI must be asked rather than answered for.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -89,15 +92,36 @@ fn parse_auth_status(success: bool, stdout: &[u8]) -> AuthProbe {
         .and_then(|value| value.get("authMethod"))
         .and_then(Value::as_str)
         .map(|method| method.to_ascii_lowercase());
-    let method = reported_method.as_deref().and_then(|method| {
-        if method.contains("api") || method.contains("token") {
-            Some("apiKey")
-        } else if method.contains("oauth") || method.contains("claude") {
-            Some("oauth")
-        } else {
-            None
-        }
-    });
+    let reported_provider = value
+        .as_ref()
+        .and_then(|value| value.get("apiProvider"))
+        .and_then(Value::as_str)
+        .map(|provider| provider.to_ascii_lowercase());
+    // Bedrock and Vertex authenticate with that cloud's credentials instead of
+    // an Anthropic login: `authMethod` is `third_party` and `apiProvider` names
+    // the cloud. Reporting them as `apiKey` — a credential, not OAuth — is what
+    // keeps them out of the OAuth-only version gate, out of
+    // `apply_env_credential_override`, and away from a sign-in button no
+    // third-party setup can use.
+    let third_party = reported_method
+        .as_deref()
+        .is_some_and(|method| method.contains("third"))
+        || reported_provider
+            .as_deref()
+            .is_some_and(|provider| !provider.is_empty() && provider != "anthropic");
+    let method = if third_party {
+        Some("apiKey")
+    } else {
+        reported_method.as_deref().and_then(|method| {
+            if method.contains("api") || method.contains("token") {
+                Some("apiKey")
+            } else if method.contains("oauth") || method.contains("claude") {
+                Some("oauth")
+            } else {
+                None
+            }
+        })
+    };
     let state = match (success, logged_in) {
         (true, Some(true)) => HarnessAuthState::Ready,
         (_, Some(false)) => HarnessAuthState::NeedsLogin,
@@ -167,8 +191,9 @@ enum SnapshotAuth {
     SavedOauth,
     /// The file is the whole credential store and holds no login.
     SignedOut,
-    /// No file evidence either way — a login could be in the OS store, so the
-    /// CLI itself must answer.
+    /// No file evidence either way — a login could be in the OS store, or a
+    /// third-party provider could hold the credential outside every store
+    /// this pass can read, so the CLI itself must answer.
     ProbeCli,
 }
 
@@ -176,8 +201,16 @@ fn snapshot_auth_choice(
     has_api_credential: bool,
     has_oauth_file: bool,
     file_is_store: bool,
+    third_party_provider: bool,
 ) -> SnapshotAuth {
-    if has_api_credential {
+    if third_party_provider {
+        // A Bedrock/Vertex credential is AWS's or Google's: it appears in no
+        // store this function reads, so their emptiness proves nothing. The
+        // switch also makes the CLI ignore any `ANTHROPIC_*` credential, so
+        // that one cannot be reported as the effective login either. Only the
+        // CLI knows, and it is asked.
+        SnapshotAuth::ProbeCli
+    } else if has_api_credential {
         SnapshotAuth::UnverifiedApiKey
     } else if has_oauth_file {
         SnapshotAuth::SavedOauth
@@ -193,6 +226,7 @@ async fn snapshot_auth_probe(bin: &Path) -> AuthProbe {
         has_api_credential(),
         has_oauth_credentials(),
         credential_store_is_file_only(),
+        third_party_provider().is_some(),
     );
     match choice {
         SnapshotAuth::UnverifiedApiKey => AuthProbe {
@@ -220,6 +254,74 @@ async fn snapshot_auth_probe(bin: &Path) -> AuthProbe {
 fn has_oauth_credentials() -> bool {
     let path = native_store::claude_home(NativeStore::Legacy).join(".credentials.json");
     read_json(path).is_some_and(|creds| creds.get("claudeAiOauth").is_some())
+}
+
+/// Claude Code's third-party model providers: the environment variable that
+/// selects each, paired with the repair its credentials need. These logins are
+/// AWS's and Google's — no `ANTHROPIC_*` variable, no `claudeAiOauth` entry, no
+/// Credential Manager target — so on a working install every store
+/// [`snapshot_auth_choice`] can read is empty, and reading them alone reports it
+/// as signed out.
+const CLAUDE_THIRD_PARTY_PROVIDERS: [(&str, &str); 2] = [
+    (
+        "CLAUDE_CODE_USE_BEDROCK",
+        "Claude Code could not authenticate with Amazon Bedrock. Refresh the AWS credentials its settings select, then re-check this harness.",
+    ),
+    (
+        "CLAUDE_CODE_USE_VERTEX",
+        "Claude Code could not authenticate with Google Vertex AI. Refresh its Google Cloud credentials, then re-check this harness.",
+    ),
+];
+
+/// The selected third-party provider's repair note, or `None` where Claude Code
+/// talks to Anthropic directly.
+///
+/// Read from Claude Code's own `settings.json` as well as the environment: the
+/// CLI documents the switch as a settings `env` entry, that is where a working
+/// install normally carries it, and it reaches orx's child from there
+/// (`native_store::prepare_claude` links the file into the isolated config
+/// dir). A setup configured only in settings is invisible to orx's own process
+/// environment. Either source enabling it counts — where the two disagree, the
+/// CLI's precedence decides what runs, but a third-party provider is in play
+/// regardless, which is the only question here.
+///
+/// `super::detect::api_key` is the environment half: it supplies the two sources
+/// `prepare_env` hands the child (process env, then orx's synced env file), and
+/// reads any variable, not only credentials.
+fn third_party_provider() -> Option<&'static str> {
+    CLAUDE_THIRD_PARTY_PROVIDERS
+        .into_iter()
+        .find(|(key, _)| {
+            [claude_settings_env(key), super::detect::api_key(key)]
+                .into_iter()
+                .flatten()
+                .any(|value| env_flag_enabled(&value))
+        })
+        .map(|(_, note)| note)
+}
+
+/// Claude Code's truthiness for a boolean env switch: set, and not an explicit
+/// off value.
+fn env_flag_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false"
+    )
+}
+
+/// A value from the `env` block of Claude Code's user settings.
+/// `settings.local.json` shadows `settings.json`, the CLI's own precedence.
+fn claude_settings_env(key: &str) -> Option<String> {
+    let home = native_store::claude_home(NativeStore::Legacy);
+    ["settings.local.json", "settings.json"]
+        .into_iter()
+        .find_map(|file| settings_env_value(&read_json(home.join(file))?, key))
+}
+
+/// Split from [`claude_settings_env`] for testing. The `env` block is a
+/// string→string map, so a non-string value is not a switch orx can read.
+fn settings_env_value(settings: &Value, key: &str) -> Option<String> {
+    Some(settings.get("env")?.get(key)?.as_str()?.to_owned())
 }
 
 /// On Windows a login can live in Credential Manager (`Claude
@@ -284,7 +386,11 @@ pub(crate) async fn current_auth_state() -> HarnessAuthState {
 }
 
 pub(crate) fn auth_recovery_note() -> &'static str {
-    if has_api_credential() {
+    // A third-party provider's credential is the cloud's, so `claude auth
+    // login` cannot repair it. Its own note carries the repair that can.
+    if let Some(note) = third_party_provider() {
+        note
+    } else if has_api_credential() {
         "Claude Code rejected the configured `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`. Replace or unset it, then re-check this harness."
     } else {
         "Sign in with `claude auth login`, then re-check this harness."
@@ -430,6 +536,7 @@ async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
         has_api_credential(),
         has_oauth_credentials(),
         credential_store_is_file_only(),
+        third_party_provider().is_some(),
     ) == SnapshotAuth::SignedOut
     {
         return (
@@ -442,7 +549,8 @@ async fn claude_spec_probes(bin: PathBuf) -> (AuthProbe, bool, Option<Value>) {
             None,
         );
     }
-    let login_evidence = has_oauth_credentials() || has_api_credential();
+    let login_evidence =
+        has_oauth_credentials() || has_api_credential() || third_party_provider().is_some();
     let models = login_evidence.then(|| {
         super::detect::spawn_timed_probe(
             "claude-code",
@@ -2437,34 +2545,96 @@ mod tests {
         // `effective_auth_probe` encodes — but its validity is unverified, so
         // the choice is not a `Ready` answer.
         assert_eq!(
-            snapshot_auth_choice(true, true, true),
+            snapshot_auth_choice(true, true, true, false),
             SnapshotAuth::UnverifiedApiKey
         );
         assert_eq!(
-            snapshot_auth_choice(true, false, false),
+            snapshot_auth_choice(true, false, false, false),
             SnapshotAuth::UnverifiedApiKey
         );
         // A saved OAuth login answers on every platform — an expired access
         // token still refreshes from the same file.
         assert_eq!(
-            snapshot_auth_choice(false, true, true),
+            snapshot_auth_choice(false, true, true, false),
             SnapshotAuth::SavedOauth
         );
         assert_eq!(
-            snapshot_auth_choice(false, true, false),
+            snapshot_auth_choice(false, true, false, false),
             SnapshotAuth::SavedOauth
         );
         // Where the file *is* the store (Linux), absent means signed out;
         // elsewhere Keychain/the credential store could hold a login, so the
         // CLI must answer.
         assert_eq!(
-            snapshot_auth_choice(false, false, true),
+            snapshot_auth_choice(false, false, true, false),
             SnapshotAuth::SignedOut
         );
         assert_eq!(
-            snapshot_auth_choice(false, false, false),
+            snapshot_auth_choice(false, false, false, false),
             SnapshotAuth::ProbeCli
         );
+    }
+
+    /// A Bedrock/Vertex install carries no credential in any store this pass
+    /// reads, so concluding a sign-out from their emptiness hid a working login
+    /// behind a sign-in button. The provider outranks every other signal: it
+    /// also makes the CLI ignore an `ANTHROPIC_*` credential, so that one is
+    /// not the effective login either.
+    #[test]
+    fn snapshot_auth_choice_asks_the_cli_about_third_party_providers() {
+        assert_eq!(
+            snapshot_auth_choice(false, false, true, true),
+            SnapshotAuth::ProbeCli
+        );
+        assert_eq!(
+            snapshot_auth_choice(true, false, true, true),
+            SnapshotAuth::ProbeCli
+        );
+        assert_eq!(
+            snapshot_auth_choice(false, true, true, true),
+            SnapshotAuth::ProbeCli
+        );
+    }
+
+    /// `third_party_provider` reads the settings `env` block because that is
+    /// where the CLI documents these switches — and where orx's own process
+    /// environment cannot see them.
+    #[test]
+    fn third_party_switches_read_settings_env_with_cli_truthiness() {
+        let settings = serde_json::json!({"env": {
+            "CLAUDE_CODE_USE_BEDROCK": "1",
+            "AWS_REGION": "",
+            "CLAUDE_CODE_USE_VERTEX": 1,
+        }});
+        assert_eq!(
+            settings_env_value(&settings, "CLAUDE_CODE_USE_BEDROCK").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            settings_env_value(&settings, "AWS_REGION").as_deref(),
+            Some("")
+        );
+        // A number is not the string map the CLI writes, and not a switch orx
+        // can read.
+        assert_eq!(
+            settings_env_value(&settings, "CLAUDE_CODE_USE_VERTEX"),
+            None
+        );
+        assert_eq!(
+            settings_env_value(&settings, "CLAUDE_CODE_USE_CUSTOM"),
+            None
+        );
+        assert_eq!(
+            settings_env_value(&serde_json::json!({}), "CLAUDE_CODE_USE_BEDROCK"),
+            None
+        );
+        // Set and not an explicit off value, the CLI's own truthiness.
+        assert!(env_flag_enabled("1"));
+        assert!(env_flag_enabled("true"));
+        assert!(env_flag_enabled("TRUE"));
+        assert!(!env_flag_enabled(""));
+        assert!(!env_flag_enabled(" 0 "));
+        assert!(!env_flag_enabled("False"));
     }
 
     #[test]
@@ -3493,6 +3663,36 @@ mod tests {
                 method: Some("apiKey"),
                 credential_conflict: false,
             }
+        );
+        // Bedrock/Vertex: a credential login, not OAuth. Labelling it `oauth`
+        // sent a working install through the OAuth-only version gate and
+        // `apply_env_credential_override`.
+        assert_eq!(
+            parse_auth_status(
+                true,
+                br#"{"loggedIn":true,"authMethod":"third_party","apiProvider":"bedrock"}"#
+            ),
+            AuthProbe {
+                state: HarnessAuthState::Ready,
+                method: Some("apiKey"),
+                credential_conflict: false,
+            }
+        );
+        // `apiProvider` alone is enough — the method name is the CLI's to
+        // change, and any provider that is not Anthropic is a third party.
+        assert_eq!(
+            parse_auth_status(true, br#"{"loggedIn":true,"apiProvider":"vertex"}"#).method,
+            Some("apiKey")
+        );
+        // First-party stays first-party: an explicit `anthropic` provider must
+        // not turn a subscription login into a credential one.
+        assert_eq!(
+            parse_auth_status(
+                true,
+                br#"{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"anthropic"}"#
+            )
+            .method,
+            Some("oauth")
         );
         // Claude intentionally exits 1 for this valid signed-out response.
         assert_eq!(
