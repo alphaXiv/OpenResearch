@@ -153,6 +153,8 @@ fn spawn(
         goal: None,
         active_leaf_id: None,
         parent_session_id: Some(parent_id.clone()),
+        side_chat_parent_id: None,
+        temporary_expires_at: None,
         created_at: now_ms(),
         updated_at: now_ms(),
     };
@@ -204,6 +206,8 @@ mod tests {
             goal: None,
             active_leaf_id: None,
             parent_session_id: parent_session_id.map(str::to_string),
+            side_chat_parent_id: None,
+            temporary_expires_at: None,
             created_at: 1,
             updated_at: 1,
         }
