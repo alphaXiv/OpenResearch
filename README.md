@@ -12,7 +12,7 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 
 <p>
 <a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-macos-dark.svg"><img src=".github/readme-assets/download-macos.svg" alt="Download OpenResearch for macOS" width="220" height="44" /></picture></a>
-<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/openresearch-cli-x86_64-pc-windows-msvc.zip"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
+<a href="https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-Setup.exe"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/download-windows-dark.svg"><img src=".github/readme-assets/download-windows.svg" alt="Download OpenResearch for Windows (Beta)" width="220" height="44" /></picture></a>
 <a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset=".github/readme-assets/install-linux-centered-dark.svg"><img src=".github/readme-assets/install-linux-centered.svg" alt="Install OpenResearch for Linux" width="220" height="44" /></picture></a>
 </p>
 
@@ -21,7 +21,7 @@ literature, develop hypotheses, run experiments, and produce research artifacts.
 <a href="https://github.com/alphaXiv/OpenResearch/releases"><img src=".github/readme-assets/action-releases.svg" alt="Releases" width="78" height="24" /></a>
 </p>
 
-<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a></sub></p>
+<p><sub>macOS 11+ · Windows beta requires <a href="docs/windows.md">Git for Windows</a> · Linux app needs glibc 2.35+</sub></p>
 
 <p><a href="https://trendshift.io/repositories/89363"><img src="https://trendshift.io/api/badge/repositories/89363" alt="GitHub Trending: #1 Repository of the Day" width="250" height="55" /></a>
 <a href="https://trendshift.io/repositories/89363?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-89363" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/89363/daily?language=Rust" alt="alphaXiv/OpenResearch | Trendshift" width="250" height="55" /></a></p>
@@ -55,7 +55,16 @@ Either way, `orx` is linked into `~/.local/bin`, with a hint to add it to your
 first and open a new terminal.
 
 On Windows, use the beta download above after installing
-[Git for Windows](docs/windows.md).
+[Git for Windows](docs/windows.md). It installs for your account, with no
+administrator prompt. The installer isn't signed yet, so Windows may say
+"Windows protected your PC": choose **More info** → **Run anyway**.
+
+On Linux, the desktop app is an AppImage for
+[x86_64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-x86_64.AppImage)
+or [ARM64](https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch-aarch64.AppImage).
+Keep it somewhere you can write to, such as `~/Applications`, so it can update
+itself, then run `chmod +x OpenResearch-*.AppImage` and open it. See
+[Linux](docs/linux.md) for requirements.
 
 [Connect a local model](docs/local-models.md) to use LM Studio, oMLX, Ollama,
 or a custom endpoint with OpenCode.
