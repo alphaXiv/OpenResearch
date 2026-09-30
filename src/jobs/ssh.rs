@@ -135,17 +135,19 @@ fn is_ssh_section_header(line: &str) -> bool {
 /// - Bare alias targets without explicit ports use `Host <host>` to seamlessly reuse active
 ///   sockets for any configured port (e.g. `ssh node` or `ssh -p <port> node`).
 /// - User-scoped targets specify `Match host <host> user <user>` and bind `ControlPath`
-///   in a `Match final` pass checking the effective port (`exec "test %p = <port>"` or `test %p = 22`),
-///   preventing cross-user session reuse and preventing conflicting `-p <port>` invocations from hijacking the socket.
+///   in a `Match final` pass checking the target's effective port (`exec "test %p = <effective_port>"`),
+///   which respects any nondefault `Port` configured in OpenSSH config while defaulting to 22.
+///   This prevents cross-user session reuse and prevents conflicting `-p <port>` invocations from hijacking the socket.
 #[cfg(unix)]
 fn render_managed_entry(
     host: &str,
     user: Option<&str>,
-    port: Option<u16>,
+    explicit_port: Option<u16>,
+    effective_port: u16,
     socket_path: &Path,
 ) -> String {
     let mut out = String::new();
-    match (user, port) {
+    match (user, explicit_port) {
         (Some(u), Some(p)) => {
             out.push_str(&format!(
                 "Match host {host} user {u}\n  User {u}\n  Port {p}\n\n"
@@ -165,7 +167,7 @@ fn render_managed_entry(
         (Some(u), None) => {
             out.push_str(&format!("Match host {host} user {u}\n  User {u}\n\n"));
             out.push_str(&format!(
-                "Match final host {host} user {u} exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath {}\n",
+                "Match final host {host} user {u} exec \"test %p = {effective_port}\"\n  ControlMaster auto\n  ControlPath {}\n",
                 socket_path.display()
             ));
         }
@@ -179,18 +181,52 @@ fn render_managed_entry(
     out
 }
 
+/// Resolves the effective SSH port for an [`SshTarget`].
+///
+/// If an explicit port was provided via `-p <port>` or `host:<port>`, that port is used.
+/// Otherwise, queries OpenSSH with `ssh -G` to determine the port configured in `~/.ssh/config`
+/// or system configs for this target. Falls back to port 22 if resolution fails or `ssh` is unavailable.
+#[cfg(unix)]
+fn resolve_effective_port(target: &SshTarget) -> u16 {
+    let (_, _, explicit_port) = target_details(target);
+    if let Some(p) = explicit_port {
+        return p;
+    }
+
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.arg("-G");
+    for opt in &target.extra_opts {
+        cmd.arg(opt);
+    }
+    cmd.arg(&target.dest);
+    if let Ok(output) = cmd.output() {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(rest) = line.strip_prefix("port ") {
+                    if let Ok(p) = rest.trim().parse::<u16>() {
+                        return p;
+                    }
+                }
+            }
+        }
+    }
+    22
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManagedHostEntry {
     host: String,
     user: Option<String>,
-    port: Option<u16>,
+    explicit_port: Option<u16>,
+    effective_port: u16,
     socket_path: PathBuf,
 }
 
 #[cfg(unix)]
-fn entry_specificity(user: Option<&str>, port: Option<u16>) -> usize {
-    match (user.is_some(), port.is_some()) {
+fn entry_specificity(user: Option<&str>, explicit_port: Option<u16>) -> usize {
+    match (user.is_some(), explicit_port.is_some()) {
         (true, true) => 3,
         (true, false) => 2,
         (false, true) => 2,
@@ -356,7 +392,7 @@ fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
 
     for section in raw_sections {
         if section.is_final {
-            let (user, port) = match &prev_section {
+            let (user, explicit_port) = match &prev_section {
                 Some(prev)
                     if !prev.is_final && prev.host == section.host && prev.user == section.user =>
                 {
@@ -367,21 +403,25 @@ fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
                 }
                 _ => (section.user.clone(), section.port),
             };
+            let effective_port = section.port.or(explicit_port).unwrap_or(22);
             if let (Some(host), Some(socket_path)) = (section.host, section.socket_path) {
                 entries.push(ManagedHostEntry {
                     host,
                     user,
-                    port,
+                    explicit_port,
+                    effective_port,
                     socket_path,
                 });
             }
             prev_section = None;
         } else if let (Some(host), Some(socket_path)) = (&section.host, &section.socket_path) {
             // Standalone or legacy entry with its own ControlPath
+            let port = section.port;
             entries.push(ManagedHostEntry {
                 host: host.clone(),
                 user: section.user.clone(),
-                port: section.port,
+                explicit_port: port,
+                effective_port: port.unwrap_or(22),
                 socket_path: socket_path.clone(),
             });
             prev_section = None;
@@ -412,7 +452,8 @@ pub(crate) fn upsert_managed_host_entry(
     target: &SshTarget,
     socket_path: &Path,
 ) -> String {
-    let (host, user, port) = target_details(target);
+    let (host, user, explicit_port) = target_details(target);
+    let effective_port = resolve_effective_port(target);
     let mut entries = parse_managed_entries(content);
 
     // Remove any existing entry matching this exact target so the updated entry
@@ -420,10 +461,11 @@ pub(crate) fn upsert_managed_host_entry(
     entries.retain(|e| {
         let same_host = e.host == host;
         let same_user = e.user.as_deref() == user.as_deref();
-        let same_port = match (e.port, port) {
+        let same_port = match (e.explicit_port, explicit_port) {
             (Some(a), Some(b)) => a == b,
-            (Some(22), None) | (None, Some(22)) | (None, None) => true,
-            _ => false,
+            (None, None) => e.effective_port == effective_port,
+            (Some(a), None) => a == effective_port,
+            (None, Some(b)) => e.effective_port == b,
         };
         !(same_host && same_user && same_port)
     });
@@ -432,7 +474,8 @@ pub(crate) fn upsert_managed_host_entry(
         ManagedHostEntry {
             host,
             user,
-            port,
+            explicit_port,
+            effective_port,
             socket_path: socket_path.to_path_buf(),
         },
     );
@@ -441,8 +484,8 @@ pub(crate) fn upsert_managed_host_entry(
     // (with user and/or port) appear before generic fallback rules.
     // slice::sort_by is stable, preserving insertion order among equal specificity.
     entries.sort_by(|a, b| {
-        let spec_a = entry_specificity(a.user.as_deref(), a.port);
-        let spec_b = entry_specificity(b.user.as_deref(), b.port);
+        let spec_a = entry_specificity(a.user.as_deref(), a.explicit_port);
+        let spec_b = entry_specificity(b.user.as_deref(), b.explicit_port);
         spec_b.cmp(&spec_a)
     });
 
@@ -453,7 +496,8 @@ pub(crate) fn upsert_managed_host_entry(
         out.push_str(&render_managed_entry(
             &entry.host,
             entry.user.as_deref(),
-            entry.port,
+            entry.explicit_port,
+            entry.effective_port,
             &entry.socket_path,
         ));
         out.push_str("\n\n");
@@ -1655,6 +1699,47 @@ mod tests {
         assert!(out3.contains("Match host myhost user carol\n  User carol\n\n"));
         assert!(!out3.contains("Port 22\n"));
         assert!(out3.contains("ControlPath /tmp/sock_user2\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_managed_host_entry_user_only_respects_configured_port() {
+        let which_ssh = std::process::Command::new("which").arg("ssh").output();
+        if which_ssh.map(|o| o.status.success()).unwrap_or(false) {
+            let temp_dir = std::env::temp_dir()
+                .join(format!("orx-ssh-cfg-port-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let custom_ssh_cfg = temp_dir.join("ssh_config");
+            std::fs::write(
+                &custom_ssh_cfg,
+                "Host custombox\n  HostName 10.0.0.1\n  User carol\n  Port 22022\n",
+            )
+            .unwrap();
+
+            let target = SshTarget {
+                dest: "carol@custombox".into(),
+                extra_opts: vec!["-F".into(), custom_ssh_cfg.to_string_lossy().into()],
+            };
+
+            let sock = Path::new("/tmp/sock_custom");
+            let out = upsert_managed_host_entry("", &target, sock);
+
+            // Pass 1 sets User without Port (so custom SSH config Port 22022 takes effect)
+            assert!(out.contains("Match host custombox user carol\n  User carol\n\n"));
+            assert!(!out.contains("Port 22022\n"));
+            assert!(!out.contains("Port 22\n"));
+
+            // Pass 2 checks resolved effective port 22022
+            assert!(out.contains("Match final host custombox user carol exec \"test %p = 22022\"\n  ControlMaster auto\n  ControlPath /tmp/sock_custom\n"));
+
+            // Re-upserting preserves effective port 22022 and stays idempotent
+            let sock2 = Path::new("/tmp/sock_custom2");
+            let out2 = upsert_managed_host_entry(&out, &target, sock2);
+            assert!(out2.contains("Match final host custombox user carol exec \"test %p = 22022\"\n  ControlMaster auto\n  ControlPath /tmp/sock_custom2\n"));
+            assert!(!out2.contains("/tmp/sock_custom\n"));
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
     }
 
     #[cfg(unix)]
