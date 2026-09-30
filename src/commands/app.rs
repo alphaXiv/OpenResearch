@@ -629,6 +629,7 @@ mod imp {
         tokio::spawn(async move {
             let args = crate::UpArgs {
                 port,
+                host: "127.0.0.1".to_string(),
                 remote: None,
                 no_browser: true,
                 no_agent: false,
