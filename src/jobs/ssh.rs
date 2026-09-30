@@ -463,7 +463,7 @@ pub(crate) fn upsert_managed_host_entry(
         let same_user = e.user.as_deref() == user.as_deref();
         let same_port = match (e.explicit_port, explicit_port) {
             (Some(a), Some(b)) => a == b,
-            (None, None) => e.effective_port == effective_port,
+            (None, None) => true,
             (Some(a), None) => a == effective_port,
             (None, Some(b)) => e.effective_port == b,
         };
@@ -835,11 +835,12 @@ fn discarded_known_hosts() -> std::path::PathBuf {
 #[cfg(unix)]
 fn control_path(target: &SshTarget) -> PathBuf {
     // A 16-hex hash leaves room for ssh's temporary bind suffix. It folds in
-    // the extra opts so different ports never share a control socket.
+    // the extra opts and effective port so different ports never share a control socket.
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     target.dest.hash(&mut h);
     target.extra_opts.hash(&mut h);
+    resolve_effective_port(target).hash(&mut h);
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
@@ -1595,6 +1596,25 @@ mod tests {
         };
         assert_ne!(control_path(&mk("22022")), control_path(&mk("22023")));
         assert_eq!(control_path(&mk("22022")), control_path(&mk("22022")));
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-cp-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let cfg1 = temp_dir.join("cfg1");
+        let cfg2 = temp_dir.join("cfg2");
+        std::fs::write(&cfg1, "Host box\n  Port 22022\n").unwrap();
+        std::fs::write(&cfg2, "Host box\n  Port 22023\n").unwrap();
+
+        let t1 = SshTarget {
+            dest: "box".into(),
+            extra_opts: vec!["-F".into(), cfg1.to_string_lossy().into()],
+        };
+        let t2 = SshTarget {
+            dest: "box".into(),
+            extra_opts: vec!["-F".into(), cfg2.to_string_lossy().into()],
+        };
+        assert_ne!(control_path(&t1), control_path(&t2));
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[cfg(unix)]
@@ -1740,6 +1760,43 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&temp_dir);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_managed_host_entry_replaces_old_entry_when_configured_port_changes() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("orx-ssh-port-change-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let cfg1 = temp_dir.join("cfg1");
+        let cfg2 = temp_dir.join("cfg2");
+        std::fs::write(&cfg1, "Host mybox\n  User carol\n  Port 22\n").unwrap();
+        std::fs::write(&cfg2, "Host mybox\n  User carol\n  Port 22022\n").unwrap();
+
+        let target1 = SshTarget {
+            dest: "carol@mybox".into(),
+            extra_opts: vec!["-F".into(), cfg1.to_string_lossy().into()],
+        };
+        let target2 = SshTarget {
+            dest: "carol@mybox".into(),
+            extra_opts: vec!["-F".into(), cfg2.to_string_lossy().into()],
+        };
+
+        let sock1 = Path::new("/tmp/sock1");
+        let sock2 = Path::new("/tmp/sock2");
+
+        let out1 = upsert_managed_host_entry("", &target1, sock1);
+        assert!(out1.contains("test %p = 22\""));
+        assert!(out1.contains("/tmp/sock1"));
+
+        // When re-synced with new port 22022, old entry is replaced, not duplicated
+        let out2 = upsert_managed_host_entry(&out1, &target2, sock2);
+        assert!(out2.contains("test %p = 22022\""));
+        assert!(out2.contains("/tmp/sock2"));
+        assert!(!out2.contains("test %p = 22\""));
+        assert!(!out2.contains("/tmp/sock1"));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[cfg(unix)]
