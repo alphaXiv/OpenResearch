@@ -134,7 +134,9 @@ fn is_ssh_section_header(line: &str) -> bool {
 ///   port and bypass the `Match final` stanza without hijacking the custom-port socket.
 /// - Bare alias targets without explicit ports use `Host <host>` to seamlessly reuse active
 ///   sockets for any configured port (e.g. `ssh node` or `ssh -p <port> node`).
-/// - User-scoped targets specify `Match host <host> user <user>` to prevent cross-user session reuse.
+/// - User-scoped targets specify `Match host <host> user <user>` and bind `ControlPath`
+///   in a `Match final` pass checking the effective port (`exec "test %p = <port>"` or `test %p = 22`),
+///   preventing cross-user session reuse and preventing conflicting `-p <port>` invocations from hijacking the socket.
 #[cfg(unix)]
 fn render_managed_entry(
     host: &str,
@@ -161,8 +163,9 @@ fn render_managed_entry(
             ));
         }
         (Some(u), None) => {
+            out.push_str(&format!("Match host {host} user {u}\n  User {u}\n\n"));
             out.push_str(&format!(
-                "Match host {host} user {u}\n  User {u}\n  ControlMaster auto\n  ControlPath {}\n",
+                "Match final host {host} user {u} exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath {}\n",
                 socket_path.display()
             ));
         }
@@ -196,7 +199,16 @@ fn entry_specificity(user: Option<&str>, port: Option<u16>) -> usize {
 }
 
 #[cfg(unix)]
-fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
+struct RawSection {
+    host: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+    socket_path: Option<PathBuf>,
+    is_final: bool,
+}
+
+#[cfg(unix)]
+fn parse_section(header: &str, body: &[String]) -> Option<RawSection> {
     let trimmed = header.trim();
     let lower = trimmed.to_ascii_lowercase();
 
@@ -204,6 +216,7 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
     let mut user = None;
     let mut port = None;
     let mut socket_path = None;
+    let mut is_final = false;
 
     if let Some(rest) = lower.strip_prefix("host") {
         if rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
@@ -225,6 +238,10 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
             let mut i = 0;
             while i < parts.len() {
                 match parts[i].to_ascii_lowercase().as_str() {
+                    "final" => {
+                        is_final = true;
+                        i += 1;
+                    }
                     "host" if i + 1 < parts.len() => {
                         host = Some(
                             parts[i + 1]
@@ -296,20 +313,18 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
         }
     }
 
-    let host = host?;
-    let socket_path = socket_path?;
-
-    Some(ManagedHostEntry {
+    Some(RawSection {
         host,
         user,
         port,
         socket_path,
+        is_final,
     })
 }
 
 #[cfg(unix)]
 fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
-    let mut entries = Vec::new();
+    let mut raw_sections = Vec::new();
     let mut current_header: Option<String> = None;
     let mut current_body: Vec<String> = Vec::new();
 
@@ -320,8 +335,8 @@ fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
         }
         if is_ssh_section_header(line) {
             if let Some(header) = current_header.take() {
-                if let Some(entry) = parse_entry(&header, &current_body) {
-                    entries.push(entry);
+                if let Some(sec) = parse_section(&header, &current_body) {
+                    raw_sections.push(sec);
                 }
                 current_body.clear();
             }
@@ -331,10 +346,51 @@ fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
         }
     }
     if let Some(header) = current_header {
-        if let Some(entry) = parse_entry(&header, &current_body) {
-            entries.push(entry);
+        if let Some(sec) = parse_section(&header, &current_body) {
+            raw_sections.push(sec);
         }
     }
+
+    let mut entries = Vec::new();
+    let mut prev_section: Option<RawSection> = None;
+
+    for section in raw_sections {
+        if section.is_final {
+            let (user, port) = match &prev_section {
+                Some(prev)
+                    if !prev.is_final && prev.host == section.host && prev.user == section.user =>
+                {
+                    (
+                        section.user.clone().or_else(|| prev.user.clone()),
+                        prev.port,
+                    )
+                }
+                _ => (section.user.clone(), section.port),
+            };
+            if let (Some(host), Some(socket_path)) = (section.host, section.socket_path) {
+                entries.push(ManagedHostEntry {
+                    host,
+                    user,
+                    port,
+                    socket_path,
+                });
+            }
+            prev_section = None;
+        } else if let (Some(host), Some(socket_path)) = (&section.host, &section.socket_path) {
+            // Standalone or legacy entry with its own ControlPath
+            entries.push(ManagedHostEntry {
+                host: host.clone(),
+                user: section.user.clone(),
+                port: section.port,
+                socket_path: socket_path.clone(),
+            });
+            prev_section = None;
+        } else {
+            // Stash Pass 1 section for the next Pass 2 Match final
+            prev_section = Some(section);
+        }
+    }
+
     entries
 }
 
@@ -361,7 +417,16 @@ pub(crate) fn upsert_managed_host_entry(
 
     // Remove any existing entry matching this exact target so the updated entry
     // can be inserted at the front as the most recent active session.
-    entries.retain(|e| !(e.host == host && e.user.as_deref() == user.as_deref() && e.port == port));
+    entries.retain(|e| {
+        let same_host = e.host == host;
+        let same_user = e.user.as_deref() == user.as_deref();
+        let same_port = match (e.port, port) {
+            (Some(a), Some(b)) => a == b,
+            (Some(22), None) | (None, Some(22)) | (None, None) => true,
+            _ => false,
+        };
+        !(same_host && same_user && same_port)
+    });
     entries.insert(
         0,
         ManagedHostEntry {
@@ -1568,6 +1633,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn upsert_managed_host_entry_user_only_does_not_inject_port_and_is_idempotent() {
+        let sock = Path::new("/tmp/sock_user");
+        let target = SshTarget::alias("carol@myhost");
+        let out = upsert_managed_host_entry("", &target, sock);
+        assert!(out.contains("Match host myhost user carol\n  User carol\n\n"));
+        assert!(!out.contains("Port 22\n"));
+        assert!(out.contains("Match final host myhost user carol exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock_user\n"));
+
+        // Repeating upsert with a new socket replaces cleanly and does not inject Port
+        let sock2 = Path::new("/tmp/sock_user2");
+        let out2 = upsert_managed_host_entry(&out, &target, sock2);
+        assert!(out2.contains("Match host myhost user carol\n  User carol\n\n"));
+        assert!(!out2.contains("Port 22\n"));
+        assert!(out2.contains("ControlPath /tmp/sock_user2\n"));
+        assert!(!out2.contains("/tmp/sock_user\n"));
+
+        // Upserting another target preserves the user-only entry without injecting Port
+        let target_other = SshTarget::alias("node2");
+        let out3 = upsert_managed_host_entry(&out2, &target_other, Path::new("/tmp/sock_other"));
+        assert!(out3.contains("Match host myhost user carol\n  User carol\n\n"));
+        assert!(!out3.contains("Port 22\n"));
+        assert!(out3.contains("ControlPath /tmp/sock_user2\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn upsert_managed_host_entry_preserves_distinct_targets_on_same_host() {
         let sock1 = Path::new("/tmp/sock1");
         let sock2 = Path::new("/tmp/sock2");
@@ -1812,10 +1903,12 @@ mod tests {
             let target2 =
                 SshTarget::host_port("alice@myhost".into(), 22023, HostKeyPolicy::UserConfig);
             let target_bare = SshTarget::alias("node");
+            let target_user = SshTarget::alias("carol@myhost");
 
             let mut out = upsert_managed_host_entry("", &target1, Path::new("/tmp/sock22022"));
             out = upsert_managed_host_entry(&out, &target2, Path::new("/tmp/sock22023"));
             out = upsert_managed_host_entry(&out, &target_bare, Path::new("/tmp/socknode"));
+            out = upsert_managed_host_entry(&out, &target_user, Path::new("/tmp/sockcarol"));
 
             std::fs::write(&cfg_path, out).unwrap();
 
@@ -1879,6 +1972,21 @@ mod tests {
             let (port, cp) = run_ssh_g(&["-p", "22022", "node"]);
             assert_eq!(cp.as_deref(), Some("/tmp/socknode"));
             assert_eq!(port.as_deref(), Some("22022"));
+
+            // 9. User-scoped target without port matches default port 22
+            let (port, cp) = run_ssh_g(&["carol@myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sockcarol"));
+            assert_eq!(port.as_deref(), Some("22"));
+
+            // 10. User-scoped target without port matches explicit -p 22
+            let (port, cp) = run_ssh_g(&["-p", "22", "carol@myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sockcarol"));
+            assert_eq!(port.as_deref(), Some("22"));
+
+            // 11. User-scoped target without port rejects different port (comment 4141417639)
+            let (port, cp) = run_ssh_g(&["-p", "22023", "carol@myhost"]);
+            assert_eq!(cp, None);
+            assert_eq!(port.as_deref(), Some("22023"));
 
             let _ = std::fs::remove_dir_all(&temp_dir);
         }
