@@ -126,10 +126,13 @@ fn is_ssh_section_header(line: &str) -> bool {
 /// Renders an OpenSSH stanza configuring `ControlMaster auto` and `ControlPath`
 /// pointing to `orx`'s active session socket.
 ///
-/// When user or port are specified, a `Match host <host> [user <user>] [exec "test %p = <port>"]`
-/// directive is used so that multiple live sessions targeting the same host (under different users
-/// or ports) maintain distinct `ControlPath` sockets without collision. Bare hosts without
-/// user or port restrictions use `Host <host>` to match arbitrary commands.
+/// To prevent socket collision and wrong session reuse:
+/// - Custom-port targets match both the explicit port flag (`-p <port>`) and default port
+///   invocation (no `-p`, where `%p` evaluates to 22), ensuring agent commands like
+///   `ssh user@host` without `-p` successfully enter the stanza and configure `Port <port>`.
+/// - Bare alias or default-port targets restrict matching to `%p = 22` so commands dialing
+///   unrelated custom ports (e.g. `ssh -p 22023 host`) do not fall through to bare alias sockets.
+/// - Specific match criteria (`user`, `port`) are combined in a `Match` directive.
 #[cfg(unix)]
 fn render_managed_entry(
     host: &str,
@@ -137,11 +140,13 @@ fn render_managed_entry(
     port: Option<u16>,
     socket_path: &Path,
 ) -> String {
-    let header = match (user, port) {
-        (Some(u), Some(p)) => format!("Match host {host} user {u} exec \"test %p = {p}\""),
-        (Some(u), None) => format!("Match host {host} user {u}"),
-        (None, Some(p)) => format!("Match host {host} exec \"test %p = {p}\""),
-        (None, None) => format!("Host {host}"),
+    let port_test = match port {
+        Some(p) if p != 22 => format!("exec \"test %p = {p} -o %p = 22\""),
+        _ => "exec \"test %p = 22\"".to_string(),
+    };
+    let header = match user {
+        Some(u) => format!("Match host {host} user {u} {port_test}"),
+        None => format!("Match host {host} {port_test}"),
     };
     let mut out = format!("{header}\n");
     if let Some(user) = user {
@@ -163,7 +168,7 @@ struct ManagedHostEntry {
     host: String,
     user: Option<String>,
     port: Option<u16>,
-    rendered: String,
+    socket_path: PathBuf,
 }
 
 #[cfg(unix)]
@@ -184,6 +189,7 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
     let mut host = None;
     let mut user = None;
     let mut port = None;
+    let mut socket_path = None;
 
     if let Some(rest) = lower.strip_prefix("host") {
         if rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
@@ -237,7 +243,9 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
                         .filter(|c| c.is_ascii_digit())
                         .collect();
                     if let Ok(p) = port_str.parse::<u16>() {
-                        port = Some(p);
+                        if p != 22 {
+                            port = Some(p);
+                        }
                     }
                 }
             }
@@ -261,22 +269,29 @@ fn parse_entry(header: &str, body: &[String]) -> Option<ManagedHostEntry> {
                     port = p.parse::<u16>().ok();
                 }
             }
+        } else if let Some(rest) = b_lower.strip_prefix("controlpath") {
+            if rest.starts_with(|c: char| c.is_whitespace() || c == '=') {
+                let cp = b_trim["controlpath".len()..]
+                    .trim()
+                    .trim_start_matches('=')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if !cp.is_empty() {
+                    socket_path = Some(PathBuf::from(cp));
+                }
+            }
         }
     }
 
     let host = host?;
-    let mut rendered = header.to_string();
-    rendered.push('\n');
-    for line in body {
-        rendered.push_str(line);
-        rendered.push('\n');
-    }
+    let socket_path = socket_path?;
 
     Some(ManagedHostEntry {
         host,
         user,
         port,
-        rendered: rendered.trim_end().to_string(),
+        socket_path,
     })
 }
 
@@ -318,6 +333,9 @@ fn parse_managed_entries(content: &str) -> Vec<ManagedHostEntry> {
 /// (those specifying user and/or port) are written before generic host fallback rules
 /// to ensure OpenSSH evaluates them in precedence order.
 ///
+/// All entries are normalized and re-rendered via [`render_managed_entry`], ensuring legacy
+/// config formats are seamlessly migrated to scoped `Match` blocks.
+///
 /// The rendered configuration always ends with `Match all` to prevent directives in parent
 /// configs that include this file from leaking into the last host block on OpenSSH < 8.4.
 #[cfg(unix)]
@@ -329,26 +347,22 @@ pub(crate) fn upsert_managed_host_entry(
     let (host, user, port) = target_details(target);
     let mut entries = parse_managed_entries(content);
 
-    let new_rendered = render_managed_entry(&host, user.as_deref(), port, socket_path);
-
-    let mut found = false;
-    for entry in &mut entries {
-        if entry.host == host && entry.user.as_deref() == user.as_deref() && entry.port == port {
-            entry.rendered = new_rendered.trim_end().to_string();
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        entries.push(ManagedHostEntry {
+    // Remove any existing entry matching this exact target so the updated entry
+    // can be inserted at the front as the most recent active session.
+    entries.retain(|e| !(e.host == host && e.user.as_deref() == user.as_deref() && e.port == port));
+    entries.insert(
+        0,
+        ManagedHostEntry {
             host,
             user,
             port,
-            rendered: new_rendered.trim_end().to_string(),
-        });
-    }
+            socket_path: socket_path.to_path_buf(),
+        },
+    );
 
+    // Sort by specificity descending so that more specific match blocks
+    // (with user and/or port) appear before generic fallback rules.
+    // slice::sort_by is stable, preserving insertion order among equal specificity.
     entries.sort_by(|a, b| {
         let spec_a = entry_specificity(a.user.as_deref(), a.port);
         let spec_b = entry_specificity(b.user.as_deref(), b.port);
@@ -359,7 +373,12 @@ pub(crate) fn upsert_managed_host_entry(
         String::from("# Managed automatically by OpenResearch (orx). Do not edit manually.\n\n");
 
     for entry in entries {
-        out.push_str(&entry.rendered);
+        out.push_str(&render_managed_entry(
+            &entry.host,
+            entry.user.as_deref(),
+            entry.port,
+            &entry.socket_path,
+        ));
         out.push_str("\n\n");
     }
 
@@ -1505,20 +1524,20 @@ mod tests {
         let target2 = SshTarget::alias("node2");
 
         let out = upsert_managed_host_entry("", &target1, sock1);
-        assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.contains("Match host node1 exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
         assert!(out.starts_with("# Managed automatically by OpenResearch (orx)"));
         assert!(out.ends_with("Match all\n"));
 
         let out = upsert_managed_host_entry(&out, &target2, sock2);
-        assert!(out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
-        assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(out.contains("Match host node1 exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.contains("Match host node2 exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
         assert!(out.ends_with("Match all\n"));
 
         let out = upsert_managed_host_entry(&out, &target1, sock1_updated);
         assert!(
-            out.contains("Host node1\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n")
+            out.contains("Match host node1 exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n")
         );
-        assert!(out.contains("Host node2\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(out.contains("Match host node2 exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
         assert!(!out.contains("/tmp/sock1\n"));
         assert!(out.ends_with("Match all\n"));
     }
@@ -1530,7 +1549,7 @@ mod tests {
         let target =
             SshTarget::host_port("root@ssh3.vast.ai".into(), 22022, HostKeyPolicy::UserConfig);
         let out = upsert_managed_host_entry("", &target, sock);
-        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022 -o %p = 22\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
         assert!(out.ends_with("Match all\n"));
     }
 
@@ -1560,25 +1579,44 @@ mod tests {
         let out = upsert_managed_host_entry(&out, &target4, sock4);
 
         // All 4 distinct targets must be present simultaneously
-        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
-        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22023\"\n  User root\n  Port 22023\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
-        assert!(out.contains("Match host ssh3.vast.ai user user2 exec \"test %p = 22022\"\n  User user2\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock3\n"));
-        assert!(out.contains("Host ssh3.vast.ai\n  ControlMaster auto\n  ControlPath /tmp/sock4\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022 -o %p = 22\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22023 -o %p = 22\"\n  User root\n  Port 22023\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user user2 exec \"test %p = 22022 -o %p = 22\"\n  User user2\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock3\n"));
+        assert!(out.contains("Match host ssh3.vast.ai exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock4\n"));
 
         // More specific match rules must appear before generic host fallback
         let pos_specific = out
-            .find("Match host ssh3.vast.ai user root exec \"test %p = 22022\"")
+            .find("Match host ssh3.vast.ai user root exec \"test %p = 22022 -o %p = 22\"")
             .unwrap();
-        let pos_generic = out.find("Host ssh3.vast.ai\n").unwrap();
+        let pos_generic = out
+            .find("Match host ssh3.vast.ai exec \"test %p = 22\"\n")
+            .unwrap();
         assert!(pos_specific < pos_generic);
 
         // Updating target1 replaces only target1's ControlPath
         let out = upsert_managed_host_entry(&out, &target1, sock1_updated);
-        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n"));
-        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22023\"\n  User root\n  Port 22023\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
-        assert!(out.contains("Match host ssh3.vast.ai user user2 exec \"test %p = 22022\"\n  User user2\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock3\n"));
-        assert!(out.contains("Host ssh3.vast.ai\n  ControlMaster auto\n  ControlPath /tmp/sock4\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22022 -o %p = 22\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock1_updated\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user root exec \"test %p = 22023 -o %p = 22\"\n  User root\n  Port 22023\n  ControlMaster auto\n  ControlPath /tmp/sock2\n"));
+        assert!(out.contains("Match host ssh3.vast.ai user user2 exec \"test %p = 22022 -o %p = 22\"\n  User user2\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/sock3\n"));
+        assert!(out.contains("Match host ssh3.vast.ai exec \"test %p = 22\"\n  ControlMaster auto\n  ControlPath /tmp/sock4\n"));
         assert!(!out.contains("/tmp/sock1\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn upsert_managed_host_entry_migrates_legacy_format_and_prevents_shadowing() {
+        let legacy = "# Managed automatically by OpenResearch (orx). Do not edit manually.\n\n\
+            Host myhost\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/old.sock\n\n\
+            Match all\n";
+
+        let new_target =
+            SshTarget::host_port("root@myhost".into(), 22023, HostKeyPolicy::UserConfig);
+        let out = upsert_managed_host_entry(legacy, &new_target, Path::new("/tmp/new.sock"));
+
+        // Both entries should be re-rendered as scoped Match blocks, eliminating legacy Host headers
+        assert!(!out.contains("Host myhost\n"));
+        assert!(out.contains("Match host myhost user root exec \"test %p = 22023 -o %p = 22\"\n  User root\n  Port 22023\n  ControlMaster auto\n  ControlPath /tmp/new.sock\n"));
+        assert!(out.contains("Match host myhost user root exec \"test %p = 22022 -o %p = 22\"\n  User root\n  Port 22022\n  ControlMaster auto\n  ControlPath /tmp/old.sock\n"));
     }
 
     #[cfg(unix)]
@@ -1741,5 +1779,82 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_config_openssh_resolution() {
+        let which_ssh = std::process::Command::new("which").arg("ssh").output();
+        if which_ssh.map(|o| o.status.success()).unwrap_or(false) {
+            let temp_dir = std::env::temp_dir()
+                .join(format!("orx-ssh-resolution-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&temp_dir).unwrap();
+            let cfg_path = temp_dir.join("managed_config");
+
+            let target1 =
+                SshTarget::host_port("alice@myhost".into(), 22022, HostKeyPolicy::UserConfig);
+            let target2 =
+                SshTarget::host_port("alice@myhost".into(), 22023, HostKeyPolicy::UserConfig);
+            let target_bare = SshTarget::alias("myhost");
+
+            let mut out = upsert_managed_host_entry("", &target1, Path::new("/tmp/sock22022"));
+            out = upsert_managed_host_entry(&out, &target2, Path::new("/tmp/sock22023"));
+            out = upsert_managed_host_entry(&out, &target_bare, Path::new("/tmp/sockbare"));
+
+            std::fs::write(&cfg_path, out).unwrap();
+
+            let run_ssh_g = |args: &[&str]| -> (Option<String>, Option<String>) {
+                let mut cmd = std::process::Command::new("ssh");
+                cmd.args(["-F", &cfg_path.to_string_lossy(), "-G"]);
+                cmd.args(args);
+                let output = cmd.output().expect("ssh -G command failed");
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let mut port = None;
+                let mut cp = None;
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 2 {
+                        if parts[0] == "port" {
+                            port = Some(parts[1].to_string());
+                        } else if parts[0] == "controlpath" {
+                            cp = Some(parts[1].to_string());
+                        }
+                    }
+                }
+                (port, cp)
+            };
+
+            // 1. Target with custom port matches when dialed without -p
+            let (port, cp) = run_ssh_g(&["alice@myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sock22023"));
+            assert_eq!(port.as_deref(), Some("22023"));
+
+            // 2. Explicit -p 22022 matches target1
+            let (port, cp) = run_ssh_g(&["-p", "22022", "alice@myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sock22022"));
+            assert_eq!(port.as_deref(), Some("22022"));
+
+            // 3. Explicit -p 22023 matches target2
+            let (port, cp) = run_ssh_g(&["-p", "22023", "alice@myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sock22023"));
+            assert_eq!(port.as_deref(), Some("22023"));
+
+            // 4. Dialing an unconfigured port does not match
+            let (port, cp) = run_ssh_g(&["-p", "9999", "alice@myhost"]);
+            assert_eq!(cp, None);
+            assert_eq!(port.as_deref(), Some("9999"));
+
+            // 5. Unrelated custom port command does not fall through to bare alias
+            let (port, cp) = run_ssh_g(&["-p", "22023", "bob@myhost"]);
+            assert_eq!(cp, None);
+            assert_eq!(port.as_deref(), Some("22023"));
+
+            // 6. Bare alias matches on default port 22
+            let (port, cp) = run_ssh_g(&["myhost"]);
+            assert_eq!(cp.as_deref(), Some("/tmp/sockbare"));
+            assert_eq!(port.as_deref(), Some("22"));
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        }
     }
 }
