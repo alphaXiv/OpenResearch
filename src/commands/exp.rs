@@ -4,6 +4,8 @@
 //!   orx exp run    <expId> …          launch a local orx-supervised run
 //!   orx exp cancel <expId>            cancel the in-flight run
 //!   orx exp wake   <expId>            resume this agent when the run succeeds or fails
+//!   orx exp archive <expId> --ancestors|--only|--descendants   hide the chosen scope
+//!   orx exp unarchive <expId> --ancestors|--only|--descendants restore the same nodes
 //!
 //! Unlike the project-scoped data commands, every verb here takes an
 //! *experiment* id from `orx project view <projectId>`.
@@ -16,12 +18,26 @@ use crate::store::Store;
 use crate::ExpCommand;
 
 pub async fn run(args: crate::ExpArgs) -> Result<()> {
-    let store = Store::open()?;
+    let mut store = Store::open()?;
     match args.command {
-        ExpCommand::Status { exp_id } => {
+        ExpCommand::Archive {
+            exp_id,
+            ancestors,
+            only,
+            descendants,
+            ..
+        } => archive(&mut store, &exp_id, ancestors, only, descendants, true),
+        ExpCommand::Unarchive {
+            exp_id,
+            ancestors,
+            only,
+            descendants,
+            ..
+        } => archive(&mut store, &exp_id, ancestors, only, descendants, false),
+        ExpCommand::Status { exp_id, scheduler } => {
             crate::local::chat::record_chat_target("experiments", &exp_id);
             resolve_experiment(store, &exp_id)?
-                .experiment_status()
+                .experiment_status(scheduler)
                 .await
         }
         ExpCommand::Desc { exp_id, set, stdin } => {
@@ -45,6 +61,32 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
             interval,
         } => wait(store, exp_id, project, timeout, interval).await,
     }
+}
+
+fn archive(
+    store: &mut Store,
+    id: &str,
+    ancestors: bool,
+    only: bool,
+    descendants: bool,
+    archived: bool,
+) -> Result<()> {
+    let direction = if ancestors {
+        crate::local::experiments::ArchiveDirection::Ancestors
+    } else if only {
+        crate::local::experiments::ArchiveDirection::Only
+    } else if descendants {
+        crate::local::experiments::ArchiveDirection::Descendants
+    } else {
+        unreachable!("clap requires an archive scope")
+    };
+    let ids = crate::local::experiments::set_archived(store, id, direction, archived)?;
+    println!(
+        "{} {} experiment(s).",
+        if archived { "Archived" } else { "Restored" },
+        ids.len()
+    );
+    Ok(())
 }
 
 fn wake(store: &Store, exp_id: &str) -> Result<()> {
@@ -130,21 +172,35 @@ pub(crate) fn default_hf_image(flavor: &str) -> String {
     }
 }
 
-/// Spawn `orx supervise <runId>` fully detached (own process group, no stdio),
+const SUPERVISOR_LOG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Spawn `orx supervise <runId>` fully detached (own process group, stderr to a log),
 /// so it outlives this command and any SSH session that launched it.
 pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
-    let exe = std::env::current_exe().map_err(|e| {
+    let exe = crate::paths::spawnable_exe().map_err(|e| {
         anyhow!(
             "Could not locate the orx binary to spawn the supervisor: {}",
             e
         )
     })?;
+    // Supervisor diagnostics (retries, transitions) exist only on stderr; keep them per run.
+    let path = crate::store::log_path(run_id).with_extension("supervisor.log");
+    if std::fs::metadata(&path).is_ok_and(|meta| meta.len() >= SUPERVISOR_LOG_MAX_BYTES) {
+        // Rename rather than truncate: a still-running supervisor keeps writing to its handle.
+        let _ = std::fs::rename(&path, path.with_extension("log.1"));
+    }
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_or_else(|_| std::process::Stdio::null(), std::process::Stdio::from);
+    // A long-lived `orx up` may be running a replaced binary; spawn the new file at its path.
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("supervise")
         .arg(run_id)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(stderr);
     // The supervisor re-resolves its directories from its own environment, so
     // without this a run launched from the macOS app is tracked in a different
     // store than the app is reading.
@@ -159,8 +215,12 @@ pub(crate) fn spawn_detached_supervise(run_id: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
-    cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| anyhow!("Could not spawn `orx supervise {}`: {}", run_id, e))?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -245,7 +305,7 @@ mod tests {
         assert!(!store.get_run(&run.id).unwrap().unwrap().cancel_requested);
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -309,6 +369,6 @@ mod tests {
         assert!(!completed_while_locked);
         assert!(store.get_run("run-1").unwrap().unwrap().cancel_requested);
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

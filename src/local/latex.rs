@@ -313,7 +313,11 @@ fn run_bibliography(
 ) -> Result<Run> {
     // cwd is the aux dir (bibtex refuses to write outside it), so `.` no longer
     // means the paper's directory — both search paths have to say so.
-    let search = format!("{}:", source_dir.to_string_lossy());
+    let search = format!(
+        "{}{}",
+        source_dir.to_string_lossy(),
+        crate::local::shell_env::PATH_LIST_SEPARATOR
+    );
     let mut command = tex_command(tool);
     command
         .arg(stem)
@@ -984,6 +988,8 @@ mod tests {
         assert!(!out.0.join("../../../etc/evil").exists());
     }
 
+    // The fixture is a shebang script, which Windows cannot execute directly.
+    #[cfg(unix)]
     #[test]
     fn a_timed_out_pass_stops_the_run_but_a_tex_error_does_not() {
         // A hanging engine must not spend the whole budget again on every
@@ -1044,6 +1050,8 @@ mod tests {
         assert!(!path.exists());
     }
 
+    // Creating a symlink on Windows needs Developer Mode or an elevated process.
+    #[cfg(unix)]
     #[test]
     fn a_symlinked_pdf_is_refused_instead_of_followed() {
         let scratch = ScratchDir::new("symlink-case").expect("scratch dir");

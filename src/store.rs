@@ -8,13 +8,18 @@
 //! Data dir: `$ORX_DATA_DIR`, else `$XDG_DATA_HOME/openresearch`, else
 //! `~/.local/share/openresearch`.
 
-use std::path::PathBuf;
+mod telemetry;
+pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
+
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::{anyhow, Result};
+use crate::local::autonomy::Autonomy;
 use crate::local::model::{LocalExperiment, LocalProject};
+use crate::workspace_state::{GlobalWorkspaceState, WorkspaceState};
 
 pub fn data_dir() -> PathBuf {
     // Resolution order (most to least authoritative):
@@ -36,12 +41,35 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub(crate) fn open_lifecycle_lock() -> Result<fd_lock::RwLock<std::fs::File>> {
-    // The config dir stays put while the user can move the live data directory.
-    open_lifecycle_lock_at(&lifecycle_lock_path())
+    open_lifecycle_lock_in(&crate::config::config_dir())
 }
 
-pub(crate) fn lifecycle_lock_path() -> PathBuf {
-    crate::config::config_dir().join("orx.lifecycle.lock")
+pub(crate) fn open_lifecycle_lock_in(config_dir: &Path) -> Result<fd_lock::RwLock<std::fs::File>> {
+    // The config dir stays put while the user can move the live data directory.
+    let path = lifecycle_lock_path_in(config_dir);
+    let legacy = config_dir.join("orx.lifecycle.lock");
+    if !path.exists() {
+        drop(open_lifecycle_lock_at(&legacy)?);
+        // Keep the legacy lock if this filesystem cannot share its inode.
+        if std::fs::create_dir_all(path.parent().unwrap()).is_err() {
+            return open_lifecycle_lock_at(&legacy);
+        }
+        match std::fs::hard_link(&legacy, &path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return open_lifecycle_lock_at(&legacy),
+        }
+    }
+    if !same_file::is_same_file(&legacy, &path)? {
+        return Err(anyhow!(
+            "Lifecycle lock paths differ; refusing to run without a shared lock"
+        ));
+    }
+    open_lifecycle_lock_at(&path)
+}
+
+pub(crate) fn lifecycle_lock_path_in(config_dir: &Path) -> PathBuf {
+    config_dir.join("locks/orx.lifecycle.lock")
 }
 
 pub(crate) fn open_lifecycle_lock_at(
@@ -221,6 +249,84 @@ pub struct StoredRun {
     pub chat_session_id: Option<String>,
 }
 
+/// Run lifecycle: active states can finish once; terminal outcomes never change.
+/// Both status updates and submission upserts enforce these transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// Submitted to the backend; not yet observed running.
+    Starting,
+    /// The backend has confirmed the job is under way.
+    Running,
+    /// Terminal: the job ran to completion with a successful exit.
+    Done,
+    /// Terminal: the job errored, or was never observed as launched.
+    Failed,
+    /// Terminal: cancellation was requested and honored.
+    Cancelled,
+}
+
+impl RunStatus {
+    #[cfg(test)]
+    const ALL: [RunStatus; 5] = [
+        Self::Starting,
+        Self::Running,
+        Self::Done,
+        Self::Failed,
+        Self::Cancelled,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Parses the stored/wire vocabulary. `None` for anything else — callers
+    /// that only need "is this finished" should prefer [`is_terminal_status`],
+    /// which treats an unrecognized string the same as a non-terminal one.
+    pub fn parse(status: &str) -> Option<Self> {
+        Some(match status {
+            "starting" => Self::Starting,
+            "running" => Self::Running,
+            "done" => Self::Done,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+
+    /// A run in a terminal state is finished and will never change again.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Done | Self::Failed | Self::Cancelled)
+    }
+
+    fn can_transition_to(self, to: RunStatus) -> bool {
+        use RunStatus::*;
+        match self {
+            Starting => true,
+            Running => matches!(to, Running | Done | Failed | Cancelled),
+            Done | Failed | Cancelled => false,
+        }
+    }
+}
+
+impl std::fmt::Display for RunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether a stored run status string denotes a finished run. An unrecognized
+/// string is treated as non-terminal (the conservative choice: it keeps a run
+/// visible as active rather than silently dropping it from "in flight" views).
+pub fn is_terminal_status(status: &str) -> bool {
+    RunStatus::parse(status).is_some_and(RunStatus::is_terminal)
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectActivitySummary {
     pub project_id: String,
@@ -235,6 +341,7 @@ pub struct RunWakeup {
     pub run: StoredRun,
     pub chat_session_id: String,
     pub state: String,
+    pub monitoring_alerted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +408,18 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) fn relocate_project_paths(&self, paths: &[(String, String)]) -> Result<()> {
+        let tx = self.begin()?;
+        for (old, new) in paths {
+            tx.execute(
+                "UPDATE local_projects SET repo_path = ?2 WHERE repo_path = ?1",
+                params![old, new],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Open (creating dirs/schema as needed). WAL so the supervise writers and
     /// the serve readers never block each other.
     pub fn open() -> Result<Self> {
@@ -335,6 +454,51 @@ impl Store {
                 ended_at     INTEGER,
                 exit_code    INTEGER
             );
+            CREATE TABLE IF NOT EXISTS native_invocation_identities (
+                harness TEXT NOT NULL,
+                call_id TEXT NOT NULL,
+                identity_json TEXT NOT NULL,
+                PRIMARY KEY (harness, call_id)
+            );
+            CREATE TABLE IF NOT EXISTS run_telemetry (
+                run_id TEXT PRIMARY KEY,
+                identity_json TEXT,
+                report_json TEXT
+            );
+            CREATE TABLE IF NOT EXISTS telemetry_pending_events (
+                event_id TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS native_usage_totals (
+                harness TEXT NOT NULL,
+                native_scope TEXT NOT NULL,
+                totals_json TEXT NOT NULL,
+                PRIMARY KEY (harness, native_scope)
+            );
+            CREATE TABLE IF NOT EXISTS native_usage_baselines (
+                execution_id TEXT NOT NULL,
+                prefix TEXT NOT NULL,
+                totals_json TEXT,
+                PRIMARY KEY (execution_id, prefix)
+            );
+            CREATE TABLE IF NOT EXISTS chat_usage_executions (
+                execution_id TEXT PRIMARY KEY,
+                turn_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                suppressed INTEGER NOT NULL,
+                outcome TEXT
+            );
+            CREATE TABLE IF NOT EXISTS chat_usage_samples (
+                execution_id TEXT NOT NULL,
+                sample_id TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                model TEXT,
+                provider TEXT,
+                usage_json TEXT NOT NULL,
+                complete INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (execution_id, sample_id)
+            );
             CREATE TABLE IF NOT EXISTS local_projects (
                 id              TEXT PRIMARY KEY,
                 name            TEXT NOT NULL,
@@ -362,6 +526,7 @@ impl Store {
                 created_at           INTEGER NOT NULL,
                 updated_at           INTEGER NOT NULL,
                 chat_session_id      TEXT,
+                archived             INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(project_id, slug)
             );
             DROP TABLE IF EXISTS local_reports;
@@ -439,6 +604,7 @@ impl Store {
                 claim_token     TEXT,
                 claimed_at      INTEGER,
                 delivered_at    INTEGER,
+                monitoring_alerted INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(run_id, chat_session_id)
             );
             CREATE INDEX IF NOT EXISTS idx_chat_run_wakeups_requested
@@ -500,6 +666,9 @@ impl Store {
         // Best-effort migrations for pre-existing dbs; re-runs fail with
         // "duplicate column name", which is exactly the no-op we want.
         for ddl in [
+            "ALTER TABLE native_invocation_identities ADD COLUMN session_id TEXT",
+            "ALTER TABLE native_invocation_identities ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chat_usage_samples ADD COLUMN complete INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE runs ADD COLUMN commit_sha TEXT",
             "ALTER TABLE runs ADD COLUMN result_markdown TEXT",
             "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
@@ -515,25 +684,38 @@ impl Store {
             "ALTER TABLE chat_sessions ADD COLUMN title_source TEXT",
             "ALTER TABLE local_projects ADD COLUMN paper_id TEXT",
             "ALTER TABLE local_projects ADD COLUMN github_sync_enabled INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE local_projects ADD COLUMN workspace_state_json TEXT",
             "ALTER TABLE local_experiments ADD COLUMN chat_session_id TEXT",
+            "ALTER TABLE local_experiments ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN tools_found INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE ssh_host_tests ADD COLUMN missing_tools TEXT NOT NULL DEFAULT ''",
             "ALTER TABLE chat_run_wakeups ADD COLUMN state TEXT NOT NULL DEFAULT 'pending'",
             "ALTER TABLE chat_run_wakeups ADD COLUMN claim_token TEXT",
             "ALTER TABLE chat_run_wakeups ADD COLUMN claimed_at INTEGER",
             "ALTER TABLE chat_run_wakeups ADD COLUMN delivered_at INTEGER",
+            "ALTER TABLE chat_run_wakeups ADD COLUMN monitoring_alerted INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_messages ADD COLUMN parent_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN base_native_session_id TEXT",
             "ALTER TABLE chat_messages ADD COLUMN result_native_session_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN active_leaf_id TEXT",
             "ALTER TABLE chat_sessions ADD COLUMN parent_session_id TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN goal TEXT",
+            "ALTER TABLE chat_sessions ADD COLUMN autonomy TEXT",
             "ALTER TABLE ui_state ADD COLUMN preferred_service_tier TEXT",
+            "ALTER TABLE ui_state ADD COLUMN workspace_state_json TEXT",
+            "ALTER TABLE ui_state ADD COLUMN preferred_autonomy TEXT",
             "ALTER TABLE chat_spawns ADD COLUMN wake_parent INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE chat_spawns ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chat_spawns ADD COLUMN finished_at INTEGER",
+            "ALTER TABLE chat_messages ADD COLUMN completed_at INTEGER",
         ] {
             let _ = conn.execute(ddl, []);
         }
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        conn.execute(
+            "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
+            [now_ms() - 7 * 24 * 60 * 60 * 1000],
+        )?;
         // Legacy tool failures cannot identify the missing dependency, so require one fresh check.
         conn.execute(
             "DELETE FROM ssh_host_tests
@@ -733,6 +915,15 @@ impl Store {
         Ok(self.conn.unchecked_transaction()?)
     }
 
+    /// `begin` that takes the write lock up front, so a check made inside it
+    /// cannot be raced by another writer between the check and the insert.
+    pub fn begin_immediate(&self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?)
+    }
+
     /// Coalesce the WAL back into the main `orx.db` file and truncate it, so a
     /// filesystem-level copy of `orx.db` alone captures all committed data.
     /// Best-effort — used before relocating the data dir. Errors are returned so
@@ -748,7 +939,8 @@ impl Store {
         Ok(self.conn.query_row(
             "SELECT onboarding_completed, tour_completed, preferred_harness,
                     preferred_model, preferred_service_tier,
-                    preferred_permission_mode, preferred_reasoning_level
+                    preferred_permission_mode, preferred_reasoning_level, workspace_state_json,
+                    preferred_autonomy
              FROM ui_state WHERE id = 1",
             [],
             |row| {
@@ -757,6 +949,7 @@ impl Store {
                 let service_tier = row.get::<_, Option<String>>(4)?;
                 let permission_mode = row.get::<_, Option<String>>(5)?;
                 let reasoning_level = row.get::<_, Option<String>>(6)?;
+                let workspace_json = row.get::<_, Option<String>>(7)?;
                 Ok(StoredUiState {
                     onboarding_completed: row.get(0)?,
                     tour_completed: row.get(1)?,
@@ -767,6 +960,13 @@ impl Store {
                         permission_mode,
                         reasoning_level,
                     }),
+                    workspace: workspace_json
+                        .as_deref()
+                        .and_then(GlobalWorkspaceState::from_stored),
+                    preferred_autonomy: row
+                        .get::<_, Option<String>>(8)?
+                        .as_deref()
+                        .and_then(Autonomy::from_id),
                 })
             },
         )?)
@@ -780,10 +980,48 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_global_workspace_state(&self, workspace: &GlobalWorkspaceState) -> Result<()> {
+        workspace.validate()?;
+        self.conn.execute(
+            "UPDATE ui_state SET workspace_state_json = ?1 WHERE id = 1",
+            params![serde_json::to_string(workspace)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn project_workspace_state(&self, id: &str) -> Result<Option<WorkspaceState>> {
+        let json: Option<String> = self.conn.query_row(
+            "SELECT workspace_state_json FROM local_projects WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        Ok(json.as_deref().and_then(WorkspaceState::from_stored))
+    }
+
+    pub fn set_project_workspace_state(
+        &self,
+        id: &str,
+        workspace: &WorkspaceState,
+    ) -> Result<bool> {
+        workspace.validate()?;
+        Ok(self.conn.execute(
+            "UPDATE local_projects SET workspace_state_json = ?2 WHERE id = ?1",
+            params![id, serde_json::to_string(workspace)?],
+        )? > 0)
+    }
+
     pub fn set_tour_completed(&self, completed: bool) -> Result<()> {
         self.conn.execute(
             "UPDATE ui_state SET tour_completed = ?1 WHERE id = 1",
             params![completed],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_preferred_autonomy(&self, autonomy: Autonomy) -> Result<()> {
+        self.conn.execute(
+            "UPDATE ui_state SET preferred_autonomy = ?1 WHERE id = 1",
+            params![autonomy.id()],
         )?;
         Ok(())
     }
@@ -807,6 +1045,13 @@ impl Store {
     }
 
     pub fn upsert_run(&self, run: &StoredRun) -> Result<()> {
+        let status = RunStatus::parse(&run.status)
+            .ok_or_else(|| anyhow!("Unknown run status: {}", run.status))?;
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin())
+            .transpose()?;
         self.conn.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code,
@@ -814,13 +1059,8 @@ impl Store {
                                chat_session_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(id) DO UPDATE SET
-               status = excluded.status,
                backend_json = excluded.backend_json,
-               updated_at = excluded.updated_at,
-               ended_at = excluded.ended_at,
-               exit_code = excluded.exit_code,
-               commit_sha = excluded.commit_sha,
-               result_markdown = excluded.result_markdown",
+               commit_sha = excluded.commit_sha",
             // chat_session_id is deliberately absent from the DO UPDATE SET:
             // run ownership is immutable, so a later status upsert never
             // rewrites (or clears) the session that launched the run.
@@ -841,23 +1081,53 @@ impl Store {
                 run.chat_session_id,
             ],
         )?;
+        // Late submission handles must survive even when their status update is stale.
+        if self.update_status(&run.id, status, run.ended_at, run.exit_code)? {
+            self.conn.execute(
+                "UPDATE runs SET result_markdown = ?2, updated_at = ?3 WHERE id = ?1",
+                params![run.id, run.result_markdown, run.updated_at],
+            )?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
         Ok(())
     }
 
+    /// Atomically apply a legal transition; false leaves the outcome untouched.
     pub fn update_status(
         &self,
         run_id: &str,
-        status: &str,
+        status: RunStatus,
         ended_at: Option<i64>,
         exit_code: Option<i64>,
-    ) -> Result<()> {
-        self.conn.execute(
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .is_autocommit()
+            .then(|| self.begin())
+            .transpose()?;
+        let applied = self.conn.execute(
             "UPDATE runs SET status = ?2, updated_at = ?3, ended_at = COALESCE(?4, ended_at),
                              exit_code = COALESCE(?5, exit_code)
-             WHERE id = ?1",
-            params![run_id, status, now_ms(), ended_at, exit_code],
+             WHERE id = ?1 AND ((status = 'starting' AND ?6) OR (status = 'running' AND ?7))",
+            params![
+                run_id,
+                status.as_str(),
+                now_ms(),
+                ended_at,
+                exit_code,
+                RunStatus::Starting.can_transition_to(status),
+                RunStatus::Running.can_transition_to(status),
+            ],
         )?;
-        Ok(())
+        if applied == 1 && status.is_terminal() {
+            self.stage_run_terminal(run_id, status)?;
+        }
+        if let Some(tx) = tx {
+            tx.commit()?;
+        }
+        Ok(applied == 1)
     }
 
     pub fn get_run(&self, run_id: &str) -> Result<Option<StoredRun>> {
@@ -994,24 +1264,56 @@ impl Store {
     }
 
     pub fn list_ready_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
-        let mut stmt = self.conn.prepare(
+        self.list_run_wakeups(
+            "w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed')
+             ORDER BY COALESCE(r.ended_at, r.updated_at), w.requested_at, r.id",
+        )
+    }
+
+    /// Pending wake-ups whose run is still live, for monitoring alerts.
+    pub fn list_active_run_wakeups(&self) -> Result<Vec<RunWakeup>> {
+        self.list_run_wakeups(
+            "w.state = 'pending' AND r.status IN ('starting', 'running')
+             ORDER BY w.requested_at, r.id",
+        )
+    }
+
+    fn list_run_wakeups(&self, filter: &'static str) -> Result<Vec<RunWakeup>> {
+        let mut stmt = self.conn.prepare(&format!(
             "SELECT r.id, r.experiment_id, r.project_id, r.status, r.backend_json, r.command,
                     r.created_at, r.updated_at, r.ended_at, r.exit_code,
                     r.commit_sha, r.result_markdown, r.cancel_requested, r.chat_session_id,
-                    w.chat_session_id, w.state
+                    w.chat_session_id, w.state, w.monitoring_alerted
              FROM chat_run_wakeups w
              JOIN runs r ON r.id = w.run_id
-             WHERE w.state IN ('pending', 'claimed') AND r.status IN ('done', 'failed')
-             ORDER BY COALESCE(r.ended_at, r.updated_at), w.requested_at, r.id",
-        )?;
+             WHERE {filter}"
+        ))?;
         let rows = stmt.query_map([], |row| {
             Ok(RunWakeup {
                 run: row_to_run(row)?,
                 chat_session_id: row.get(14)?,
                 state: row.get(15)?,
+                monitoring_alerted: row.get(16)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Flips a pending wake-up's monitoring alert flag; `true` when this call changed it,
+    /// which makes setting it an atomic claim across `orx up` processes.
+    pub fn set_run_wakeup_monitoring_alerted(
+        &self,
+        run_id: &str,
+        chat_session_id: &str,
+        alerted: bool,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE chat_run_wakeups SET monitoring_alerted = ?3
+             WHERE run_id = ?1 AND chat_session_id = ?2
+               AND state = 'pending' AND monitoring_alerted != ?3",
+            params![run_id, chat_session_id, alerted],
+        )?;
+        Ok(changed == 1)
     }
 
     pub fn claim_run_wakeup(&self, run_id: &str, chat_session_id: &str) -> Result<Option<String>> {
@@ -1342,7 +1644,7 @@ impl Store {
     pub fn create_demo_snapshot(
         &self,
         project: &LocalProject,
-        experiment: &crate::local::model::LocalExperiment,
+        experiments: &[crate::local::model::LocalExperiment],
         run: &StoredRun,
         sessions: &[StoredChatSession],
         messages: &[StoredChatMessage],
@@ -1369,23 +1671,26 @@ impl Store {
             tx.commit()?;
             return Ok(false);
         }
-        tx.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
-            params![
-                experiment.id,
-                experiment.project_id,
-                experiment.parent_experiment_id,
-                experiment.slug,
-                experiment.branch_name,
-                experiment.title,
-                experiment.description,
-                experiment.run_command,
-                experiment.agent_status,
-                experiment.created_at,
-                experiment.updated_at,
-                experiment.chat_session_id,
-            ],
-        )?;
+        for experiment in experiments {
+            tx.execute(
+                &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
+                params![
+                    experiment.id,
+                    experiment.project_id,
+                    experiment.parent_experiment_id,
+                    experiment.slug,
+                    experiment.branch_name,
+                    experiment.title,
+                    experiment.description,
+                    experiment.run_command,
+                    experiment.agent_status,
+                    experiment.created_at,
+                    experiment.updated_at,
+                    experiment.chat_session_id,
+                    experiment.archived,
+                ],
+            )?;
+        }
         tx.execute(
             "INSERT INTO runs (id, experiment_id, project_id, status, backend_json, command,
                                created_at, updated_at, ended_at, exit_code, commit_sha,
@@ -1442,8 +1747,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages (id, session_id, role, parts_json, created_at,
                                             parent_id, base_native_session_id,
-                                            result_native_session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                            result_native_session_id, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     message.id,
                     message.session_id,
@@ -1453,6 +1758,7 @@ impl Store {
                     message.parent_id,
                     message.base_native_session_id,
                     message.result_native_session_id,
+                    message.completed_at,
                 ],
             )?;
         }
@@ -1587,11 +1893,11 @@ impl Store {
 
     pub fn create_local_experiment(&self, e: &LocalExperiment) -> Result<()> {
         self.conn.execute(
-            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"),
+            &format!("INSERT INTO local_experiments ({EXPERIMENT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"),
             params![
                 e.id, e.project_id, e.parent_experiment_id, e.slug, e.branch_name,
                 e.title, e.description, e.run_command, e.agent_status, e.created_at, e.updated_at,
-                e.chat_session_id,
+                e.chat_session_id, e.archived,
             ],
         )?;
         Ok(())
@@ -1634,14 +1940,34 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_experiments_archived(
+        &mut self,
+        ids: &[String],
+        archived: bool,
+    ) -> Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let mut changed = Vec::new();
+        for id in ids {
+            let rows = tx.execute(
+                "UPDATE local_experiments SET archived = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?1 AND archived != ?2",
+                params![id, archived, now_ms()],
+            )?;
+            if rows > 0 {
+                changed.push(id.clone());
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
+    }
+
     // --- chat sessions / messages ------------------------------------------
 
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
-                                        active_leaf_id, parent_session_id, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                                        active_leaf_id, parent_session_id, created_at, updated_at, autonomy)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             params![
                 s.id,
                 s.project_id,
@@ -1661,6 +1987,7 @@ impl Store {
                 s.parent_session_id,
                 s.created_at,
                 s.updated_at,
+                s.autonomy,
             ],
         )?;
         Ok(())
@@ -1683,6 +2010,16 @@ impl Store {
              ORDER BY updated_at DESC"
         ))?;
         let rows = stmt.query_map(params![project_id], row_to_chat_session)?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// Every project's sessions for the composer's `/resume` picker, capped so a
+    /// long-lived install cannot turn one dialog open into a multi-megabyte read.
+    pub fn list_all_chat_sessions(&self) -> Result<Vec<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions ORDER BY updated_at DESC LIMIT 500"
+        ))?;
+        let rows = stmt.query_map([], row_to_chat_session)?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
@@ -1813,6 +2150,64 @@ impl Store {
         self.conn.execute(
             "UPDATE chat_sessions SET context_usage_json = ?2 WHERE id = ?1",
             params![id, json],
+        )?;
+        Ok(())
+    }
+
+    /// The session bound to an agent's own chat, if one was already adopted.
+    pub fn chat_session_for_native_id(&self, native_id: &str) -> Result<Option<StoredChatSession>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {CHAT_SESSION_COLS} FROM chat_sessions WHERE native_session_id = ?1
+             ORDER BY created_at LIMIT 1"
+        ))?;
+        let mut rows = stmt.query_map(params![native_id], row_to_chat_session)?;
+        Ok(rows.next().transpose()?)
+    }
+
+    /// Native ids orx already has a session for, so the `/resume` picker can
+    /// offer each of the agent's own chats exactly once.
+    pub fn native_session_ids(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT native_session_id FROM chat_sessions WHERE native_session_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    pub fn set_chat_session_autonomy(&self, id: &str, autonomy: Autonomy) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET autonomy = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, autonomy.id(), now_ms()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_goal(&self, id: &str, goal: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET goal = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, goal, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Cleared after a compaction: the pre-compaction total would otherwise be
+    /// inherited by the next turn and keep the meter pinned high.
+    pub fn clear_chat_session_context_usage(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET context_usage_json = NULL WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_chat_session_bootstrap_context(
+        &self,
+        id: &str,
+        context: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE chat_sessions SET bootstrap_context = ?2 WHERE id = ?1",
+            params![id, context],
         )?;
         Ok(())
     }
@@ -2049,8 +2444,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                  base_native_session_id, result_native_session_id, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     message.id,
                     message.session_id,
@@ -2060,6 +2455,7 @@ impl Store {
                     message.parent_id,
                     message.base_native_session_id,
                     message.result_native_session_id,
+                    message.completed_at,
                 ],
             )?;
             tx.execute(
@@ -2129,6 +2525,23 @@ impl Store {
                 row_to_chat_turn,
             )
             .optional()?)
+    }
+
+    pub fn chat_native_thread_has_named_model(
+        &self,
+        session_id: &str,
+        native_session_id: &str,
+    ) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (
+                SELECT 1 FROM chat_turns t
+                JOIN chat_messages m ON m.id = t.assistant_message_id
+                WHERE t.session_id = ?1 AND m.result_native_session_id = ?2
+                  AND json_extract(t.settings_json, '$.model') IS NOT NULL
+            )",
+            params![session_id, native_session_id],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn insert_queued_chat_message(&self, message: &StoredQueuedChatMessage) -> Result<()> {
@@ -2319,15 +2732,24 @@ impl Store {
         Ok(changed > 0)
     }
 
-    pub fn reset_chat_turn_for_retry(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
+    pub fn reset_chat_turn_for_retry(&self, id: &str, started_at: i64) -> Result<bool> {
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE chat_turns SET state = 'preparing', delivery_state = 'not_sent',
                  attempt_count = 0, next_retry_at = NULL, error_kind = NULL,
                  error_message = NULL, recovery_action = NULL, updated_at = ?2
              WHERE id = ?1 AND state = 'failed' AND recovery_action = 'retry'
                    AND recovered_by_turn_id IS NULL",
-            params![id, now_ms()],
+            params![id, started_at],
         )?;
+        if changed > 0 {
+            transaction.execute(
+                "UPDATE chat_messages SET completed_at = NULL, created_at = ?2 WHERE id =
+                 (SELECT assistant_message_id FROM chat_turns WHERE id = ?1)",
+                params![id, started_at],
+            )?;
+        }
+        transaction.commit()?;
         Ok(changed > 0)
     }
 
@@ -2423,6 +2845,7 @@ impl Store {
             params![now],
         )?;
         transaction.commit()?;
+        self.recover_terminal_usage()?;
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {CHAT_TURN_COLS} FROM chat_turns
              WHERE state = 'failed' AND recovery_action IS NOT NULL
@@ -2445,7 +2868,7 @@ impl Store {
         let mut stmt = self.conn.prepare(
             // rowid tiebreak: a user message and its reply can share a millisecond.
             "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                    base_native_session_id, result_native_session_id
+                    base_native_session_id, result_native_session_id, completed_at
              FROM chat_messages
              WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )?;
@@ -2456,6 +2879,7 @@ impl Store {
                 role: row.get(2)?,
                 parts_json: row.get(3)?,
                 created_at: row.get(4)?,
+                completed_at: row.get(8)?,
                 parent_id: row.get(5)?,
                 base_native_session_id: row.get(6)?,
                 result_native_session_id: row.get(7)?,
@@ -2479,7 +2903,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT id, session_id, role, parts_json, created_at, parent_id,
-                        base_native_session_id, result_native_session_id
+                        base_native_session_id, result_native_session_id, completed_at
                  FROM chat_messages WHERE id = ?1",
                 params![id],
                 |row| {
@@ -2489,6 +2913,7 @@ impl Store {
                         role: row.get(2)?,
                         parts_json: row.get(3)?,
                         created_at: row.get(4)?,
+                        completed_at: row.get(8)?,
                         parent_id: row.get(5)?,
                         base_native_session_id: row.get(6)?,
                         result_native_session_id: row.get(7)?,
@@ -2628,6 +3053,15 @@ pub struct OverleafLink {
     pub root: String,
 }
 
+impl OverleafLink {
+    pub fn project(&self) -> crate::local::overleaf::Project {
+        crate::local::overleaf::Project {
+            id: self.overleaf_project_id.clone(),
+            host: self.host.clone(),
+        }
+    }
+}
+
 /// Most recent preflight result per ssh host alias (Settings → Compute → SSH).
 /// Serializes to the wire shape the UI's `SshPreflight` type expects; `host`
 /// is the row key only (the API embeds results under their host entry).
@@ -2679,6 +3113,11 @@ pub struct StoredChatSession {
     /// Hidden context prepended only when a seeded transcript starts its first
     /// real native harness session. Never serialized to the UI.
     pub bootstrap_context: Option<String>,
+    /// What the user asked the agent to keep working toward (`/goal`), carried
+    /// into every turn until they clear it.
+    pub goal: Option<String>,
+    /// Research autonomy level id (`crate::local::autonomy`); `None` is the default.
+    pub autonomy: Option<String>,
     /// Tip of the branch the UI is currently showing. Forked turns make the
     /// transcript a tree; this picks which path through it is live.
     pub active_leaf_id: Option<String>,
@@ -2699,12 +3138,14 @@ pub struct StoredAgentSelection {
     pub reasoning_level: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredUiState {
     pub onboarding_completed: bool,
     pub tour_completed: bool,
     pub preferred_agent: Option<StoredAgentSelection>,
+    pub workspace: Option<GlobalWorkspaceState>,
+    pub preferred_autonomy: Option<Autonomy>,
 }
 
 /// Normalized transcript entry; `parts_json` is the wire-format parts array
@@ -2717,6 +3158,7 @@ pub struct StoredChatMessage {
     pub role: String,
     pub parts_json: String,
     pub created_at: i64,
+    pub completed_at: Option<i64>,
     /// Message this one follows on its branch. NULL only for a branch root.
     pub parent_id: Option<String>,
     /// Harness session id current *before* this turn ran. Re-sampling a turn
@@ -2736,10 +3178,11 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
         // the tree.
         "INSERT INTO chat_messages
                  (id, session_id, role, parts_json, created_at, parent_id,
-                  base_native_session_id, result_native_session_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                  base_native_session_id, result_native_session_id, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                  parts_json = excluded.parts_json,
+                 completed_at = COALESCE(excluded.completed_at, completed_at),
                  result_native_session_id = COALESCE(
                      excluded.result_native_session_id, result_native_session_id)",
         params![
@@ -2750,7 +3193,8 @@ fn upsert_chat_message_with(conn: &Connection, m: &StoredChatMessage) -> Result<
             m.created_at,
             m.parent_id,
             m.base_native_session_id,
-            m.result_native_session_id
+            m.result_native_session_id,
+            m.completed_at
         ],
     )?;
     Ok(())
@@ -2828,7 +3272,8 @@ fn row_to_chat_turn(
 
 const CHAT_SESSION_COLS: &str = "id, project_id, harness, native_session_id, title, model, service_tier, \
      permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, context_usage_json, \
-     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id";
+     created_at, updated_at, title_source, bootstrap_context, active_leaf_id, parent_session_id, \
+     goal, autonomy";
 
 fn row_to_chat_spawn(row: &rusqlite::Row<'_>) -> std::result::Result<ChatSpawn, rusqlite::Error> {
     Ok(ChatSpawn {
@@ -2864,6 +3309,8 @@ fn row_to_chat_session(
         bootstrap_context: row.get(16)?,
         active_leaf_id: row.get(17)?,
         parent_session_id: row.get(18)?,
+        goal: row.get(19)?,
+        autonomy: row.get(20)?,
     })
 }
 
@@ -2877,7 +3324,7 @@ const PROJECT_COLS: &str = "id, name, slug, github_owner, github_repo, github_sy
 
 const EXPERIMENT_COLS: &str = "id, project_id, parent_experiment_id, slug, branch_name, \
                                title, description, run_command, agent_status, created_at, \
-                               updated_at, chat_session_id";
+                               updated_at, chat_session_id, archived";
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> std::result::Result<StoredRun, rusqlite::Error> {
     Ok(StoredRun {
@@ -2908,6 +3355,42 @@ pub fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_lock_keeps_legacy_inode() {
+        let config_dir = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        let lock = open_lifecycle_lock_in(&config_dir).unwrap();
+        let legacy = config_dir.join("orx.lifecycle.lock");
+        let path = lifecycle_lock_path_in(&config_dir);
+        assert!(same_file::is_same_file(legacy, &path).unwrap());
+        assert!(path.parent().unwrap().is_dir());
+        assert!(!config_dir
+            .join("credentials.json")
+            .starts_with(path.parent().unwrap()));
+        drop(lock);
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_lock_rejects_replaced_entry() {
+        let config_dir = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        let lock = open_lifecycle_lock_in(&config_dir).unwrap();
+        let path = lifecycle_lock_path_in(&config_dir);
+        drop(lock);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, "replacement").unwrap();
+        assert!(open_lifecycle_lock_in(&config_dir).is_err());
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn lifecycle_lock_uses_legacy_when_dedicated_dir_cannot_be_created() {
+        let config_dir = std::env::temp_dir().join(format!("orx-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("locks"), "not a directory").unwrap();
+        assert!(open_lifecycle_lock_in(&config_dir).is_ok());
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
 
     #[test]
     fn human_bytes_scales() {
@@ -2945,7 +3428,117 @@ mod tests {
         assert_eq!(tests[0].host, "legacy-connect");
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workspace_state_roundtrips_without_touching_project_activity_or_preferences() {
+        let dir = std::env::temp_dir().join(format!("orx-workspace-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for id in ["first", "second"] {
+            store
+                .create_local_project(&LocalProject {
+                    id: id.into(),
+                    name: id.into(),
+                    slug: id.into(),
+                    github_owner: String::new(),
+                    github_repo: String::new(),
+                    github_sync_enabled: false,
+                    baseline_branch: "main".into(),
+                    repo_path: dir.join(id).to_string_lossy().into_owned(),
+                    run_command: None,
+                    paper_id: None,
+                    created_at: 1,
+                    updated_at: 2,
+                })
+                .unwrap();
+        }
+        let value = serde_json::json!({
+            "version": 1,
+            "lastLocation": "/projects/first/tasks/new",
+            "lastTaskId": null,
+            "tasks": {"new": {
+                "tabs": [
+                    {"kind":"home", "view":"files"},
+                    {"kind":"experiment", "experimentId":"experiment", "view":"terminal", "runId":"run"},
+                    {"kind":"file", "path":"paper.tex", "source":"repo", "sessionId":"session", "ref":"main", "line":12},
+                    {"kind":"code", "experimentId":"experiment", "branch":"main", "view":"changes"},
+                    {"kind":"plan", "sessionId":"session", "promptId":"prompt"},
+                    {"kind":"subagent", "sessionId":"session", "spawnPartId":"part"}
+                ],
+                "active":{"kind":"home", "view":"files"}, "previewKey":"file:paper.tex",
+                "history":["home", "file:paper.tex"], "expanded":{"files":["src"]},
+                "scroll":{"file:paper.tex":{"top":23.5,"left":2.0}}, "sourceModes":{"file:paper.tex":true},
+                "filesView":"changes", "scope":"agent", "panelMax":true,
+                "treeViewport":{"x":-24.0,"y":18.0,"zoom":1.4}
+            }}
+        });
+        let workspace: WorkspaceState = serde_json::from_value(value.clone()).unwrap();
+        assert!(store.project_workspace_state("first").unwrap().is_none());
+        assert!(store
+            .set_project_workspace_state("first", &workspace)
+            .unwrap());
+        assert!(!store
+            .set_project_workspace_state("missing", &workspace)
+            .unwrap());
+        assert!(store.project_workspace_state("second").unwrap().is_none());
+        assert_eq!(
+            store
+                .get_local_project("first")
+                .unwrap()
+                .unwrap()
+                .updated_at,
+            2
+        );
+        let preferences = store.ui_state().unwrap();
+        let global: GlobalWorkspaceState = serde_json::from_value(serde_json::json!({
+            "lastLocation":"/projects/first/settings/storage", "railOpen":false,
+            "panelWidth":620, "experimentsView":"table"
+        }))
+        .unwrap();
+        store.set_global_workspace_state(&global).unwrap();
+        assert_eq!(
+            store.ui_state().unwrap().preferred_agent,
+            preferences.preferred_agent
+        );
+        assert_eq!(
+            store.ui_state().unwrap().onboarding_completed,
+            preferences.onboarding_completed
+        );
+        store.set_tour_completed(true).unwrap();
+        store.set_onboarding_completed(true).unwrap();
+        store
+            .set_preferred_agent(&StoredAgentSelection {
+                harness: "codex".into(),
+                model: None,
+                service_tier: None,
+                permission_mode: None,
+                reasoning_level: None,
+            })
+            .unwrap();
+        assert_eq!(store.ui_state().unwrap().workspace, Some(global.clone()));
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.project_workspace_state("first").unwrap()).unwrap(),
+            value
+        );
+        assert_eq!(store.ui_state().unwrap().workspace, Some(global));
+        for corrupt in [
+            "not json",
+            "{\"version\":2,\"lastLocation\":null,\"tasks\":{}}",
+        ] {
+            store
+                .conn
+                .execute(
+                    "UPDATE local_projects SET workspace_state_json = ?1 WHERE id = 'first'",
+                    params![corrupt],
+                )
+                .unwrap();
+            assert!(store.project_workspace_state("first").unwrap().is_none());
+        }
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -2958,6 +3551,8 @@ mod tests {
                 onboarding_completed: false,
                 tour_completed: false,
                 preferred_agent: None,
+                workspace: None,
+                preferred_autonomy: None,
             }
         );
 
@@ -2971,6 +3566,7 @@ mod tests {
         store.set_onboarding_completed(true).unwrap();
         store.set_tour_completed(true).unwrap();
         store.set_preferred_agent(&selection).unwrap();
+        store.set_preferred_autonomy(Autonomy::Copilot).unwrap();
 
         assert_eq!(
             store.ui_state().unwrap(),
@@ -2978,6 +3574,8 @@ mod tests {
                 onboarding_completed: true,
                 tour_completed: true,
                 preferred_agent: Some(selection),
+                workspace: None,
+                preferred_autonomy: Some(Autonomy::Copilot),
             }
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -3144,6 +3742,7 @@ mod tests {
                 role: "user".into(),
                 parts_json: "[]".into(),
                 created_at: 1,
+                completed_at: None,
                 parent_id: None,
                 base_native_session_id: None,
                 result_native_session_id: None,
@@ -3178,6 +3777,38 @@ mod tests {
     }
 
     #[test]
+    fn named_model_history_is_scoped_to_the_native_thread() {
+        let dir = std::env::temp_dir().join(format!("orx-store-model-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut turn = chat_turn_fixture("one", "client-1");
+        turn.settings_json = r#"{"model":"gpt-6-astra-canary-invalid"}"#.into();
+        store.admit_chat_turn(None, &turn).unwrap();
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: turn.assistant_message_id,
+                session_id: "chat_1".into(),
+                role: "assistant".into(),
+                parts_json: "[]".into(),
+                created_at: 2,
+                completed_at: None,
+                parent_id: None,
+                base_native_session_id: None,
+                result_native_session_id: Some("old-thread".into()),
+            })
+            .unwrap();
+        assert!(store
+            .chat_native_thread_has_named_model("chat_1", "old-thread")
+            .unwrap());
+        assert!(!store
+            .chat_native_thread_has_named_model("chat_1", "fresh-thread")
+            .unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn chat_turn_admission_is_atomic_and_idempotent() {
         let dir = std::env::temp_dir().join(format!("orx-store-turns-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -3191,6 +3822,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 2,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3322,6 +3954,45 @@ mod tests {
     }
 
     #[test]
+    fn chat_completion_time_survives_reload_and_partial_updates() {
+        let dir = std::env::temp_dir().join(format!("orx-chat-time-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_chat_session(&chat_session_fixture("chat_1"))
+            .unwrap();
+        let mut message = StoredChatMessage {
+            id: "answer".into(),
+            session_id: "chat_1".into(),
+            role: "assistant".into(),
+            parts_json: "[]".into(),
+            created_at: 1000,
+            completed_at: Some(165000),
+            parent_id: None,
+            base_native_session_id: None,
+            result_native_session_id: None,
+        };
+        store.upsert_chat_message(&message).unwrap();
+        message.completed_at = None;
+        store.upsert_chat_message(&message).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            store
+                .get_chat_message("answer")
+                .unwrap()
+                .unwrap()
+                .completed_at,
+            Some(165000)
+        );
+        assert_eq!(
+            store.list_chat_messages("chat_1").unwrap()[0].completed_at,
+            Some(165000)
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn migration_chains_a_legacy_transcript_into_one_branch() {
         let dir = std::env::temp_dir().join(format!("orx-store-tree-{}", uuid::Uuid::new_v4()));
         let store = Store::open_at(dir.clone()).unwrap();
@@ -3339,6 +4010,7 @@ mod tests {
                     role: role.into(),
                     parts_json: "[]".into(),
                     created_at: i as i64,
+                    completed_at: None,
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,
@@ -3404,6 +4076,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3412,8 +4085,32 @@ mod tests {
         assert!(store
             .fail_chat_turn("turn_1", "not_sent", "setup", "failed", Some("retry"))
             .unwrap());
-        assert!(store.reset_chat_turn_for_retry("turn_1").unwrap());
-        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 1);
+        store
+            .upsert_chat_message(&StoredChatMessage {
+                id: turn.assistant_message_id.clone(),
+                role: "assistant".into(),
+                completed_at: Some(2000),
+                ..user.clone()
+            })
+            .unwrap();
+        assert!(store.reset_chat_turn_for_retry("turn_1", 3000).unwrap());
+        assert_eq!(
+            store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap()
+                .completed_at,
+            None
+        );
+        assert_eq!(
+            store
+                .get_chat_message(&turn.assistant_message_id)
+                .unwrap()
+                .unwrap()
+                .created_at,
+            3000
+        );
+        assert_eq!(store.list_chat_messages("chat_1").unwrap().len(), 2);
         assert_eq!(
             store
                 .get_chat_turn("chat_1", "turn_1")
@@ -3446,7 +4143,7 @@ mod tests {
         let interrupted = store.get_chat_turn("chat_1", "turn_1").unwrap().unwrap();
         assert_eq!(interrupted.state, "interrupted");
         assert!(interrupted.recovery_action.is_none());
-        assert!(!store.reset_chat_turn_for_retry("turn_1").unwrap());
+        assert!(!store.reset_chat_turn_for_retry("turn_1", 3000).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3468,6 +4165,7 @@ mod tests {
             role: "assistant".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3514,6 +4212,7 @@ mod tests {
             role: "user".into(),
             parts_json: "[]".into(),
             created_at: 1,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
@@ -3525,6 +4224,7 @@ mod tests {
             role: "assistant".into(),
             parts_json: "[]".into(),
             created_at: 2,
+            completed_at: None,
             parent_id: Some(user.id.clone()),
             base_native_session_id: Some("native_1".into()),
             result_native_session_id: None,
@@ -3639,6 +4339,7 @@ mod tests {
             role: role.into(),
             parts_json: parts.into(),
             created_at: 0,
+            completed_at: None,
             parent_id: None,
             base_native_session_id: None,
             result_native_session_id: None,
@@ -3695,6 +4396,8 @@ mod tests {
             archived: false,
             context_usage_json: None,
             bootstrap_context: None,
+            goal: None,
+            autonomy: None,
             active_leaf_id: None,
             parent_session_id: None,
             created_at: 1,
@@ -3711,6 +4414,22 @@ mod tests {
             attempts: 0,
             finished_at: None,
         }
+    }
+
+    #[test]
+    fn chat_session_autonomy_roundtrips() {
+        let dir = std::env::temp_dir().join(format!("orx-store-autonomy-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let mut session = chat_session_fixture("chat_a");
+        session.autonomy = Some("copilot".into());
+        store.create_chat_session(&session).unwrap();
+        let autonomy = |store: &Store| store.get_chat_session("chat_a").unwrap().unwrap().autonomy;
+        assert_eq!(autonomy(&store).as_deref(), Some("copilot"));
+        store
+            .set_chat_session_autonomy("chat_a", Autonomy::Agentic)
+            .unwrap();
+        assert_eq!(autonomy(&store).as_deref(), Some("agentic"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3739,6 +4458,35 @@ mod tests {
                 .parent_session_id
                 .as_deref(),
             Some("chat_parent")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_resume_picker_sees_every_project_newest_first() {
+        let dir = std::env::temp_dir().join(format!("orx-store-allchats-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+
+        for (id, project, updated_at) in [
+            ("chat_old", "proj_1", 10),
+            ("chat_other_project", "proj_2", 30),
+            ("chat_middle", "proj_1", 20),
+        ] {
+            let mut session = chat_session_fixture(id);
+            session.project_id = project.into();
+            session.updated_at = updated_at;
+            store.create_chat_session(&session).unwrap();
+        }
+
+        let all = store.list_all_chat_sessions().unwrap();
+        assert_eq!(
+            all.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["chat_other_project", "chat_middle", "chat_old"]
+        );
+        assert_eq!(
+            store.list_chat_sessions_by_project("proj_1").unwrap().len(),
+            2
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3984,6 +4732,319 @@ mod tests {
         }
     }
 
+    /// Every (from, to) pair, checked against the lifecycle diagram on
+    /// [`RunStatus`] rather than the implementation, so this fails if
+    /// `can_transition_to` and the documented state machine ever drift apart.
+    #[test]
+    fn run_status_transition_table_matches_the_documented_lifecycle() {
+        use RunStatus::*;
+        let legal: &[(RunStatus, RunStatus)] = &[
+            (Starting, Starting),
+            (Starting, Running),
+            (Starting, Done),
+            (Starting, Failed),
+            (Starting, Cancelled),
+            (Running, Running),
+            (Running, Done),
+            (Running, Failed),
+            (Running, Cancelled),
+        ];
+        for from in RunStatus::ALL {
+            for to in RunStatus::ALL {
+                let expected = legal.contains(&(from, to));
+                assert_eq!(
+                    from.can_transition_to(to),
+                    expected,
+                    "{from} -> {to} should be {}",
+                    if expected { "legal" } else { "illegal" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn status_writers_enforce_every_transition_and_preserve_terminal_outcomes() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-transitions-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        for from in RunStatus::ALL {
+            for to in RunStatus::ALL {
+                for upsert in [false, true] {
+                    let id = format!("{from}-{to}-{upsert}");
+                    let mut original = run_fixture(&id, from.as_str(), Some("owner"));
+                    original.result_markdown = Some("original result".into());
+                    original.ended_at = from.is_terminal().then_some(10);
+                    original.exit_code = from.is_terminal().then_some(0);
+                    original.cancel_requested = true;
+                    store.upsert_run(&original).unwrap();
+                    let before = store.get_run(&id).unwrap().unwrap();
+                    let expected = from == RunStatus::Starting
+                        || (from == RunStatus::Running && to != RunStatus::Starting);
+                    if upsert {
+                        let mut incoming = run_fixture(&id, to.as_str(), None);
+                        incoming.backend_json = "{\"job_id\":\"late-handle\"}".into();
+                        incoming.ended_at = Some(20);
+                        incoming.exit_code = Some(1);
+                        incoming.result_markdown = Some("new result".into());
+                        store.upsert_run(&incoming).unwrap();
+                    } else {
+                        assert_eq!(
+                            store.update_status(&id, to, Some(20), Some(1)).unwrap(),
+                            expected,
+                        );
+                    }
+                    let after = store.get_run(&id).unwrap().unwrap();
+                    assert_eq!(
+                        after.status,
+                        if expected { to } else { from }.as_str(),
+                        "{id}"
+                    );
+                    assert_eq!(after.chat_session_id, before.chat_session_id);
+                    assert!(after.cancel_requested);
+                    if expected {
+                        assert_eq!(after.ended_at, Some(20));
+                        assert_eq!(after.exit_code, Some(1));
+                    } else {
+                        assert_eq!(after.ended_at, before.ended_at);
+                        assert_eq!(after.exit_code, before.exit_code);
+                        assert_eq!(after.updated_at, before.updated_at);
+                        assert_eq!(after.result_markdown, before.result_markdown);
+                    }
+                    if upsert {
+                        assert!(after.backend_json.contains("late-handle"));
+                        if expected {
+                            assert_eq!(after.result_markdown.as_deref(), Some("new result"));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(store
+            .upsert_run(&run_fixture("invalid", "unknown", None))
+            .is_err());
+        assert!(store.get_run("invalid").unwrap().is_none());
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn run_status_is_terminal_matches_the_three_absorbing_states() {
+        for status in RunStatus::ALL {
+            assert_eq!(
+                status.is_terminal(),
+                matches!(
+                    status,
+                    RunStatus::Done | RunStatus::Failed | RunStatus::Cancelled
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn run_status_as_str_round_trips_through_parse() {
+        for status in RunStatus::ALL {
+            assert_eq!(RunStatus::parse(status.as_str()), Some(status));
+        }
+        assert_eq!(RunStatus::parse("not-a-real-status"), None);
+        assert!(!is_terminal_status("not-a-real-status"));
+    }
+
+    /// Test scenario from the state-machine design doc: "duplicate completion
+    /// callbacks". The second write must be silently rejected rather than
+    /// erroring or re-stamping `ended_at`/`exit_code`.
+    #[test]
+    fn duplicate_terminal_writes_are_idempotent_no_ops() {
+        let dir = std::env::temp_dir().join(format!("orx-store-dup-term-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_1", RunStatus::Done, Some(100), Some(0))
+            .unwrap());
+        let first = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(first.status, "done");
+        assert_eq!(first.ended_at, Some(100));
+        assert_eq!(first.exit_code, Some(0));
+
+        // A second, later completion callback for the same run (e.g. a
+        // retried webhook, or a stale poll landing after a fresher one) must
+        // not be applied, and must not disturb the first write's timestamp
+        // or exit code.
+        assert!(!store
+            .update_status("run_1", RunStatus::Done, Some(200), Some(1))
+            .unwrap());
+        let second = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(second.status, "done");
+        assert_eq!(
+            second.ended_at,
+            Some(100),
+            "ended_at must not be re-stamped"
+        );
+        assert_eq!(
+            second.exit_code,
+            Some(0),
+            "exit_code must not be overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "completion arriving after cancellation" — once a run
+    /// has been recorded as cancelled, a late success/failure report from the
+    /// backend must not resurrect it.
+    #[test]
+    fn completion_after_cancellation_is_rejected() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-cancel-race-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_1", RunStatus::Cancelled, Some(100), None)
+            .unwrap());
+        assert!(!store
+            .update_status("run_1", RunStatus::Done, Some(200), Some(0))
+            .unwrap());
+
+        let run = store.get_run("run_1").unwrap().unwrap();
+        assert_eq!(run.status, "cancelled");
+        assert_eq!(run.ended_at, Some(100));
+        assert_eq!(run.exit_code, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "invalid backward transitions" — a backend cannot
+    /// regress an already-`running` job back to `starting`.
+    #[test]
+    fn running_cannot_regress_to_starting() {
+        let dir = std::env::temp_dir().join(format!("orx-store-backward-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+
+        assert!(!store
+            .update_status("run_1", RunStatus::Starting, None, None)
+            .unwrap());
+        assert_eq!(store.get_run("run_1").unwrap().unwrap().status, "running");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenarios: "cancel while preparing" and "cancel while running" —
+    /// both non-terminal states can move directly to `cancelled`.
+    #[test]
+    fn cancel_is_legal_from_either_non_terminal_state() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-cancel-both-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_starting", "starting", None))
+            .unwrap();
+        store
+            .upsert_run(&run_fixture("run_running", "running", None))
+            .unwrap();
+
+        assert!(store
+            .update_status("run_starting", RunStatus::Cancelled, Some(1), None)
+            .unwrap());
+        assert!(store
+            .update_status("run_running", RunStatus::Cancelled, Some(1), None)
+            .unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "retry after a partially completed run" — a run that
+    /// failed can be re-launched under a fresh run id (retries are new rows,
+    /// never a resurrection of the old one), and the old terminal row is left
+    /// untouched by anything trying to touch it afterward.
+    #[test]
+    fn retry_after_failure_is_a_new_row_not_a_resurrection() {
+        let dir = std::env::temp_dir().join(format!("orx-store-retry-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+        assert!(store
+            .update_status("run_1", RunStatus::Failed, Some(1), Some(1))
+            .unwrap());
+
+        // The retry is a distinct run id; the failed row is untouched.
+        store
+            .upsert_run(&run_fixture("run_1_retry", "starting", None))
+            .unwrap();
+        assert!(store
+            .update_status("run_1_retry", RunStatus::Running, None, None)
+            .unwrap());
+
+        assert_eq!(store.get_run("run_1").unwrap().unwrap().status, "failed");
+        assert_eq!(
+            store.get_run("run_1_retry").unwrap().unwrap().status,
+            "running"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test scenario: "concurrent status updates" / "agent wake while a run
+    /// is finishing" — many independent connections (as separate supervisor
+    /// processes would be) race to finalize the same run with different
+    /// terminal outcomes. Exactly one write must win, and the row must land
+    /// on a real terminal state rather than a torn/partial one.
+    #[test]
+    fn concurrent_terminal_writes_from_separate_connections_settle_on_exactly_one_outcome() {
+        let dir =
+            std::env::temp_dir().join(format!("orx-store-concurrent-{}", uuid::Uuid::new_v4()));
+        // Open once first so schema creation isn't itself racing below.
+        let setup = Store::open_at(dir.clone()).unwrap();
+        setup
+            .upsert_run(&run_fixture("run_1", "running", None))
+            .unwrap();
+        drop(setup);
+
+        let outcomes = [RunStatus::Done, RunStatus::Failed, RunStatus::Cancelled];
+        let handles: Vec<_> = outcomes
+            .into_iter()
+            .map(|outcome| {
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    // Each thread is its own connection, like independent
+                    // supervisor processes sharing one SQLite file (WAL +
+                    // busy_timeout, set in `open_at_with_move_lock`).
+                    let store = Store::open_at(dir).unwrap();
+                    store
+                        .update_status("run_1", outcome, Some(1), None)
+                        .unwrap()
+                })
+            })
+            .collect();
+        let applied: Vec<bool> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(
+            applied.iter().filter(|ok| **ok).count(),
+            1,
+            "exactly one racing writer should win: {applied:?}"
+        );
+        let final_status = Store::open_at(dir.clone())
+            .unwrap()
+            .get_run("run_1")
+            .unwrap()
+            .unwrap()
+            .status;
+        assert!(
+            RunStatus::parse(&final_status).is_some_and(RunStatus::is_terminal),
+            "run must settle on a real terminal state, got {final_status:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn run_chat_session_id_roundtrips() {
         let dir = std::env::temp_dir().join(format!("orx-store-runsess-{}", uuid::Uuid::new_v4()));
@@ -4051,9 +5112,9 @@ mod tests {
             ["run_done", "run_failed"]
         );
 
-        store
-            .update_status("run_active", "done", Some(2), Some(0))
-            .unwrap();
+        assert!(store
+            .update_status("run_active", RunStatus::Done, Some(2), Some(0))
+            .unwrap());
         assert_eq!(store.list_ready_run_wakeups().unwrap().len(), 3);
         let token = store
             .claim_run_wakeup("run_done", "chat_A")
@@ -4094,7 +5155,66 @@ mod tests {
             .all(|wakeup| wakeup.run.id != "run_done"));
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn monitoring_alert_claims_once_and_keeps_the_terminal_wakeup() {
+        let dir = std::env::temp_dir().join(format!("orx-store-alert-{}", uuid::Uuid::new_v4()));
+        let first = Store::open_at(dir.clone()).unwrap();
+        first
+            .create_chat_session(&chat_session_fixture("chat_A"))
+            .unwrap();
+        for (id, status) in [("run_live", "starting"), ("run_done", "done")] {
+            first
+                .upsert_run(&run_fixture(id, status, Some("chat_A")))
+                .unwrap();
+            first.register_run_wakeup(id, "chat_A").unwrap();
+        }
+        let second = Store::open_at(dir.clone()).unwrap();
+
+        let active = first.list_active_run_wakeups().unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].run.id, "run_live");
+        assert!(!active[0].monitoring_alerted);
+        assert!(first
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
+            .unwrap());
+        assert!(!second
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
+            .unwrap());
+        assert!(second.list_active_run_wakeups().unwrap()[0].monitoring_alerted);
+
+        assert!(second
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
+            .unwrap());
+        assert!(!first
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
+            .unwrap());
+
+        first
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", true)
+            .unwrap();
+        assert!(first
+            .update_status("run_live", RunStatus::Done, Some(2), Some(0))
+            .unwrap());
+        assert!(first.list_active_run_wakeups().unwrap().is_empty());
+        assert!(first
+            .list_ready_run_wakeups()
+            .unwrap()
+            .iter()
+            .any(|wakeup| wakeup.run.id == "run_live" && wakeup.state == "pending"));
+        first
+            .claim_run_wakeup("run_live", "chat_A")
+            .unwrap()
+            .unwrap();
+        assert!(!first
+            .set_run_wakeup_monitoring_alerted("run_live", "chat_A", false)
+            .unwrap());
+
+        drop(second);
+        drop(first);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4149,7 +5269,7 @@ mod tests {
 
         drop(second);
         drop(first);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4177,7 +5297,7 @@ mod tests {
         );
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4206,7 +5326,7 @@ mod tests {
 
         drop(second);
         drop(first);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4233,7 +5353,7 @@ mod tests {
         assert_eq!(ids, ["run_running", "run_starting"]);
 
         drop(store);
-        std::fs::remove_dir_all(dir).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -4255,7 +5375,10 @@ mod tests {
             .unwrap();
 
         let run = store.get_run("run_1").unwrap().unwrap();
-        assert_eq!(run.status, "done", "status still updates on conflict");
+        assert_eq!(
+            run.status, "failed",
+            "terminal outcome survives later upserts"
+        );
         assert_eq!(
             run.chat_session_id,
             Some("chat_A".to_string()),
@@ -4278,6 +5401,7 @@ mod tests {
             created_at: 1,
             updated_at: 1,
             chat_session_id: chat_session_id.map(str::to_string),
+            archived: false,
         }
     }
 
@@ -4323,6 +5447,7 @@ mod tests {
                     role: role.into(),
                     parts_json: "[]".into(),
                     created_at,
+                    completed_at: None,
                     parent_id: None,
                     base_native_session_id: None,
                     result_native_session_id: None,

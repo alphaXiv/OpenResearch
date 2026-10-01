@@ -42,16 +42,13 @@ const DIFF_CLASS_NAME = [
   "[&_.openresearch-diff-file]:[--diff-code-delete-edit-text-color:var(--diff-text-color)]",
   "[&_.openresearch-diff-file]:[--diff-code-delete-edit-background-color:var(--color-diff-delete-edit)]",
   "[&_.openresearch-diff-file]:[--diff-omit-gutter-line-color:var(--color-diff-omit-gutter)]",
-  "[&_.openresearch-diff-file]:w-full [&_.openresearch-diff-file]:text-sm",
-  "[&_.openresearch-diff-file]:leading-[1.55] [&_.openresearch-diff-file.diff-unified]:table-auto",
+  "[&_.openresearch-diff-file]:w-full",
+  "[&_.openresearch-diff-file.diff-unified]:table-fixed",
   "[&_.openresearch-diff-file.diff-unified_col.diff-gutter-col:first-child]:collapse",
   "[&_.openresearch-diff-file.diff-unified_col.diff-gutter-col:first-child]:w-0",
-  "[&_.openresearch-diff-file.diff-unified_col.diff-gutter-col:nth-child(2)]:w-[1%]",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:first-child]:hidden",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:sticky",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:start-0",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:z-1",
-  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:w-[1%]",
+  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:first-child]:p-0",
+  "[&_.openresearch-diff-file.diff-unified_col.diff-gutter-col:nth-child(2)]:w-[7ch]",
+  "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:w-[7ch]",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pt-0 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pe-2.5 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:pb-0 [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:ps-3.5",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:whitespace-nowrap",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:text-end",
@@ -59,13 +56,9 @@ const DIFF_CLASS_NAME = [
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e [&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:border-e-border",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:select-none",
   "[&_.openresearch-diff-file.diff-unified_.diff-line_>_td:nth-child(2)]:cursor-default",
-  "[&_.openresearch-diff-file_.diff-line]:leading-[1.55]",
   "[&_.openresearch-diff-file_.diff-line:has(.diff-code-insert)]:bg-diff-insert-code",
   "[&_.openresearch-diff-file_.diff-line:has(.diff-code-delete)]:bg-diff-delete-code",
-  "[&_.openresearch-diff-file_.diff-code]:py-0 [&_.openresearch-diff-file_.diff-code]:px-4",
-  "[&_.openresearch-diff-file_.diff-code]:whitespace-pre",
-  "[&_.openresearch-diff-file_.diff-code]:break-normal",
-  "[&_.openresearch-diff-file_.diff-code]:wrap-normal",
+  "[&_.openresearch-diff-file_.diff-code]:py-0 [&_.openresearch-diff-file_.diff-code]:ps-[2ch] [&_.openresearch-diff-file_.diff-code]:pe-4",
   "[&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t [&_.openresearch-diff-file_.diff-hunk_+_.diff-hunk_.diff-line:first-child_>_td]:border-t-border",
 ].join(" ");
 
@@ -127,7 +120,7 @@ function tokenizeDiffFile(file: FileData): HunkTokens {
   return tokenize(file.hunks, { enhancers, highlight: false });
 }
 
-function parseDiffFiles(diff: string, partial: boolean): { files: FileData[]; failed: boolean } {
+export function parseDiffFiles(diff: string, partial: boolean): { files: FileData[]; failed: boolean } {
   if (!diff.trim()) return { files: [], failed: false };
   try {
     return { files: parseDiff(diff, { nearbySequences: "zip" }), failed: false };
@@ -194,7 +187,7 @@ function DiffFileCard({
   return (
     <section className={`diff-file-card overflow-hidden border border-border rounded-md bg-background [&.expanded_.diff-file-header]:border-b [&.expanded_.diff-file-header]:border-b-border ${expanded ? "expanded" : ""}`}>
       <button
-        className="diff-file-header sticky top-0 z-10 flex items-center justify-between gap-3 w-full text-start py-2 px-3 bg-canvas cursor-pointer [&_.chev]:text-muted [&_.chev]:text-xs [&_.chev]:shrink-0 [&_.chev]:w-3 [&_.path]:flex [&_.path]:items-center [&_.path]:gap-2 [&_.path]:min-w-0 [&_.path]:flex-1 [&_.path_code]:min-w-0 [&_.path_code]:flex-1 [&_.path_code]:overflow-hidden [&_.path_code]:text-ellipsis [&_.path_code]:whitespace-nowrap [&_.path_code]:font-mono [&_.path_code]:text-xs [&_.path_code]:font-semibold [&_.path_code]:text-text [&_.stats]:flex [&_.stats]:items-center [&_.stats]:gap-2 [&_.stats]:shrink-0 [&_.stats]:font-mono [&_.stats]:text-xs [&_.stats]:font-medium [&_.stats]:tabular-nums"
+        className="diff-file-header sticky top-0 z-10 flex items-center justify-between gap-3 w-full text-start py-2 px-3 bg-canvas cursor-pointer [&_.chev]:text-muted [&_.chev]:text-xs [&_.chev]:shrink-0 [&_.chev]:w-3 [&_.path]:flex [&_.path]:items-center [&_.path]:gap-2 [&_.path]:min-w-0 [&_.path]:flex-1 [&_.path_code]:min-w-0 [&_.path_code]:flex-1 [&_.path_code]:overflow-hidden [&_.path_code]:text-ellipsis [&_.path_code]:whitespace-nowrap [&_.path_code]:font-mono [&_.path_code]:text-xs [&_.path_code]:font-medium [&_.path_code]:text-text [&_.stats]:flex [&_.stats]:items-center [&_.stats]:gap-2 [&_.stats]:shrink-0 [&_.stats]:font-mono [&_.stats]:text-xs [&_.stats]:font-medium [&_.stats]:tabular-nums"
         aria-expanded={expanded}
         onClick={() => setExpanded((e) => !e)}
       >
@@ -213,7 +206,7 @@ function DiffFileCard({
         (file.hunks.length === 0 ? (
           <div className="diff-empty py-2 px-3 text-muted text-sm">{m.git_diff_no_textual_diff_for_this_file()}</div>
         ) : (
-          <div className="diff-file-body overflow-x-auto bg-background">
+          <div className="diff-file-body min-w-0 py-3.5 bg-background">
             <Diff
               className="openresearch-diff-file"
               diffType={file.type}
@@ -297,7 +290,7 @@ export function GitDiffExplorer({ diff, partial = false }: { diff: string; parti
   return (
     <div className="diff-explorer @container">
       <div className="diff-explorer-toolbar flex items-center justify-between gap-3 mb-2.5 text-sm [&_button]:py-0.5 [&_button]:px-0 [&_button]:text-muted [&_button]:text-sm [&_button]:font-medium [&_button:hover]:text-text [&_button:hover]:underline [&_button:hover]:underline-offset-2">
-        <strong>
+        <strong className="font-medium">
           {partial
             ? items.length === 1 ? m.git_diff_one_file_partial() : m.git_diff_files_partial({ count: fmtNumber(items.length) })
             : items.length === 1

@@ -1,4 +1,5 @@
 /target
+/windows/launcher/target
 # Built macOS .app bundle (scripts/build-macos-app.sh output).
 /dist
 *.log
@@ -13,6 +14,7 @@ Claude.local.md
 # Keep local skills private.
 .claude/skills/
 .agents/skills/
+.cursor/skills/
 
 # Stray SQLite store if the binary is ever run from the repo root
 /orx.db

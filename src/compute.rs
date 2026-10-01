@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{anyhow, Result};
 use crate::jobs::BackendDescriptor;
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, Store, StoredRun};
+use crate::store::{log_path, RunStatus, Store, StoredRun};
 
 #[derive(Debug, Clone)]
 pub struct SourceSnapshot {
@@ -217,6 +217,8 @@ fn install_content_addressed(
 fn restrict_snapshot_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -521,35 +523,52 @@ backend_adapter!(
     run_id | crate::local::k8s::submit_local_k8s_with_source(args, source, run_id).await
 );
 
-backend_adapter!(
-    SshCompute,
-    "ssh",
-    "SSH",
-    true,
-    false,
-    false,
-    "SSH tar stream",
-    false,
-    preflight | args | {
-        let host = args
-            .host
-            .as_deref()
-            .ok_or_else(|| anyhow!("SSH requires --host <alias>."))?;
-        let check = crate::jobs::ssh::preflight(&crate::jobs::ssh::SshTarget::alias(host)).await;
-        if !check.reachable || !check.tools_found {
-            return Ok(not_ready(
-                check
-                    .error
-                    .as_deref()
-                    .unwrap_or("The SSH host needs bash and tar."),
-            ));
+#[derive(Default)]
+pub struct SshCompute {
+    launch: tokio::sync::OnceCell<crate::jobs::ssh::ResolvedLaunch>,
+}
+
+#[async_trait]
+impl ComputeBackend for SshCompute {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            id: "ssh",
+            label: "SSH",
+            remote: true,
+            flavors: false,
+            requires_flavor: false,
+            source_transport: "SSH tar stream",
         }
+    }
+
+    async fn preflight(&self, args: &crate::ExpRunArgs) -> Result<Preflight> {
+        self.launch
+            .get_or_try_init(|| crate::jobs::ssh::resolve_launch(args))
+            .await?;
         ready()
-    },
-    submit | args,
-    source,
-    run_id | crate::local::ssh::submit_local_ssh_with_source(args, source, run_id).await
-);
+    }
+
+    async fn stage_source(
+        &self,
+        project: &LocalProject,
+        experiment: &LocalExperiment,
+    ) -> Result<StagedSource> {
+        stage_snapshot(project, experiment, false).await
+    }
+
+    async fn submit(
+        &self,
+        args: &crate::ExpRunArgs,
+        source: StagedSource,
+        run_id: String,
+    ) -> Result<StoredRun> {
+        let launch = self
+            .launch
+            .get()
+            .ok_or_else(|| anyhow!("SSH launch was not prepared."))?;
+        crate::local::ssh::submit_local_ssh_with_source(args, source.0, run_id, launch).await
+    }
+}
 
 backend_adapter!(
     SlurmCompute,
@@ -631,7 +650,7 @@ pub fn backend(id: &str) -> Result<Box<dyn ComputeBackend>> {
         "hf" => Ok(Box::new(HuggingFaceCompute)),
         "modal" => Ok(Box::new(ModalCompute)),
         "k8s" => Ok(Box::new(KubernetesCompute)),
-        "ssh" => Ok(Box::new(SshCompute)),
+        "ssh" => Ok(Box::new(SshCompute::default())),
         "slurm" => Ok(Box::new(SlurmCompute)),
         "ray" => Ok(Box::new(RayCompute)),
         "openresearch" => Ok(Box::new(OpenResearchCompute)),
@@ -648,6 +667,34 @@ pub fn capabilities() -> Vec<Capabilities> {
 }
 
 pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
+    if let Some(timeout) = &args.timeout {
+        match args.backend.as_deref().unwrap_or("local") {
+            "local" | "ssh" => {
+                return Err(anyhow!("--timeout does not apply to this backend."));
+            }
+            "ray" => {
+                return Err(anyhow!("--timeout isn't supported on --backend ray."));
+            }
+            "tinker" => {}
+            _ => {
+                crate::jobs::huggingface::parse_timeout(timeout)?;
+            }
+        }
+    }
+    if (args.container.is_some() || args.no_container) && args.backend.as_deref() != Some("ssh") {
+        return Err(anyhow!(
+            "--container and --no-container only apply with --backend ssh."
+        ));
+    }
+    if args.container.is_some() && args.no_container {
+        return Err(anyhow!("--container conflicts with --no-container."));
+    }
+    if let Some(reference) = &args.container {
+        crate::jobs::ssh::validate_container_reference(reference)?;
+    }
+    if args.backend.as_deref() == Some("ssh") && (args.image.is_some() || args.flavor.is_some()) {
+        return Err(anyhow!("SSH does not support --flavor or --image."));
+    }
     if args.manifest.is_some() && args.backend.as_deref() != Some("k8s") {
         return Err(anyhow!("--manifest only applies with --backend k8s."));
     }
@@ -692,6 +739,7 @@ pub fn validate_run_args(args: &crate::ExpRunArgs) -> Result<()> {
 }
 
 pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
+    validate_run_args(args)?;
     let backend_id = args.backend.as_deref().unwrap_or("local");
     let backend = backend(backend_id)?;
     let store = Store::open()?;
@@ -722,6 +770,9 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         })
         .unwrap_or_default();
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: format!("{}_job", backend_id),
         namespace: None,
         job_id: None,
@@ -757,7 +808,27 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
         cancel_requested: false,
         chat_session_id: args.launching_chat_session(),
     };
-    reserve_run(&store, &pending, args.force)?;
+    let identity = args.invocation_identity()?;
+    let report = (!args.telemetry_suppressed)
+        .then(|| {
+            crate::telemetry::pending_event_payload(
+                "experiment_finished",
+                serde_json::json!({
+                    "harness": identity.as_ref().map(|identity| &identity.harness),
+                    "model": identity.as_ref().map(|identity| &identity.model),
+                    "provider": identity.as_ref().and_then(|identity| identity.provider.as_ref()),
+                    "status": "failed",
+                }),
+            )
+        })
+        .flatten();
+    reserve_run(
+        &store,
+        &pending,
+        args.force,
+        identity.as_ref(),
+        report.as_ref(),
+    )?;
     let pending_backend_json = descriptor.to_json();
     match backend.submit(args, source, run_id.clone()).await {
         Ok(run) => {
@@ -780,8 +851,14 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
             let handle_was_persisted = current
                 .as_ref()
                 .is_some_and(|run| run.backend_json != pending_backend_json);
-            if !handle_was_persisted {
-                store.update_status(&run_id, "failed", Some(crate::store::now_ms()), None)?;
+            if !handle_was_persisted
+                && store.update_status(
+                    &run_id,
+                    RunStatus::Failed,
+                    Some(crate::store::now_ms()),
+                    None,
+                )?
+            {
                 store
                     .set_result_markdown(&run_id, &format!("Compute submission failed: {error}"))?;
             }
@@ -790,7 +867,13 @@ pub async fn submit(args: &crate::ExpRunArgs) -> Result<StoredRun> {
     }
 }
 
-fn reserve_run(store: &Store, pending: &StoredRun, force: bool) -> Result<()> {
+fn reserve_run(
+    store: &Store,
+    pending: &StoredRun,
+    force: bool,
+    identity: Option<&crate::store::InvocationIdentity>,
+    report: Option<&(String, serde_json::Value)>,
+) -> Result<()> {
     let dir = crate::store::data_dir().join("submission-locks");
     std::fs::create_dir_all(&dir)?;
     let file = std::fs::OpenOptions::new()
@@ -816,7 +899,11 @@ fn reserve_run(store: &Store, pending: &StoredRun, force: bool) -> Result<()> {
             ));
         }
     }
-    store.upsert_run(pending)
+    let tx = store.begin()?;
+    store.reserve_run_telemetry(&pending.id, identity, report)?;
+    store.upsert_run(pending)?;
+    tx.commit()?;
+    Ok(())
 }
 
 pub fn record_submission_handle(run_id: &str, descriptor: &BackendDescriptor) -> Result<()> {
@@ -883,12 +970,81 @@ mod tests {
             flavor: None,
             org: None,
             host: None,
+            container: None,
+            no_container: false,
             manifest: None,
             image: None,
             timeout: None,
             force: false,
             chat_session_id: None,
+            invocation_context: None,
+            telemetry_suppressed: false,
         }
+    }
+
+    #[test]
+    fn ssh_selectors_and_saved_target_precedence() {
+        use crate::config::{SshHostSettings, SshSettings};
+        let settings = SshSettings {
+            default_host: Some("lab".into()),
+            hosts: std::collections::BTreeMap::from([
+                (
+                    "lab".into(),
+                    SshHostSettings {
+                        container: Some("research".into()),
+                    },
+                ),
+                ("direct".into(), SshHostSettings { container: None }),
+            ]),
+        };
+        let mut args = tinker_args();
+        args.backend = Some("ssh".into());
+        for (host, container, no_container, expected_host, expected_container) in [
+            (None, None, false, "lab", Some("research")),
+            (
+                Some("lab"),
+                Some("research"),
+                false,
+                "lab",
+                Some("research"),
+            ),
+            (None, Some("other"), false, "lab", Some("other")),
+            (None, Some("none"), false, "lab", Some("none")),
+            (None, None, true, "lab", None),
+            (Some("direct"), None, true, "direct", None),
+            (Some("unknown"), None, false, "unknown", None),
+        ] {
+            args.host = host.map(str::to_string);
+            args.container = container.map(str::to_string);
+            args.no_container = no_container;
+            validate_run_args(&args).unwrap();
+            let (host, options) = crate::jobs::ssh::resolve_options(&args, &settings).unwrap();
+            assert_eq!(host, expected_host);
+            assert_eq!(options.container.as_deref(), expected_container);
+        }
+        args.host = None;
+        assert!(crate::jobs::ssh::resolve_options(&args, &SshSettings::default()).is_err());
+        args.container = Some(String::new());
+        assert!(validate_run_args(&args).is_err());
+        args.container = Some("research".into());
+        args.no_container = true;
+        assert!(validate_run_args(&args).is_err());
+        args.no_container = false;
+        for backend in ["local", "slurm", "openresearch"] {
+            args.backend = Some(backend.into());
+            assert!(validate_run_args(&args).is_err());
+        }
+        use clap::Parser;
+        assert!(crate::Cli::try_parse_from([
+            "orx",
+            "exp",
+            "run",
+            "exp",
+            "--container",
+            "research",
+            "--no-container"
+        ])
+        .is_err());
     }
 
     #[test]
@@ -915,5 +1071,28 @@ mod tests {
         args.image = None;
         args.timeout = Some("1h".into());
         assert!(validate_run_args(&args).is_err());
+    }
+
+    #[test]
+    fn invalid_timeout_is_rejected_before_submission() {
+        let mut args = tinker_args();
+        for backend in [
+            None,
+            Some("local"),
+            Some("ssh"),
+            Some("ray"),
+            Some("tinker"),
+        ] {
+            args.backend = backend.map(str::to_string);
+            args.timeout = Some("1h".into());
+            assert!(validate_run_args(&args).is_err(), "{backend:?}");
+        }
+        args.backend = Some("hf".into());
+        for timeout in ["0s", "18446744073709551615d", "bad"] {
+            args.timeout = Some(timeout.into());
+            assert!(validate_run_args(&args).is_err(), "{timeout}");
+        }
+        args.timeout = Some("1h".into());
+        assert!(validate_run_args(&args).is_ok());
     }
 }

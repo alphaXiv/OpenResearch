@@ -1,0 +1,39 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body>
+<div style="width:720px;height:384px;margin:40px auto;background:var(--term-bg)">
+  <div id="terminal" style="height:100%"></div>
+</div>
+<script type="module">
+import '../../src/tailwind.css';
+import { mountTerminal } from '../../src/components/terminal.ts';
+const wrap = document.getElementById('terminal');
+const { terminal } = mountTerminal(wrap, false);
+const frame = Array.from({ length: 32 }, (_, i) => `Screen line ${i + 1}`).join('\r\n');
+terminal.write(frame + '\x1b[H', () => {
+  requestAnimationFrame(() => {
+    const screenHeight = terminal.element.querySelector('.xterm-screen').getBoundingClientRect().height;
+    const expectedHeight = Math.max(wrap.clientHeight, screenHeight * 32 / terminal.rows);
+    if (Math.abs(terminal.element.getBoundingClientRect().height - expectedHeight) > 1) {
+      throw new Error('Unused terminal rows remain scrollable');
+    }
+    terminal.write('\x1b[32;1H', () => requestAnimationFrame(() => {
+      terminal.write('\x1b[H', () => requestAnimationFrame(() => {
+        terminal.write('\x1b[32;1H', () => requestAnimationFrame(() => {
+          if (wrap.scrollTop <= 0) throw new Error('Cursor movement disabled output following');
+        }));
+      }));
+    }));
+    setTimeout(() => {
+    terminal.reset();
+    for (let i = 1; i <= 120; i++) terminal.writeln(`History line ${i}`);
+    terminal.write('', () => requestAnimationFrame(() => {
+      if (wrap.scrollTop <= 0) throw new Error('Active terminal prompt is below the visible panel');
+    }));
+    }, 200);
+  });
+});
+</script>
+</body>
+</html>

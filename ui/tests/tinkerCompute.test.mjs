@@ -5,11 +5,12 @@ import test from "node:test";
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 test("Tinker is always visible in compute and environment settings", async () => {
-  const [settings, logos] = await Promise.all([
+  const [settings, logos, targets] = await Promise.all([
     source("../src/components/SettingsPage.tsx"),
     source("../src/components/BackendLogos.tsx"),
+    source("../src/computeTargets.ts"),
   ]);
-  assert.match(settings, /tinker: m\.compute_target_tinker/);
+  assert.match(targets, /tinker: m\.compute_target_tinker/);
   assert.match(settings, /target\.id === "tinker"/);
   assert.match(settings, /"TINKER_API_KEY", "HF_TOKEN", "WANDB_API_KEY"/);
   assert.match(logos, /case "tinker_job":\s+return <TinkerLogo/);

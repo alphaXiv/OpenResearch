@@ -1,0 +1,12 @@
+# LF in the working tree on every platform. SYSTEM_PROMPT.md and the
+# agent-skills SKILL.md files are include_str!'d at build time, and a CRLF
+# checkout ships a binary whose own `\n`-boundary parsing of them fails.
+#
+# An existing clone keeps its CRLF working tree until each file next changes;
+# `git add --renormalize .` converts it in one step.
+* text=auto eol=lf
+
+# The demo's commit ids are asserted against hardcoded SHAs, so these must never
+# be treated as text and normalized.
+*.pt binary
+*.pkl binary

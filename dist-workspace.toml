@@ -9,12 +9,17 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # Mark only publishing builds and verify every packaged binary before hosting.
 github-build-setup = "../build-setup.yml"
-# Mark only publishing builds and verify every packaged binary before hosting.
-global-artifacts-jobs = ["./verify-build-channel", "./telemetry-contract"]
+# Sign and notarize the macOS archives before the global build checksums them.
+local-artifacts-jobs = ["./sign-macos-cli"]
+# release.yml is hand-edited (custom-sign-macos-cli needs build-local-artifacts),
+# so dist skips it; see macos/DISTRIBUTION.md before changing dist config.
+allow-dirty = ["ci"]
+# Verify packaged binaries and source CI before publishing.
+global-artifacts-jobs = ["./verify-build-channel", "./telemetry-contract", "./ci"]
 # The installers to generate for each app
-installers = ["shell"]
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-musl", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program

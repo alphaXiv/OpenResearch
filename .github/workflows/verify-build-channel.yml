@@ -34,8 +34,11 @@ jobs:
           while IFS= read -r -d '' archive; do
             extract_dir="extracted/$verified"
             mkdir -p "$extract_dir"
-            tar -xf "$archive" -C "$extract_dir"
-            binary="$(find "$extract_dir" -type f -name orx -print -quit)"
+            case "$archive" in
+              *.zip) unzip -q "$archive" -d "$extract_dir" 2>/dev/null || 7z x -y -o"$extract_dir" "$archive" > /dev/null ;;
+              *) tar -xf "$archive" -C "$extract_dir" ;;
+            esac
+            binary="$(find "$extract_dir" -type f \( -name orx -o -name orx.exe \) -print -quit)"
             if [[ -z "$binary" ]]; then
               echo "::error::No orx binary found in '$archive'"
               exit 1
@@ -47,7 +50,7 @@ jobs:
               exit 1
             fi
             verified=$((verified + 1))
-          done < <(find artifacts -type f \( -name '*.tar.xz' -o -name '*.tar.gz' \) -print0)
+          done < <(find artifacts -type f \( -name '*.tar.xz' -o -name '*.tar.gz' -o -name '*.zip' \) -print0)
           expected="$(jq 'length' <<< "$TARGETS_JSON")"
           if (( verified != expected )); then
             echo "::error::Expected $expected packaged archive(s), verified $verified"

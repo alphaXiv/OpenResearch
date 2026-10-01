@@ -58,34 +58,9 @@ pub struct AppManifest {
     pub sha256: String,
 }
 
-/// Fetches the published app manifest. `Ok(None)` for a 404 — the expected state
-/// between a release being published and its DMG being attached. That is
-/// "nothing to update to yet", never an error the user should see.
+/// Fetches the published app manifest; `Ok(None)` until the DMG is attached.
 pub async fn fetch_manifest(timeout: Duration) -> Result<Option<AppManifest>> {
-    let url = format!(
-        "{}/releases/latest/download/{}",
-        super::REPO_URL,
-        MANIFEST_ASSET
-    );
-    let res = super::http()
-        .get(&url)
-        .header("user-agent", super::UA)
-        .timeout(timeout)
-        .send()
-        .await
-        .map_err(|e| anyhow!("Could not fetch the macOS app manifest: {}", e))?;
-    if res.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-    let status = res.status();
-    if !status.is_success() {
-        return Err(anyhow!(
-            "App manifest request failed ({} {})",
-            status.as_u16(),
-            status.canonical_reason().unwrap_or("")
-        ));
-    }
-    Ok(Some(serde_json::from_str(&res.text().await?)?))
+    super::fetch_app_manifest(MANIFEST_ASSET, timeout).await
 }
 
 /// Update the installed bundle at `root` in place.
@@ -106,8 +81,8 @@ pub async fn update(root: &Path, current: &Version, dry_run: bool, background: b
 
     // Keep the cache honest even when this install can't apply the update: it is
     // what the dashboard and the outdated warning read.
-    if let Some(latest) = &latest {
-        super::write_check_cache(&latest.to_string());
+    if let (Some(manifest), Some(latest)) = (&published, &latest) {
+        super::write_check_cache(&latest.to_string(), &manifest.tag);
     }
 
     let Some((manifest, latest)) = published
@@ -159,7 +134,7 @@ pub async fn update(root: &Path, current: &Version, dry_run: bool, background: b
     let _ = std::fs::remove_dir_all(&staging);
     swapped?;
 
-    super::record_installed(&latest.to_string());
+    super::record_installed(&latest.to_string(), &manifest.tag);
     if !background {
         println!("✓ Updated OpenResearch {} → {}.", current, latest);
         println!("Restart the app to run the new version.");
@@ -358,13 +333,14 @@ fn swap_bundle(root: &Path, staged: &Path) -> Result<()> {
 }
 
 /// Remove staging, backup, and probe litter an interrupted update left next to
-/// the bundle. Matches only our own `.`-prefixed names, so the live bundle and
-/// anything else in `/Applications` are never candidates.
+/// the app (the macOS bundle, or the Linux AppImage). Matches only our own
+/// `.`-prefixed names, so the live app and anything else beside it are never
+/// candidates.
 ///
-/// The age floor keeps this off a *concurrent* updater's staging directory: the
-/// lock lives under `config_dir()`, so two user accounts sharing one
-/// `/Applications` are not serialized against each other.
-fn sweep_leftovers(parent: &Path, root: &Path) {
+/// The age floor keeps this off a *concurrent* updater's staging: the lock
+/// lives under `config_dir()`, so two user accounts sharing one folder are not
+/// serialized against each other.
+pub(super) fn sweep_leftovers(parent: &Path, root: &Path) {
     const MIN_AGE: Duration = Duration::from_secs(60 * 60);
     let bundle = root.file_name().unwrap_or_default().to_string_lossy();
     let Ok(entries) = std::fs::read_dir(parent) else {

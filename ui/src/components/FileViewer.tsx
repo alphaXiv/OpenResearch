@@ -1,3 +1,10 @@
+import {
+  setScopedQueryData,
+  queryClient,
+} from "../queries/client";
+import { useQuery } from "@tanstack/react-query";
+import { resolvedFileQuery, refreshFile, type LoadedFile } from "../queries/files";
+
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // Mirror of openresearch.sh's AgentFileView: one file from the project —
@@ -9,32 +16,38 @@ import { ltr } from "../i18n";
 
 import {
   Check,
-  CloudUpload,
   Code,
   Copy,
   Download,
   ExternalLink,
   FileOutput,
   FileText,
+  FolderOpen,
   GitBranch,
-  RotateCw,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import {
   absoluteFileUrl,
   artifactUrl,
-  getAbsoluteFile,
-  getArtifactFileMetadata,
-  getArtifactFileText,
-  getProjectFile,
+  FileChangedError,
   openFileInEditor,
   projectFileUrl,
+  revealFileInManager,
   saveProjectFile,
-  type AbsoluteFile,
-  type CheckoutRoot,
-  type ProjectFile,
+  type ArtifactEntry,
 } from "../api";
+import { useFileVersion } from "../useFileVersion";
+import {
+  conflictAfterRefresh,
+  confirmingFileDiscard,
+  createFileBuffer,
+  fileBufferContent,
+  isDirtyFileBuffer,
+  normalizedFileContent,
+  updateFileDraft,
+  type FileBufferSession,
+} from "../fileSync";
 import { useLatexCompile } from "../useLatexCompile";
 import { useOverleafSync } from "../useOverleafSync";
 import {
@@ -46,18 +59,13 @@ import { CodeView } from "./CodeView";
 import { CodeEditor } from "./CodeEditor";
 import { ArtifactMarkdown } from "./ArtifactsTab";
 import type { TabOpenIntent } from "../tabPreview";
-import { isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
+import { FileTypeIcon, isHtmlFile, isLatexFile, isMarkdownFile } from "./FileTypeIcon";
 import { HtmlPreview } from "./HtmlPreview";
-import { OverleafPanel } from "./OverleafPanel";
+import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
+import { MediaToolbarSlot } from "./mediaToolbar";
 import { Md } from "./Md";
-import { Button, IconButton, IconButtonLink, Spinner } from "./ui";
-
-type ArtifactPreviewFile = Omit<ProjectFile, "root">;
-type LoadedFile =
-  | { source: "checkout"; file: ProjectFile }
-  | { source: "artifact"; file: ArtifactPreviewFile; checkoutRoot?: CheckoutRoot }
-  | { source: "absolute"; file: AbsoluteFile };
+import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
 export interface FileScrollPosition {
   top: number;
@@ -117,6 +125,24 @@ function CopyableCommand({ command }: { command: string }) {
   );
 }
 
+/** Busy/error state for a detached OS file action; failures surface as a tooltip. */
+function useOsFileAction(run: () => Promise<unknown>) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trigger = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await run();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, error, trigger };
+}
+
 export function FileViewer({
   projectId,
   path,
@@ -131,6 +157,14 @@ export function FileViewer({
   lineScrollRequest,
   onLineScrollRequestHandled,
   onEdit,
+  artifactVersion,
+  artifactEntries = [],
+  bufferSession,
+  remote = false,
+  restored = false,
+  onRestoreActivated,
+  showSource = false,
+  onShowSourceChange,
 }: {
   projectId: string;
   path: string;
@@ -163,10 +197,23 @@ export function FileViewer({
   /** Typing in the editor — the commitment that takes a preview tab out of
    * preview mode. */
   onEdit?: () => void;
+  /** Selected artifact metadata changes only when this path changes. */
+  artifactVersion?: string | null;
+  artifactEntries?: ArtifactEntry[];
+  bufferSession: FileBufferSession;
+  remote?: boolean;
+  restored?: boolean;
+  onRestoreActivated?: () => void;
+  showSource?: boolean;
+  onShowSourceChange?: (showSource: boolean) => void;
 }) {
-  const [loaded, setLoaded] = useState<LoadedFile | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
+  const fileOptions = resolvedFileQuery(projectId, path, source ?? "repo", sessionId, gitRef);
+  const fileQuery = useQuery({ ...fileOptions, enabled: !bufferSession.saving });
+  const loaded = fileQuery.data ?? null;
+  const error = fileQuery.error?.message ?? null;
+  const setLoaded = (value: React.SetStateAction<LoadedFile | null>) => {
+    setScopedQueryData(fileOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
   const [nonce, setNonce] = useState(0);
   const isArtifacts = source === "artifacts";
   const isAbsolute = source === "abs";
@@ -178,18 +225,33 @@ export function FileViewer({
   // .html likewise, and its scripts run — see HtmlPreview.
   const isHtml = isHtmlFile(path);
   const rendersByDefault = isMarkdown || isHtml;
-  const [showSource, setShowSource] = useState(false);
+  const [activated, setActivated] = useState(false);
+  const autoRun = !restored || activated;
+  const activate = () => {
+    setActivated(true);
+    onRestoreActivated?.();
+  };
   // Live edit buffer for the code file. It IS the view for editable files (no
   // edit mode); it tracks the loaded content and diverges as the user types.
-  const [draft, setDraft] = useState("");
-  const [saving, setSaving] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  useSyncExternalStore(bufferSession.subscribe, bufferSession.getRevision);
+  const editState = bufferSession.getSnapshot();
+  const updateEditState = bufferSession.set;
+  const saving = bufferSession.saving;
+  const setSaving = bufferSession.setSaving;
+  const saveRevision = bufferSession.saveRevision;
+  const saveError = bufferSession.saveError;
+  const setSaveError = bufferSession.setSaveError;
   const bodyRef = useRef<HTMLDivElement>(null);
+  const selectableContentRef = useRef<HTMLDivElement>(null);
+  const [copiedContents, setCopiedContents] = useState(false);
+  const [mediaToolbarSlot, setMediaToolbarSlot] = useState<HTMLDivElement | null>(null);
   const scrollPositionRef = useRef(scrollPosition);
   const data = loaded?.file ?? null;
   // A cited `artifacts/…` file can answer from either name in the checkout, so
   // writes, the editor, and raw bytes must target the path that answered.
-  const filePath = loaded?.source === "checkout" ? loaded.file.path : path;
+  const filePath = editState && isDirtyFileBuffer(editState)
+    ? editState.path
+    : loaded?.source === "checkout" ? loaded.file.path : path;
   // This file's parent dir: the artifact report folder for image resolution,
   // and the anchor for a relative link inside an abs file.
   const parentFolder = filePath.split("/").slice(0, -1).join("/");
@@ -225,57 +287,75 @@ export function FileViewer({
   // A file that exists in the live checkout on disk (not a committed branch tree
   // or an artifact) — the only source the write/open endpoints can resolve.
   const onDisk = !gitRef && loaded?.source === "checkout" && data != null && !data.notFound;
-  // Editable = a live checkout text file. A session read that fell back to the
-  // clone isn't the worktree it names, so it stays read-only rather than
-  // silently editing another checkout.
   // A session read that fell back to the clone isn't the worktree it names: the
   // write and compile endpoints both refuse it, so nothing may act on it.
   const viaPrunedWorktree =
     sessionId != null && loaded?.source === "checkout" && loaded.file.root === "clone";
-  const editable =
+  const editableText =
     onDisk &&
     data != null &&
     !data.binary &&
     !data.truncated &&
     !mediaKind &&
     !viaPrunedWorktree;
+  const unsafeRemoteEdit = editableText && data.version === undefined;
+  const hasDraft = editState !== null && isDirtyFileBuffer(editState);
+  const editable = !unsafeRemoteEdit && (
+    (editableText && typeof data.version === "string") || hasDraft
+  );
   // The editor replaces the read-only view for editable files — except markdown,
   // which stays rendered until its source toggle is on.
   // A <textarea> normalizes line endings to LF, so track the buffer in LF and
   // re-apply the file's original EOL on write (else a CRLF file's every line flips).
-  const baseline = useMemo(() => (data?.content ?? "").replace(/\r\n/g, "\n"), [data?.content]);
-  const dirty = editable && draft !== baseline;
+  const draft = editState?.draft ?? normalizedFileContent(data?.content ?? "");
+  const baseline = editState?.baseline ?? normalizedFileContent(data?.content ?? "");
+  const dirty = editable && editState !== null && isDirtyFileBuffer(editState);
+  // A reopened file shows its cached copy (or clean buffer) until the refetch
+  // lands and reseeds it; jumping before then spends the request on stale lines.
+  const staleBuffer = editState !== null && !hasDraft
+    && typeof data?.version === "string" && editState.version !== data.version;
+  const settledLineScrollRequest = fileQuery.isFetching || staleBuffer ? undefined : lineScrollRequest;
 
-  // Reseed the buffer only on a genuine load/reload — skip the optimistic
-  // baseline bump `save()` makes, so a keystroke typed mid-save isn't clobbered.
-  const lastWriteRef = useRef<string | null>(null);
-  useEffect(() => {
-    const incoming = data?.content ?? "";
-    if (lastWriteRef.current !== null && incoming === lastWriteRef.current) {
-      lastWriteRef.current = null;
-      return;
+  const save = async (expectedVersion?: string): Promise<boolean> => {
+    const savingState = bufferSession.getSnapshot();
+    if (!editable || !savingState || !isDirtyFileBuffer(savingState)) return true;
+    if (bufferSession.saving) return false;
+    if (savingState.conflict && expectedVersion === undefined) {
+      setSaveError(savingState.conflict.exists
+        ? m.file_viewer_changed_on_disk()
+        : m.file_viewer_deleted_on_disk());
+      return false;
     }
-    setDraft(incoming.replace(/\r\n/g, "\n"));
-    setSaveError(null);
-  }, [data?.content, path]);
-
-  const save = async (): Promise<boolean> => {
-    if (!editable || data == null || !dirty || saving) return !dirty;
-    const content = data.content.includes("\r\n") ? draft.replace(/\n/g, "\r\n") : draft;
+    const savedDraft = savingState.draft;
+    const content = fileBufferContent(savingState);
     setSaving(true);
     setSaveError(null);
     try {
-      await saveProjectFile(projectId, filePath, content, { sessionId });
-      // Advance the baseline to what we wrote so `dirty` clears without a refetch;
-      // mark it so the reseed effect ignores this self-inflicted change.
-      lastWriteRef.current = content;
+      await queryClient.cancelQueries(fileOptions);
+      const result = await saveProjectFile(projectId, filePath, content, {
+        sessionId,
+        expectedVersion: expectedVersion ?? savingState.version,
+      });
+      const current = bufferSession.getSnapshot();
+      if (!current) return false;
+      bufferSession.saved(savedDraft, result.version);
       setLoaded((prev) =>
         prev && prev.source === "checkout"
-          ? { source: "checkout", file: { ...prev.file, content } }
+          ? { source: "checkout", file: { ...prev.file, content, version: result.version } }
           : prev,
       );
       return true;
     } catch (e) {
+      if (e instanceof FileChangedError) {
+        const current = bufferSession.getSnapshot();
+        if (!current) return false;
+        if (!isDirtyFileBuffer(current)) return false;
+        updateEditState({
+          ...current,
+          conflict: { currentVersion: e.currentVersion, exists: e.exists },
+        });
+        return false;
+      }
       setSaveError(e instanceof Error ? e.message : String(e));
       return false;
     } finally {
@@ -291,6 +371,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     ready: data != null && !data.notFound,
     source: editable ? draft : (data?.content ?? ""),
   });
@@ -302,6 +384,8 @@ export function FileViewer({
     filePath,
     sessionId,
     enabled: liveTex,
+    autoRun,
+    onManualAction: activate,
     savedSource: baseline,
     dirty,
     // A pull rewrote the file underneath this view; refetch so the editor shows
@@ -313,32 +397,48 @@ export function FileViewer({
       [filePath],
     ),
   });
-  const [showOverleaf, setShowOverleaf] = useState(false);
-  const overleafConflicts = overleaf.last?.conflicts.length ?? 0;
-  // A conflict is the one outcome the user has to act on, and an automatic sync
-  // can produce it with the panel closed.
-  useEffect(() => {
-    if (overleafConflicts > 0) setShowOverleaf(true);
-  }, [overleafConflicts]);
-  const overleafTip = overleaf.error
-    ? m.overleaf_sync_failed()
-    : overleafConflicts > 0
-      ? m.overleaf_conflict_tip()
-      : overleaf.blocked
-        ? m.overleaf_save_to_sync()
-        : overleaf.link
-          ? m.overleaf_in_sync()
-          : m.overleaf_send_paper();
-  const overleafColor =
-    overleaf.error || overleafConflicts > 0
-      ? "text-accent-red"
-      : overleaf.link
-        ? "text-accent-green"
-        : undefined;
 
   // A .tex shows its compiled PDF or its source — nothing in between.
   const showingPdf = isLatex && latex.showPdf && latex.compiled != null;
-  const showingEditor = editable && !(rendersByDefault && !showSource) && !showingPdf;
+  const showingUnsafeDraft = unsafeRemoteEdit && hasDraft;
+  const showingEditor = (editable || showingUnsafeDraft) &&
+    !(rendersByDefault && !showSource) &&
+    !showingPdf;
+  const canCopyContents = data !== null && !data.notFound && !data.binary && !mediaKind && !showingPdf;
+  const canSelectContents = canCopyContents && !showingEditor && (!isHtml || showSource);
+
+  const copyContents = async () => {
+    if (!data) return;
+    try {
+      if (data.truncated && !showingEditor) {
+        // WebKit requires the clipboard write to start during the click.
+        const content = fetch(rawFileUrl(filePath)).then(async (response) => {
+          if (!response.ok) throw new Error();
+          return new Blob([await response.text()], { type: "text/plain" });
+        });
+        await navigator.clipboard.write([new ClipboardItem({ "text/plain": content })]);
+      } else {
+        await navigator.clipboard.writeText(showingEditor ? draft : data.content);
+      }
+      setCopiedContents(true);
+      window.setTimeout(() => setCopiedContents(false), 1500);
+    } catch {
+      showAlert(m.file_viewer_copy_failed(), "error");
+    }
+  };
+
+  const selectViewerContents = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if ((!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== "a") return;
+    if (!(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+    const content = selectableContentRef.current;
+    if (!content) return;
+    event.preventDefault();
+    const range = document.createRange();
+    range.selectNodeContents(content);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  };
 
   // `#toolbar=0` asks the browser's PDF viewer to drop its own chrome, so the
   // pane shows the document and this view's header owns the controls.
@@ -364,97 +464,93 @@ export function FileViewer({
   // Blur and ⌘S only rebuild when there was an edit to save.
   const saveAndCompile = async () => {
     if (!dirty) return;
-    await compileFromDisk();
+    if (autoRun) await compileFromDisk();
+    else await save();
   };
 
-  const [openingEditor, setOpeningEditor] = useState(false);
-  const [editorError, setEditorError] = useState<string | null>(null);
   // Hand the file to the OS, which opens it in the user's default app for the
   // type (their editor for source files) — no picker.
-  const openInEditor = async () => {
-    setOpeningEditor(true);
-    setEditorError(null);
-    try {
-      await openFileInEditor(projectId, filePath, { sessionId });
-    } catch (e) {
-      setEditorError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setOpeningEditor(false);
-    }
+  const openEditor = useOsFileAction(() =>
+    openFileInEditor(projectId, filePath, { sessionId }),
+  );
+  const revealManager = useOsFileAction(() =>
+    revealFileInManager(projectId, filePath, { sessionId }),
+  );
+  const osActionBlocker = remote
+    ? m.file_viewer_os_action_local_only()
+    : data?.notFound
+      ? m.file_viewer_not_found()
+      : gitRef
+        ? m.file_viewer_os_action_committed_version({ branch: ltr(gitRef) })
+        : onDisk
+          ? null
+          : m.file_viewer_os_action_not_on_disk();
+  const reload = useCallback(() => {
+    if (!bufferSession.saving) setNonce((value) => value + 1);
+  }, [bufferSession]);
+  const discardAndReload = () => {
+    updateEditState(null);
+    setSaveError(null);
+    reload();
   };
-  // filePath is `path` in every store but the checkout, so this covers all four.
-  const rawUrl = `${rawFileUrl(filePath)}&v=${nonce}`;
+
+  const diskVersion = useFileVersion(rawFileUrl(filePath), !gitRef && !saving);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    // Artifacts come from the compatibility /files endpoint (no session/branch);
-    // repo files from the checkout-aware /file endpoint. All paths normalize
-    // into the same ProjectFile-shaped `data` so the render body is shared.
-    const fromArtifacts = async (): Promise<ArtifactPreviewFile> => {
-      const metadata = await getArtifactFileMetadata(projectId, path);
-      const wantsBody = metadata?.presentation === "text" || metadata?.presentation === "unknown";
-      const body = metadata && wantsBody
-        ? await getArtifactFileText(projectId, path)
-        : null;
-      const notFound = metadata === null || (wantsBody && body === null);
-      return {
-        // A missing artifact resolves to null → notFound, so it shows
-        // the friendly copy rather than a raw error.
-        path,
-        content: body?.content ?? "",
-        truncated: body?.truncated ?? false,
-        binary: body?.binary ?? metadata?.presentation === "download",
-        notFound,
-        presentation: body
-          ? (body.binary ? "download" : "text")
-          : (metadata?.presentation ?? "download"),
-      };
-    };
-    // A cited artifact path arrives stripped of its `artifacts/` prefix, which
-    // the checkout copy usually keeps — try that first; a throwing probe
-    // (unknown session, directory name) just means "not here".
-    const fromCheckout = async (): Promise<ProjectFile | null> => {
-      for (const candidate of [`artifacts/${path}`, path]) {
-        const file = await getProjectFile(projectId, candidate, { sessionId }).catch(() => null);
-        if (file && !file.notFound) return file;
+    if (!error || gitRef) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "hidden") reload();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [error, gitRef, reload]);
+
+  // filePath is `path` in every store but the checkout, so this covers all four.
+  const rawUrl = `${rawFileUrl(filePath)}&v=${encodeURIComponent(diskVersion ?? artifactVersion ?? "")}&reload=${nonce}`;
+
+  useEffect(() => {
+    if (!loaded || bufferSession.saving) return;
+    const next = loaded;
+    const current = bufferSession.getSnapshot();
+    if (current && isDirtyFileBuffer(current)) {
+      const checkout = next.source === "checkout" ? next.file : null;
+      const sameTarget = checkout !== null &&
+        checkout.path === current.path &&
+        (!sessionId || checkout.root === "worktree");
+      const conflict = conflictAfterRefresh(
+        current,
+        sameTarget && typeof checkout.version === "string" ? checkout.version : null,
+        sameTarget && !checkout.notFound,
+      );
+      if (
+        conflict &&
+        (conflict.currentVersion !== current.conflict?.currentVersion ||
+          conflict.exists !== current.conflict?.exists)
+      ) {
+        updateEditState({ ...current, conflict });
       }
-      return null;
-    };
-    // Branch tabs do not fall back because a ref names a committed tree.
-    const load: Promise<LoadedFile> = isAbsolute
-      ? getAbsoluteFile(path).then((file) => ({ source: "absolute", file }))
-      : isArtifacts
-      ? fromArtifacts().then(async (file) => {
-          if (!file.notFound) return { source: "artifact", file };
-          const checkout = await fromCheckout();
-          return checkout ? { source: "checkout", file: checkout } : { source: "artifact", file };
-        })
-      : getProjectFile(projectId, path, { sessionId, ref: gitRef }).then((d) =>
-          d.notFound && !gitRef
-            ? fromArtifacts().then((f) =>
-                f.notFound
-                  ? { source: "checkout", file: d }
-                  : { source: "artifact", file: f, checkoutRoot: d.root },
-              )
-            : { source: "checkout", file: d },
-        );
-    load
-      .then((next) => {
-        if (cancelled) return;
-        setLoaded(next);
-        setError(null);
-      })
-      .catch((e: Error) => {
-        if (!cancelled) setError(e.message);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, path, source, sessionId, gitRef, nonce]);
+      else if (!conflict && current.conflict) updateEditState({ ...current, conflict: null });
+    }
+    // Reseeding only a lagging clean buffer lets this rerun on editState (a clean
+    // revert after a conflict) without looping.
+    const behind = !current || (!isDirtyFileBuffer(current)
+      && (current.version !== next.file.version || current.path !== next.file.path));
+    if (behind && next.source === "checkout" &&
+      !next.file.notFound && !next.file.binary && !next.file.truncated && typeof next.file.version === "string") {
+      updateEditState(createFileBuffer(next.file.path, next.file.content, next.file.version));
+      setSaveError(null);
+    }
+  }, [loaded, bufferSession, sessionId, saving, saveRevision, editState]);
+  const sourceKey = JSON.stringify(fileOptions.queryKey);
+  const previousVersion = useRef({ sourceKey, nonce, artifactVersion, diskVersion });
+  useEffect(() => {
+    const previous = previousVersion.current;
+    previousVersion.current = { sourceKey, nonce, artifactVersion, diskVersion };
+    if (previous.sourceKey !== sourceKey) return;
+    if (previous.nonce !== nonce || (previous.diskVersion !== null && previous.diskVersion !== diskVersion)
+      || (previous.artifactVersion != null && previous.artifactVersion !== artifactVersion)) {
+      void refreshFile(projectId, path, source ?? "repo", sessionId, gitRef);
+    }
+  }, [sourceKey, nonce, artifactVersion, diskVersion, projectId, path, source, sessionId, gitRef]);
 
   // Stays a layout effect: the code views scroll to a `file:line` target in
   // passive effects, which run after this and so win over the restore.
@@ -478,14 +574,14 @@ export function FileViewer({
   };
 
   return (
-    <div className="file-view flex flex-col h-full min-h-0">
-      <div className="file-view-header flex items-center gap-2 py-1.5 px-3 border-b border-b-border-variant text-text shrink-0">
-        <FileText size={13} className="shrink-0" />
-        <code className="file-view-path font-mono text-sm text-text flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap" title={filePath}>
-          {filePath}
-        </code>
+    <div className="file-view flex flex-col h-full min-h-0 min-w-0" onKeyDown={selectViewerContents}>
+      <div className="file-view-header @container flex w-full min-w-0 min-h-9 items-center gap-1 px-4 py-1 bg-background text-text shrink-0">
+        <FileTypeIcon name={filePath} />
+        <span className="file-view-path flex-1 min-w-0 truncate text-sm text-subtext" data-tip={ltr(filePath)}>
+          {filePath.split("/").pop() || filePath}
+        </span>
         {branchLabel && (
-          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap shrink-0 [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
+          <span className="file-view-branch inline-flex items-center gap-1 min-w-0 text-xs text-muted border border-border-variant rounded-sm py-px px-1.5 max-w-65 overflow-hidden text-ellipsis whitespace-nowrap [&_svg]:flex-none" title={m.a11y_branch({ branch: ltr(branchLabel) })}>
             <GitBranch size={11} />
             {branchLabel}
           </span>
@@ -506,8 +602,10 @@ export function FileViewer({
             )}
           </span>
         )}
+        <div ref={setMediaToolbarSlot} className="contents" />
         {isLatex && latex.compiled && (
           <IconButton
+            size="small"
             active={!latex.showPdf}
             data-tip={
               latex.stale && latex.showPdf
@@ -529,6 +627,7 @@ export function FileViewer({
         )}
         {isLatex && compiledPdfUrl && compiledPdfName && (
           <IconButtonLink
+            size="small"
             data-tip={
               latex.stale
                 ? m.file_viewer_download_stale_pdf({ name: ltr(compiledPdfName) })
@@ -542,24 +641,10 @@ export function FileViewer({
             <Download size={13} className={latex.stale ? "text-accent-amber" : undefined} />
           </IconButtonLink>
         )}
-        {liveTex && (
-          <IconButton
-            active={showOverleaf}
-            data-tip={overleafTip}
-            data-tip-align="end"
-            aria-label={m.a11y_overleaf_status({ status: overleafTip })}
-            aria-expanded={showOverleaf}
-            onClick={() => setShowOverleaf((open) => !open)}
-          >
-            {overleaf.syncing ? (
-              <Spinner />
-            ) : (
-              <CloudUpload size={13} className={overleafColor} />
-            )}
-          </IconButton>
-        )}
+        {liveTex && <OverleafButton overleaf={overleaf} />}
         {isLatex && onDisk && (
           <IconButton
+            size="small"
             data-tip={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
             data-tip-align="end"
             aria-label={latex.compiled ? m.file_viewer_recompile_pdf() : m.file_viewer_compile_pdf()}
@@ -571,34 +656,53 @@ export function FileViewer({
         )}
         {rendersByDefault && (
           <IconButton
+            size="small"
             active={showSource}
             data-tip={showSource ? m.common_rendered_view() : m.common_view_source()}
             data-tip-align="end"
             aria-label={showSource ? m.common_rendered_view() : m.common_view_source()}
-            onClick={() => setShowSource((s) => !s)}
+            onClick={() => onShowSourceChange?.(!showSource)}
           >
             <Code size={13} />
           </IconButton>
         )}
-        {onDisk && (
+        {canCopyContents && (
           <IconButton
-            data-tip={editorError ?? m.file_viewer_open_in_default_editor()}
+            size="small"
+            data-tip={copiedContents ? m.common_copied() : m.file_viewer_copy_contents()}
             data-tip-align="end"
-            aria-label={m.file_viewer_open_in_default_editor()}
-            disabled={openingEditor}
-            onClick={() => void openInEditor()}
+            aria-label={copiedContents ? m.common_copied() : m.file_viewer_copy_contents()}
+            onClick={() => void copyContents()}
           >
-            {openingEditor ? <Spinner /> : <ExternalLink size={13} />}
+            {copiedContents ? <Check size={13} /> : <Copy size={13} />}
           </IconButton>
         )}
-        <IconButton
-          data-tip={m.file_viewer_reload_file()}
-          data-tip-align="end"
-          aria-label={m.file_viewer_reload_file()}
-          onClick={() => setNonce((n) => n + 1)}
-        >
-          {loading ? <Spinner /> : <RotateCw size={13} />}
-        </IconButton>
+        {data != null && (
+          <>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? openEditor.error ?? m.file_viewer_open_in_default_editor()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_open_in_default_editor()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={openEditor.busy || osActionBlocker != null}
+              onClick={() => void openEditor.trigger()}
+            >
+              {openEditor.busy ? <Spinner /> : <ExternalLink size={13} />}
+            </IconButton>
+            <IconButton
+              size="small"
+              data-tip={osActionBlocker ?? revealManager.error ?? m.file_viewer_reveal_in_file_manager()}
+              data-tip-align="end"
+              aria-label={m.file_viewer_reveal_in_file_manager()}
+              aria-description={osActionBlocker ?? undefined}
+              disabled={revealManager.busy || osActionBlocker != null}
+              onClick={() => void revealManager.trigger()}
+            >
+              {revealManager.busy ? <Spinner /> : <FolderOpen size={13} />}
+            </IconButton>
+          </>
+        )}
       </div>
       {/* Outside the scroll body, unlike its siblings: this state can be
           editable, and the editor's `h-full` would push it out of view. */}
@@ -607,13 +711,46 @@ export function FileViewer({
           {m.file_viewer_not_in_artifacts_showing_root({ root: loaded.file.root === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
         </div>
       )}
+      {unsafeRemoteEdit && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-accent-amber">
+          {m.file_viewer_update_remote_to_edit_safely()}
+        </div>
+      )}
+      {error && data !== null && (
+        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-accent-red">
+          {m.file_viewer_failed_to_load_file()} {ltr(error)}
+        </div>
+      )}
+      {editState?.conflict && (
+        <div
+          className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 flex items-center flex-wrap gap-2 text-sm text-accent-amber"
+        >
+          <span className="flex-1 min-w-0" role="status">
+            {editState.conflict.exists
+              ? m.file_viewer_changed_on_disk()
+              : m.file_viewer_deleted_on_disk()}
+          </span>
+          {editState?.conflict?.exists && editState.conflict.currentVersion && (
+            <Button
+              disabled={saving}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => void save(editState.conflict?.currentVersion ?? undefined)}
+            >
+              {m.file_viewer_overwrite_disk_file()}
+            </Button>
+          )}
+          <Button disabled={saving} onPointerDown={(event) => event.preventDefault()} onClick={discardAndReload}>
+            {m.file_viewer_reload_from_disk()}
+          </Button>
+        </div>
+      )}
       {(latex.error || latex.log) && (
         <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4">
           <div className="flex items-start gap-2">
             <span
               className={`flex-1 min-w-0 text-sm ${
                 latex.builtWithErrors ? "text-subtext" : "text-accent-red"
-              }`}
+                }`}
             >
               {latex.error ??
                 (latex.builtWithErrors
@@ -651,26 +788,6 @@ export function FileViewer({
           </Button>
         </div>
       )}
-      {liveTex && overleaf.error && (
-        <div className="file-view-note shrink-0 max-h-45 overflow-auto border-b border-b-border-variant py-2.5 px-4 flex items-start gap-2">
-          <span className="flex-1 min-w-0 text-sm text-accent-red whitespace-pre-wrap">
-            {overleaf.error}
-          </span>
-          <IconButton
-            data-tip={m.file_viewer_dismiss()}
-            data-tip-align="end"
-            aria-label={m.file_viewer_dismiss_overleaf_message()}
-            onClick={overleaf.dismiss}
-          >
-            <X size={13} />
-          </IconButton>
-        </div>
-      )}
-      {liveTex && showOverleaf && overleaf.loaded && (
-        <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4">
-          <OverleafPanel overleaf={overleaf} />
-        </div>
-      )}
       {isLatex && onDisk && latex.engine === null && latex.installHint && (
         <div className="file-view-note shrink-0 border-b border-b-border-variant py-2.5 px-4 text-sm text-subtext">
           {latex.installHint}
@@ -690,10 +807,11 @@ export function FileViewer({
       <div
         ref={bodyRef}
         className="file-view-body flex-1 min-h-0 overflow-auto bg-background"
+        tabIndex={canSelectContents ? 0 : undefined}
         onScroll={(event) => {
           const position = {
-            top: event.currentTarget.scrollTop,
-            left: event.currentTarget.scrollLeft,
+            top: Math.max(0, event.currentTarget.scrollTop),
+            left: Math.max(0, event.currentTarget.scrollLeft),
           };
           scrollPositionRef.current = position;
           onScrollPositionChange?.(position);
@@ -709,40 +827,72 @@ export function FileViewer({
             {m.file_viewer_artifact_fallback({ root: loaded.checkoutRoot === "worktree" ? m.file_viewer_session_worktree() : m.file_viewer_project_clone() })}
           </div>
         )}
-        {error ? (
+        {error && data === null ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_failed_to_load_file()} {ltr(error)}</div>
         ) : data === null ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_loading()}</div>
+        ) : showingEditor ? (
+          // Editable files open straight into the editor — click and type.
+          <CodeEditor
+            value={draft}
+            onChange={(next) => {
+              const current = bufferSession.getSnapshot() ?? (
+                data && typeof data.version === "string"
+                  ? createFileBuffer(data.path, data.content, data.version)
+                  : null
+              );
+              if (current) updateEditState(updateFileDraft(current, next));
+              onEdit?.();
+              if (saveError) setSaveError(null);
+            }}
+            onSave={() => void saveAndCompile()}
+            onBlur={() => { if (!confirmingFileDiscard) void saveAndCompile(); }}
+            readOnly={showingUnsafeDraft}
+            path={path}
+            highlightLine={line}
+            scrollRequest={settledLineScrollRequest}
+            onScrollRequestHandled={onLineScrollRequestHandled}
+            scrollPosition={scrollPositionRef.current}
+            onScrollPositionChange={(position) => {
+              scrollPositionRef.current = position;
+              onScrollPositionChange?.(position);
+            }}
+          />
         ) : data.notFound ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {loaded ? notFoundCopy(loaded) : m.file_viewer_not_found()}
           </div>
         ) : mediaKind ? (
-          <MediaPreview
-            kind={mediaKind}
-            url={rawUrl}
-            name={path.split("/").pop() ?? path}
-         />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              kind={mediaKind}
+              url={rawUrl}
+              name={path.split("/").pop() ?? path}
+            />
+          </MediaToolbarSlot.Provider>
         ) : data.binary ? (
           <div className="file-view-note py-2.5 px-4 text-sm text-muted">
             {m.file_viewer_binary_file_no_inline_preview()} <a href={rawUrl} download={path.split("/").pop() ?? path}>{m.file_viewer_download()}</a>
           </div>
         ) : showingPdf && pdfPaneUrl && compiledPdfName ? (
-          <MediaPreview
-            key={pdfPaneUrl}
-            kind="pdf"
-            url={pdfPaneUrl}
-            name={compiledPdfName}
-            downloadBar={false}
-         />
+          <MediaToolbarSlot.Provider value={mediaToolbarSlot}>
+            <MediaPreview
+              key={pdfPaneUrl}
+              kind="pdf"
+              url={pdfPaneUrl}
+              name={compiledPdfName}
+              download={false}
+            />
+          </MediaToolbarSlot.Provider>
         ) : isMarkdown && !showSource ? (
-          <div className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
+          <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (
               <ArtifactMarkdown
                 projectId={projectId}
                 folder={parentFolder}
                 markdown={data.content}
-             />
+                entries={artifactEntries}
+              />
             ) : (
               <Md
                 text={data.content}
@@ -753,7 +903,7 @@ export function FileViewer({
                   ((p, _line, _exp, _ref, intent) =>
                     onOpenFile(p, sessionId, gitRef, intent))
                 }
-             />
+              />
             )}
           </div>
         ) : isHtml && !showSource ? (
@@ -763,32 +913,18 @@ export function FileViewer({
             url={rawUrl}
             name={filePath}
             resolveSrc={resolveAssetSrc}
-         />
-        ) : showingEditor ? (
-          // Editable files open straight into the editor — click and type.
-          <CodeEditor
-            value={draft}
-            onChange={(next) => {
-              setDraft(next);
-              onEdit?.();
-              if (saveError) setSaveError(null);
-            }}
-            onSave={() => void saveAndCompile()}
-            onBlur={() => void saveAndCompile()}
-            path={path}
-            highlightLine={line}
-            scrollRequest={lineScrollRequest}
-            onScrollRequestHandled={onLineScrollRequestHandled}
-         />
+          />
         ) : (
           <>
-            <CodeView
-              text={data.content}
-              path={path}
-              highlightLine={line}
-              scrollRequest={lineScrollRequest}
-              onScrollRequestHandled={onLineScrollRequestHandled}
-           />
+            <div ref={selectableContentRef}>
+              <CodeView
+                text={data.content}
+                path={path}
+                highlightLine={line}
+                scrollRequest={settledLineScrollRequest}
+                onScrollRequestHandled={onLineScrollRequestHandled}
+              />
+            </div>
             {data.truncated && (
               <div className="file-view-note py-2.5 px-4 text-sm text-muted">{m.file_viewer_file_truncated_showing_the_first_512_kb()}</div>
             )}

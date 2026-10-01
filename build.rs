@@ -7,13 +7,12 @@ fn main() {
         Ok(value)
             if value == "1"
                 && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
-                && std::env::var("GITHUB_REPOSITORY").as_deref()
-                    == Ok("alphaXiv/openresearch-cli") =>
+                && std::env::var("GITHUB_REPOSITORY").as_deref() == Ok("alphaXiv/OpenResearch") =>
         {
             "production"
         }
         Ok(value) if value == "1" => panic!(
-            "ORX_OFFICIAL_RELEASE_BUILD=1 is only valid in alphaXiv/openresearch-cli GitHub Actions"
+            "ORX_OFFICIAL_RELEASE_BUILD=1 is only valid in alphaXiv/OpenResearch GitHub Actions"
         ),
         Ok(value) => {
             panic!("ORX_OFFICIAL_RELEASE_BUILD must be unset or exactly `1`, got `{value}`")
@@ -25,4 +24,31 @@ fn main() {
     };
 
     println!("cargo:rustc-env=ORX_BUILD_CHANNEL={channel}");
+
+    // `desktop_app`: this build includes the windowed app (src/commands/app.rs).
+    println!("cargo:rustc-check-cfg=cfg(desktop_app)");
+    let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let linux_desktop = os == "linux" && std::env::var_os("CARGO_FEATURE_DESKTOP").is_some();
+    if os == "macos" || os == "windows" || linux_desktop {
+        println!("cargo:rustc-cfg=desktop_app");
+    }
+
+    embed_windows_icon();
+}
+
+/// Resource 1 is the icon Explorer shows for orx.exe and the app window loads.
+fn embed_windows_icon() {
+    println!("cargo:rerun-if-changed=windows/OpenResearch.ico");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let icon = manifest_dir.join("windows").join("OpenResearch.ico");
+    // An absolute path, so it doesn't matter which directory rc.exe resolves against.
+    let rc = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("icon.rc");
+    let escaped = icon.display().to_string().replace('\\', "\\\\");
+    std::fs::write(&rc, format!("1 ICON \"{escaped}\"\n")).unwrap();
+    embed_resource::compile(&rc, embed_resource::NONE)
+        .manifest_required()
+        .unwrap();
 }

@@ -1,5 +1,5 @@
 //! The harness compatibility layer: one `Harness` trait that every coding-agent
-//! integration (Claude Code, Codex, OpenCode, Cursor) implements, plus the
+//! integration (Claude Code, Codex, OpenCode, Cursor, Antigravity) implements, plus the
 //! single `registry()` that every consumer iterates.
 //!
 //! A harness can offer up to three capabilities, and no harness is required to
@@ -11,15 +11,16 @@
 //!   normalizing its native event stream into wire parts. Detection-only or
 //!   install-only harnesses leave this at its default (unsupported).
 //! * **skill install** (`skill_target` / `skill_shim`) — drop the `orx` skill
-//!   shim so the agent auto-discovers the CLI. Cursor offers only this.
+//!   shim so the agent auto-discovers the CLI.
 //!
-//! Adding a fourth harness is one new file with one `impl Harness` and one line
+//! Adding a harness is one new file with one `impl Harness` and one line
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
-mod cursor;
+pub(crate) mod cursor;
 mod detect;
 pub(crate) mod opencode;
 mod options;
@@ -28,9 +29,11 @@ pub(crate) mod title;
 
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 
 use crate::error::Result;
 use crate::local::chat::{
@@ -40,6 +43,10 @@ use crate::local::chat::{
 use crate::store::Store;
 
 pub(crate) use claude::{question_prompt, should_synthesize_plan, synthesize_resume};
+pub(crate) use detect::{
+    detect_spawn_output_timed, probe_timing_scope, spawn_retrying_busy, unique as unique_bins,
+    ProbeTiming, ProbeTimingSink,
+};
 pub use detect::{HarnessAuthState, HarnessInfo, ModelInfo};
 pub use options::{HarnessOptions, PermissionMode};
 pub use plan_gate::command_is_readonly;
@@ -267,6 +274,21 @@ pub trait Harness: Send + Sync {
         None
     }
 
+    /// The fast first pass of [`Harness::detect`]: install, auth, and
+    /// `agent_ready` only — no model-catalog or capability probes, which are
+    /// the subprocesses that stall cold `/api/harnesses` calls for seconds.
+    /// Install/auth come from filesystem and env evidence alone; one
+    /// conditional exception is a single auth child where the login may live
+    /// in an OS credential store the filesystem cannot see (Claude's
+    /// `ProbeCli`). An installed harness's answer is provisional — `detect_one`
+    /// marks it `catalog_pending` and clamps readiness — so the caller can
+    /// complete it in the background.
+    /// Default is the full detect, for harnesses whose auth *is* the catalog
+    /// probe (Antigravity) or that have nothing expensive to defer.
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect().await
+    }
+
     /// Run one chat turn: spawn the CLI, parse its event stream, push wire
     /// parts onto `ctx`. Default is "not a chat harness".
     async fn run_turn(&self, _ctx: &mut TurnCtx) -> TurnResult {
@@ -284,6 +306,13 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// Compact this session's context in the harness's own store. Returning
+    /// `Fallback` asks the caller for the shared summarize-and-reseed path,
+    /// which every harness can take.
+    async fn compact(&self, _ctx: &CompactCtx) -> Result<CompactOutcome> {
+        Ok(CompactOutcome::Fallback)
+    }
+
     /// The permission-mode / reasoning-level vocabulary this harness supports,
     /// for the composer toggles. Default is neither control (the UI hides both).
     fn options(&self) -> HarnessOptions {
@@ -291,17 +320,37 @@ pub trait Harness: Send + Sync {
     }
 
     /// Generate a short (≤6 words) session title from the session's first user
-    /// message by spawning a short-lived headless child pinned to a cheap
-    /// configuration. `None` = can't or failed — the caller keeps the
-    /// first-line placeholder.
+    /// message with a short-lived child, using the session model for OpenCode.
+    /// `None` = failed; the caller keeps the first-line placeholder.
     ///
-    /// Default: no generation (e.g. Cursor has no chat capability). OpenCode
-    /// also still adopts a native `session.updated` title (minus its creation
+    /// Default: the shared title one-shot, sanitized; a harness without
+    /// `one_shot` gets none. OpenCode also still adopts a native `session.updated` title (minus its creation
     /// seed) through `TurnCtx::set_title` if its server ever offers one, but
     /// runs its own one-shot child since the server stopped titling parent
     /// sessions.
-    async fn generate_title(&self, _first_message: &str) -> Option<String> {
+    async fn generate_title(&self, first_message: &str, model: Option<&str>) -> Option<String> {
+        let prompt = title::title_prompt(first_message);
+        let request = OneShot {
+            model: model.filter(|model| self.id() == "opencode" && model.starts_with("orx-local-")),
+            ..title::title_request(&prompt)
+        };
+        let raw = self.one_shot(request).await?;
+        title::sanitize_title(&raw)
+    }
+
+    /// Run one headless request on a throwaway child at the requested
+    /// [`OneShotQuality`] and return the model's reply verbatim. The child
+    /// cannot write or reach MCP servers (tools are disabled where the CLI
+    /// allows), and nothing is recorded in the harness's own session store.
+    /// `None` = can't or failed.
+    async fn one_shot(&self, _request: OneShot<'_>) -> Option<String> {
         None
+    }
+
+    /// Whether `one_shot` runs on `OneShot::model`; callers caching by model
+    /// should not vary the key for a harness that ignores it.
+    fn one_shot_honours_model(&self) -> bool {
+        true
     }
 
     /// Decide how an answered prompt flows back, and (for inline harnesses)
@@ -381,10 +430,10 @@ pub trait Harness: Send + Sync {
 
     /// The worktree-relative dir this harness discovers native `SKILL.md` skill
     /// dirs under, for a **local `orx up` session** — `.claude/skills`,
-    /// `.opencode/skills`, `.agents/skills`. The modular `orx` skills are
+    /// `.opencode/skills`, `.agents/skills`, `.cursor/skills`. The modular `orx` skills are
     /// written there (fresh every turn, beside the playbook) so the session's
     /// own agent auto-loads them. `None` for a harness with no local chat
-    /// session that can host per-session skills (Cursor).
+    /// session that can host per-session skills.
     fn session_skills_dir(&self) -> Option<&'static str> {
         None
     }
@@ -466,7 +515,59 @@ pub fn registry() -> Vec<Box<dyn Harness>> {
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
+        Box::new(antigravity::Antigravity),
     ]
+}
+
+/// A single self-contained request for [`Harness::one_shot`].
+#[derive(Debug, Clone, Copy)]
+pub struct OneShot<'a> {
+    /// Replaces the harness's agent system prompt where the CLI allows it;
+    /// otherwise it is folded into the message.
+    pub system: &'a str,
+    pub prompt: &'a str,
+    pub quality: OneShotQuality,
+    /// The model the user has picked for chat, in the harness's own id form.
+    /// Codex and OpenCode run on it (their configured default may point at a
+    /// provider with no working key); Claude keeps its per-quality alias.
+    pub model: Option<&'a str>,
+    pub timeout: Duration,
+}
+
+/// How much model to spend on a one-shot: `Cheap` is the smallest/fastest
+/// configuration (titles), `Standard` a mid-tier model at modest effort
+/// (anything that has to read and reason about a project). Each harness maps
+/// these onto its own flags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OneShotQuality {
+    Cheap,
+    Standard,
+}
+
+/// The transcript a compaction summarizes: the same snapshot a lost native
+/// session is reseeded with, but for a session with no turn in flight — and so
+/// the same newest-`RECOVERY_SNAPSHOT_BYTES` cap, which on the reseed path is
+/// all the agent keeps of a long chat, and the same every-branch scope rather
+/// than the active path alone.
+pub(crate) fn compaction_snapshot(session_id: &str) -> String {
+    native_recovery_snapshot(session_id, "")
+}
+
+/// What a session needs to compact, without the machinery of a live turn.
+pub struct CompactCtx {
+    pub host: Arc<crate::local::chat::ChatHost>,
+    pub session_id: String,
+    pub native_session_id: Option<String>,
+    pub model: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompactOutcome {
+    /// The harness compacted its own context; the session id still resolves.
+    Native,
+    /// The harness has no compaction of its own to offer for this session —
+    /// summarize and reseed instead.
+    Fallback,
 }
 
 /// The chat-capable harness with this id, if any (used by chat dispatch).
@@ -481,16 +582,43 @@ pub fn is_chat_harness(id: &str) -> bool {
     registry().iter().any(|h| h.id() == id && h.supports_chat())
 }
 
-async fn detect_one(harness: &dyn Harness) -> Option<HarnessInfo> {
-    harness.detect().await.map(|mut info| {
-        if info.auth_state == HarnessAuthState::Unknown {
-            info.auth_state = if info.agent_ready {
-                HarnessAuthState::Ready
-            } else if info.installed && !info.install_broken && info.id != "claude-code" {
-                HarnessAuthState::NeedsLogin
-            } else {
-                HarnessAuthState::Unknown
-            };
+async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo> {
+    let timing = detect::detect_timing();
+    let start = std::time::Instant::now();
+    let detected = if snapshot {
+        harness.detect_snapshot().await
+    } else {
+        harness.detect().await
+    };
+    // The per-harness wall clock joins the fill's probe timings as the
+    // `"total"` row — the snapshot pass is covered by its own pass event.
+    if !snapshot {
+        detect::record_probe_timing(harness.id(), "total", start.elapsed().as_millis() as u64);
+    }
+    if timing {
+        eprintln!(
+            "orx detect: {} ({}): {}ms",
+            harness.id(),
+            if snapshot { "snapshot" } else { "full" },
+            start.elapsed().as_millis()
+        );
+    }
+    detected.map(|mut info| {
+        // A snapshot answer for an installed harness is provisional by
+        // definition: its install/auth evidence is file-based and the model
+        // catalog is a placeholder until the Full pass lands. Consumers
+        // outside onboarding (ModelPicker, ChatPanel, SettingsPage) read
+        // `agent_ready` without checking `catalog_pending`, so the
+        // pending ⇒ not-ready invariant lives here rather than at every call
+        // site — and `supports_steering` goes with it, since a steering claim
+        // is only meaningful once the CLI's readiness is verified.
+        if snapshot && (info.installed || info.catalog_pending) {
+            info.catalog_pending = true;
+            info.agent_ready = false;
+            info.supports_steering = false;
+        }
+        if info.auth_state == HarnessAuthState::Unknown && info.agent_ready {
+            info.auth_state = HarnessAuthState::Ready;
         }
         info.options = harness.options();
         // The trait is the ceiling: a `detect` narrows it for an installation
@@ -505,17 +633,49 @@ pub async fn detect_harness(id: &str) -> Option<HarnessInfo> {
     let harness = registry()
         .into_iter()
         .find(|h| h.id() == id && h.supports_chat())?;
-    detect_one(harness.as_ref()).await
+    detect_one(harness.as_ref(), false).await
+}
+
+/// The snapshot pass of [`detect_harness`] (see [`Harness::detect_snapshot`]).
+pub async fn detect_harness_snapshot(id: &str) -> Option<HarnessInfo> {
+    detect_one(chat_harness(id)?.as_ref(), true).await
 }
 
 /// Detect every chat-capable harness, in registry order. This is what the
 /// `orx up` dashboard renders in its harness picker.
 pub async fn detect_harnesses() -> Vec<HarnessInfo> {
-    let harnesses: Vec<Box<dyn Harness>> = registry()
+    detect_all(false).await
+}
+
+/// The full pass, yielding each harness as its own probes finish instead of
+/// in a batch. Callers that can commit entries individually unblock a ready
+/// agent on its own clock rather than the slowest sibling's — the onboarding
+/// gate is per-entry (`agentReady && !catalogPending`), so the catalog fill
+/// should not be. Items carry the harness's registry index so the caller can
+/// restore registry order for the final payload.
+pub fn detect_harnesses_each() -> impl futures::Stream<Item = (usize, HarnessInfo)> {
+    registry()
         .into_iter()
         .filter(|h| h.supports_chat())
-        .collect();
-    let futures = harnesses.iter().map(|h| detect_one(h.as_ref()));
+        .enumerate()
+        .map(|(i, h)| async move { detect_one(h.as_ref(), false).await.map(|info| (i, info)) })
+        .collect::<futures::stream::FuturesUnordered<_>>()
+        .filter_map(std::future::ready)
+}
+
+/// The snapshot pass of [`detect_harnesses`]: readiness without the model
+/// catalogs, so a cold `/api/harnesses` answers in the time the *fastest*
+/// probes take instead of the slowest catalog. Entries that still owe a
+/// catalog carry `catalog_pending`.
+pub async fn detect_harnesses_snapshot() -> Vec<HarnessInfo> {
+    detect_all(true).await
+}
+
+async fn detect_all(snapshot: bool) -> Vec<HarnessInfo> {
+    let futures = registry()
+        .into_iter()
+        .filter(|h| h.supports_chat())
+        .map(|h| async move { detect_one(h.as_ref(), snapshot).await });
     futures::future::join_all(futures)
         .await
         .into_iter()
@@ -741,6 +901,44 @@ mod tests {
         assert_eq!(opencode.default_permission_mode, Some("default"));
         assert_eq!(opencode.plan_activation, Some(PlanActivation::Command));
         assert!(opencode.reasoning_levels.is_empty());
+
+        let cursor = options_for("cursor");
+        assert_eq!(
+            permission_contract(&cursor),
+            [
+                ("ask", "Ask", "Answer questions without changing files"),
+                ("auto", "Auto", "Allow commands unless explicitly denied"),
+                (
+                    "full-access",
+                    "Full access",
+                    "Allow commands and disable the sandbox"
+                ),
+            ]
+        );
+        assert_eq!(cursor.default_permission_mode, Some("auto"));
+        assert_eq!(cursor.plan_activation, Some(PlanActivation::Command));
+        assert!(cursor.reasoning_levels.is_empty());
+
+        let antigravity = options_for("antigravity");
+        assert_eq!(
+            permission_contract(&antigravity),
+            [
+                (
+                    "default",
+                    "Ask for approval",
+                    "Ask before changes; allow read-only planning"
+                ),
+                (
+                    "bypass",
+                    "Bypass permissions",
+                    "Allow commands and skip tool confirmation prompts"
+                ),
+            ]
+        );
+        assert_eq!(antigravity.default_permission_mode, Some("bypass"));
+        assert_eq!(antigravity.plan_activation, Some(PlanActivation::Command));
+        assert!(reasoning_ids(&antigravity).is_empty());
+        assert!(antigravity.default_reasoning_level.is_none());
     }
 
     /// Every advertised permission-mode id must round-trip through

@@ -22,30 +22,363 @@
 //! fallback for a CLI too old for `--verbose`).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+/// A key probe is one short reply; a cold CLI start is most of it.
+const KEY_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::{json, Value};
 
-use super::detect::{probe_bin, read_json, HarnessInfo};
+use super::detect::{read_json, BinProbe, HarnessAuthState, HarnessInfo, ModelInfo};
 use super::options::{
     HarnessOptions, OptionChoice, PermissionMode, PlanActivation, REASONING_DEFAULT_ID,
 };
-use super::{Harness, ResumeAction, TurnFailure, TurnOutcome, TurnResult, ORX_MAX_ATTEMPTS};
+use super::{
+    CompactCtx, CompactOutcome, Harness, OneShot, ResumeAction, TurnFailure, TurnOutcome,
+    TurnResult, ORX_MAX_ATTEMPTS,
+};
 use crate::error::{anyhow, Result};
 use crate::local::chat::{
     ContextUsage, DeliveryState, PromptAnswer, ResumeCtx, TurnCtx, WirePart, WirePrompt,
     WireQuestionOption, WireToolState,
 };
+use crate::local::local_models::is_loopback_url;
 use crate::local::native_store::{self, NativeStore};
-use crate::local::opencode::find_opencode;
+use crate::local::opencode::{find_opencode, ResolvedBinary, SummarizeOutcome};
 
 const OPENCODE_REINSTALL: &str =
     "Reinstall opencode (curl -fsSL https://opencode.ai/install | bash)";
 
+#[path = "opencode_v2.rs"]
+mod v2;
+
 pub struct OpenCode;
+
+impl OpenCode {
+    /// `snapshot` skips every catalog probe — `models`/`debug config` children,
+    /// the V2 server bring-up, local-server and dead-key checks — and answers
+    /// install/auth only; readiness is deferred entirely and the entry is
+    /// marked `catalog_pending` until a full pass replaces it. The one
+    /// non-free check kept is the isolated DB lease preflight (file I/O, no
+    /// child process), which surfaces `needs_config_repair` early.
+    async fn detect_at(&self, snapshot: bool) -> Option<HarnessInfo> {
+        let mut info = HarnessInfo::new(self.id(), self.name());
+        let mut models = Vec::new();
+        let mut public_models = HashSet::new();
+        let mut config = Value::Null;
+        let bin = find_opencode().ok();
+        let mut resolved_binary = None;
+        if let Some(discovered) = &bin {
+            // The catalog children launch on the discovered binary while
+            // `resolve_binary` probes every candidate — each spawn costs
+            // seconds on Windows, and sequencing the catalog behind the
+            // version sweep made the fill their sum. A resolution landing on
+            // a different binary (a stale first candidate) re-runs the probes
+            // on the winner; a V2 verdict never needs them. The snapshot
+            // skips the spawns entirely — discovery already proves the file
+            // is there, and a V2 install's real auth only answers through
+            // the served API anyway.
+            let speculated = (!snapshot).then(|| {
+                super::detect::spawn_timed_probe(
+                    "opencode",
+                    "models",
+                    opencode_models(discovered.clone()),
+                )
+            });
+            let resolved = if snapshot {
+                None
+            } else {
+                Some(
+                    super::detect::timed_probe(
+                        "opencode",
+                        "resolve",
+                        crate::local::opencode::resolve_binary(),
+                    )
+                    .await,
+                )
+            };
+            let (bin, probe) = match resolved.as_ref() {
+                Some(Ok(binary)) => (
+                    binary.path.clone(),
+                    BinProbe::Answered(Some(binary.version.clone())),
+                ),
+                // Nothing resolved: report what discovery first named, so the
+                // UI shows a broken install rather than "not detected".
+                Some(Err(error)) => (discovered.clone(), BinProbe::Broken(error.to_string())),
+                None => (discovered.clone(), BinProbe::Unknown),
+            };
+            info.record_bin(&bin, probe);
+            // The speculation only stands when resolution picked the binary
+            // it ran against — anything else cuts the child loose
+            // (kill_on_drop reaps it) and the winner is probed below.
+            let mut spec_out = None;
+            if let Some(models_task) = speculated {
+                match resolved.as_ref() {
+                    Some(Ok(binary))
+                        if binary.protocol != crate::local::opencode::Protocol::V2
+                            && binary.path == *discovered =>
+                    {
+                        spec_out = Some(models_task.await);
+                    }
+                    other => {
+                        if std::env::var_os("ORX_DETECT_TIMING").is_some() {
+                            eprintln!(
+                                "orx detect: opencode spec miss (resolved={:?} spec={:?})",
+                                other.map(|r| r.as_ref().map(|b| b.path.clone())),
+                                discovered
+                            );
+                        }
+                        models_task.abort();
+                        // Await teardown so the aborted probe's timing row
+                        // lands in the fill's sink before the pass drains it.
+                        let _ = models_task.await;
+                    }
+                }
+            }
+            if let Some(Ok(binary)) = resolved {
+                if binary.protocol == crate::local::opencode::Protocol::V2 {
+                    return Some(v2::detect(binary, info).await);
+                }
+                resolved_binary = Some(binary);
+            }
+            if !info.install_broken {
+                let db = native_store::opencode_db(NativeStore::Isolated);
+                let preflight = tokio::task::spawn_blocking(move || {
+                    native_store::opencode_database::DatabaseLease::acquire(&db, 1).map(drop)
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow!("OpenCode database inspection failed: {error}"))
+                });
+                if let Err(error) = preflight {
+                    let busy = error
+                        .downcast_ref::<native_store::opencode_database::DatabaseBusy>()
+                        .is_some();
+                    info.auth_state = if busy {
+                        HarnessAuthState::Unknown
+                    } else {
+                        HarnessAuthState::Unsupported
+                    };
+                    // A database the CLI will not open is not an out-of-date
+                    // binary: upgrading a current install cannot repair it, and
+                    // orx must never delete a user's database to clear it.
+                    info.needs_config_repair = !busy;
+                    info.agent_note = Some(if busy {
+                        error.to_string()
+                    } else {
+                        format!(
+                            "{error}\nThis is an OpenCode database problem, not an out-of-date install. \
+                             Close other OpenCode processes and re-check; if it persists, move the file aside so OpenCode can recreate it."
+                        )
+                    });
+                    return Some(info);
+                }
+            }
+            // A binary that failed `--version` has no catalog to give either.
+            if let Some(binary) = resolved_binary.as_ref().filter(|_| !snapshot) {
+                (models, public_models) = match spec_out {
+                    Some(catalog) => catalog.ok().unwrap_or_default(),
+                    // Resolution picked a different binary than the
+                    // speculation ran on — rare enough to simply re-probe.
+                    None => opencode_models(binary.path.clone()).await,
+                };
+                // `debug config --pure` answers the same fields this pass
+                // consumes (provider gates, local providers, the default
+                // model) — project/plugin layers are off under `--pure` and
+                // the child runs from the home dir anyway — so the file read
+                // stands in for a multi-second spawn. It falls back to the
+                // child only for a config the strict parse cannot honor —
+                // `opencode.jsonc` or a `.json` carrying comments — which
+                // opencode accepts and a `Null` here would silently drop
+                // (configured local providers would vanish).
+                let unresolved;
+                (config, unresolved) = snapshot_config();
+                if unresolved {
+                    if let Some(text) = super::detect::timed_probe(
+                        "opencode",
+                        "config",
+                        run_models(binary.path.clone(), &["debug", "config", "--pure"]),
+                    )
+                    .await
+                    .and_then(|text| serde_json::from_str(&text).ok())
+                    {
+                        config = text;
+                    }
+                }
+            } else if snapshot {
+                // `debug config` costs a child process; the snapshot reads
+                // the config file directly.
+                config = snapshot_config().0;
+            }
+        }
+        apply_configured_labels(&mut models, &config);
+        let providers: Vec<_> = opencode_providers()
+            .into_iter()
+            .filter(|id| provider_enabled(&config, id))
+            .collect();
+        if !providers.is_empty() {
+            info.authenticated = true;
+            info.auth_method = Some("oauth");
+            info.account = Some(providers.join(", "));
+        }
+        // opencode also takes provider keys straight from the environment,
+        // writing no auth.json — same fallback claude.rs has. Checked against
+        // orx's synced env too, since that's a source the harness child gets
+        // but this process may not. Measured, not assumed: `opencode models`
+        // still lists free/bundled models when signed out, so a non-empty
+        // model list can't stand in for a credential.
+        const PROVIDER_KEYS: &[(&str, &str)] = &[
+            ("anthropic", "ANTHROPIC_API_KEY"),
+            ("openai", "OPENAI_API_KEY"),
+            ("openrouter", "OPENROUTER_API_KEY"),
+            ("google", "GEMINI_API_KEY"),
+            ("google", "GOOGLE_API_KEY"),
+            ("groq", "GROQ_API_KEY"),
+            ("xai", "XAI_API_KEY"),
+            ("deepseek", "DEEPSEEK_API_KEY"),
+        ];
+        if !info.authenticated
+            && PROVIDER_KEYS.iter().any(|(id, key)| {
+                provider_enabled(&config, id) && super::detect::api_key(key).is_some()
+            })
+        {
+            info.authenticated = true;
+            info.auth_method = Some("apiKey");
+        }
+
+        let local = local_providers(&config);
+        // Snapshot defers the local-server liveness probes with the catalog.
+        let available = if snapshot {
+            HashSet::new()
+        } else {
+            available_local_models(&local).await
+        };
+        let is_local =
+            |model: &ModelInfo| local.iter().any(|(id, _)| model_provider(&model.id) == *id);
+        let missing_local = models
+            .iter()
+            .any(|model| is_local(model) && !available.contains(&model.id));
+        if missing_local {
+            info.agent_note = Some("Some local models are unavailable. Start the server, load the configured model, and re-check OpenCode.".to_string());
+        }
+        models.retain(|model| {
+            available.contains(&model.id)
+                || (info.authenticated && !is_local(model))
+                || (public_models.contains(&model.id)
+                    && provider_enabled(&config, "opencode")
+                    && !is_local(model))
+        });
+        // Onboarding and the composer seed their selection from the first model.
+        let default = config.get("model").and_then(Value::as_str);
+        models.sort_by_key(|model| {
+            (
+                Some(model.id.as_str()) != default,
+                !model.id.starts_with("orx-local-"),
+            )
+        });
+        if !info.authenticated && !local.is_empty() {
+            info.auth_method = Some("local");
+        }
+        if !snapshot {
+            // Readiness needs the catalog — `models` proves a credential
+            // resolves to something runnable. The snapshot leaves it false;
+            // `detect_one` marks the answer pending until the fill lands.
+            info.agent_ready = info.installed && !info.install_broken && !models.is_empty();
+        }
+        if info.agent_ready {
+            // Hide the models of providers whose stored key a live request rejects.
+            let cloud_providers: Vec<_> = providers
+                .iter()
+                .filter(|id| !local.iter().any(|(local_id, _)| local_id == id))
+                .cloned()
+                .collect();
+            let dead = match &resolved_binary {
+                Some(binary) => dead_providers(binary, &cloud_providers, &models).await,
+                None => Vec::new(),
+            };
+            if !dead.is_empty() {
+                models.retain(|model| !dead.iter().any(|p| model_provider(&model.id) == p));
+                info.account = Some(
+                    providers
+                        .iter()
+                        .map(|p| {
+                            if dead.contains(p) {
+                                format!("{p} (key rejected)")
+                            } else {
+                                p.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+                let note = format!(
+                    "{} rejected the stored API key, so its models are hidden. Re-add it with `opencode auth login`.",
+                    dead.join(", ")
+                );
+                info.agent_note = Some(match info.agent_note.take() {
+                    Some(local_note) => format!("{local_note} {note}"),
+                    None => note,
+                });
+            }
+            // Every key rejected and nothing free left: nothing can run a turn.
+            if models.is_empty() {
+                info.agent_ready = false;
+                info.auth_state = HarnessAuthState::NeedsLogin;
+            }
+            info.models = models;
+        } else if info.install_broken {
+            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
+        } else if !info.installed {
+            info.agent_note = Some(
+                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then configure a local model or sign in with `opencode auth login`."
+                    .to_string(),
+            );
+        } else if !snapshot {
+            // Installed but not ready — the snapshot leaves the diagnosis to
+            // the fill, whose catalog decides which of these actually applies.
+            if !local.is_empty() {
+                info.agent_note = Some(if available.is_empty() {
+                    "Local model server unavailable or configured model not found. Start the server, load your model, and re-check OpenCode."
+                } else {
+                    "The local server is reachable, but OpenCode did not list the configured model. Check `opencode models` and re-check OpenCode."
+                }.to_string());
+            } else if info.authenticated {
+                info.agent_note = Some(
+                    "OpenCode listed no models. Check `opencode models` and re-check OpenCode."
+                        .to_string(),
+                );
+            } else {
+                info.agent_note = Some(
+                    "Configure a local model in OpenCode, or sign in with `opencode auth login`."
+                        .to_string(),
+                );
+            }
+        }
+        if info.installed
+            && !info.install_broken
+            && !info.agent_ready
+            && !snapshot
+            && config.is_null()
+        {
+            info.agent_note = Some("Could not read OpenCode configuration. Update OpenCode and re-check to discover local models.".to_string());
+        }
+        if info.auth_state == HarnessAuthState::Unknown && !config.is_null() {
+            info.auth_state = if info.authenticated || info.agent_ready {
+                HarnessAuthState::Ready
+            } else {
+                HarnessAuthState::NeedsLogin
+            };
+        }
+        if let Err(error) = crate::local::local_models::read() {
+            info.agent_note = Some(error.to_string());
+        }
+        Some(info)
+    }
+}
 
 #[async_trait]
 impl Harness for OpenCode {
@@ -61,72 +394,42 @@ impl Harness for OpenCode {
         true
     }
 
-    async fn generate_title(&self, first_message: &str) -> Option<String> {
-        opencode_generate_title(&find_opencode().ok()?, first_message).await
+    /// opencode compacts through its own summarize endpoint, which needs a live
+    /// server and a native session; without either, the shared fallback runs.
+    async fn compact(&self, ctx: &CompactCtx) -> Result<CompactOutcome> {
+        let Some(native_id) = ctx.native_session_id.as_deref() else {
+            return Ok(CompactOutcome::Fallback);
+        };
+        // A live session is still resumable, so a failure to compact it in
+        // place is reported rather than traded for a summary of its transcript.
+        match ctx
+            .host
+            .opencode
+            .summarize(&ctx.session_id, native_id, ctx.model.as_deref())
+            .await?
+        {
+            SummarizeOutcome::Compacted => Ok(CompactOutcome::Native),
+            SummarizeOutcome::NoServer => Err(anyhow!(
+                "OpenCode is not running for this chat — send a message first, then compact"
+            )),
+            SummarizeOutcome::NoModel => Ok(CompactOutcome::Fallback),
+        }
+    }
+
+    async fn one_shot(&self, request: OneShot<'_>) -> Option<String> {
+        opencode_one_shot(
+            &crate::local::opencode::resolve_binary().await.ok()?,
+            request,
+        )
+        .await
     }
 
     async fn detect(&self) -> Option<HarnessInfo> {
-        let mut info = HarnessInfo::new(self.id(), self.name());
-        let mut models = Vec::new();
-        if let Ok(bin) = find_opencode() {
-            info.record_bin(&bin, probe_bin(&bin).await);
-            // A binary that failed `--version` has no catalog to give either.
-            if !info.install_broken {
-                models = opencode_models(&bin).await;
-            }
-        }
-        let providers = opencode_providers();
-        if !providers.is_empty() {
-            info.authenticated = true;
-            info.auth_method = Some("oauth");
-            info.account = Some(providers.join(", "));
-        }
-        // opencode also takes provider keys straight from the environment,
-        // writing no auth.json — same fallback claude.rs has. Checked against
-        // orx's synced env too, since that's a source the harness child gets
-        // but this process may not. Measured, not assumed: `opencode models`
-        // still lists free/bundled models when signed out, so a non-empty
-        // model list can't stand in for a credential.
-        const PROVIDER_KEYS: &[&str] = &[
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-            "GROQ_API_KEY",
-            "XAI_API_KEY",
-            "DEEPSEEK_API_KEY",
-        ];
-        if !info.authenticated
-            && PROVIDER_KEYS
-                .iter()
-                .any(|k| super::detect::api_key(k).is_some())
-        {
-            info.authenticated = true;
-            info.auth_method = Some("apiKey");
-        }
+        self.detect_at(false).await
+    }
 
-        // Tightened from `installed` alone — opencode with no credential can't
-        // actually run a turn, and it was the one harness reporting Connected
-        // regardless. Behaviour change on upgrade: an install with neither
-        // auth.json nor a provider key above now reads "Not signed in", and
-        // since step 1 of onboarding gates on this, an opencode-only user is
-        // asked to sign in before continuing.
-        info.agent_ready = info.ready();
-        if info.agent_ready {
-            info.models = models;
-        } else if info.install_broken {
-            info.agent_note = Some(info.broken_note(OPENCODE_REINSTALL));
-        } else if info.installed {
-            info.agent_note =
-                Some("Sign in with `opencode auth login` to chat with it here.".to_string());
-        } else {
-            info.agent_note = Some(
-                "Install opencode (curl -fsSL https://opencode.ai/install | bash), then sign in with `opencode auth login`."
-                    .to_string(),
-            );
-        }
-        Some(info)
+    async fn detect_snapshot(&self) -> Option<HarnessInfo> {
+        self.detect_at(true).await
     }
 
     async fn run_turn(&self, ctx: &mut TurnCtx) -> TurnResult {
@@ -220,6 +523,65 @@ fn opencode_auth_path() -> Option<PathBuf> {
     Some(base.join("opencode").join("auth.json"))
 }
 
+/// The cheap config read for the snapshot pass: `OPENCODE_CONFIG_CONTENT`,
+/// the file `OPENCODE_CONFIG` points at, else `opencode.json` under
+/// `OPENCODE_CONFIG_DIR` or the stock `~/.config/opencode`. `debug config
+/// --pure` additionally merges project and plugin layers, but it costs a
+/// child process — the snapshot settles for the file and the full pass
+/// re-reads it properly.
+///
+/// One merge the file read must not skip: orx's own connected local models,
+/// which `local_models::prepare_env` folds into `OPENCODE_CONFIG_CONTENT` for
+/// every spawned CLI — and inline content shadows the file entirely, so a
+/// connections-only user sees exactly those providers and nothing else.
+///
+/// Returns the config plus whether a source exists the strict parse could
+/// not honor (`.jsonc`, comments) — a cue for the full pass to ask the CLI.
+fn snapshot_config() -> (Value, bool) {
+    let connections = crate::local::local_models::read().unwrap_or_default();
+    // `true` when a config source exists that the strict file read cannot
+    // honor — opencode accepts `.jsonc` and comments, which parse as `Null`
+    // here and would silently drop configured providers. The full pass
+    // resolves those with `debug config --pure`.
+    let mut unresolved = false;
+    let mut config = if let Some(content) = crate::local::shell_env::var("OPENCODE_CONFIG_CONTENT")
+    {
+        // The env var overrides the file entirely — present-but-unparseable
+        // means "no usable config", not "fall through to the file" — but its
+        // comments still outrun the strict parse.
+        let parsed = serde_json::from_str::<Value>(&content.to_string_lossy());
+        unresolved = parsed.is_err();
+        parsed.unwrap_or(Value::Null)
+    } else if !connections.is_empty() {
+        // The spawned CLI would get inline content built from the connections
+        // alone; the file never enters the picture.
+        json!({})
+    } else if let Some(custom) = crate::local::shell_env::var("OPENCODE_CONFIG") {
+        let path = PathBuf::from(custom);
+        let parsed = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        unresolved = path.exists() && parsed.is_none();
+        parsed.unwrap_or(Value::Null)
+    } else {
+        let dir = crate::local::shell_env::var("OPENCODE_CONFIG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| super::xdg_config_home().join("opencode"));
+        let json = dir.join("opencode.json");
+        let parsed = std::fs::read_to_string(&json)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        // opencode honors a sibling `.jsonc` alongside — and comments inside
+        // — `.json`; either outruns what the file read can claim to cover.
+        unresolved = dir.join("opencode.jsonc").exists() || (json.exists() && parsed.is_none());
+        parsed.unwrap_or(Value::Null)
+    };
+    if !connections.is_empty() && config.is_object() {
+        let _ = crate::local::local_models::merge_config(&mut config, &connections, None);
+    }
+    (config, unresolved)
+}
+
 /// Providers opencode is signed into (its auth.json is `{provider: {type}}`).
 fn opencode_providers() -> Vec<String> {
     let Some(auth) = opencode_auth_path().and_then(read_json) else {
@@ -229,6 +591,190 @@ fn opencode_providers() -> Vec<String> {
         Some(map) => map.keys().cloned().collect(),
         None => Vec::new(),
     }
+}
+
+/// Providers whose stored key a live request rejects: one tiny read-only
+/// request per provider on its first catalogued model. Verdicts are kept per
+/// auth.json version so a paid probe runs once, not once per detection, and
+/// only when the child actually answered — a timeout or spawn failure is not
+/// remembered, so a dead key is still found on the next detection.
+async fn dead_providers(
+    binary: &ResolvedBinary,
+    providers: &[String],
+    models: &[ModelInfo],
+) -> Vec<String> {
+    static VERDICTS: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let verdicts = VERDICTS.get_or_init(Default::default);
+    let version = opencode_auth_path()
+        .and_then(|p| std::fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let probes = providers.iter().filter_map(|provider| {
+        let model = models
+            .iter()
+            .find(|model| model_provider(&model.id) == provider)?
+            .id
+            .clone();
+        let key = format!("{version}:{provider}");
+        let cached = verdicts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied();
+        Some(async move {
+            let dead = match cached {
+                Some(dead) => dead,
+                None => {
+                    let dead = probe_rejects_key(binary, &model).await;
+                    if let Some(dead) = dead {
+                        verdicts
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, dead);
+                    }
+                    dead.unwrap_or(false)
+                }
+            };
+            dead.then(|| provider.clone())
+        })
+    });
+    futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// `Some(true)` when the provider answered with an authentication error,
+/// `Some(false)` for any other answer, `None` when the child never answered.
+async fn probe_rejects_key(binary: &ResolvedBinary, model: &str) -> Option<bool> {
+    let out = opencode_child(
+        binary,
+        Some(model),
+        "Reply with the single word ok",
+        KEY_PROBE_TIMEOUT,
+    )
+    .await?;
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Some(!out.status.success() && is_auth_rejection(&text))
+}
+
+/// Phrases the major providers use when a key is invalid, revoked, or expired.
+/// A bare `401` is deliberately absent: line numbers and counts contain it.
+const AUTH_REJECTION_MARKERS: &[&str] = &[
+    "api key not valid",
+    "invalid api key",
+    "incorrect api key",
+    "invalid x-api-key",
+    "invalid_api_key",
+    "authentication_error",
+    "authentication failed",
+    "unauthorized",
+    "status 401",
+    "http 401",
+    "code 401",
+    "error 401",
+    "(401)",
+    "key has expired",
+    "api key expired",
+    "no auth credentials",
+];
+
+fn is_auth_rejection(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    AUTH_REJECTION_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// The `provider` half of an opencode `provider/model` id.
+fn model_provider(id: &str) -> &str {
+    id.split_once('/').map(|(p, _)| p).unwrap_or(id)
+}
+
+fn local_providers(config: &Value) -> Vec<(&str, &Value)> {
+    config
+        .get("provider")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+        .filter(|(id, provider)| {
+            provider_enabled(config, id)
+                && provider
+                    .pointer("/options/baseURL")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_loopback_url)
+        })
+        .map(|(id, provider)| (id.as_str(), provider))
+        .collect()
+}
+
+fn provider_enabled(config: &Value, id: &str) -> bool {
+    let contains = |key| {
+        config.get(key).and_then(Value::as_array).map(|providers| {
+            providers
+                .iter()
+                .any(|provider| provider.as_str() == Some(id))
+        })
+    };
+    contains("enabled_providers").unwrap_or(true)
+        && !contains("disabled_providers").unwrap_or(false)
+}
+
+fn apply_configured_labels(models: &mut [ModelInfo], config: &Value) {
+    for model in models
+        .iter_mut()
+        .filter(|model| model.display_name.is_none())
+    {
+        if let Some((provider, id)) = model.id.split_once('/') {
+            model.display_name = config
+                .get("provider")
+                .and_then(|providers| providers.get(provider))
+                .and_then(|provider| provider.get("models"))
+                .and_then(|models| models.get(id))
+                .and_then(|model| model.get("name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+        }
+    }
+}
+
+async fn available_local_models(providers: &[(&str, &Value)]) -> HashSet<String> {
+    let probes = providers.iter().map(|(id, provider)| async move {
+        let advertised = crate::local::local_models::discover(&crate::local::local_models::Probe {
+            base_url: provider.pointer("/options/baseURL")?.as_str()?.to_owned(),
+            api_key: provider
+                .pointer("/options/apiKey")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        })
+        .await
+        .ok()?;
+        let models = provider.get("models")?.as_object()?;
+        Some(
+            models
+                .iter()
+                .filter_map(|(model, options)| {
+                    let api_id = options.get("id").and_then(Value::as_str).unwrap_or(model);
+                    advertised
+                        .iter()
+                        .any(|entry| entry == api_id)
+                        .then(|| format!("{id}/{model}"))
+                })
+                .collect::<Vec<_>>(),
+        )
+    });
+    futures::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .flatten()
+        .collect()
 }
 
 /// `opencode models --verbose` — the ground truth for what the agent can run
@@ -243,80 +789,190 @@ fn opencode_providers() -> Vec<String> {
 /// Falls back to the plain `opencode models` id list if `--verbose` is
 /// unavailable or unparseable, so an older/newer opencode still yields models
 /// (just without per-model variants).
-async fn opencode_models(bin: &PathBuf) -> Vec<super::ModelInfo> {
-    let verbose = run_models(bin, &["models", "--verbose"]).await;
+async fn opencode_models(bin: PathBuf) -> (Vec<super::ModelInfo>, HashSet<String>) {
+    let verbose = run_models(bin.clone(), &["models", "--verbose"]).await;
     if let Some(out) = &verbose {
         let parsed = parse_verbose_models(out);
         if !parsed.is_empty() {
-            return parsed;
+            let public = parse_verbose_models_filtered(out, true)
+                .into_iter()
+                .map(|model| model.id)
+                .collect();
+            return (parsed, public);
         }
     }
     let Some(plain) = run_models(bin, &["models"]).await else {
-        return Vec::new();
+        return (Vec::new(), HashSet::new());
     };
-    model_id_lines(&plain).map(super::ModelInfo::new).collect()
+    (
+        model_id_lines(&plain).map(super::ModelInfo::new).collect(),
+        HashSet::new(),
+    )
 }
 
-/// One-shot session title from the first user message: a throwaway
-/// `opencode run` child on the user's default model. opencode's server no
+/// One headless request on a throwaway `opencode run` child on
+/// `request.model`, else the user's default model. opencode's server no
 /// longer retitles parent sessions itself (only sub-agent child sessions get
-/// task-description titles), so the `session.updated` adoption path never
-/// fires for the session proper — this mirrors the claude/codex one-shot
-/// children instead. Any failure lands on `None` and keeps the placeholder.
-async fn opencode_generate_title(bin: &PathBuf, first_message: &str) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(bin);
-    // The user's message is embedded in the prompt, so the child must not be
-    // able to act on it: the built-in read-only `plan` agent denies writes,
-    // `--pure` skips external plugins, and the temp cwd keeps any residual
-    // reads away from real repos. A tool call that still asks for permission
-    // just blocks the unattended child until TITLE_TIMEOUT kills it — the
-    // placeholder title stands.
-    cmd.args([
-        "run",
-        "--agent",
-        "plan",
-        "--pure",
-        &super::title::title_prompt(first_message),
-    ])
-    .stdin(std::process::Stdio::null())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::null())
-    .kill_on_drop(true)
-    // Outside any repository, so the child doesn't ingest the server cwd's
-    // AGENTS.md into a request that only needs one sentence.
-    .current_dir(std::env::temp_dir());
-    crate::local::chat::prepare_env(&mut cmd);
-    cmd.env(
-        "OPENCODE_DB",
-        native_store::prepare_opencode(NativeStore::Isolated).ok()?,
-    );
-    // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
-    // otherwise write escape codes straight into the title column.
-    cmd.env("NO_COLOR", "1");
-    let out = tokio::time::timeout(super::title::TITLE_TIMEOUT, cmd.output())
+/// task-description titles), so titles run through here like the
+/// claude/codex one-shot children. opencode has no system-prompt flag, so
+/// `system` leads the message. Any failure lands on `None` and the caller
+/// keeps its fallback.
+async fn opencode_one_shot(binary: &ResolvedBinary, request: OneShot<'_>) -> Option<String> {
+    let message = format!("{}\n\n{}", request.system, request.prompt);
+    if binary.protocol == crate::local::opencode::Protocol::V2 {
+        return v2::generate(
+            binary.clone(),
+            request.model.map(str::to_owned),
+            message,
+            request.timeout,
+        )
         .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
-        return None;
+        .ok();
     }
-    super::title::sanitize_title(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Run `opencode <args>` in the home dir, returning stdout on success.
-async fn run_models(bin: &PathBuf, args: &[&str]) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(bin);
-    cmd.args(args)
-        .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-        .stdin(std::process::Stdio::null());
-    crate::local::chat::prepare_env(&mut cmd);
-    let fut = cmd.output();
-    let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(20), fut).await else {
-        return None;
-    };
+    let out = opencode_child(binary, request.model, &message, request.timeout).await?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Run one unattended `opencode run` to completion, or `None` if it could
+/// not be started, had no isolated store, or ran past `timeout`.
+///
+/// The message embeds untrusted text, so the child must not be able to act on
+/// it: the built-in read-only `plan` agent denies writes, `--pure` skips
+/// external plugins, and the temp cwd keeps any residual reads away from real
+/// repos. A tool call that still asks for permission just blocks the child
+/// until the timeout kills it.
+async fn opencode_child(
+    binary: &ResolvedBinary,
+    model: Option<&str>,
+    message: &str,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let db = native_store::prepare_opencode(NativeStore::Isolated).ok()?;
+    let lease = crate::local::opencode::prepare_database(binary, &db)
+        .await
+        .ok()?;
+    let mut cmd = tokio::process::Command::new(&binary.path);
+    cmd.args(["run", "--agent", "plan", "--pure"]);
+    cmd.args(model.iter().flat_map(|model| ["--model", model]))
+        .arg(message)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .current_dir(std::env::temp_dir());
+    crate::local::local_models::prepare_env(&mut cmd, model).ok()?;
+    // Stateless V1 calls must not race chat startup when initializing its database.
+    cmd.env("OPENCODE_DB", ":memory:");
+    cmd.env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
+    // Plain text only — an ANSI-colorizing CLI (or a synced FORCE_COLOR) would
+    // otherwise write escape codes straight into the reply.
+    cmd.env("NO_COLOR", "1");
+    let binary = binary.clone();
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        // The task owns the lease until the child is reaped, even if its caller is cancelled.
+        let _lease = lease;
+        binary.check_unchanged().ok()?;
+        let (mut child, _permit) = super::detect::detect_spawn_child(cmd).await.ok()?;
+        let mut stdout = child.stdout.take()?;
+        let mut stderr = child.stderr.take()?;
+        let output = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).await.ok()?;
+            Some(bytes)
+        });
+        let errors = tokio::spawn(async move {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).await.ok()?;
+            Some(bytes)
+        });
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            _ => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                None
+            }
+        };
+        let stdout = output.await.ok().flatten();
+        let stderr = errors.await.ok().flatten();
+        Some(std::process::Output {
+            status: status?,
+            stdout: stdout?,
+            stderr: stderr?,
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Run `opencode <args>` in the home dir, returning stdout on success.
+/// File redirection avoids the truncated piped config output reported in #307.
+/// Takes a bare path rather than `ResolvedBinary` so detection can spawn the
+/// catalog children before resolution settles — a binary swapped mid-detect
+/// just answers as whatever it now is, and the next pass re-verifies.
+async fn run_models(bin: PathBuf, args: &[&str]) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(&bin);
+    cmd.args(args)
+        .current_dir(dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    crate::local::local_models::prepare_env(&mut cmd, None).ok()?;
+    cmd.env("OPENCODE_DB", ":memory:")
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1")
+        // The probe runs from the home dir, so project-layer discovery is
+        // already empty — skipping the scan outright is ~1s off the child's
+        // startup (measured on Windows).
+        .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1")
+        // Serve the catalog bundled into the binary instead of refreshing
+        // models.dev — ~1.2s off a cold first-install run, and opencode
+        // refreshes its own cache on the next real launch anyway.
+        .env("OPENCODE_DISABLE_MODELS_FETCH", "1")
+        // Nothing the catalog probe prints depends on plugins, LSP servers,
+        // the claude-code bridge, or terminal chrome — each disabled piece is
+        // startup work the child skips (~0.8s combined on Windows).
+        .env("OPENCODE_DISABLE_DEFAULT_PLUGINS", "1")
+        .env("OPENCODE_DISABLE_LSP_DOWNLOAD", "1")
+        .env("OPENCODE_DISABLE_CLAUDE_CODE", "1")
+        .env("OPENCODE_DISABLE_PRUNE", "1")
+        .env("OPENCODE_DISABLE_AUTOCOMPACT", "1")
+        .env("OPENCODE_DISABLE_TERMINAL_TITLE", "1")
+        .env("NO_COLOR", "1");
+    let path = std::env::temp_dir().join(format!("orx-opencode-stdout-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    cmd.stdout(std::process::Stdio::from(options.open(&path).ok()?));
+    let status = {
+        // The lane is acquired before the deadline, but the spawn itself is
+        // inside it — a `CreateProcess` wedged on an AV scan must not hold the
+        // fill (and its single-flight flag) forever. On timeout the dropped
+        // future kills the child via `kill_on_drop`.
+        let permit = super::detect::detect_spawn_permit().await;
+        tokio::time::timeout(Duration::from_secs(20), async move {
+            let (mut child, _permit) = super::detect::spawn_with_permit(cmd, permit).await.ok()?;
+            child.wait().await.ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    let stdout = std::fs::read(&path).ok();
+    std::fs::remove_file(&path).ok();
+    let stdout = stdout?;
+    matches!(status, Some(status) if status.success())
+        .then(|| String::from_utf8_lossy(&stdout).into_owned())
 }
 
 /// The bare `provider/model` id lines of plain `opencode models` output.
@@ -341,6 +997,10 @@ fn model_id_lines(out: &str) -> impl Iterator<Item = &str> {
 /// dropping every later model, and quietly, because a partial parse doesn't
 /// trigger the plain-list fallback.
 fn parse_verbose_models(out: &str) -> Vec<super::ModelInfo> {
+    parse_verbose_models_filtered(out, false)
+}
+
+fn parse_verbose_models_filtered(out: &str, public_only: bool) -> Vec<super::ModelInfo> {
     let mut models = Vec::new();
     let mut lines = out.lines().peekable();
     while let Some(line) = lines.next() {
@@ -385,6 +1045,21 @@ fn parse_verbose_models(out: &str) -> Vec<super::ModelInfo> {
         // An unparseable block still yields the model, just without variants —
         // never drop a model the CLI reported.
         let parsed = serde_json::from_str::<Value>(&block).ok();
+        if public_only
+            && !(header.starts_with("opencode/")
+                && parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/cost/input"))
+                    .and_then(Value::as_f64)
+                    == Some(0.0)
+                && parsed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/cost/output"))
+                    .and_then(Value::as_f64)
+                    == Some(0.0))
+        {
+            continue;
+        }
         let variants = parsed.as_ref().and_then(variant_ids);
         let name = parsed
             .as_ref()
@@ -467,6 +1142,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
             tool: None,
             state: None,
             prompt: None,
+            phase: None,
             children: Vec::new(),
         }),
         "tool" => {
@@ -497,6 +1173,7 @@ fn to_wire_part(part: &Value) -> Option<WirePart> {
                         .map(str::to_string),
                 }),
                 prompt: None,
+                phase: None,
                 children: Vec::new(),
             })
         }
@@ -609,6 +1286,16 @@ async fn post_permission(
     Ok(())
 }
 
+fn submitted_answers<'a>(answers: &'a [String], note: Option<&'a String>) -> &'a [String] {
+    if !answers.is_empty() {
+        answers
+    } else {
+        note.filter(|note| !note.trim().is_empty())
+            .map(std::slice::from_ref)
+            .unwrap_or_default()
+    }
+}
+
 /// Deliver an answered card's reply to the live serve session, unblocking the
 /// paused `session.prompt` POST. Permission → `{response: once|always|reject}`;
 /// question → `{answers: [[label,...]]}` (or reject). The reply target is the
@@ -631,14 +1318,17 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
     // Reach this session's live serve child through the shared host, exactly
     // as `ChatHost::interrupt` does — the reply goes to the same loopback
     // serve whose `session.prompt` POST is paused on this prompt.
-    let port = ctx
+    let endpoint = ctx
         .host
         .opencode
-        .port_for(&ctx.session_id)
+        .endpoint_for(&ctx.session_id)
         .await
-        .ok_or_else(|| anyhow!("opencode serve is not running — cannot deliver the reply"))?;
-    let base = format!("http://127.0.0.1:{port}");
-    let http = ctx.http();
+        .ok_or_else(|| anyhow!("OpenCode serve is not running"))?;
+    if endpoint.protocol == crate::local::opencode::Protocol::V2 {
+        return v2::reply(ctx, &endpoint, prompt, answer).await;
+    }
+    let base = endpoint.base_url;
+    let http = &endpoint.client;
 
     match prompt.kind.as_str() {
         "permission" => {
@@ -651,7 +1341,8 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
             post_permission(http, &base, native_session, request_id, response).await?;
         }
         "question" => {
-            if answer.answers.is_empty() {
+            let submitted = submitted_answers(&answer.answers, answer.note.as_ref());
+            if submitted.is_empty() {
                 // No selection: reject the question rather than reply empty, so
                 // opencode surfaces the model's fallback path.
                 http.post(format!("{base}/question/{request_id}/reject"))
@@ -663,7 +1354,7 @@ async fn reply_inline(ctx: &ResumeCtx, prompt: &WirePrompt, answer: &PromptAnswe
                 // opencode takes an array of answers, one per question; we only
                 // surface the first question, so send a single answer array.
                 http.post(format!("{base}/question/{request_id}/reply"))
-                    .json(&json!({ "answers": [&answer.answers] }))
+                    .json(&json!({ "answers": [submitted] }))
                     .send()
                     .await?
                     .error_for_status()?;
@@ -717,17 +1408,6 @@ impl std::fmt::Display for OpenCodeSetupHttpError {
 
 impl std::error::Error for OpenCodeSetupHttpError {}
 
-#[derive(Debug)]
-struct OpenCodeSetupProtocolError(&'static str);
-
-impl std::fmt::Display for OpenCodeSetupProtocolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for OpenCodeSetupProtocolError {}
-
 fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Response> {
     if response.status().is_success() {
         return Ok(response);
@@ -745,18 +1425,66 @@ fn opencode_setup_response(response: reqwest::Response) -> Result<reqwest::Respo
     .into())
 }
 
+async fn ensure_runtime(
+    ctx: &mut TurnCtx,
+    store: NativeStore,
+    binary: crate::local::opencode::ResolvedBinary,
+    database: PathBuf,
+) -> Result<crate::local::opencode::AgentStatus> {
+    let host = ctx.host.clone();
+    let project = ctx.project.clone();
+    let session = ctx.session_id.clone();
+    let model = ctx.model.clone();
+    let (sender, mut progress) = tokio::sync::watch::channel("Preparing OpenCode".to_string());
+    let setup = host.opencode.ensure(
+        &project,
+        &session,
+        model.as_deref(),
+        crate::local::opencode::ResolvedRuntime {
+            binary,
+            database,
+            store,
+        },
+        sender,
+    );
+    tokio::pin!(setup);
+    let mut progress_open = true;
+    let result = loop {
+        tokio::select! {
+            result = &mut setup => break result,
+            changed = progress.changed(), if progress_open => {
+                if changed.is_err() { progress_open = false; continue; }
+                let mut part = WirePart::tool("opencode-setup", "OpenCode", "running", None);
+                if let Some(state) = &mut part.state { state.title = Some(progress.borrow().clone()); }
+                ctx.upsert_part(part);
+                ctx.flush()?;
+            }
+        }
+    };
+    if let Some(state) = ctx
+        .assistant
+        .parts
+        .iter_mut()
+        .find(|part| part.id == "opencode-setup")
+        .and_then(|part| part.state.as_mut())
+    {
+        state.status = if result.is_ok() { "completed" } else { "error" }.into();
+        state.error = result.as_ref().err().map(ToString::to_string);
+    }
+    ctx.flush()?;
+    result
+}
+
 async fn opencode_setup_attempt(
     ctx: &mut TurnCtx,
     store: NativeStore,
+    binary: &crate::local::opencode::ResolvedBinary,
+    database: &Path,
 ) -> Result<(String, String, reqwest::Response)> {
-    let status = ctx
-        .host
-        .opencode
-        .ensure(&ctx.project, &ctx.session_id, store)
-        .await?;
+    let status = ensure_runtime(ctx, store, binary.clone(), database.to_owned()).await?;
     let port = status
         .port
-        .ok_or(OpenCodeSetupProtocolError("opencode agent has no port"))?;
+        .ok_or_else(|| anyhow!("opencode agent has no port"))?;
     let base = format!("http://127.0.0.1:{port}");
     let native_id = match &ctx.native_session_id {
         Some(id) => id.clone(),
@@ -772,11 +1500,9 @@ async fn opencode_setup_attempt(
             let id = session
                 .get("id")
                 .and_then(Value::as_str)
-                .ok_or(OpenCodeSetupProtocolError(
-                    "opencode session response had no id",
-                ))?
+                .ok_or_else(|| anyhow!("opencode session response had no id"))?
                 .to_string();
-            ctx.set_native_session_id(&id);
+            ctx.persist_native_session_id(&id)?;
             id
         }
     };
@@ -788,10 +1514,12 @@ async fn opencode_setup_attempt(
 async fn opencode_pre_accept_setup(
     ctx: &mut TurnCtx,
     store: NativeStore,
+    binary: &crate::local::opencode::ResolvedBinary,
+    database: &Path,
 ) -> Result<(String, String, reqwest::Response)> {
     loop {
         let remaining = ctx.orx_retry_remaining();
-        let attempt = opencode_setup_attempt(ctx, store);
+        let attempt = opencode_setup_attempt(ctx, store, binary, database);
         let result = match remaining {
             Some(remaining) => tokio::time::timeout(remaining, attempt)
                 .await
@@ -818,10 +1546,7 @@ async fn opencode_pre_accept_setup(
                             None,
                         )
                     } else {
-                        (
-                            error.downcast_ref::<OpenCodeSetupProtocolError>().is_none(),
-                            None,
-                        )
+                        (false, None)
                     };
                 let retry = retryable
                     .then(|| ctx.schedule_orx_retry(explicit))
@@ -868,7 +1593,16 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
         ctx.native_session_id = None;
     }
 
-    let (native_id, base, events) = opencode_pre_accept_setup(ctx, store).await?;
+    let binary = crate::local::opencode::resolve_binary().await?;
+    let database = match native_session {
+        Some(session) => session.path,
+        None => native_store::prepare_opencode(store)?,
+    };
+    if binary.protocol == crate::local::opencode::Protocol::V2 {
+        return v2::run_turn(ctx, store, binary, database).await;
+    }
+    let (native_id, base, events) =
+        opencode_pre_accept_setup(ctx, store, &binary, &database).await?;
     let mut stream = events.bytes_stream();
 
     let mut body = json!({
@@ -958,28 +1692,51 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
                 // merge its parts as the authoritative versions.
                 let resp = resp?.error_for_status()?;
                 ctx.mark_delivery(DeliveryState::Accepted);
+                let message = resp.json::<Value>().await?;
+                if let Some(error) = opencode_response_error(&message) {
+                    ctx.mark_native_retry_exhausted();
+                    ctx.mark_terminal_failure("opencode_terminal", error);
+                    return Err(anyhow!("{error}"));
+                }
                 ctx.clear_retry_status();
-                if let Ok(message) = resp.json::<Value>().await {
-                    if !opencode_response_is_current(&message, turn_started_at) {
-                        let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
-                        ctx.mark_terminal_failure("opencode_stale_response", message);
-                        return Err(anyhow!(message));
-                    }
-                    if let Some(parts) = message.get("parts").and_then(Value::as_array) {
-                        for part in parts {
-                            if let Some(wire) = to_wire_part(part) {
-                                // Preserve children: the final `task` part carries
-                                // none, but its row already streamed the sub-agent
-                                // transcript into `children`.
-                                ctx.upsert_part_preserving_children(wire);
-                            }
+                if !opencode_response_is_current(&message, turn_started_at) {
+                    let message = "OpenCode returned an earlier assistant message instead of replying to this turn. Update OpenCode or start a new chat.";
+                    ctx.mark_terminal_failure("opencode_stale_response", message);
+                    return Err(anyhow!(message));
+                }
+                if let Some(parts) = message.get("parts").and_then(Value::as_array) {
+                    for part in parts {
+                        if let Some(wire) = to_wire_part(part) {
+                            // Preserve children: the final `task` part carries
+                            // none, but its row already streamed the sub-agent
+                            // transcript into `children`.
+                            ctx.upsert_part_preserving_children(wire);
                         }
                     }
+                    ctx.mark_final_text_tail();
                 }
                 return Ok(());
             }
         }
     }
+}
+
+fn opencode_response_error(message: &Value) -> Option<&str> {
+    if let Some(error) = message
+        .pointer("/info/error")
+        .filter(|error| !error.is_null())
+    {
+        return Some(
+            error
+                .pointer("/data/message")
+                .or_else(|| error.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or("OpenCode reported an error"),
+        );
+    }
+    (message.pointer("/info/summary").and_then(Value::as_bool) == Some(true)).then_some(
+        "OpenCode compacted the context but did not resume this turn. Continue the chat to resume.",
+    )
 }
 
 fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
@@ -993,6 +1750,24 @@ fn opencode_response_is_current(message: &Value, turn_started_at: i64) -> bool {
 /// `input + output + reasoning + cache.read + cache.write`. Returns `None` when
 /// the object is absent, and `None` (not `Some(0)`) when every field is zero —
 /// the early `message.updated` events carry an all-zero placeholder.
+fn opencode_native_usage(tokens: &Value) -> crate::store::TokenUsage {
+    let field = |name| tokens.get(name).and_then(Value::as_u64);
+    let cache_read_tokens = tokens.pointer("/cache/read").and_then(Value::as_u64);
+    let cache_write_tokens = tokens.pointer("/cache/write").and_then(Value::as_u64);
+    let reasoning_tokens = field("reasoning");
+    crate::store::TokenUsage {
+        input_tokens: field("input").and_then(|input| {
+            input
+                .checked_add(cache_read_tokens?)
+                .and_then(|n| n.checked_add(cache_write_tokens?))
+        }),
+        output_tokens: field("output").and_then(|output| output.checked_add(reasoning_tokens?)),
+        cache_read_tokens,
+        cache_write_tokens,
+        reasoning_tokens,
+    }
+}
+
 fn opencode_used_tokens(tokens: Option<&Value>) -> Option<u64> {
     let tokens = tokens?;
     let field = |v: &Value, name: &str| v.get(name).and_then(Value::as_u64).unwrap_or(0);
@@ -1054,16 +1829,8 @@ fn handle_event(
             if props.get("sessionID").and_then(Value::as_str) != Some(native_id) {
                 return;
             }
-            let error = props.get("error").unwrap_or(props);
-            let message = error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("OpenCode reported an error")
-                .to_string();
-            ctx.mark_native_retry_exhausted();
+            // OpenCode can emit this before recovering through automatic compaction.
             ctx.mark_delivery(DeliveryState::Accepted);
-            ctx.mark_terminal_failure("opencode_terminal", message.clone());
-            ctx.push_error(message);
         }
         // A `task` tool spawns a sub-agent in a child session; opencode announces
         // it with `session.created` carrying the child's `parentID` = our
@@ -1071,6 +1838,17 @@ fn handle_event(
         // events stream into that row's `children`.
         Some("session.created") => {
             let info = props.get("info").unwrap_or(&Value::Null);
+            if info
+                .get("parentID")
+                .and_then(Value::as_str)
+                .is_some_and(|parent| {
+                    parent == native_id || ctx.native_usage_scopes.contains(parent)
+                })
+            {
+                if let Some(child) = info.get("id").and_then(Value::as_str) {
+                    ctx.native_usage_scopes.insert(child.to_string());
+                }
+            }
             if info.get("parentID").and_then(Value::as_str) == Some(native_id) {
                 if let Some(child_id) = info.get("id").and_then(Value::as_str) {
                     if let Some(spawn) = newest_task_part_id(&ctx.assistant.parts, sub_sessions) {
@@ -1082,7 +1860,8 @@ fn handle_event(
         Some("message.updated") => {
             let info = props.get("info").unwrap_or(&Value::Null);
             let session = info.get("sessionID").and_then(Value::as_str);
-            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant");
+            let is_assistant = info.get("role").and_then(Value::as_str) == Some("assistant")
+                && info.get("summary").and_then(Value::as_bool) != Some(true);
             if session == Some(native_id)
                 && info.get("role").and_then(Value::as_str) == Some("user")
             {
@@ -1096,6 +1875,24 @@ fn handle_event(
             if ours && is_assistant {
                 if let Some(id) = info.get("id").and_then(Value::as_str) {
                     assistant_msgs.insert(id.to_string());
+                }
+            }
+            let accountable = session == Some(native_id)
+                || session.is_some_and(|session| ctx.native_usage_scopes.contains(session));
+            if accountable && info.get("role").and_then(Value::as_str) == Some("assistant") {
+                if let (Some(id), Some(model), Some(provider)) = (
+                    info.get("id").and_then(Value::as_str),
+                    info.get("modelID").and_then(Value::as_str),
+                    info.get("providerID").and_then(Value::as_str),
+                ) {
+                    ctx.native_message_models.insert(
+                        id.to_string(),
+                        crate::store::InvocationIdentity {
+                            harness: "opencode".into(),
+                            model: model.to_string(),
+                            provider: Some(provider.to_string()),
+                        },
+                    );
                 }
             }
             // Only the MAIN session's tokens drive the context meter; a
@@ -1120,6 +1917,25 @@ fn handle_event(
                 .get("messageID")
                 .and_then(Value::as_str)
                 .is_some_and(|mid| assistant_msgs.contains(mid));
+            if (session == Some(native_id)
+                || session.is_some_and(|session| ctx.native_usage_scopes.contains(session)))
+                && part.get("type").and_then(Value::as_str) == Some("step-finish")
+            {
+                if let (Some(id), Some(tokens)) =
+                    (part.get("id").and_then(Value::as_str), part.get("tokens"))
+                {
+                    let identity = part
+                        .get("messageID")
+                        .and_then(Value::as_str)
+                        .and_then(|id| ctx.native_message_models.get(id));
+                    ctx.record_native_usage(
+                        id,
+                        identity.map(|i| i.model.as_str()),
+                        identity.and_then(|i| i.provider.as_deref()),
+                        opencode_native_usage(tokens),
+                    );
+                }
+            }
             // A sub-agent's part (foreign sessionID we've registered) streams
             // into its owning `task` row's children, with a namespaced id — but
             // only assistant-owned parts (skip the child's user prompt echo).
@@ -1136,13 +1952,24 @@ fn handle_event(
             if session != Some(native_id) || !owned_by_assistant {
                 return;
             }
+            if part.get("type").and_then(Value::as_str) == Some("step-finish")
+                && part.get("reason").and_then(Value::as_str) == Some("stop")
+            {
+                ctx.mark_final_text_tail();
+                ctx.maybe_flush();
+            }
             if let Some(wire) = to_wire_part(part) {
                 ctx.upsert_part(wire);
                 ctx.maybe_flush();
             }
         }
         Some("message.part.delta") => {
-            if props.get("field").and_then(Value::as_str) != Some("text") {
+            if props.get("field").and_then(Value::as_str) != Some("text")
+                || !props
+                    .get("messageID")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| assistant_msgs.contains(id))
+            {
                 return;
             }
             let session = props.get("sessionID").and_then(Value::as_str);
@@ -1269,6 +2096,63 @@ async fn handle_prompt_event(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn local_models_require_an_enabled_loopback_server_and_matching_model() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/v1/models",
+                    axum::routing::get(|| async {
+                        axum::Json(json!({"data": [{"id": "loaded"}]}))
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let mut config = json!({
+            "enabled_providers": ["local"],
+            "provider": {
+                "local": {"options": {"baseURL": base}, "models": {
+                    "loaded": {}, "missing": {}, "alias": {"id": "loaded"}
+                }},
+                "disabled": {"options": {"baseURL": base}},
+                "cloud": {"options": {"baseURL": "https://example.com/v1"}}
+            }
+        });
+        let providers = local_providers(&config);
+        assert_eq!(providers.len(), 1);
+        let available = available_local_models(&providers).await;
+        assert_eq!(
+            available,
+            HashSet::from(["local/loaded".into(), "local/alias".into()])
+        );
+        assert!(!provider_enabled(&config, "openai"));
+        server.abort();
+        let _ = server.await;
+        assert!(available_local_models(&providers).await.is_empty());
+        config["disabled_providers"] = json!(["local"]);
+        assert!(local_providers(&config).is_empty());
+        for url in [
+            "http://localhost:1234/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://[::1]:11434/v1",
+        ] {
+            assert!(is_loopback_url(url));
+        }
+        for url in [
+            "https://localhost.example/v1",
+            "http://127.0.0.1@example.com/v1",
+            "http://192.168.1.1/v1",
+            "file:///tmp/models",
+        ] {
+            assert!(!is_loopback_url(url));
+        }
+    }
+
     /// Trimmed-down real `opencode models --verbose` output (1.17.15): a header
     /// line per model followed by its pretty-printed JSON. Covers the three
     /// cases that matter — a rich variants map, a *different* one on another
@@ -1314,8 +2198,77 @@ opencode/glm-5
             .map(|c| c.iter().map(|c| c.id.as_str()).collect())
     }
 
+    #[test]
+    fn public_models_require_opencode_and_explicit_zero_cost() {
+        let catalog = r#"opencode/free
+{"cost":{"input":0,"output":0}}
+opencode/paid
+{"cost":{"input":1,"output":2}}
+other/free
+{"cost":{"input":0,"output":0}}
+opencode/unknown
+{}
+"#;
+        let models = parse_verbose_models_filtered(catalog, true);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "opencode/free");
+        assert_eq!(parse_verbose_models(catalog).len(), 4);
+    }
+
+    #[test]
+    fn native_stop_marks_only_the_final_text_tail() {
+        let mut ctx = TurnCtx::test_stub();
+        ctx.upsert_part(WirePart::text("progress", "Reading"));
+        ctx.upsert_part(WirePart::tool("tool", "read", "completed", None));
+        ctx.upsert_part(WirePart::text("answer", "Done"));
+        let mut messages = HashSet::from(["message".to_string()]);
+        handle_event(
+            &mut ctx,
+            "session",
+            &json!({"type":"message.part.updated","properties":{"part":{"id":"finish","messageID":"message","sessionID":"session","type":"step-finish","reason":"stop"}}}),
+            &mut messages,
+            &mut HashMap::new(),
+        );
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[2].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
+        ctx.upsert_part(WirePart::text("progress", "Reading"));
+        ctx.upsert_part(WirePart::text("answer", "Done."));
+        ctx.mark_final_text_tail();
+        assert_eq!(
+            ctx.assistant.parts[0].phase,
+            Some(crate::local::chat::MessagePhase::Commentary)
+        );
+        assert_eq!(
+            ctx.assistant.parts[2].phase,
+            Some(crate::local::chat::MessagePhase::FinalAnswer)
+        );
+    }
+
     /// The core of issue #123 for opencode: variants are genuinely per-model,
     /// so each model gets its own list rather than a hard-coded union.
+    #[test]
+    fn plain_catalog_keeps_configured_local_labels() {
+        let mut models = vec![
+            ModelInfo::new("local/mlx/qwen"),
+            ModelInfo::new("cloud/claude").with_label(Some("Claude"), None),
+        ];
+        apply_configured_labels(
+            &mut models,
+            &json!({"provider":{"local":{"models":{"mlx/qwen":{"name":"Qwen · LM Studio (local)"}}}}}),
+        );
+        assert_eq!(
+            models[0].display_name.as_deref(),
+            Some("Qwen · LM Studio (local)")
+        );
+        assert_eq!(models[1].display_name.as_deref(), Some("Claude"));
+    }
+
     #[test]
     fn verbose_models_parse_per_model_variants() {
         let models = parse_verbose_models(VERBOSE_SAMPLE);
@@ -1585,6 +2538,18 @@ opencode/glm-5
     }
 
     #[test]
+    fn native_step_tokens_restore_inclusive_counters() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("fixtures/opencode-mock-usage.json")).unwrap();
+        let usage = opencode_native_usage(&fixture[0]["tokens"]);
+        usage.validate().unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.reasoning_tokens, Some(5));
+        assert_eq!(usage.total(), Some(120));
+    }
+
+    #[test]
     fn message_updated_reports_summed_tokens_without_window() {
         let mut ctx = TurnCtx::test_stub();
         let mut msgs = HashSet::new();
@@ -1637,6 +2602,37 @@ opencode/glm-5
     }
 
     #[test]
+    fn compaction_recovery_does_not_surface_a_terminal_error_or_summary() {
+        let mut ctx = TurnCtx::test_stub();
+        let mut messages = HashSet::new();
+        let mut sessions = HashMap::new();
+        for event in [
+            json!({"type":"session.error","properties":{"sessionID":"ses_x","error":{"name":"ContextOverflowError","data":{"message":"Too many tokens"}}}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"summary","sessionID":"ses_x","role":"assistant","summary":true}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"summary_text","messageID":"summary","sessionID":"ses_x","type":"text","text":"Internal summary"}}}),
+            json!({"type":"message.part.delta","properties":{"sessionID":"ses_x","messageID":"summary","partID":"summary_text","field":"text","delta":"hidden"}}),
+            json!({"type":"message.updated","properties":{"info":{"id":"answer","sessionID":"ses_x","role":"assistant"}}}),
+            json!({"type":"message.part.updated","properties":{"part":{"id":"answer_text","messageID":"answer","sessionID":"ses_x","type":"text","text":"Run finished"}}}),
+        ] {
+            handle_event(&mut ctx, "ses_x", &event, &mut messages, &mut sessions);
+        }
+        assert_eq!(ctx.delivery_state(), DeliveryState::Accepted);
+        assert_eq!(ctx.assistant.parts.len(), 1);
+        assert_eq!(ctx.assistant.parts[0].text.as_deref(), Some("Run finished"));
+        assert_eq!(
+            opencode_response_error(&json!({"info":{"role":"assistant","finish":"stop"}})),
+            None
+        );
+        assert_eq!(
+            opencode_response_error(
+                &json!({"info":{"error":{"name":"APIError","data":{"message":"Invalid API key"}}}})
+            ),
+            Some("Invalid API key")
+        );
+        assert!(opencode_response_error(&json!({"info":{"summary":true}})).is_some());
+    }
+
+    #[test]
     fn stale_final_response_is_rejected() {
         assert!(opencode_response_is_current(
             &json!({"info":{"time":{"created":100}}}),
@@ -1646,6 +2642,29 @@ opencode/glm-5
             &json!({"info":{"time":{"created":99}}}),
             100
         ));
+    }
+
+    #[test]
+    fn auth_rejections_are_recognized_but_other_failures_are_not() {
+        assert!(is_auth_rejection(
+            "Error: API key not valid. Please pass a valid API key."
+        ));
+        assert!(is_auth_rejection("Incorrect API key provided: sk-abc"));
+        assert!(is_auth_rejection("{\"type\":\"authentication_error\"}"));
+        assert!(is_auth_rejection("HTTP 401 Unauthorized"));
+        assert!(!is_auth_rejection("Error: fetch failed (ENOTFOUND)"));
+        assert!(!is_auth_rejection(
+            "    at plugin.ts:401:12\ncontext: 1401 tokens"
+        ));
+        assert!(!is_auth_rejection("ok"));
+        assert!(!is_auth_rejection("model not found: google/nope"));
+    }
+
+    #[test]
+    fn model_provider_is_the_prefix() {
+        assert_eq!(model_provider("google/gemini-2.5-flash"), "google");
+        assert_eq!(model_provider("opencode/big-pickle"), "opencode");
+        assert_eq!(model_provider("bare"), "bare");
     }
 
     #[test]
@@ -1721,6 +2740,25 @@ opencode/glm-5
             &mut subs,
         );
         assert_eq!(subs.get("ses_child").map(String::as_str), Some("prt_task"));
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"session.created","properties":{"info":{"id":"ses_grandchild","parentID":"ses_child"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        handle_event(
+            &mut ctx,
+            "ses_main",
+            &json!({"type":"message.updated","properties":{"info":{"id":"msg_grandchild","sessionID":"ses_grandchild","role":"assistant","modelID":"child-model","providerID":"fixture"}}}),
+            &mut msgs,
+            &mut subs,
+        );
+        assert!(ctx.native_usage_scopes.contains("ses_grandchild"));
+        assert_eq!(
+            ctx.native_message_models["msg_grandchild"].model,
+            "child-model"
+        );
         // The child session's assistant message + a tool part → nests under task.
         handle_event(
             &mut ctx,
@@ -1766,5 +2804,73 @@ opencode/glm-5
         let task = &ctx.assistant.parts[0];
         assert_eq!(task.state.as_ref().unwrap().status, "completed");
         assert_eq!(task.children.len(), 1, "children survive the final merge");
+    }
+
+    /// A `#!/bin/sh` stand-in for the opencode CLI, as in `detect.rs`.
+    #[cfg(unix)]
+    fn sh_script(name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("orx-opencode-capture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        let body = body.replacen(
+            "#!/bin/sh\n",
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 1.18.31; exit 0; fi\n",
+            1,
+        );
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Capture uses a private regular file because resolved config can contain API keys.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_stdout_is_a_private_file() {
+        let script = sh_script(
+            "stdout-kind",
+            "#!/bin/sh\n[ -f /dev/stdout ] && ls -lL /dev/stdout\n",
+        );
+
+        let binary = crate::local::opencode::resolve_binary_at(script.clone())
+            .await
+            .unwrap();
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
+        // macOS reports the write-only descriptor mode through /dev/stdout.
+        assert!(
+            out.starts_with("-rw-------") || out.starts_with("--w-------"),
+            "stdout permissions: {out}"
+        );
+
+        std::fs::remove_dir_all(script.parent().unwrap()).ok();
+    }
+
+    /// Read the whole capture file after the child exits, including output over 64 KiB.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_past_the_pipe_capacity_arrives_whole() {
+        let script = sh_script(
+            "big-output",
+            "#!/bin/sh\nawk 'BEGIN { for (i = 0; i < 7000; i++) printf \"%010d\", i }'\n",
+        );
+
+        let binary = crate::local::opencode::resolve_binary_at(script.clone())
+            .await
+            .unwrap();
+        let out = run_models(binary.path.clone(), &[])
+            .await
+            .expect("child output");
+        assert_eq!(out.len(), 70_000);
+        assert!(
+            out.ends_with("0000006999"),
+            "tail: {}",
+            &out[out.len() - 20..]
+        );
+
+        std::fs::remove_dir_all(script.parent().unwrap()).ok();
     }
 }

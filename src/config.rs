@@ -46,6 +46,20 @@ pub fn biorxiv_api_url() -> String {
     std::env::var("BIORXIV_API_URL").unwrap_or_else(|_| "https://api.biorxiv.org".to_string())
 }
 
+/// Base URL for NCBI E-utilities (PubMed search and records). Public, no
+/// token. Backs PubMed discovery and `orx paper <pmid>`. Override with
+/// `PUBMED_API_URL`.
+pub fn pubmed_api_url() -> String {
+    std::env::var("PUBMED_API_URL")
+        .unwrap_or_else(|_| "https://eutils.ncbi.nlm.nih.gov/entrez/eutils".to_string())
+}
+
+/// Contact address sent to NCBI as `email=` alongside `tool=orx`, which NCBI
+/// asks E-utilities clients to include. Override with `NCBI_EMAIL`.
+pub fn ncbi_email() -> String {
+    std::env::var("NCBI_EMAIL").unwrap_or_else(|_| "orx@alphaxiv.org".to_string())
+}
+
 /// Contact address sent to OpenAlex as `mailto=` to enter its faster "polite
 /// pool". OpenAlex asks API users to identify themselves this way. Override with
 /// `OPENALEX_MAILTO`.
@@ -126,35 +140,50 @@ pub async fn clear_credentials() -> Result<()> {
     }
 }
 
-/// Where the Overleaf Git authentication token lives. Deliberately *not*
+/// Where the Overleaf Git authentication token and session cookie live. Deliberately *not*
 /// `~/.openresearch/env`: `list_synced_env` fans that file out to every compute
 /// backend and into the agent's environment, and nothing off this machine
 /// pushes to Overleaf.
-fn overleaf_token_path() -> PathBuf {
+fn overleaf_credentials_path() -> PathBuf {
     config_dir().join("overleaf.json")
 }
 
-#[derive(Serialize, Deserialize)]
-struct OverleafToken {
+#[derive(Default, Serialize, Deserialize)]
+struct OverleafCredentials {
+    #[serde(default)]
     token: String,
+    /// The browser session cookie the live editor channel authenticates with,
+    /// as `name=value`. Separate from the token: the git bridge is a paid
+    /// feature and the cookie is not, so either can be present alone.
+    #[serde(default)]
+    session: String,
+    /// The Overleaf host the cookie belongs to; it is sent nowhere else.
+    #[serde(default)]
+    session_host: String,
 }
 
-pub fn overleaf_token() -> Option<String> {
-    let raw = std::fs::read_to_string(overleaf_token_path()).ok()?;
-    let stored: OverleafToken = serde_json::from_str(&raw).ok()?;
-    let token = stored.token.trim().to_string();
-    (!token.is_empty()).then_some(token)
+fn overleaf_credentials() -> OverleafCredentials {
+    std::fs::read_to_string(overleaf_credentials_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
-/// Writes the token owner-only, like `save_credentials` beside it.
-pub fn set_overleaf_token(token: &str) -> Result<()> {
-    let path = overleaf_token_path();
+/// Writes owner-only, like `save_credentials` beside it. An empty file goes
+/// away rather than lingering with nothing in it.
+fn save_overleaf_credentials(credentials: &OverleafCredentials) -> Result<()> {
+    let path = overleaf_credentials_path();
+    if credentials.token.is_empty() && credentials.session.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        };
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let body = serde_json::to_string_pretty(&OverleafToken {
-        token: token.to_string(),
-    })?;
+    let body = serde_json::to_string_pretty(credentials)?;
     std::fs::write(&path, format!("{body}\n"))?;
     #[cfg(unix)]
     {
@@ -164,12 +193,47 @@ pub fn set_overleaf_token(token: &str) -> Result<()> {
     Ok(())
 }
 
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+pub fn overleaf_token() -> Option<String> {
+    non_empty(overleaf_credentials().token)
+}
+
+pub fn set_overleaf_token(token: &str) -> Result<()> {
+    let mut credentials = overleaf_credentials();
+    credentials.token = token.to_string();
+    save_overleaf_credentials(&credentials)
+}
+
 pub fn clear_overleaf_token() -> Result<()> {
-    match std::fs::remove_file(overleaf_token_path()) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+    let mut credentials = overleaf_credentials();
+    credentials.token.clear();
+    save_overleaf_credentials(&credentials)
+}
+
+/// The session cookie and the host it was issued by.
+pub fn overleaf_session() -> Option<(String, String)> {
+    let credentials = overleaf_credentials();
+    let session = non_empty(credentials.session)?;
+    let host = non_empty(credentials.session_host)?;
+    Some((host, session))
+}
+
+pub fn set_overleaf_session(host: &str, session: &str) -> Result<()> {
+    let mut credentials = overleaf_credentials();
+    credentials.session = session.to_string();
+    credentials.session_host = host.to_string();
+    save_overleaf_credentials(&credentials)
+}
+
+pub fn clear_overleaf_session() -> Result<()> {
+    let mut credentials = overleaf_credentials();
+    credentials.session.clear();
+    credentials.session_host.clear();
+    save_overleaf_credentials(&credentials)
 }
 
 /// The user-chosen data dir, if one is persisted and non-empty. Consumed by
@@ -183,6 +247,10 @@ pub fn clear_overleaf_token() -> Result<()> {
 /// (and vice-versa). Sync because `store::data_dir()` calls it on every open.
 pub fn settings_data_dir() -> Option<PathBuf> {
     crate::telemetry::persisted_data_dir().map(PathBuf::from)
+}
+
+pub fn settings_cache_dir() -> Option<PathBuf> {
+    crate::telemetry::persisted_cache_dir().map(PathBuf::from)
 }
 
 /// Set or clear the persisted data dir, preserving every other settings field.
@@ -325,31 +393,38 @@ pub fn remove_synced_env_var(key: &str) -> Result<()> {
 /// `synced_env_var` parses), replacing an existing line for `key` and keeping
 /// every other line. File is owner-only (0600) on create and rewrite.
 pub fn write_synced_env_var(key: &str, value: &str) -> Result<()> {
+    write_synced_env_vars(&[(key, value)])
+}
+
+pub fn write_synced_env_vars(values: &[(&str, &str)]) -> Result<()> {
     use anyhow::anyhow;
     let dir = dirs::home_dir()
         .ok_or_else(|| anyhow!("no home directory"))?
         .join(".openresearch");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("env");
-    // Inverse of synced_env_var's unescaping: backslashes first, then quotes.
-    let escaped = value.replace('\\', r"\\").replace('\'', r"'\''");
-    let new_line = format!("export {key}='{escaped}'");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let prefix = format!("export {key}=");
-    let mut lines: Vec<&str> = Vec::new();
-    let mut replaced = false;
-    for line in existing.lines() {
-        if line.starts_with(&prefix) {
-            if !replaced {
-                lines.push(&new_line);
-                replaced = true;
+    let mut lines: Vec<String> = existing.lines().map(str::to_string).collect();
+    for (key, value) in values {
+        // Inverse of synced_env_var's unescaping: backslashes first, then quotes.
+        let escaped = value.replace('\\', r"\\").replace('\'', r"'\''");
+        let new_line = format!("export {key}='{escaped}'");
+        let prefix = format!("export {key}=");
+        let mut replaced = false;
+        lines.retain_mut(|line| {
+            if !line.starts_with(&prefix) {
+                return true;
             }
-        } else {
-            lines.push(line);
+            if replaced {
+                return false;
+            }
+            *line = new_line.clone();
+            replaced = true;
+            true
+        });
+        if !replaced {
+            lines.push(new_line);
         }
-    }
-    if !replaced {
-        lines.push(&new_line);
     }
     let body = format!("{}\n", lines.join("\n"));
     {
@@ -368,5 +443,34 @@ pub fn write_synced_env_var(key: &str, value: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostSettings {
+    pub container: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshSettings {
+    pub default_host: Option<String>,
+    #[serde(default)]
+    pub hosts: std::collections::BTreeMap<String, SshHostSettings>,
+}
+
+pub fn ssh_settings() -> Result<SshSettings> {
+    crate::telemetry::ssh_settings()
+}
+
+pub fn set_ssh_host(host: String, options: SshHostSettings) -> Result<()> {
+    crate::jobs::ssh::validate_host_options(&options)?;
+    crate::telemetry::set_ssh_host(host, options)?;
+    Ok(())
+}
+
+pub fn set_ssh_default(host: Option<String>) -> Result<()> {
+    crate::telemetry::set_ssh_default(host)?;
     Ok(())
 }

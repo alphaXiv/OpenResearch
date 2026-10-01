@@ -21,10 +21,13 @@ export function CodeEditor({
   onChange,
   onSave,
   onBlur,
+  readOnly = false,
   path,
   highlightLine,
   scrollRequest,
   onScrollRequestHandled,
+  scrollPosition,
+  onScrollPositionChange,
 }: {
   value: string;
   onChange: (next: string) => void;
@@ -32,6 +35,7 @@ export function CodeEditor({
   onSave: () => void;
   /** Focus left the editor — the viewer saves any pending edit. */
   onBlur?: () => void;
+  readOnly?: boolean;
   path: string;
   /** 1-based line to scroll to and place the caret on (from a `file:line` chip). */
   highlightLine?: number;
@@ -39,6 +43,8 @@ export function CodeEditor({
    * so the caret re-navigates even though `path` didn't change. */
   scrollRequest?: number;
   onScrollRequestHandled?: () => void;
+  scrollPosition?: { top: number; left: number };
+  onScrollPositionChange?: (position: { top: number; left: number }) => void;
 }) {
   // A trailing newline opens a new (empty) line the caret can sit on, so unlike
   // the read-only view every "\n" gets a row.
@@ -56,6 +62,14 @@ export function CodeEditor({
     const ta = taRef.current;
     if (ta && overlayRef.current) overlayRef.current.scrollTop = ta.scrollTop;
   };
+  const initialScroll = useRef(scrollPosition);
+  useLayoutEffect(() => {
+    const ta = taRef.current;
+    if (!ta || !initialScroll.current) return;
+    ta.scrollTop = initialScroll.current.top;
+    ta.scrollLeft = initialScroll.current.left;
+    syncScroll();
+  }, [path]);
   // Re-sync after content changes relayout (e.g. a newline shifts scrollHeight).
   useLayoutEffect(syncScroll, [value]);
 
@@ -66,7 +80,7 @@ export function CodeEditor({
   // request re-runs this against real content.
   useLayoutEffect(() => {
     const ta = taRef.current;
-    if (!ta || !highlightLine) return;
+    if (!ta || !highlightLine || scrollRequest === undefined) return;
     const text = value.split("\n");
     const target = Math.min(Math.max(Math.trunc(highlightLine), 1), text.length);
     let caret = 0;
@@ -82,6 +96,7 @@ export function CodeEditor({
   }, [path, scrollRequest]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (readOnly) return;
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
       e.preventDefault();
       onSave();
@@ -140,10 +155,16 @@ export function CodeEditor({
         className={`file-view-editarea ${layerClassName} overflow-y-auto overflow-x-hidden resize-none border-0 bg-transparent text-transparent caret-text outline-none`}
         style={{ paddingInlineStart: `${codeCh}ch` }}
         value={value}
-        onChange={(e) => onChange(e.target.value)}
-        onScroll={syncScroll}
+        onChange={(e) => {
+          if (!readOnly) onChange(e.target.value);
+        }}
+        onScroll={(event) => {
+          syncScroll();
+          onScrollPositionChange?.({ top: Math.max(0, event.currentTarget.scrollTop), left: Math.max(0, event.currentTarget.scrollLeft) });
+        }}
         onKeyDown={onKeyDown}
-        onBlur={onBlur}
+        onBlur={readOnly ? undefined : onBlur}
+        readOnly={readOnly}
         spellCheck={false}
         autoComplete="off"
         autoCorrect="off"

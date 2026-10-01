@@ -28,14 +28,18 @@ use crate::error::{anyhow, Result};
 /// processes (unlike the `-u` flag).
 pub const PYTHONUNBUFFERED: &str = "PYTHONUNBUFFERED";
 
-/// Default `PYTHONUNBUFFERED=1` into a job's environment map unless the caller
-/// already set it (an explicit value always wins). Shared by every backend that
-/// carries env as a `HashMap`; kubernetes open-codes the equivalent because its
-/// env is a JSON `[{name, value}]` array, not a map.
-pub fn default_unbuffered(env: &HashMap<String, String>) -> HashMap<String, String> {
+/// Redirected CPython output uses Windows' ANSI codepage (often cp1252), so other
+/// characters crash a run.
+pub const PYTHONIOENCODING: &str = "PYTHONIOENCODING";
+
+/// Default CPython's streaming and encoding unless the caller set them; kubernetes
+/// open-codes it because its env is a JSON array.
+pub fn default_python_env(env: &HashMap<String, String>) -> HashMap<String, String> {
     let mut env = env.clone();
     env.entry(PYTHONUNBUFFERED.to_string())
         .or_insert_with(|| "1".to_string());
+    env.entry(PYTHONIOENCODING.to_string())
+        .or_insert_with(|| "utf-8".to_string());
     env
 }
 
@@ -46,6 +50,12 @@ pub fn default_unbuffered(env: &HashMap<String, String>) -> HashMap<String, Stri
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackendDescriptor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_container: Option<ssh::ContainerRun>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitoring_error: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cancellation_accepted: bool,
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -75,9 +85,7 @@ pub struct BackendDescriptor {
     pub ssh_port: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_user: Option<String>,
-    /// Wall-clock bound the supervisor wraps around the payload
-    /// (openresearch_job only) — persisted here because the launch happens in
-    /// the supervisor, long after the `--timeout` flag is gone.
+    /// Requested execution limit for OpenResearch and Slurm jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// Immutable local source archive used for this run. These fields make a
@@ -223,14 +231,15 @@ impl BackendDescriptor {
 
 /// Map an HF job stage onto the local run-status vocabulary. `UPDATING` appears
 /// in the wild as a live state (see huggingface_hub).
-pub fn stage_to_run_status(stage: &str) -> &'static str {
+pub fn stage_to_run_status(stage: &str) -> crate::store::RunStatus {
+    use crate::store::RunStatus;
     match stage {
-        "SCHEDULING" => "starting",
-        "RUNNING" | "UPDATING" => "running",
-        "COMPLETED" => "done",
-        "ERROR" => "failed",
-        "CANCELED" | "DELETED" => "cancelled",
-        _ => "running",
+        "SCHEDULING" => RunStatus::Starting,
+        "RUNNING" | "UPDATING" => RunStatus::Running,
+        "COMPLETED" => RunStatus::Done,
+        "ERROR" => RunStatus::Failed,
+        "CANCELED" | "DELETED" => RunStatus::Cancelled,
+        _ => RunStatus::Running,
     }
 }
 
@@ -244,6 +253,9 @@ mod tests {
 
     fn openresearch_descriptor() -> BackendDescriptor {
         BackendDescriptor {
+            ssh_container: None,
+            monitoring_error: None,
+            cancellation_accepted: false,
             kind: "openresearch_job".to_string(),
             namespace: Some("org_1".to_string()),
             job_id: Some("sb_1".to_string()),
@@ -296,6 +308,20 @@ mod tests {
         assert_eq!(d.ssh_ref().unwrap(), ("mybox", ".orx/runs/r1"));
         assert_eq!(d.ssh_host, None);
         assert_eq!(d.timeout_secs, None);
+        assert_eq!(d.ssh_container, None);
+        let mut d = d;
+        d.ssh_container = Some(ssh::ContainerRun {
+            reference: "research".into(),
+            id: "immutable-id".into(),
+            started_at: "2026-09-21T00:00:00Z".into(),
+            run_dir: "/home/user/.orx/runs/r1".into(),
+        });
+        let json = d.to_json();
+        assert!(json.contains("sshContainer"));
+        assert_eq!(
+            BackendDescriptor::parse(&json).unwrap().ssh_container,
+            d.ssh_container
+        );
     }
 
     #[test]
@@ -336,14 +362,22 @@ mod tests {
     }
 
     #[test]
-    fn default_unbuffered_injects_when_absent_and_lets_author_win() {
-        // Injected when the caller didn't set it.
-        let got = default_unbuffered(&HashMap::new());
+    fn default_python_env_injects_when_absent_and_lets_author_win() {
+        // Injected when the caller didn't set them.
+        let got = default_python_env(&HashMap::new());
         assert_eq!(got.get(PYTHONUNBUFFERED).map(String::as_str), Some("1"));
+        assert_eq!(got.get(PYTHONIOENCODING).map(String::as_str), Some("utf-8"));
 
-        // An explicit value is preserved — even a falsy one — never overwritten.
-        let author = HashMap::from([(PYTHONUNBUFFERED.to_string(), "0".to_string())]);
-        let got = default_unbuffered(&author);
+        // Explicit values are preserved — even falsy ones — never overwritten.
+        let author = HashMap::from([
+            (PYTHONUNBUFFERED.to_string(), "0".to_string()),
+            (PYTHONIOENCODING.to_string(), "cp1252".to_string()),
+        ]);
+        let got = default_python_env(&author);
         assert_eq!(got.get(PYTHONUNBUFFERED).map(String::as_str), Some("0"));
+        assert_eq!(
+            got.get(PYTHONIOENCODING).map(String::as_str),
+            Some("cp1252")
+        );
     }
 }

@@ -10,8 +10,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::json;
@@ -24,27 +23,57 @@ use crate::local::model::LocalProject;
 use crate::local::native_store::{self, NativeStore};
 use crate::store;
 
+#[path = "opencode_runtime.rs"]
+mod runtime;
+#[cfg(all(test, unix))]
+pub(crate) use runtime::resolve_binary_at;
+pub(crate) use runtime::{
+    prepare_database, resolve_binary, start_server, AgentEndpoint, Protocol, ResolvedBinary,
+};
+
 /// Playbook path inside the session worktree; opencode re-reads it every turn,
 /// so rewriting the file retargets a running server without a restart.
-const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
+pub(crate) const PLAYBOOK_REL: &str = ".openresearch/agent/autoresearch-local.md";
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `opencode` on PATH, else the installer's default drop location.
-pub fn find_opencode() -> Result<PathBuf> {
-    if let Some(found) = crate::local::shell_env::find_on_path("opencode") {
-        return Ok(found);
-    }
-    if let Some(home) = dirs::home_dir() {
-        let fallback = home.join(".opencode").join("bin").join("opencode");
-        if fallback.is_file() {
-            return Ok(fallback);
-        }
-    }
-    Err(anyhow!(
+pub(crate) struct ResolvedRuntime {
+    pub binary: ResolvedBinary,
+    pub database: PathBuf,
+    pub store: NativeStore,
+}
+
+/// `opencode` on PATH, then the installer's default drop location, in
+/// preference order. The native installer writes `~/.opencode/bin`, which a
+/// stale npm-style `opencode` shim earlier on PATH otherwise hides.
+pub(crate) fn opencode_candidates() -> Vec<PathBuf> {
+    let drop = dirs::home_dir()
+        .map(|home| home.join(".opencode").join("bin"))
+        .and_then(|dir| crate::local::shell_env::find_in_dir(&dir, "opencode"));
+    // Resolved and de-duplicated: the native install is both on PATH and in its
+    // drop directory, and probing that one binary twice costs a 15s timeout.
+    crate::local::harness::unique_bins(
+        crate::local::shell_env::find_on_path("opencode")
+            .into_iter()
+            .chain(drop)
+            .map(|path| crate::paths::canonicalize(&path).unwrap_or(path))
+            .collect(),
+    )
+}
+
+pub(crate) fn not_found() -> crate::error::Error {
+    anyhow!(
         "opencode not found (checked PATH and ~/.opencode/bin/opencode).\n\
          Install it with: curl -fsSL https://opencode.ai/install | bash"
-    ))
+    )
+}
+
+/// `opencode` on PATH, else the installer's default drop location.
+pub fn find_opencode() -> Result<PathBuf> {
+    opencode_candidates()
+        .into_iter()
+        .next()
+        .ok_or_else(not_found)
 }
 
 /// Ask the OS for a free loopback port (bind :0, read it back, release).
@@ -63,8 +92,8 @@ pub fn agent_log_path() -> PathBuf {
 /// headless turn never stalls on a TUI prompt; the interactive `question` tool
 /// is denied AND disabled (it would deadlock serve mode — nothing can answer
 /// it), repeated on the default `build` agent because the tool filter is
-/// agent-scoped. `model` only when the user passed `orx up --model`.
-fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
+/// agent-scoped. The model default keeps local subagents on the same endpoint.
+fn opencode_config_json(model: Option<&str>, instructions: &str, plugin: Option<&str>) -> String {
     let mut cfg = json!({
         "$schema": "https://opencode.ai/config.json",
         "permission": {
@@ -88,6 +117,9 @@ fn opencode_config_json(model: Option<&str>, instructions: &str) -> String {
         },
         "instructions": [instructions],
     });
+    if let Some(plugin) = plugin {
+        cfg["plugin"] = json!([plugin]);
+    }
     if let Some(model) = model {
         cfg["model"] = json!(model);
     }
@@ -205,12 +237,12 @@ fn playbook_md(project: &LocalProject, state: &ProjectState) -> String {
         .map_or(String::new(), |flavor| format!(" (`--flavor {flavor}`)"));
     let compute_bullet = format!(
         "- Compute: default target **{compute_backend}**{flavor_part} — \
-         {compute_default_source}; load **`orx-compute`** before launching"
+         {compute_default_source}; load **`orx-compute`** and read `orx compute instructions show` before configuring or launching"
     );
     let project_state = project_state_md(project, state);
     let skill_names = super::agent_skills::skills(super::agent_skills::SkillSet::Local)
         .iter()
-        .map(|skill| format!("- `{}`", skill.name))
+        .map(|skill| format!("- `{}`: {}", skill.name, skill.description))
         .collect::<Vec<_>>()
         .join("\n");
     let template = SYSTEM_PROMPT
@@ -245,6 +277,8 @@ fn exclude_agent_files(hub: &Path) {
         ".claude/skills/",
         ".opencode/skills/",
         ".agents/skills/",
+        ".agents/hooks.json",
+        ".cursor/skills/",
         ".orx/latex-templates/",
     ]
     .into_iter()
@@ -272,12 +306,12 @@ fn exclude_agent_files(hub: &Path) {
 /// and write the autoresearch playbook into the worktree. Every harness
 /// adapter injects this same file (opencode via config `instructions`, Claude
 /// Code via `--append-system-prompt`, Codex via `developerInstructions` —
-/// legacy exec: first-turn context). Returns
+/// legacy exec: first-turn context; Cursor: first-turn pointer at this file). Returns
 /// `(workdir, playbook)` — the worktree the harness runs in and the playbook
 /// path inside it.
 ///
 /// `session_skills_dir` is the harness's worktree-relative native-skills dir
-/// (`.claude/skills`, `.opencode/skills`, `.agents/skills`); when `Some`, the
+/// (`.claude/skills`, `.opencode/skills`, `.agents/skills`, `.cursor/skills`); when `Some`, the
 /// modular `orx` skills are written there too, fresh alongside the playbook, so
 /// the session's own agent auto-loads them with zero drift.
 pub fn ensure_playbook(
@@ -298,7 +332,7 @@ pub fn ensure_playbook(
     // semantics) so this session's agent discovers them natively.
     if let Some(dir) = session_skills_dir {
         super::agent_skills::ensure_session_skills(&workdir, dir)?;
-        // The user's skills — uploaded and mirrored — land beside the built-ins.
+        // Explicit uploads land beside the built-ins; discovered skills stay native.
         super::user_skills::write_into_session(&workdir, dir)?;
     }
     // LaTeX templates the agent copies from, written fresh for the same reason —
@@ -321,11 +355,23 @@ fn write_agent_files(
     project: &LocalProject,
     model: Option<&str>,
     session_id: &str,
+    protocol: Protocol,
 ) -> Result<(PathBuf, Option<PathBuf>)> {
     // Source of truth for the session-skills dir is the harness trait.
     use crate::local::harness::Harness;
     let skills_dir = crate::local::harness::opencode::OpenCode.session_skills_dir();
     let (repo, playbook) = ensure_playbook(project, session_id, skills_dir)?;
+    let plugin = if protocol == Protocol::V1 {
+        let path = repo.join(".openresearch/agent/invocation.mjs");
+        std::fs::write(&path, include_str!("opencode_invocation.mjs"))?;
+        Some(
+            reqwest::Url::from_file_path(&path)
+                .map_err(|_| anyhow!("Invalid invocation plugin path"))?
+                .to_string(),
+        )
+    } else {
+        None
+    };
     let config_override = if git::is_tracked(&repo, "opencode.json") {
         // Out-of-root config: absolute instructions path (no root to anchor it).
         let path = repo
@@ -334,14 +380,14 @@ fn write_agent_files(
             .join("opencode.json");
         std::fs::write(
             &path,
-            opencode_config_json(model, &playbook.to_string_lossy()),
+            opencode_config_json(model, &playbook.to_string_lossy(), plugin.as_deref()),
         )
         .map_err(|e| anyhow!("Could not write {}: {}", path.display(), e))?;
         Some(path)
     } else {
         std::fs::write(
             repo.join("opencode.json"),
-            opencode_config_json(model, PLAYBOOK_REL),
+            opencode_config_json(model, PLAYBOOK_REL, plugin.as_deref()),
         )
         .map_err(|e| anyhow!("Could not write opencode.json: {}", e))?;
         None
@@ -362,6 +408,7 @@ pub struct AgentStatus {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    pub protocol: Protocol,
 }
 
 struct AgentChild {
@@ -371,6 +418,9 @@ struct AgentChild {
     session_id: String,
     model: Option<String>,
     native_store: NativeStore,
+    binary: ResolvedBinary,
+    endpoint: AgentEndpoint,
+    database: native_store::opencode_database::DatabaseLease,
 }
 
 impl AgentChild {
@@ -381,37 +431,8 @@ impl AgentChild {
             project_id: Some(self.project_id.clone()),
             session_id: Some(self.session_id.clone()),
             model: self.model.clone(),
+            protocol: self.binary.protocol,
         }
-    }
-}
-
-/// Poll `/global/health` until opencode answers, watching for early exit.
-async fn wait_healthy(child: &mut Child, port: u16) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
-        .build()?;
-    let url = format!("http://127.0.0.1:{port}/global/health");
-    let deadline = Instant::now() + HEALTH_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Err(anyhow!(
-                "opencode exited during startup ({status}); see {}",
-                agent_log_path().display()
-            ));
-        }
-        if let Ok(resp) = client.get(&url).send().await {
-            if resp.status().is_success() {
-                return Ok(());
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(anyhow!(
-                "opencode did not become healthy on 127.0.0.1:{port} within {}s; see {}",
-                HEALTH_TIMEOUT.as_secs(),
-                agent_log_path().display()
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(400)).await;
     }
 }
 
@@ -423,53 +444,33 @@ async fn spawn_agent(
     session_id: &str,
     up_port: Option<u16>,
     native_store: NativeStore,
+    binary: ResolvedBinary,
+    database: native_store::opencode_database::DatabaseLease,
 ) -> Result<AgentChild> {
-    let bin = find_opencode()?;
     // The clone/worktree setup inside can hit the network; keep it off the
     // async workers.
     let (repo, config_override) = {
         let (project, model) = (project.clone(), model.map(str::to_string));
         let session = session_id.to_string();
-        tokio::task::spawn_blocking(move || write_agent_files(&project, model.as_deref(), &session))
-            .await
-            .map_err(|e| anyhow!("agent file task failed: {e}"))??
+        let protocol = binary.protocol;
+        tokio::task::spawn_blocking(move || {
+            write_agent_files(&project, model.as_deref(), &session, protocol)
+        })
+        .await
+        .map_err(|e| anyhow!("agent file task failed: {e}"))??
     };
     // Best-effort: the playbook is the real guide; the shim just lets
     // opencode's skill tool surface `orx skill` too.
     if let Err(err) = crate::commands::install_skills::install_opencode_shim().await {
         eprintln!("warning: could not install the orx opencode skill: {err}");
     }
-    let port = free_port()?;
-    // The data dir may not exist yet (fresh machine, no Store::open before us).
-    if let Some(parent) = agent_log_path().parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("Could not create {}: {}", parent.display(), e))?;
-    }
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(agent_log_path())
-        .map_err(|e| anyhow!("Could not open {}: {}", agent_log_path().display(), e))?;
-
-    let mut cmd = Command::new(&bin);
-    cmd.arg("serve")
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("--hostname")
-        .arg("127.0.0.1")
-        // Without --print-logs the log file stays empty and startup failures
-        // are undiagnosable.
-        .arg("--print-logs")
-        .current_dir(&repo)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log.try_clone().map_err(|e| anyhow!("{e}"))?))
-        .stderr(Stdio::from(log))
-        // Dies with `orx up` when the runtime drops the handle (Ctrl-C, exit).
-        .kill_on_drop(true);
+    let mut cmd = Command::new(&binary.path);
+    cmd.current_dir(&repo);
     // This orx first on PATH (the agent shells out to plain `orx`), the imported
     // shell environment, and the dashboard's Environment tab vars.
-    crate::local::chat::prepare_env(&mut cmd);
-    cmd.env("OPENCODE_DB", native_store::prepare_opencode(native_store)?);
+    crate::local::local_models::prepare_env(&mut cmd, model)?;
+    cmd.env("OPENCODE_DB", database.path())
+        .env("OPENCODE_DISABLE_AUTOUPDATE", "1");
     // Tag runs the agent launches (`orx exp run`) with this session so they can
     // be explicitly subscribed to. One serve child per session; set after the
     // synced-env loop so it isn't shadowed.
@@ -479,20 +480,11 @@ async fn spawn_agent(
         // Project configs load after OPENCODE_CONFIG and would override our
         // headless permission grants, so they are disabled for this child.
         cmd.env("OPENCODE_CONFIG", config)
-            .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1");
+            .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+            .env("OPENCODE_CONFIG_PROJECT_DISABLE", "1");
     }
-    // Own process group: a terminal SIGINT reaches orx up alone, which then
-    // tears the child down deliberately (kill_on_drop / shutdown()).
-    #[cfg(unix)]
-    cmd.process_group(0);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| anyhow!("Could not spawn {}: {}", bin.display(), e))?;
-    if let Err(err) = wait_healthy(&mut child, port).await {
-        let _ = child.kill().await;
-        return Err(err);
-    }
+    let (child, endpoint) = runtime::start_server(&binary, cmd).await?;
+    let port = endpoint.port()?;
     Ok(AgentChild {
         child,
         port,
@@ -500,22 +492,47 @@ async fn spawn_agent(
         session_id: session_id.to_string(),
         model: model.map(str::to_string),
         native_store,
+        binary,
+        endpoint,
+        database,
     })
+}
+
+/// Why a summarize attempt did or did not compact in place.
+pub(crate) enum SummarizeOutcome {
+    Compacted,
+    NoServer,
+    NoModel,
 }
 
 /// The `orx up` opencode host: one serve child per chat session, keyed by the
 /// orx session id, each running in that session's worktree. Share as
 /// `Arc<AgentHost>` in axum state.
 pub struct AgentHost {
-    /// `orx up --model` override, applied to every spawn.
+    /// `orx up --model` default when the session does not select a local model.
     model_override: Option<String>,
     /// Serializes ensure() spawns (across all sessions — a spawn is seconds,
     /// and one at a time keeps clone/fetch traffic sane). Never taken by
-    /// status()/port_for(), and `inner` is never held across a spawn — a slow
+    /// status()/endpoint_for(), and `inner` is never held across a spawn — a slow
     /// clone or health poll must not block status reads or turn replies.
     spawn_lock: Mutex<()>,
     inner: Mutex<HashMap<String, AgentChild>>,
     up_port: std::sync::OnceLock<u16>,
+    starting: std::sync::Mutex<HashMap<String, tokio::sync::watch::Sender<bool>>>,
+    stopping: std::sync::atomic::AtomicBool,
+}
+
+struct StartupRegistration<'a> {
+    host: &'a AgentHost,
+    session: &'a str,
+}
+
+impl Drop for StartupRegistration<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut starting) = self.host.starting.lock() {
+            starting.remove(self.session);
+        }
+    }
 }
 
 impl AgentHost {
@@ -525,6 +542,8 @@ impl AgentHost {
             spawn_lock: Mutex::new(()),
             inner: Mutex::new(HashMap::new()),
             up_port: std::sync::OnceLock::new(),
+            starting: std::sync::Mutex::new(HashMap::new()),
+            stopping: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -539,16 +558,64 @@ impl AgentHost {
         guard.values().map(AgentChild::status).collect()
     }
 
-    /// Loopback port of the session's live server (for inline replies/aborts).
-    pub async fn port_for(&self, session_id: &str) -> Option<u16> {
+    pub(crate) async fn endpoint_for(&self, session_id: &str) -> Option<AgentEndpoint> {
         let mut guard = self.inner.lock().await;
         let agent = guard.get_mut(session_id)?;
         if matches!(agent.child.try_wait(), Ok(None)) {
-            Some(agent.port)
+            Some(agent.endpoint.clone())
         } else {
             guard.remove(session_id);
             None
         }
+    }
+
+    pub(crate) async fn interrupt(&self, session_id: &str, native_id: &str) -> Result<()> {
+        let Some(endpoint) = self.endpoint_for(session_id).await else {
+            return Ok(());
+        };
+        let path = match endpoint.protocol {
+            Protocol::V1 => format!("/session/{native_id}/abort"),
+            Protocol::V2 => format!("/api/session/{native_id}/interrupt"),
+        };
+        endpoint
+            .client
+            .post(format!("{}{path}", endpoint.base_url))
+            .json(&json!({}))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    /// Ask opencode to summarize (compact) a session in place.
+    pub(crate) async fn summarize(
+        &self,
+        session_id: &str,
+        native_id: &str,
+        model: Option<&str>,
+    ) -> Result<SummarizeOutcome> {
+        let Some(endpoint) = self.endpoint_for(session_id).await else {
+            return Ok(SummarizeOutcome::NoServer);
+        };
+        // Summarize needs a named model. A session can legitimately have none
+        // (a custom provider advertises no models), and there is no way to call
+        // this endpoint without one — so the caller knowingly trades this
+        // resumable session for a summary rather than leaving `/compact` broken.
+        let Some((provider, model_id)) = model.and_then(|model| model.split_once('/')) else {
+            return Ok(SummarizeOutcome::NoModel);
+        };
+        let path = match endpoint.protocol {
+            Protocol::V1 => format!("/session/{native_id}/summarize"),
+            Protocol::V2 => format!("/api/session/{native_id}/summarize"),
+        };
+        endpoint
+            .client
+            .post(format!("{}{path}", endpoint.base_url))
+            .json(&json!({ "providerID": provider, "modelID": model_id }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(SummarizeOutcome::Compacted)
     }
 
     /// Spawn (or reuse) the opencode server for this session. Idempotent when
@@ -557,14 +624,65 @@ impl AgentHost {
         &self,
         project: &LocalProject,
         session_id: &str,
-        native_store: NativeStore,
+        model: Option<&str>,
+        runtime: ResolvedRuntime,
+        progress: tokio::sync::watch::Sender<String>,
     ) -> Result<AgentStatus> {
         let _spawning = self.spawn_lock.lock().await;
+        if self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(anyhow!("OpenCode is shutting down"));
+        }
+        let (sender, mut cancel) = tokio::sync::watch::channel(false);
+        self.starting
+            .lock()
+            .map_err(|_| anyhow!("OpenCode startup lock failed"))?
+            .insert(session_id.to_string(), sender);
+        let _registration = StartupRegistration {
+            host: self,
+            session: session_id,
+        };
+        let cancelled = cancel.clone();
+        tokio::select! {
+            result = self.ensure_started(project, session_id, model, runtime, progress, &cancelled) => result,
+            _ = cancel.changed() => Err(anyhow!("OpenCode startup was cancelled")),
+        }
+    }
+
+    async fn ensure_started(
+        &self,
+        project: &LocalProject,
+        session_id: &str,
+        model: Option<&str>,
+        runtime: ResolvedRuntime,
+        progress: tokio::sync::watch::Sender<String>,
+        cancelled: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<AgentStatus> {
+        let ResolvedRuntime {
+            binary,
+            database: database_path,
+            store: native_store,
+        } = runtime;
+        let model = model
+            .filter(|model| model.starts_with("orx-local-"))
+            .or(self.model_override.as_deref());
+        let database_path = native_store::opencode_database::normalize_path(&database_path)?;
+        if binary.protocol == Protocol::V1 {
+            let path = database_path.clone();
+            drop(
+                tokio::task::spawn_blocking(move || {
+                    native_store::opencode_database::DatabaseLease::acquire(&path, 1)
+                })
+                .await??,
+            );
+        }
         {
             let mut guard = self.inner.lock().await;
             if let Some(agent) = guard.get_mut(session_id) {
                 if agent.project_id == project.id
                     && agent.native_store == native_store
+                    && agent.binary == binary
+                    && agent.database.path() == database_path
+                    && agent.model.as_deref() == model
                     && matches!(agent.child.try_wait(), Ok(None))
                 {
                     return Ok(agent.status());
@@ -574,27 +692,57 @@ impl AgentHost {
                 let _ = old.child.kill().await; // kill() also reaps
             }
         }
+        // A binary replacement invalidates every owned child using this database.
+        {
+            let mut guard = self.inner.lock().await;
+            let stale: Vec<String> = guard
+                .iter()
+                .filter(|(_, child)| {
+                    child.database.path() == database_path && child.binary != binary
+                })
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in stale {
+                if let Some(mut child) = guard.remove(&id) {
+                    child.child.kill().await?;
+                }
+            }
+        }
+        let database =
+            runtime::prepare_database_with_progress(&binary, &database_path, |message| {
+                progress.send_replace(message.to_string());
+            })
+            .await?;
         // inner released: status()/port reads keep answering while the spawn
         // (clone/fetch + health poll) is in flight instead of hanging.
-        let agent = spawn_agent(
+        let mut agent = spawn_agent(
             project,
-            self.model_override.as_deref(),
+            model,
             session_id,
             self.up_port.get().copied(),
             native_store,
+            binary,
+            database,
         )
         .await?;
+        let mut inner = self.inner.lock().await;
+        if *cancelled.borrow() || self.stopping.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = agent.child.kill().await;
+            return Err(anyhow!("OpenCode startup was cancelled"));
+        }
         let status = agent.status();
-        self.inner
-            .lock()
-            .await
-            .insert(session_id.to_string(), agent);
+        inner.insert(session_id.to_string(), agent);
         Ok(status)
     }
 
     /// Kill and reap one session's child (on session delete). No-op when the
     /// session has none.
     pub async fn kill_session(&self, session_id: &str) {
+        if let Ok(mut starting) = self.starting.lock() {
+            if let Some(cancel) = starting.remove(session_id) {
+                let _ = cancel.send(true);
+            }
+        }
         if let Some(mut agent) = self.inner.lock().await.remove(session_id) {
             let _ = agent.child.kill().await;
         }
@@ -602,6 +750,13 @@ impl AgentHost {
 
     /// Kill and reap every child (also happens via kill_on_drop on exit).
     pub async fn shutdown(&self) {
+        self.stopping
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Ok(mut starting) = self.starting.lock() {
+            for (_, cancel) in starting.drain() {
+                let _ = cancel.send(true);
+            }
+        }
         for (_, mut agent) in self.inner.lock().await.drain() {
             let _ = agent.child.kill().await;
         }
@@ -612,6 +767,22 @@ impl AgentHost {
 mod tests {
     use super::*;
     use crate::local::agent_skills::{self, SkillSet};
+
+    #[tokio::test]
+    async fn cancellation_does_not_wait_for_migration_or_allow_late_startup() {
+        let host = AgentHost::new(None);
+        let _spawning = host.spawn_lock.lock().await;
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        host.starting.lock().unwrap().insert("chat".into(), cancel);
+        tokio::time::timeout(Duration::from_secs(1), host.kill_session("chat"))
+            .await
+            .unwrap();
+        assert!(*receiver.borrow());
+        tokio::time::timeout(Duration::from_secs(1), host.shutdown())
+            .await
+            .unwrap();
+        assert!(host.stopping.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     fn sample_project() -> LocalProject {
         LocalProject {
@@ -678,14 +849,12 @@ mod tests {
             "template comment not stripped"
         );
         assert!(!md.contains("<!--"), "HTML comment leaked into the prompt");
-        // Sanity: skill routing names every installed native skill without
-        // duplicating the descriptions already surfaced by the harness.
         assert!(md.contains("Use the available OpenResearch skills"));
         assert!(md.contains("execute important user flows"));
         assert!(!md.contains("orx skill <name>"));
+        // Native catalogs may abbreviate descriptions; preserve routing context here.
         for skill in agent_skills::skills(SkillSet::Local) {
-            assert!(md.contains(&format!("- `{}`", skill.name)));
-            assert!(!md.contains(skill.description));
+            assert!(md.contains(&format!("- `{}`: {}", skill.name, skill.description)));
         }
         assert!(md.contains("orx-compute"));
         assert!(md.contains("helping the user across the research process"));
@@ -709,6 +878,14 @@ mod tests {
         assert!(!md.contains("## Command index"));
         assert!(!md.contains("## The auto-research loop"));
         assert!(!md.contains("## Compute backends"));
+    }
+
+    #[test]
+    fn playbook_carries_python_environment_policy() {
+        let md = sample_playbook();
+        assert!(md.contains("## Python environments"));
+        assert!(md.contains("use `uv run --locked`"));
+        assert!(md.contains("Without uv"));
     }
 
     #[test]
@@ -766,8 +943,11 @@ mod tests {
     fn reports_skill_owns_artifact_output_policy() {
         let md = sample_playbook();
         let reports = agent_skills::find("orx-reports", SkillSet::Local).unwrap();
-        assert!(reports.content.contains("descriptive filename"));
-        assert!(reports.content.contains("artifacts root"));
+        assert!(md.contains("`orx-reports` before creating or organizing artifacts"));
+        assert!(reports.content.contains("Reuse the relevant folder"));
+        assert!(reports
+            .content
+            .contains("<file path=\"artifacts/transformer-sweep/figures/patch-size.svg\" />"));
         assert!(!md.contains("PROJECT.md"));
     }
 

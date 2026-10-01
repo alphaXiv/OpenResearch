@@ -7,6 +7,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{anyhow, Result};
 
+#[path = "opencode_db.rs"]
+pub mod opencode_database;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeStore {
     Isolated,
@@ -39,11 +42,12 @@ fn home_dir() -> PathBuf {
 pub fn opencode_db(store: NativeStore) -> PathBuf {
     match store {
         NativeStore::Isolated => crate::store::data_dir().join("agents/opencode/opencode.db"),
-        NativeStore::Legacy => user_env_path("OPENCODE_DB").unwrap_or_else(|| {
-            user_env_path("XDG_DATA_HOME")
+        NativeStore::Legacy => {
+            let data = user_env_path("XDG_DATA_HOME")
                 .unwrap_or_else(|| home_dir().join(".local/share"))
-                .join("opencode/opencode.db")
-        }),
+                .join("opencode");
+            data.join(user_env_path("OPENCODE_DB").unwrap_or_else(|| PathBuf::from("opencode.db")))
+        }
     }
 }
 
@@ -72,6 +76,15 @@ pub fn codex_home(store: NativeStore) -> PathBuf {
     }
 }
 
+pub fn cursor_home(store: NativeStore) -> PathBuf {
+    match store {
+        NativeStore::Isolated => crate::store::data_dir().join("agents/cursor"),
+        NativeStore::Legacy => user_env_path("CURSOR_CONFIG_DIR")
+            .or_else(|| user_env_path("XDG_CONFIG_HOME").map(|root| root.join("cursor")))
+            .unwrap_or_else(|| home_dir().join(".cursor")),
+    }
+}
+
 pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     let isolated = opencode_db(NativeStore::Isolated);
     let legacy = opencode_db(NativeStore::Legacy);
@@ -82,11 +95,7 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
         if store == NativeStore::Legacy && db == isolated {
             continue;
         }
-        let found = match opencode_has_session(&db, native_id) {
-            Ok(found) => found,
-            Err(_) if store == NativeStore::Legacy => false,
-            Err(error) => return Err(error),
-        };
+        let found = opencode_has_session(&db, native_id)?;
         if found {
             return Ok(Some(NativeSessionLocation { store, path: db }));
         }
@@ -94,21 +103,85 @@ pub fn opencode_session(native_id: &str) -> Result<Option<NativeSessionLocation>
     Ok(None)
 }
 
-fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
-    match std::fs::metadata(db) {
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    }
-    let connection =
-        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    match connection.query_row("SELECT 1 FROM session WHERE id = ?1", [native_id], |_| {
+pub(crate) struct OpenCodeRelocation {
+    database: PathBuf,
+    sessions: Vec<(String, String)>,
+    v2_sessions: Vec<(String, String)>,
+    projects: Vec<(String, String)>,
+}
+
+impl OpenCodeRelocation {
+    pub(crate) fn apply(self) -> Result<()> {
+        let mut connection = rusqlite::Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        let transaction = connection.transaction()?;
+        for (table, column, paths) in [
+            ("session", "directory", self.sessions),
+            ("session_v2", "directory", self.v2_sessions),
+            ("project", "worktree", self.projects),
+        ] {
+            for (old, new) in paths {
+                transaction.execute(
+                    &format!("UPDATE {table} SET {column} = ?2 WHERE {column} = ?1"),
+                    rusqlite::params![old, new],
+                )?;
+            }
+        }
+        transaction.commit()?;
         Ok(())
-    }) {
-        Ok(()) => Ok(true),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
-        Err(error) => Err(error.into()),
     }
+}
+
+pub(crate) fn opencode_relocation(
+    database: &Path,
+    relocate: impl Fn(&Path) -> PathBuf,
+) -> Result<Option<OpenCodeRelocation>> {
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut changes = OpenCodeRelocation {
+        database: database.to_path_buf(),
+        sessions: Vec::new(),
+        v2_sessions: Vec::new(),
+        projects: Vec::new(),
+    };
+    for (table, column, paths) in [
+        ("session", "directory", &mut changes.sessions),
+        ("session_v2", "directory", &mut changes.v2_sessions),
+        ("project", "worktree", &mut changes.projects),
+    ] {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            rusqlite::params![table, column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        let mut query = connection.prepare(&format!("SELECT DISTINCT {column} FROM {table}"))?;
+        for path in query.query_map([], |row| row.get::<_, String>(0))? {
+            let old = path?;
+            let new = relocate(Path::new(&old));
+            if new != Path::new(&old) {
+                paths.push((old, new.to_string_lossy().into_owned()));
+            }
+        }
+    }
+    Ok((!changes.sessions.is_empty()
+        || !changes.v2_sessions.is_empty()
+        || !changes.projects.is_empty())
+    .then_some(changes))
+}
+
+pub(crate) fn opencode_has_session(db: &Path, native_id: &str) -> Result<bool> {
+    opencode_database::has_session(db, native_id)
 }
 
 pub fn codex_sqlite_override(store: NativeStore, home: &Path) -> Option<String> {
@@ -121,6 +194,64 @@ pub fn claude_session(native_id: &str) -> Result<Option<NativeSessionLocation>> 
 
 pub fn codex_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
     session_location(codex_home, &["sessions", "archived_sessions"], native_id)
+}
+
+pub fn cursor_session(native_id: &str) -> Result<Option<NativeSessionLocation>> {
+    let isolated = cursor_home(NativeStore::Isolated);
+    for (store, root) in [
+        (NativeStore::Isolated, isolated.clone()),
+        (NativeStore::Legacy, cursor_home(NativeStore::Legacy)),
+    ] {
+        if store == NativeStore::Legacy && root == isolated {
+            continue;
+        }
+        let path = match cursor_session_path(&root, native_id) {
+            Ok(path) => path,
+            Err(_) if store == NativeStore::Legacy => continue,
+            Err(error) => return Err(error),
+        };
+        if let Some(path) = path {
+            return Ok(Some(NativeSessionLocation { store, path }));
+        }
+    }
+    Ok(None)
+}
+
+/// Cursor CLI print-mode chats live at `chats/<workspace-md5>/<uuid>/store.db`
+/// (and ACP sessions at `acp-sessions/<uuid>/`). Walk those trees only — never
+/// `projects/`, which is the IDE's transcript dump and can be huge.
+fn cursor_session_path(root: &Path, native_id: &str) -> Result<Option<PathBuf>> {
+    for tree in ["chats", "acp-sessions"] {
+        if let Some(path) = named_dir_session(&root.join(tree), native_id, 3)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn named_dir_session(root: &Path, native_id: &str, depth: usize) -> Result<Option<PathBuf>> {
+    if depth == 0 {
+        return Ok(None);
+    }
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if path.file_name().and_then(|name| name.to_str()) == Some(native_id) {
+            return Ok(Some(path));
+        }
+        if let Some(path) = named_dir_session(&path, native_id, depth - 1)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn session_location(
@@ -244,7 +375,27 @@ pub fn prepare_codex(store: NativeStore) -> Result<PathBuf> {
         Err(error) => return Err(error.into()),
     }
     prepare_links(&root, &legacy, &sources)?;
-    Ok(root.canonicalize().unwrap_or(root))
+    Ok(crate::paths::canonicalize(&root).unwrap_or(root))
+}
+
+pub fn prepare_cursor(store: NativeStore) -> Result<PathBuf> {
+    let root = cursor_home(store);
+    let legacy = cursor_home(NativeStore::Legacy);
+    if store == NativeStore::Legacy || root == legacy {
+        std::fs::create_dir_all(&root)?;
+        return Ok(root);
+    }
+    prepare_links(
+        &root,
+        &legacy,
+        &[
+            legacy.join("cli-config.json"),
+            legacy.join("skills"),
+            legacy.join("skills-cursor"),
+            legacy.join("plugins"),
+        ],
+    )?;
+    Ok(root)
 }
 
 fn prepare_links(root: &Path, lock_root: &Path, sources: &[PathBuf]) -> Result<()> {
@@ -305,6 +456,11 @@ fn reconcile_link(source: &Path, destination: &Path) -> Result<()> {
             remove_link(destination)?;
         }
         Ok(metadata) if metadata.is_file() && source_metadata.is_file() && marker.is_file() => {
+            // Windows' hard-link fallback is the source itself: nothing to adopt.
+            if same_file::is_same_file(destination, source).unwrap_or(false) {
+                write_marker(&marker, source)?;
+                return Ok(());
+            }
             if std::fs::read_to_string(&marker).ok().as_deref() == file_hash(source)?.as_deref() {
                 adopt_managed_file(destination, source)?;
             } else {
@@ -394,7 +550,7 @@ fn remove_link(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(source, destination)
 }
 
@@ -410,20 +566,109 @@ pub(crate) fn copy_symlink(source: &Path, destination: &Path) -> std::io::Result
     }
 }
 
+/// Without Developer Mode, Windows refuses symlinks; a junction reads back like one,
+/// a hard link does not (see `reconcile_link`).
 #[cfg(windows)]
-fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
-    if source.is_dir() {
+pub(crate) fn create_symlink(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let directory = source.is_dir();
+    let attempt = if directory {
         std::os::windows::fs::symlink_dir(source, destination)
     } else {
         std::os::windows::fs::symlink_file(source, destination)
+    };
+    match attempt {
+        Err(error)
+            if error.raw_os_error()
+                == Some(windows_sys::Win32::Foundation::ERROR_PRIVILEGE_NOT_HELD as i32) => {}
+        result => return result,
+    }
+    if directory {
+        create_junction(source, destination)
+    } else {
+        std::fs::hard_link(source, destination)
     }
 }
 
+/// `mklink /J` is the only junction maker short of reparse-point FFI. Both paths are quoted,
+/// and a Windows path cannot contain the `"` that would end its quoting.
+#[cfg(windows)]
+fn create_junction(source: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    let output = std::process::Command::new("cmd")
+        .arg("/d")
+        .arg("/c")
+        .raw_arg(format!(
+            "mklink /J \"{}\" \"{}\"",
+            destination.display(),
+            source.display()
+        ))
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = if output.stderr.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    Err(std::io::Error::other(format!(
+        "mklink /J: {}",
+        String::from_utf8_lossy(detail).trim()
+    )))
+}
+
+/// Outside the unix-only `tests`: hard links exist everywhere.
 #[cfg(test)]
+mod hard_link_tests {
+    use super::*;
+
+    #[test]
+    fn a_hard_linked_destination_survives_an_edit_through_the_source() {
+        let root = std::env::temp_dir().join(format!("orx-hard-link-{}", uuid::Uuid::new_v4()));
+        let legacy = root.join("legacy");
+        let isolated = root.join("isolated");
+        let source = legacy.join("config.toml");
+        let destination = isolated.join("config.toml");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::write(&source, "first").unwrap();
+        std::fs::hard_link(&source, &destination).unwrap();
+        write_marker(
+            &destination.with_file_name("config.toml.orx-managed-link"),
+            &source,
+        )
+        .unwrap();
+
+        std::fs::write(&source, "second").unwrap();
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+
+        assert!(same_file::is_same_file(&destination, &source).unwrap());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "second");
+        assert!(!std::fs::read_dir(&isolated)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .contains(".orx-conflict-")));
+
+        // A launch with nothing edited must not adopt the link back as a copy.
+        prepare_links(&isolated, &legacy, std::slice::from_ref(&source)).unwrap();
+        assert!(same_file::is_same_file(&destination, &source).unwrap());
+        assert!(!legacy.join(".config.toml.orx-backup").exists());
+        assert!(!std::fs::symlink_metadata(&destination)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
     #[test]
     fn native_store_smoke_test() {
         let root = std::env::temp_dir().join(format!("orx-native-store-{}", uuid::Uuid::new_v4()));
@@ -476,10 +721,19 @@ mod tests {
         assert!(tree_session_path(&root.join("sessions"), "ession-id")
             .unwrap()
             .is_none());
+        let chat_id = "e0ad13d3-d977-43a7-9994-e739975e82ec";
+        let chat = root.join("chats").join("abc123def456").join(chat_id);
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::write(chat.join("store.db"), []).unwrap();
+        assert_eq!(
+            cursor_session_path(&root, chat_id).unwrap().as_deref(),
+            Some(chat.as_path())
+        );
+        assert!(cursor_session_path(&root, "missing-id").unwrap().is_none());
         let db = root.join("opencode.db");
         let connection = rusqlite::Connection::open(&db).unwrap();
         connection
-            .execute_batch("CREATE TABLE session (id TEXT); INSERT INTO session VALUES ('id');")
+            .execute_batch("CREATE TABLE session (id TEXT, directory TEXT); CREATE TABLE message (id TEXT, session_id TEXT, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, data TEXT); INSERT INTO session VALUES ('id', '/tmp');")
             .unwrap();
         assert!(opencode_has_session(&db, "id").unwrap());
         assert!(!opencode_has_session(&db, "missing").unwrap());

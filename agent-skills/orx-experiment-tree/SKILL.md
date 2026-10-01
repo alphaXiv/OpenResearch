@@ -11,22 +11,24 @@ rules this depends on — **never edit a node a run has answered** and
 **the run command + env is a fixed contract** — are the cardinal rules;
 everything below assumes them.
 
+Create a node only when a planned run will establish a baseline or test a
+hypothesis relevant to the project. Put a code change on that node only if it
+serves that baseline or hypothesis. Do not create nodes for unrelated cleanup,
+refactors, bug fixes, or dependency updates.
+
 ## Before the first launch
 
-If the project has no completed runs, ask the user how they run the code before
-launching. Ask for the environment setup (conda, venv, uv, modules), dependency
-installation, the exact train or evaluation command they use today, and any
-compute-specific requirements. Do not reverse-engineer or guess this setup from
-the repository. Encode the durable recipe in the project's run command so later
-sessions do not need to ask again.
+Follow the session playbook's Python policy. Before launching, resolve the
+train/evaluation command and compute-specific requirements; ask only if the
+project setup leaves these or the chosen workflow unclear. Record the durable
+setup and execution recipe in the project's run command.
 
 ## Provisional until it answers — repair, don't branch
 
 Every node exists to establish a baseline or test a hypothesis. A run that dies
 on an error does **neither** — nothing was established, nothing was tested — so
 there is nothing to protect: fix that node's branch in place and re-run the
-same node. Successive runs on one node are how you get it working; a new node
-is for a new question.
+same node. Successive runs on one node are how you get it working.
 
 Once a run *does* answer the node — it produced the result the node was after,
 good, bad, or `nan` — the node is **frozen**. Its branch is the code that
@@ -171,8 +173,9 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
      exit condition. Don't keep calling it into a timeout.
 7. **Analyze each finish as it lands, then iterate.** Do the per-completion read
    *inside the loop above*, not deferred to the end — when a run finishes,
-   **actually read its results** with `orx logs <runId>` (see `orx-evidence`). To
-   see exactly what a finished node changed, diff its branch against its parent's
+   **actually read its results** from the file reported by `orx logs <runId>`
+   (see `orx-evidence`). To see exactly what a finished node changed, diff its
+   branch against its parent's
    branch (see `orx-git`). Don't infer from status alone. Each
    completion is a decision point with four moves:
    - **Repair** — the run answered nothing: fix this node's branch and
@@ -190,7 +193,7 @@ intended flow — do **not** edit a frozen node or rewrite the run command:
 
 Stop when the goal is met, or after ~3 consecutive failed or regressed runs.
 When you stop, write up the tree as a descriptively named project artifact — see
-the `orx-reports` skill for naming and optional folder guidance.
+the `orx-reports` skill for naming and folder guidance.
 
 Close any turn that ran or changed experiments with a short experiment summary:
 one line per relevant node with what it tested, its status, and the headline

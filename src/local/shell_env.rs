@@ -8,13 +8,15 @@
 //! machine uses whatever the user exported. Two OpenResearch installs then
 //! disagree about which database they are looking at.
 //!
-//! macOS app mode probes the shell once at startup ([`crate::commands::app`])
-//! and installs the answer here; every other entry point falls through to the
-//! process environment unchanged.
+//! App mode on macOS and Linux probes the shell once at startup
+//! ([`crate::commands::app`]) and installs the answer here (only PATH if it
+//! arrives after startup has moved on); every other entry point falls through
+//! to the process environment unchanged. The Linux AppImage also hands host
+//! programs the session's GTK settings ([`host_gui_env`]).
 //!
-//! Scope is orx's own resolution and the children it spawns. The other things
-//! orx shells out to — `git`, `kubectl`, and `ssh` — still inherit the process
-//! environment.
+//! Scope is orx's own resolution, the children it spawns, and the dashboard's
+//! PTY terminals. The other things orx shells out to — `git`, `kubectl`, and
+//! `ssh` — still inherit the process environment.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
@@ -24,15 +26,18 @@ use std::sync::OnceLock;
 /// Deliberately short. These are the variables whose divergence makes the app
 /// and the CLI behave like different installs; credentials reach harness
 /// children through `chat::prepare_env` instead.
-pub const IMPORTED: [&str; 8] = [
+pub const IMPORTED: [&str; 11] = [
     "PATH",
     "ORX_DATA_DIR",
+    "ORX_CACHE_DIR",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
     "OPENCODE_DB",
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_SECURESTORAGE_CONFIG_DIR",
     "CODEX_HOME",
+    "CURSOR_CONFIG_DIR",
+    "CURSOR_DATA_DIR",
 ];
 
 static OVERRIDE: OnceLock<HashMap<&'static str, OsString>> = OnceLock::new();
@@ -50,11 +55,25 @@ pub fn search_path() -> Option<OsString> {
     var("PATH")
 }
 
+/// What separates PATH entries when composing one for a child.
+#[cfg(not(windows))]
+pub const PATH_LIST_SEPARATOR: &str = ":";
+#[cfg(windows)]
+pub const PATH_LIST_SEPARATOR: &str = ";";
+
 /// Where `binary` lives, or None when this machine has no such tool. The path
 /// is returned as it sits on PATH; a caller that needs the real binary behind a
 /// symlink composes with `resolve_symlinks`.
 pub fn find_on_path(binary: &str) -> Option<PathBuf> {
     search_in(&search_path()?, binary)
+}
+
+/// Where `binary` lives inside `dir`, trying the PATHEXT spellings a bare name lacks on Windows.
+pub fn find_in_dir(dir: &std::path::Path, binary: &str) -> Option<PathBuf> {
+    candidate_names(binary)
+        .into_iter()
+        .map(|name| dir.join(name))
+        .find(|candidate| candidate.is_file())
 }
 
 /// Split from the PATH lookup so the search is testable without a probe.
@@ -64,8 +83,42 @@ fn search_in(paths: &OsStr, binary: &str) -> Option<PathBuf> {
     // pick up a binary.
     std::env::split_paths(paths)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(binary))
+        .flat_map(|dir| {
+            candidate_names(binary)
+                .into_iter()
+                .map(move |name| dir.join(name))
+        })
         .find(|candidate| candidate.is_file())
+}
+
+/// The filenames `binary` may have inside one PATH directory, in the order to
+/// try them.
+#[cfg(not(windows))]
+fn candidate_names(binary: &str) -> Vec<String> {
+    vec![binary.to_string()]
+}
+
+/// Windows executables carry a PATHEXT extension and npm CLIs ship `.cmd` shims, so try those.
+#[cfg(windows)]
+fn candidate_names(binary: &str) -> Vec<String> {
+    // Already extended (`bash.exe`): taken as written, the way cmd.exe does.
+    if std::path::Path::new(binary).extension().is_some() {
+        return vec![binary.to_string()];
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    let names: Vec<String> = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|ext| ext.starts_with('.'))
+        .map(|ext| format!("{binary}{}", ext.to_ascii_lowercase()))
+        .collect();
+    if names.is_empty() {
+        return [".com", ".exe", ".bat", ".cmd"]
+            .iter()
+            .map(|ext| format!("{binary}{ext}"))
+            .collect();
+    }
+    names
 }
 
 /// Hand the imported variables to a child process. Every `orx` child re-resolves
@@ -86,10 +139,51 @@ pub fn export_to(mut set: impl FnMut(&'static str, &OsString)) {
     }
 }
 
+/// What the Linux AppImage's AppRun and GTK hook point at the image (keep in step
+/// with linux/AppRun, which saves the session's values as `ORX_HOST_<name>`).
+const APPIMAGE_GTK_VARS: [&str; 12] = [
+    "GDK_BACKEND",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GI_TYPELIB_PATH",
+    "GIO_EXTRA_MODULES",
+    "GIO_MODULE_DIR",
+    "GSETTINGS_SCHEMA_DIR",
+    "GTK_DATA_PREFIX",
+    "GTK_EXE_PREFIX",
+    "GTK_IM_MODULE_FILE",
+    "GTK_PATH",
+    "GTK_THEME",
+    "XDG_DATA_DIRS",
+];
+
+/// The session's own values (`None`: unset) of what AppRun set for the bundled GTK,
+/// for host programs, which fail on the image's schemas. Empty outside the AppImage.
+pub fn host_gui_env() -> Vec<(&'static str, Option<OsString>)> {
+    APPIMAGE_GTK_VARS
+        .iter()
+        .filter_map(|var| {
+            let saved = std::env::var_os(format!("ORX_HOST_{var}"))?;
+            let saved = saved.to_str()?;
+            // AppRun writes `=<value>` for a set variable and `-` for an unset one.
+            Some((*var, saved.strip_prefix('=').map(OsString::from)))
+        })
+        .collect()
+}
+
+/// [`host_gui_env`], applied to a command about to start a host program.
+pub fn restore_host_gui_env(command: &mut std::process::Command) {
+    for (var, value) in host_gui_env() {
+        match value {
+            Some(value) => command.env(var, value),
+            None => command.env_remove(var),
+        };
+    }
+}
+
 /// Install the probe's answer; the first call wins. Deliberately not
 /// `env::set_var` — app mode enters inside an already-running tokio runtime,
 /// where mutating the process environment races every live thread.
-#[cfg(target_os = "macos")]
+#[cfg(all(desktop_app, unix))]
 pub fn set(vars: HashMap<&'static str, OsString>) {
     let _ = OVERRIDE.set(vars);
 }
@@ -127,9 +221,22 @@ mod tests {
 
     const M: &str = "__ORX_ENV_abc123__";
 
+    /// `parse_probe` insists on one absolute PATH entry, and what counts as
+    /// absolute differs by platform.
+    #[cfg(windows)]
+    const PATH_VALUE: &str = r"C:\tools\bin;C:\Windows";
+    #[cfg(not(windows))]
+    const PATH_VALUE: &str = "/opt/homebrew/bin:/usr/bin";
+
     fn fenced(payload: &str) -> String {
         format!("nvm loaded\n{M}{payload}{M}")
     }
+
+    /// What a bare `tool` is actually called on disk on each platform.
+    #[cfg(windows)]
+    const TOOL: &str = "tool.exe";
+    #[cfg(not(windows))]
+    const TOOL: &str = "tool";
 
     #[test]
     fn the_search_skips_relative_entries_and_takes_the_first_absolute_hit() {
@@ -137,13 +244,13 @@ mod tests {
         let (early, late) = (root.join("early"), root.join("late"));
         std::fs::create_dir_all(&early).expect("early");
         std::fs::create_dir_all(&late).expect("late");
-        std::fs::write(early.join("tool"), "").expect("early tool");
-        std::fs::write(late.join("tool"), "").expect("late tool");
+        std::fs::write(early.join(TOOL), "").expect("early tool");
+        std::fs::write(late.join(TOOL), "").expect("late tool");
 
         let paths =
             std::env::join_paths([PathBuf::new(), PathBuf::from("bin"), early.clone(), late])
                 .expect("join");
-        assert_eq!(search_in(&paths, "tool"), Some(early.join("tool")));
+        assert_eq!(search_in(&paths, "tool"), Some(early.join(TOOL)));
         assert_eq!(search_in(&paths, "absent"), None);
 
         // A relative entry is rejected even when it does resolve: cargo runs
@@ -154,17 +261,44 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    /// The harnesses are all looked up by bare name, so an extensionless search
+    /// on Windows reports every one of them missing.
+    #[cfg(windows)]
+    #[test]
+    fn the_search_extends_a_bare_name_and_prefers_the_earlier_path_entry() {
+        let root = std::env::temp_dir().join(format!("orx-path-ext-{}", std::process::id()));
+        let (early, late) = (root.join("early"), root.join("late"));
+        std::fs::create_dir_all(&early).expect("early");
+        std::fs::create_dir_all(&late).expect("late");
+        // Only the later directory holds the `.exe`; the earlier one holds a
+        // `.cmd` shim, which PATHEXT orders after it.
+        std::fs::write(early.join("claude.cmd"), "").expect("shim");
+        std::fs::write(late.join("claude.exe"), "").expect("exe");
+
+        let paths = std::env::join_paths([early.clone(), late.clone()]).expect("join");
+        assert_eq!(search_in(&paths, "claude"), Some(early.join("claude.cmd")));
+        // An extension already on the name is taken as written, so the `.cmd`
+        // sitting earlier on PATH is not a candidate at all.
+        assert_eq!(
+            search_in(&paths, "claude.exe"),
+            Some(late.join("claude.exe"))
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     #[test]
     fn reads_every_imported_variable() {
         let vars = parse_probe(
-            &fenced(
-                "/opt/homebrew/bin:/usr/bin\0/data\0/share\0/config\0/open.db\0/claude\0/secure\0/codex\0",
-            ),
+            &fenced(&format!(
+                "{PATH_VALUE}\0/data\0/cache\0/share\0/config\0/open.db\0/claude\0/secure\0/codex\0"
+            )),
             M,
         )
         .unwrap();
-        assert_eq!(vars["PATH"], OsString::from("/opt/homebrew/bin:/usr/bin"));
+        assert_eq!(vars["PATH"], OsString::from(PATH_VALUE));
         assert_eq!(vars["ORX_DATA_DIR"], OsString::from("/data"));
+        assert_eq!(vars["ORX_CACHE_DIR"], OsString::from("/cache"));
         assert_eq!(vars["XDG_DATA_HOME"], OsString::from("/share"));
         assert_eq!(vars["XDG_CONFIG_HOME"], OsString::from("/config"));
         assert_eq!(vars["OPENCODE_DB"], OsString::from("/open.db"));
@@ -178,8 +312,8 @@ mod tests {
 
     #[test]
     fn unset_variables_are_dropped_so_lookups_fall_through() {
-        let vars = parse_probe(&fenced("/usr/bin\0\0\0\0\0\0\0\0"), M).unwrap();
-        assert_eq!(vars["PATH"], OsString::from("/usr/bin"));
+        let vars = parse_probe(&fenced(&format!("{PATH_VALUE}\0\0\0\0\0\0\0\0\0")), M).unwrap();
+        assert_eq!(vars["PATH"], OsString::from(PATH_VALUE));
         assert!(!vars.contains_key("ORX_DATA_DIR"));
         assert!(!vars.contains_key("OPENCODE_DB"));
         assert!(!vars.contains_key("CLAUDE_CONFIG_DIR"));

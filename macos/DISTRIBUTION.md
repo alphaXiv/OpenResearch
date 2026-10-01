@@ -6,7 +6,7 @@ signs, notarizes, and packages it into a DMG. CI
 trigger caveat below) and attaches `OpenResearch.dmg`:
 
 ```
-https://github.com/alphaXiv/openresearch-cli/releases/latest/download/OpenResearch.dmg
+https://github.com/alphaXiv/OpenResearch/releases/latest/download/OpenResearch.dmg
 ```
 
 The release job is a no-op until the **repository** variable
@@ -64,6 +64,24 @@ signature check — not the digest — is what makes an unattended swap safe, so
 **changing the signing identity breaks self-update for every installed app**:
 update `EXPECTED_TEAM_ID` and ship that release before retiring the old cert.
 
+## CLI binaries
+
+The `install.sh` archives for macOS are signed with the same Developer ID and
+notarized by `.github/workflows/sign-macos-cli.yml`, which dist runs between its
+local and global builds. It re-uploads each darwin archive under the same
+artifact name with a rewritten `.sha256` and per-target manifest checksum, so the
+installers and `sha256.sum` built afterwards match the signed archives. It uses
+the same `release-signing` environment, so a release waits on one approval for
+it, then another for the DMG. Unlike the DMG, it ignores `MACOS_SIGNING_ENABLED`:
+every published release needs those secrets and that approval. Dry runs skip it,
+so the first real release is its first end-to-end run.
+
+dist does not generate this job's `needs: build-local-artifacts`, so
+`dist-workspace.toml` sets `allow-dirty = ["ci"]`, which makes `dist generate`
+skip `release.yml` entirely: dist config changes no longer reach CI on their own.
+To regenerate, remove `allow-dirty`, run the pinned `dist generate`, re-add that `needs`
+line to `custom-sign-macos-cli`, and restore `allow-dirty`.
+
 ## Configure signing (CI)
 
 Needs an Apple Developer Program account with a **Developer ID Application**
@@ -96,11 +114,6 @@ From it you produce the six values below.
 Also enable **Require a pull request** + **Require review from Code Owners** on
 `main` (see `.github/CODEOWNERS`) so the signing scripts can't change unreviewed.
 Never commit the `.p12`.
-
-`package-macos-app.sh` signs with `macos/entitlements.plist`, which grants the
-Apple-events entitlement the Dock-click tab focus needs. Without it that path is
-denied in signed builds only — unsigned local bundles never exercise the check —
-and the first Dock click prompts once for Automation access.
 
 ## Build / sign locally
 
@@ -143,8 +156,9 @@ installer drop locations — the "works in my terminal, broken in the app" bug.
 (`$SHELL -ilc`, interactive because `.zshrc` is where these exports live) once at
 startup and installs the result via `local::shell_env`, which harness lookup,
 harness children, and directory resolution consult instead of the process
-environment. It is best-effort and capped at 5s; every outcome is logged. To see
-it, run the bundled binary from a terminal:
+environment. It is best-effort: startup waits up to 5s, and a later answer
+(within 60s) still supplies PATH but not the directories below. Every outcome is
+logged. To see it, run the bundled binary from a terminal:
 
 ```bash
 /Applications/OpenResearch.app/Contents/MacOS/OpenResearch
@@ -155,8 +169,9 @@ it, run the bundled binary from a terminal:
 The app and a `curl`-installed `orx` share one data dir and one config dir, so
 both must be safe to have at once:
 
-- **Ports** — the app binds an ephemeral loopback port rather than `orx up`'s
-  4791.
+- **Ports** — the app binds loopback port 4792 rather than `orx up`'s 4791,
+  falling back to an ephemeral port when 4792 is taken. Keeping it fixed keeps
+  the window's origin, and so its localStorage, stable across launches.
 - **Store** — SQLite in WAL with a 5s busy timeout; concurrent readers/writers
   are expected. Run supervisors hold a per-run exclusive lock, so a second
   server recovering the same active run exits instead of double-driving it.
@@ -172,7 +187,8 @@ both must be safe to have at once:
   `launched_as_app_bundle`.
 
 - **Directories** — `ORX_DATA_DIR`, `XDG_DATA_HOME`, and `XDG_CONFIG_HOME` are
-  imported by the same startup probe (`local::shell_env::IMPORTED`), so a rc
+  imported by the same startup probe when it answers within the startup wait
+  (`local::shell_env::IMPORTED`), so a rc
   file that redirects the store moves the app with it. Otherwise the app would
   read the default database while the CLI read the user's, and the lock above
   would guard a file neither shares.

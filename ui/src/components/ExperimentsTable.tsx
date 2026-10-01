@@ -1,27 +1,33 @@
+import { WorkspaceEmptyState } from "./WorkspaceEmptyState";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
+import { FlaskConical, CircleStop, FolderTree, GitBranch, Terminal } from "lucide-react";
 import { useState } from "react";
 import { fmtNumber, runDisplayStatus, timeAgo, type Experiment, type Run } from "../api";
 import { StatusBadge } from "./StatusBadge";
 import { tabOpenGestureHandlers, type TabOpenIntent } from "../tabPreview";
 import { Button } from "./ui";
+import { ArchiveMenu, type ArchiveActions } from "./ArchiveMenu";
 
 export function ExperimentsTable({
   runs,
   experiments,
+  archiveActions,
   emptyHint,
   onOpen,
   onOpenLogs,
   onOpenCode,
+  onArchive,
   onCancel,
 }: {
   runs: Run[];
   experiments: Experiment[];
+  archiveActions: Map<string, ArchiveActions>;
   emptyHint?: string;
   onOpen: (experiment: Experiment, intent: TabOpenIntent) => void;
   onOpenLogs: (experimentId: string, runId: string, intent: TabOpenIntent) => void;
   onOpenCode: (experimentId: string, intent: TabOpenIntent) => void;
+  onArchive: (id: string, direction: "ancestors" | "descendants" | "only", archived: boolean) => void;
   onCancel: (runId: string) => Promise<void>;
 }) {
   const [pendingCancellation, setPendingCancellation] = useState<ReadonlySet<string>>(new Set());
@@ -44,9 +50,11 @@ export function ExperimentsTable({
 
   if (sortedExperiments.length === 0) {
     return (
-      <div className="empty-state absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-6 text-center text-subtext [&_p]:max-w-[46ch] [&_p]:m-0 [&_p]:leading-normal [&_p]:text-balance [&_p.empty-state-title]:text-2xl [&_p.empty-state-title]:font-normal [&_p.empty-state-title]:text-text [&_p.empty-state-hint]:text-lg [&_p.empty-state-hint]:text-subtext experiments-empty-state [&_p]:text-2xl">
-        <p>{emptyHint ?? m.experiments_none_yet()}</p>
-      </div>
+      <WorkspaceEmptyState
+        icon={FlaskConical}
+        title={emptyHint ?? m.experiments_none_yet()}
+        description={emptyHint ? undefined : m.experiments_empty_description()}
+      />
     );
   }
 
@@ -114,6 +122,7 @@ export function ExperimentsTable({
                 >
                   {experiment.title || experiment.slug}
                 </button>
+                {experiment.archived && <span className="text-muted text-xs">{m.tree_archived()}</span>}
                 <span className="experiment-table-subtitle flex items-center min-w-0 gap-1.5 mt-1 overflow-hidden text-subtext text-sm [&_>_svg]:shrink-0 [&_code]:min-w-0 [&_code]:overflow-hidden [&_code]:text-ellipsis [&_code]:whitespace-nowrap" title={experiment.branchName}>
                   <GitBranch size={14} aria-hidden="true" />
                   <code>{experiment.branchName}</code>
@@ -163,7 +172,6 @@ export function ExperimentsTable({
                   <Button
                     size="small"
                     variant="danger"
-                    className="[@container((max-width:_560px))]:ms-auto"
                     disabled={cancelling}
                     title={cancelling ? m.experiments_stop_requested() : m.experiments_stop_run()}
                     onClick={() => void requestCancel(liveRun.id)}
@@ -172,6 +180,12 @@ export function ExperimentsTable({
                     {cancelling ? m.common_stopping() : m.common_stop()}
                   </Button>
                 )}
+                <ArchiveMenu
+                  id={experiment.id}
+                  name={experiment.title || experiment.slug}
+                  actions={archiveActions.get(experiment.id)!}
+                  onArchive={onArchive}
+                />
               </div>
             </div>
           );

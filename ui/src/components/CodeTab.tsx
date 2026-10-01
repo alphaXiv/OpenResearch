@@ -1,14 +1,15 @@
+import { useIsFetching, useQuery } from "@tanstack/react-query";
+
+import { queryClient } from "../queries/client";
+import { getCodeTreeQuery, getSessionWorktreeQuery, getExperimentDiffQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
 // Files and committed changes for one experiment branch. The opening
 // experiment fixes the Git source; users only switch between Files/Changes.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo } from "react";
 import {
-  getCodeTree,
-  getSessionWorktree,
   githubBranchUrl,
-  type CodeTree,
   type Experiment,
   type Project,
 } from "../api";
@@ -49,76 +50,15 @@ export function CodeTab({
   ) => void;
 }) {
   const branch = experiment.branchName;
-  const sourceKey = `${projectId}:${branch}`;
-  const [data, setData] = useState<CodeTree | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [changesLoading, setChangesLoading] = useState(false);
-  const [changesRefreshKey, setChangesRefreshKey] = useState(0);
-  // The experiment's session worktree, when it exists and is still checked out
-  // on this branch, is the on-disk copy to edit — so files open editable there
-  // instead of as read-only committed blobs. Absent → committed view (read-only).
-  const [editSessionId, setEditSessionId] = useState<string | undefined>(undefined);
-  // A request id drops stale responses — from earlier sources, superseded
-  // refreshes, and (via the effect-cleanup bump) post-unmount completions.
-  const reqId = useRef(0);
-  const requestedSource = useRef<string | null>(null);
-
-  const load = useCallback(() => {
-    requestedSource.current = sourceKey;
-    const id = ++reqId.current;
-    setLoading(true);
-    getCodeTree(projectId, { ref: branch })
-      .then((d) => {
-        if (id !== reqId.current) return;
-        setData(d);
-        setError(null);
-      })
-      .catch((e: Error) => {
-        if (id !== reqId.current) return;
-        setError(e.message);
-      })
-      .finally(() => {
-        if (id === reqId.current) setLoading(false);
-      });
-  }, [projectId, branch, sourceKey]);
-
-  // Clear a previous branch's tree immediately and invalidate its requests.
-  useEffect(() => {
-    reqId.current++;
-    requestedSource.current = null;
-    setData(null);
-    setError(null);
-    setLoading(false);
-    return () => {
-      reqId.current++;
-    };
-  }, [sourceKey]);
-
-  // Changes can open without paying for an unused tree request. Load the tree
-  // once when Files is first shown; manual Refresh can still call load again.
-  useEffect(() => {
-    if (view === "files" && requestedSource.current !== sourceKey) load();
-  }, [view, sourceKey, load]);
-
-  // Resolve whether this branch is live on the creating session's worktree; only
-  // then are its files on disk under that branch and safe to edit via the
-  // session. Any other case (no session, pruned worktree, session moved to
-  // another branch) leaves files read-only.
-  useEffect(() => {
-    setEditSessionId(undefined);
-    const sid = experiment.chatSessionId;
-    if (!sid) return;
-    let cancelled = false;
-    getSessionWorktree(sid)
-      .then((wt) => {
-        if (!cancelled && wt.exists && wt.branch === branch) setEditSessionId(sid);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [experiment.chatSessionId, branch]);
+  const files = useQuery({ ...getCodeTreeQuery(projectId, { ref: branch }), enabled: view === "files", subscribed: view === "files" });
+  const worktree = useQuery({ ...getSessionWorktreeQuery(experiment.chatSessionId ?? ""), enabled: view === "files" && Boolean(experiment.chatSessionId), subscribed: view === "files" && Boolean(experiment.chatSessionId) });
+  const data = files.data;
+  const error = files.error?.message;
+  const loading = files.isFetching;
+  const diffOptions = getExperimentDiffQuery(experiment.id);
+  const changesLoading = useIsFetching({ queryKey: diffOptions.queryKey }) > 0;
+  const editSessionId = worktree.data?.exists && worktree.data.branch === branch ? experiment.chatSessionId ?? undefined : undefined;
+  const load = () => { void files.refetch(); };
 
   const tree = useMemo(() => (data ? buildTree(data.entries) : null), [data]);
   const refreshing = view === "files" ? loading : changesLoading;
@@ -148,16 +88,14 @@ export function CodeTab({
         githubTitle={m.a11y_open_branch_github({ branch: ltr(branch) })}
         refreshing={refreshing}
         onRefresh={() =>
-          view === "files" ? load() : setChangesRefreshKey((current) => current + 1)
+          view === "files" ? load() : void queryClient.invalidateQueries(diffOptions)
         }
-     />
+      />
       {view === "changes" ? (
         <BranchChanges
           key={experiment.id}
           experiment={experiment}
-          refreshKey={changesRefreshKey}
-          onLoadingChange={setChangesLoading}
-       />
+        />
       ) : (
         <>
           {data?.truncated && <CodeTabNote>{m.code_tab_listing_truncated()}</CodeTabNote>}
@@ -182,7 +120,7 @@ export function CodeTab({
                       ? onOpenFile(path, editSessionId, undefined, intent)
                       : onOpenFile(path, undefined, branch, intent)
                   }
-               />
+                />
               </div>
             )}
           </CodeTabBody>

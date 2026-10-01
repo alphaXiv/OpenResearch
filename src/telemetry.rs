@@ -20,6 +20,8 @@
 //!   retry on the next run; telemetry errors never enter a command's `?` chain.
 //! - **musl-safe.** Reuses a rustls `reqwest` client; adds no TLS/C dependency.
 
+pub(crate) mod harness;
+
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -105,6 +107,8 @@ fn flush_window() -> Duration {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
+    #[serde(default)]
+    pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
     pub install_id: Option<String>,
@@ -117,6 +121,13 @@ pub(crate) struct Settings {
     /// (each mutation re-reads and patches only its own field via `mutate_settings`).
     #[serde(default)]
     pub data_dir: Option<String>,
+    /// Legacy repository migration source, retained for remote-install compatibility.
+    #[serde(default)]
+    pub cache_dir: Option<String>,
+    /// Binary selected by the remote installer. The local SSH launcher uses a
+    /// separate compatibility file, but retaining this avoids dropping it.
+    #[serde(default)]
+    pub orx_binary_path: Option<String>,
     /// Default compute target for local-mode launches (Settings → Compute).
     /// Absent = no default: local launches require an explicit `--backend`.
     #[serde(default)]
@@ -155,6 +166,15 @@ pub(crate) struct Settings {
     /// place; only the silent apply stops.
     #[serde(default)]
     pub auto_update: Option<bool>,
+    /// Surfaces whose `first_action` event has already been sent, so a restart
+    /// cannot re-report a later action as the user's first one.
+    #[serde(default)]
+    pub first_action_reported: Vec<String>,
+    /// Language the dashboard last reported it is displaying (e.g. `zh-CN`).
+    #[serde(default)]
+    pub dashboard_locale: Option<String>,
+    #[serde(default)]
+    harness_snapshot: Option<harness::InitialSnapshot>,
 }
 
 /// A paper the user linked to their researcher profile.
@@ -185,6 +205,12 @@ pub(crate) struct ResearchProfile {
 pub(crate) fn persisted_data_dir() -> Option<String> {
     load_settings()
         .and_then(|s| s.data_dir)
+        .filter(|s| !s.is_empty())
+}
+
+pub(crate) fn persisted_cache_dir() -> Option<String> {
+    load_settings()
+        .and_then(|s| s.cache_dir)
         .filter(|s| !s.is_empty())
 }
 
@@ -294,8 +320,46 @@ pub(crate) fn set_github_default_prompt_seen(seen: bool) -> std::io::Result<()> 
     mutate_settings(|settings| settings.github_default_prompt_seen = Some(seen))
 }
 
+fn dashboard_locale() -> Option<String> {
+    load_settings().and_then(|settings| settings.dashboard_locale)
+}
+
+pub(crate) fn set_dashboard_locale(locale: &str) -> std::io::Result<()> {
+    if dashboard_locale().as_deref() == Some(locale) {
+        return Ok(());
+    }
+    mutate_settings(|settings| settings.dashboard_locale = Some(locale.to_string()))
+}
+
 fn settings_path() -> PathBuf {
     crate::config::config_dir().join("settings.json")
+}
+
+pub(crate) fn ssh_settings() -> crate::error::Result<crate::config::SshSettings> {
+    let raw = match std::fs::read_to_string(settings_path()) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(error) => return Err(error.into()),
+    };
+    let settings: Settings = serde_json::from_str(&raw)
+        .map_err(|error| crate::error::anyhow!("Cannot read SSH settings: {error}"))?;
+    for options in settings.ssh.hosts.values() {
+        crate::jobs::ssh::validate_host_options(options)?;
+    }
+    Ok(settings.ssh)
+}
+
+pub(crate) fn set_ssh_host(
+    host: String,
+    options: crate::config::SshHostSettings,
+) -> std::io::Result<()> {
+    mutate_settings(|settings| {
+        settings.ssh.hosts.insert(host, options);
+    })
+}
+
+pub(crate) fn set_ssh_default(host: Option<String>) -> std::io::Result<()> {
+    mutate_settings(|settings| settings.ssh.default_host = host)
 }
 
 fn outbox_dir() -> PathBuf {
@@ -438,7 +502,7 @@ fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
 /// one persisted on first use. Returns `None` only if the id can't be persisted
 /// (so a run that couldn't write never invents a throwaway id that would inflate
 /// install counts on every invocation).
-fn install_id() -> Option<String> {
+pub(crate) fn install_id() -> Option<String> {
     // Fast path: already generated.
     if let Some(id) = load_settings().and_then(|s| s.install_id) {
         return Some(id);
@@ -553,6 +617,7 @@ pub(crate) fn set_persisted_disabled(disabled: bool) -> std::io::Result<()> {
     if result.is_ok() && disabled {
         cancel_pending();
         remove_queued_product_events();
+        let _ = crate::store::Store::open().and_then(|store| store.purge_pending_telemetry());
     }
     result
 }
@@ -594,7 +659,7 @@ fn build_payload_with_id(
     event_id: uuid::Uuid,
     properties: serde_json::Value,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "schemaVersion": 1,
         "installId": install_id,
         "context": {
@@ -612,7 +677,11 @@ fn build_payload_with_id(
             "occurredAt": iso8601_utc(crate::store::now_ms()),
             "properties": properties,
         }],
-    })
+    });
+    if let Some(locale) = dashboard_locale() {
+        payload["context"]["locale"] = json!(locale);
+    }
+    payload
 }
 
 #[cfg(test)]
@@ -628,7 +697,7 @@ fn build_payload(
 /// (`YYYY-MM-DDTHH:MM:SS.mmmZ`). Pure civil-date math on the UTC timeline — no
 /// timezone or DST involved — so no date crate is needed (the codebase has
 /// none). Uses the standard days-from-civil algorithm.
-fn iso8601_utc(ms: i64) -> String {
+pub(crate) fn iso8601_utc(ms: i64) -> String {
     let ms = ms.max(0);
     let secs = ms / 1000;
     let millis = ms % 1000;
@@ -682,12 +751,14 @@ fn persist_payload(event_id: uuid::Uuid, payload: &serde_json::Value) -> Option<
     let dir = outbox_dir();
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("{event_id}.json"));
-    let tmp = dir.join(format!(".{event_id}.tmp"));
-    std::fs::write(&tmp, serde_json::to_vec(payload).ok()?).ok()?;
-    if std::fs::rename(&tmp, &path).is_err() {
-        let _ = std::fs::remove_file(tmp);
-        return None;
-    }
+    crate::local::git::atomic_write_with_mode(
+        &path,
+        &serde_json::to_vec(payload).ok()?,
+        Some(0o600),
+    )
+    .ok()?;
+    #[cfg(unix)]
+    std::fs::File::open(&dir).ok()?.sync_all().ok()?;
     Some(path)
 }
 
@@ -744,10 +815,47 @@ fn remove_queued_product_events() {
     }
 }
 
+pub(crate) fn accounting_reports_enabled() -> bool {
+    is_enabled(flag())
+}
+
+pub(crate) fn pending_event_payload(
+    event: &str,
+    properties: serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    if !is_enabled(flag()) {
+        return None;
+    }
+    let event_id = uuid::Uuid::new_v4();
+    let payload = build_payload_with_id(event, &install_id()?, event_id, properties);
+    Some((event_id.to_string(), payload))
+}
+
+fn transfer_pending_events() {
+    if !is_enabled(flag()) {
+        return;
+    }
+    let Ok(store) = crate::store::Store::open() else {
+        return;
+    };
+    let Ok(events) = store.pending_telemetry() else {
+        return;
+    };
+    for (id, payload) in events {
+        let Ok(event_id) = uuid::Uuid::parse_str(&id) else {
+            continue;
+        };
+        if persist_payload(event_id, &payload).is_some() {
+            let _ = store.acknowledge_pending_telemetry(&id);
+        }
+    }
+}
+
 pub(crate) fn retry_outbox() {
     if environment_disabled_reason().is_some() {
         return;
     }
+    transfer_pending_events();
     let Ok(entries) = std::fs::read_dir(outbox_dir()) else {
         return;
     };
@@ -847,6 +955,22 @@ fn consent_distinct_id(agreed: bool) -> String {
     CONSENT_SENTINEL_ID.to_string()
 }
 
+fn consent_payload(agreed: bool, distinct_id: &str, event_id: uuid::Uuid) -> serde_json::Value {
+    let mut payload = build_payload_with_id(
+        "telemetry_consent",
+        distinct_id,
+        event_id,
+        json!({ "agreed": agreed }),
+    );
+    // An opt-out carries no dimension beyond the choice itself.
+    if !agreed {
+        if let Some(context) = payload["context"].as_object_mut() {
+            context.remove("locale");
+        }
+    }
+    payload
+}
+
 /// Record a telemetry toggle choice — `cli_telemetry_consent` with
 /// `{ agreed: bool }`. Within an eligible official build, this is the ONE event
 /// that ignores the user's telemetry preference: it must land even when the
@@ -867,14 +991,8 @@ pub(crate) async fn record_consent(agreed: bool) {
     if environment_disabled_reason().is_some() {
         return;
     }
-    let distinct_id = consent_distinct_id(agreed);
     let event_id = uuid::Uuid::new_v4();
-    let payload = build_payload_with_id(
-        "telemetry_consent",
-        &distinct_id,
-        event_id,
-        json!({ "agreed": agreed }),
-    );
+    let payload = consent_payload(agreed, &consent_distinct_id(agreed), event_id);
     let path = persist_payload(event_id, &payload);
     let send = deliver_queued_payload(path, payload);
     // Cap the wait so the settings POST / command return promptly even if the
@@ -898,8 +1016,27 @@ pub(crate) fn capture_onboarding_research_profile(profile: &ResearchProfile) {
     );
 }
 
-pub(crate) fn capture_project_created(local: bool) {
-    capture("project_created", json!({ "local": local }));
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectCreationMode {
+    Blank,
+    Folder,
+    Paper,
+}
+
+pub(crate) fn capture_project_created(local: bool, mode: Option<ProjectCreationMode>) {
+    let mut properties = json!({ "local": local });
+    if let Some(mode) = mode {
+        properties["creationMode"] = json!(mode);
+    }
+    capture("project_created", properties);
+}
+
+pub(crate) fn capture_demo_welcome_choice(choice: &str) {
+    if !WELCOME_CHOICES.contains(&choice) {
+        return;
+    }
+    capture("demo_welcome_choice", json!({ "choice": choice }));
 }
 
 pub(crate) fn capture_chat_session_started(harness: &str) {
@@ -960,7 +1097,7 @@ impl TelemetrySession {
         TelemetrySession
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(desktop_app)]
     pub(crate) fn start_app() -> TelemetrySession {
         retry_outbox();
         capture("app_started", json!({}));
@@ -974,6 +1111,7 @@ impl TelemetrySession {
     /// site in `main` already threads it, so keeping the param avoids
     /// re-touching main).
     pub(crate) async fn finish(self, _success: bool) {
+        retry_outbox();
         flush_pending().await;
     }
 }
@@ -999,6 +1137,87 @@ impl TelemetrySession {
 ///
 /// Non-blocking: the send is spawned and registered for the exit-time flush, so
 /// this returns immediately and never delays the command's own success output.
+/// Onboarding screens, in order; must match the API's
+/// `CLI_ANALYTICS_ONBOARDING_STEPS` or the event is rejected at ingest.
+pub(crate) const ONBOARDING_STEPS: [&str; 3] = ["welcome", "environment", "profile"];
+pub(crate) const WELCOME_CHOICES: [&str; 3] = ["explore_demo", "create_project", "dismiss"];
+pub(crate) const DEMO_EXPERIMENT_KINDS: [&str; 2] = ["curated", "run"];
+/// Starter prompts are usually model-generated, so only the slot position is stable.
+/// The upper bound is headroom — the UI renders whatever the model returns.
+pub(crate) const STARTER_SLOTS: std::ops::RangeInclusive<u8> = 1..=8;
+pub(crate) const FIRST_ACTION_SURFACES: [&str; 2] = ["demo", "project"];
+pub(crate) const FIRST_ACTIONS: [&str; 7] = [
+    "starter_click",
+    "typed_prompt",
+    "open_experiment",
+    "open_file",
+    "run_experiment",
+    "create_experiment",
+    "open_settings",
+];
+
+pub(crate) fn capture_onboarding_step_viewed(step: &str) {
+    if !ONBOARDING_STEPS.contains(&step) {
+        return;
+    }
+    capture("onboarding_step_viewed", json!({ "step": step }));
+}
+
+/// `curated` replays a recorded demo conversation; `run` launches real compute.
+pub(crate) fn capture_demo_experiment_started(kind: &str, experiment: &str) {
+    if !DEMO_EXPERIMENT_KINDS.contains(&kind) || experiment.is_empty() {
+        return;
+    }
+    capture(
+        "demo_experiment_started",
+        json!({ "kind": kind, "experiment": experiment }),
+    );
+}
+
+pub(crate) fn capture_project_starter_clicked(slot: u8) {
+    if !STARTER_SLOTS.contains(&slot) {
+        return;
+    }
+    capture("project_starter_clicked", json!({ "slot": slot }));
+}
+
+/// First action on a surface, sent at most once per surface for the life of the
+/// install, so quitting and relaunching cannot promote a later action.
+pub(crate) fn capture_first_action(surface: &str, action: &str) {
+    if !FIRST_ACTION_SURFACES.contains(&surface) || !FIRST_ACTIONS.contains(&action) {
+        return;
+    }
+    // Check enablement before claiming: `capture` drops the event when telemetry
+    // is off, and claiming first would burn the slot for a later opt-in.
+    if !is_enabled(flag()) {
+        return;
+    }
+    if !claim_first_action_surface(surface) {
+        return;
+    }
+    capture(
+        "first_action",
+        json!({ "surface": surface, "action": action }),
+    );
+}
+
+/// Claim `surface`'s single first-action slot; true only for the winning caller.
+fn claim_first_action_surface(surface: &str) -> bool {
+    let mut claimed = false;
+    let _ = mutate_settings(|settings| {
+        if settings
+            .first_action_reported
+            .iter()
+            .any(|seen| seen == surface)
+        {
+            return;
+        }
+        settings.first_action_reported.push(surface.to_string());
+        claimed = true;
+    });
+    claimed
+}
+
 pub(crate) fn capture_experiment_started(kind: &str, local: bool, target: Option<&str>) {
     let mut extra = json!({ "kind": kind, "local": local });
     if let (Some(obj), Some(t)) = (extra.as_object_mut(), target) {
@@ -1317,6 +1536,42 @@ mod tests {
     }
 
     #[test]
+    fn ssh_settings_preserve_siblings_and_reject_corrupt_config() {
+        use crate::config::SshHostSettings;
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-ssh-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        assert!(ssh_settings().unwrap().hosts.is_empty());
+        set_persisted_disabled(true).unwrap();
+        let options = SshHostSettings {
+            container: Some("research".into()),
+        };
+        set_ssh_host("lab".into(), options.clone()).unwrap();
+        set_ssh_default(Some("lab".into())).unwrap();
+        set_compute_default(Some("ssh".into()), None).unwrap();
+        let settings = ssh_settings().unwrap();
+        assert_eq!(settings.default_host.as_deref(), Some("lab"));
+        assert_eq!(settings.hosts["lab"], options);
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        set_ssh_host("lab".into(), SshHostSettings::default()).unwrap();
+        set_ssh_default(None).unwrap();
+        assert_eq!(
+            ssh_settings().unwrap().hosts["lab"],
+            SshHostSettings::default()
+        );
+        for raw in [
+            r#"{"ssh":null}"#,
+            r#"{"ssh":{"hosts":{"lab":{"container":""}}}}"#,
+            r#"{"ssh":{"hosts":[]}}"#,
+            "{",
+        ] {
+            std::fs::write(settings_path(), raw).unwrap();
+            assert!(ssh_settings().is_err(), "{raw}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn compute_default_roundtrip_preserves_siblings() {
         // Same single-writer contract as data_dir: the Compute settings persist
         // in the telemetry-owned settings.json, so a default-target write must
@@ -1502,6 +1757,62 @@ mod tests {
     }
 
     #[test]
+    fn first_action_claims_each_surface_once() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-first-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        assert!(claim_first_action_surface("project"));
+        assert!(!claim_first_action_surface("project"));
+        assert!(claim_first_action_surface("demo"));
+        assert_eq!(
+            load_settings()
+                .map(|s| s.first_action_reported)
+                .unwrap_or_default(),
+            vec!["project".to_string(), "demo".to_string()],
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_disabled_first_action_does_not_burn_the_surface() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-burn-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::set_var("ORX_NO_TELEMETRY", "1");
+
+        capture_first_action("project", "typed_prompt");
+        assert!(
+            load_settings()
+                .map(|s| s.first_action_reported.is_empty())
+                .unwrap_or(true),
+            "an opt-out must leave the slot free for a later opt-in"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dimension_events_reject_values_outside_the_allowlists() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-vocab-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+
+        capture_first_action("website", "typed_prompt");
+        capture_first_action("project", "danced");
+        assert!(
+            load_settings()
+                .map(|s| s.first_action_reported.is_empty())
+                .unwrap_or(true),
+            "an unknown surface or action must never claim a slot"
+        );
+        assert!(!STARTER_SLOTS.contains(&0) && !STARTER_SLOTS.contains(&9));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn every_event_name_is_cli_prefixed() {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-prefix-{}", uuid::Uuid::new_v4()));
@@ -1524,6 +1835,11 @@ mod tests {
             ("skill_invoked", "cli_skill_invoked"),
             ("experiment_started", "cli_experiment_started"),
             ("telemetry_consent", "cli_telemetry_consent"),
+            ("onboarding_step_viewed", "cli_onboarding_step_viewed"),
+            ("demo_experiment_started", "cli_demo_experiment_started"),
+            ("project_starter_clicked", "cli_project_starter_clicked"),
+            ("first_action", "cli_first_action"),
+            ("demo_welcome_choice", "cli_demo_welcome_choice"),
         ] {
             let p = build_payload(bare, "did", json!({}));
             assert_eq!(
@@ -1549,9 +1865,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Read one whole HTTP request off `stream`: on Windows, closing with unread data
+    /// resets the connection and the client never sees the reply.
+    async fn drain_request(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt as _;
+
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .map(str::to_owned)
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap();
+                if bytes.len() >= header_end + 4 + content_length {
+                    break;
+                }
+            }
+        }
+        bytes
+    }
+
     #[tokio::test]
     async fn sender_posts_the_first_party_endpoint() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let _g = EnvGuard::new(OPT_VARS);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1560,31 +1908,7 @@ mod tests {
         let event_id = uuid::Uuid::new_v4();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0_u8; 4096];
-            loop {
-                let read = stream.read(&mut buffer).await.unwrap();
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&buffer[..read]);
-                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
-                {
-                    let headers = String::from_utf8_lossy(&bytes[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length: ")
-                                .map(str::to_owned)
-                        })
-                        .and_then(|value| value.parse::<usize>().ok())
-                        .unwrap();
-                    if bytes.len() >= header_end + 4 + content_length {
-                        break;
-                    }
-                }
-            }
+            let bytes = drain_request(&mut stream).await;
             stream
                 .write_all(
                     b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1627,6 +1951,7 @@ mod tests {
                 "202 Accepted",
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
+                drain_request(&mut stream).await;
                 let response =
                     format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 stream.write_all(response.as_bytes()).await.unwrap();
@@ -1661,6 +1986,7 @@ mod tests {
         );
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
+            drain_request(&mut stream).await;
             stream
                 .write_all(
                     b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -1695,7 +2021,13 @@ mod tests {
     #[ignore = "release workflow production contract gate"]
     async fn production_contract_is_accepted() {
         assert_eq!(build_channel(), "production");
+        harness::assert_production_contract().await;
         let payloads = [
+            build_payload(
+                "harness_setup",
+                "cli-release-contract-test",
+                json!({"attemptId":uuid::Uuid::new_v4().to_string(),"harness":"opencode","action":"install","trigger":"automatic","outcome":"failed","stage":"verify","reason":"not_ready","exitCode":null,"durationMs":100,"errorExcerpt":null}),
+            ),
             build_payload(
                 "command",
                 "cli-release-contract-test",
@@ -1721,6 +2053,16 @@ mod tests {
                 "project_created",
                 "cli-release-contract-test",
                 json!({ "local": true }),
+            ),
+            build_payload(
+                "project_created",
+                "cli-release-contract-test",
+                json!({ "local": true, "creationMode": "blank" }),
+            ),
+            build_payload(
+                "demo_welcome_choice",
+                "cli-release-contract-test",
+                json!({ "choice": "explore_demo" }),
             ),
             build_payload(
                 "chat_session_started",
@@ -1758,7 +2100,9 @@ mod tests {
                 json!({ "kind": "run", "local": true, "computeTarget": "local" }),
             ),
         ];
-        for payload in payloads {
+        let mut localized = build_payload("app_started", "cli-release-contract-test", json!({}));
+        localized["context"]["locale"] = json!("zh-CN");
+        for payload in payloads.into_iter().chain([localized]) {
             assert_eq!(post_payload(&payload).await, DeliveryOutcome::Acknowledged);
         }
     }
@@ -1775,14 +2119,29 @@ mod tests {
     }
 
     #[test]
+    fn payload_context_carries_the_dashboard_locale_once_reported() {
+        let _g = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-tel-locale-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let before = build_payload("app_started", "did", json!({}));
+        assert!(before["context"].get("locale").is_none());
+        set_dashboard_locale("zh-CN").unwrap();
+        let after = build_payload("app_started", "did", json!({}));
+        assert_eq!(after["context"]["locale"], "zh-CN");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn consent_payload_carries_agreed_flag() {
         let _g = EnvGuard::new(OPT_VARS);
         let dir = std::env::temp_dir().join(format!("orx-tel-agreed-{}", uuid::Uuid::new_v4()));
         std::env::set_var("XDG_CONFIG_HOME", &dir);
+        set_dashboard_locale("es").unwrap();
         for agreed in [true, false] {
-            let p = build_payload("telemetry_consent", "did", json!({ "agreed": agreed }));
+            let p = consent_payload(agreed, "did", uuid::Uuid::new_v4());
             assert_eq!(p["events"][0]["name"], "cli_telemetry_consent");
             assert_eq!(p["events"][0]["properties"]["agreed"], agreed);
+            assert_eq!(p["context"].get("locale").is_some(), agreed);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1873,6 +2232,15 @@ mod tests {
         keys
     }
 
+    #[test]
+    fn project_creation_modes_are_allowlisted() {
+        for mode in ["blank", "folder", "paper"] {
+            let parsed: ProjectCreationMode = serde_json::from_value(json!(mode)).unwrap();
+            assert_eq!(json!(parsed), json!(mode));
+        }
+        assert!(serde_json::from_value::<ProjectCreationMode>(json!("/private/path")).is_err());
+    }
+
     #[tokio::test]
     async fn environment_disabled_consent_never_creates_an_install_id() {
         let _g = EnvGuard::new(OPT_VARS);
@@ -1904,9 +2272,12 @@ mod tests {
         assert!(environment_disabled_reason().is_some());
 
         let session = TelemetrySession::start(Some("up"));
+        harness::capture_initial(&json!({"harnesses":[]}));
+        harness::SetupAttempt::new("opencode", "install", "automatic");
         capture_onboarding_completed();
         capture_onboarding_research_profile(&ResearchProfile::default());
-        capture_project_created(true);
+        capture_project_created(true, Some(ProjectCreationMode::Blank));
+        capture_demo_welcome_choice("explore_demo");
         capture_chat_session_started("codex");
         capture_chat_message_sent("codex");
         capture_skill_invoked("reproduce-paper", "slash", Some("codex"));

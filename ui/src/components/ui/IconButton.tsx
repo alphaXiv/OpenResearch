@@ -6,7 +6,6 @@ const BASE = [
   "transition-[background,color] duration-120 ease-standard",
   "focus-visible:outline-2 focus-visible:outline-solid focus-visible:outline-text focus-visible:outline-offset-2",
   "disabled:cursor-default disabled:opacity-45",
-  "[.chat-header.rail-hidden_>_&:first-child]:me-3",
 ].join(" ");
 
 type IconButtonSize = "default" | "small";
@@ -23,29 +22,31 @@ const SIZES: Record<IconButtonSize, string> = {
   small: "h-7 w-7 rounded-sm",
 };
 
-function classes(variant: IconButtonVariant, size: IconButtonSize, active: boolean, className?: string) {
-  return cn(BASE, VARIANTS[variant], SIZES[size], active && "active", className);
+function classes(variant: IconButtonVariant, size: IconButtonSize, active: boolean, shape: "rounded" | "circle", className?: string) {
+  return cn(BASE, VARIANTS[variant], SIZES[size], shape === "circle" && "rounded-full", active && "active", className);
 }
 
 export type IconButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   active?: boolean;
+  shape?: "rounded" | "circle";
   size?: IconButtonSize;
   variant?: IconButtonVariant;
 };
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { active = false, size = "default", variant = "default", className, ...props },
+  { active = false, shape = "rounded", size = "default", variant = "default", className, ...props },
   ref,
 ) {
-  return <button ref={ref} className={classes(variant, size, active, className)} {...props} />;
+  return <button ref={ref} className={classes(variant, size, active, shape, className)} {...props} />;
 });
 
 export type IconButtonLinkProps = AnchorHTMLAttributes<HTMLAnchorElement> & {
   active?: boolean;
+  shape?: "rounded" | "circle";
   size?: IconButtonSize;
   variant?: IconButtonVariant;
 };
 
-export function IconButtonLink({ active = false, size = "default", variant = "default", className, ...props }: IconButtonLinkProps) {
-  return <a className={classes(variant, size, active, className)} {...props} />;
+export function IconButtonLink({ active = false, shape = "rounded", size = "default", variant = "default", className, ...props }: IconButtonLinkProps) {
+  return <a className={classes(variant, size, active, shape, className)} {...props} />;
 }

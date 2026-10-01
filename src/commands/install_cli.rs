@@ -96,7 +96,7 @@ pub fn install(force: bool) -> Result<Installed> {
         Err(_) => {}
     }
 
-    std::os::unix::fs::symlink(&target, &link).map_err(|e| {
+    crate::local::native_store::create_symlink(&target, &link).map_err(|e| {
         anyhow!(
             "Could not link {} -> {}: {}",
             link.display(),
@@ -169,13 +169,14 @@ fn dir_on_path(dir: &Path) -> bool {
 /// directory (`~/bin` -> `~/.local/bin`) isn't mistaken for a rival install.
 fn other_orx_on_path(link: &Path) -> Option<PathBuf> {
     let paths = crate::local::shell_env::search_path()?;
-    let link_real = link.canonicalize();
+    let link_real = crate::paths::canonicalize(link);
     std::env::split_paths(&paths)
         .filter(|dir| !dir.as_os_str().is_empty())
-        .map(|dir| dir.join("orx"))
-        .filter(|candidate| candidate.exists())
-        .find(|candidate| match (candidate.canonicalize(), &link_real) {
-            (Ok(candidate), Ok(link)) => &candidate != link,
-            _ => candidate != link,
-        })
+        .filter_map(|dir| crate::local::shell_env::find_in_dir(&dir, "orx"))
+        .find(
+            |candidate| match (crate::paths::canonicalize(candidate), &link_real) {
+                (Ok(candidate), Ok(link)) => &candidate != link,
+                _ => candidate != link,
+            },
+        )
 }

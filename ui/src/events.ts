@@ -3,11 +3,13 @@
 // terminals can subscribe without threading props everywhere.
 
 import { useEffect, useRef } from "react";
+
 import type {
   ChatMessage,
   ChatSession,
   ContextUsage,
   Experiment,
+  OverleafLiveStatus,
   Project,
   QueuedMessage,
   Run,
@@ -97,6 +99,22 @@ export function onHarnessAuth(fn: HarnessAuthListener): () => void {
   };
 }
 
+// `harness.catalog` fires when the background fill has replaced a snapshot
+// answer's placeholder models with the real catalog — re-read, don't re-probe.
+type HarnessCatalogListener = () => void;
+const harnessCatalogListeners = new Set<HarnessCatalogListener>();
+
+export function onHarnessCatalog(fn: HarnessCatalogListener): () => void {
+  harnessCatalogListeners.add(fn);
+  return () => {
+    harnessCatalogListeners.delete(fn);
+  };
+}
+
+function emitHarnessCatalog() {
+  harnessCatalogListeners.forEach((fn) => fn());
+}
+
 function emitHarnessAuth(ev: HarnessAuthEvent) {
   harnessAuthListeners.forEach((fn) => fn(ev));
 }
@@ -120,6 +138,27 @@ export function onDataDirMove(fn: DataDirMoveListener): () => void {
 
 function emitDataDirMove(ev: DataDirMoveEvent) {
   dataDirMoveListeners.forEach((fn) => fn(ev));
+}
+
+// Overleaf live-sync events fan out the same way: the .tex tab that opened the
+// channel is the one that reloads on a pull or shows the connection state.
+export type OverleafEvent =
+  | { type: "live"; key: string; status: OverleafLiveStatus }
+  /** Overleaf edits reached these checkout-relative files. */
+  | { type: "pulled"; key: string; paths: string[] };
+
+type OverleafListener = (ev: OverleafEvent) => void;
+const overleafListeners = new Set<OverleafListener>();
+
+export function onOverleafEvent(fn: OverleafListener): () => void {
+  overleafListeners.add(fn);
+  return () => {
+    overleafListeners.delete(fn);
+  };
+}
+
+function emitOverleaf(ev: OverleafEvent) {
+  overleafListeners.forEach((fn) => fn(ev));
 }
 
 // Update status fans out the same way: the restart banner and the Updates
@@ -169,14 +208,14 @@ const REOPEN_AFTER_MS = 3_000;
 
 export interface OrxEventHandlers {
   onRun: (run: Run) => void;
-  onExperiment: (experiment: Experiment) => void;
-  onProject: (project: Project) => void;
+  onExperiment?: (experiment: Experiment) => void;
+  onProject?: (project: Project) => void;
   onReconnect?: () => void;
   /** The project's artifacts changed on disk — refetch the listing. */
   onArtifacts?: (projectId: string) => void;
 }
 
-export function useOrxEvents(handlers: OrxEventHandlers) {
+export function useOrxEventStream(handlers: OrxEventHandlers) {
   // Keep the latest handlers without re-opening the stream every render.
   const ref = useRef(handlers);
   ref.current = handlers;
@@ -235,6 +274,11 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
           return null;
         }
       };
+      es.addEventListener("resync.required", () => {
+        emitChat({ type: "reconnected" });
+        emitProjectActivityEvent();
+        ref.current.onReconnect?.();
+      });
       es.addEventListener("run.updated", (e) => {
         const d = parse<{ run: Run }>(e as MessageEvent);
         if (d?.run) {
@@ -246,14 +290,14 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         const d = parse<{ experiment: Experiment }>(e as MessageEvent);
         if (d?.experiment) {
           emitProjectActivityEvent();
-          ref.current.onExperiment(d.experiment);
+          ref.current.onExperiment?.(d.experiment);
         }
       });
       es.addEventListener("project.updated", (e) => {
         const d = parse<{ project: Project }>(e as MessageEvent);
         if (d?.project) {
           emitProjectActivityEvent();
-          ref.current.onProject(d.project);
+          ref.current.onProject?.(d.project);
         }
       });
       es.addEventListener("files.updated", (e) => {
@@ -309,6 +353,7 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         const d = parse<HarnessAuthEvent>(e as MessageEvent);
         if (d?.harness && d.authState) emitHarnessAuth(d);
       });
+      es.addEventListener("harness.catalog", () => emitHarnessCatalog());
       es.addEventListener("datadir.move.progress", (e) => {
         const d = parse<{ phase: string; copiedBytes: number; totalBytes: number }>(
           e as MessageEvent,
@@ -327,6 +372,14 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
         const d = parse<UpdateStatus>(e as MessageEvent);
         if (d) emitUpdateStatus(d);
       });
+      es.addEventListener("overleaf.live", (e) => {
+        const d = parse<{ key: string; status: OverleafLiveStatus }>(e as MessageEvent);
+        if (d?.key && d.status) emitOverleaf({ type: "live", key: d.key, status: d.status });
+      });
+      es.addEventListener("overleaf.pulled", (e) => {
+        const d = parse<{ key: string; paths: string[] }>(e as MessageEvent);
+        if (d?.key && Array.isArray(d.paths)) emitOverleaf({ type: "pulled", key: d.key, paths: d.paths });
+      });
     };
     connect();
     return () => {
@@ -337,3 +390,22 @@ export function useOrxEvents(handlers: OrxEventHandlers) {
     };
   }, []);
 }
+
+type EntityObservers = Pick<OrxEventHandlers, "onRun" | "onReconnect">;
+const entityListeners = new Set<EntityObservers>();
+export function useOrxEvents(handlers: EntityObservers) {
+  const ref = useRef(handlers);
+  ref.current = handlers;
+  useEffect(() => {
+    const listener: EntityObservers = {
+      onRun: (run) => ref.current.onRun(run),
+      onReconnect: () => ref.current.onReconnect?.(),
+    };
+    entityListeners.add(listener);
+    return () => { entityListeners.delete(listener); };
+  }, []);
+}
+export const emitEntity = {
+  onRun: (run: Run) => entityListeners.forEach((h) => h.onRun(run)),
+  onReconnect: () => entityListeners.forEach((h) => h.onReconnect?.()),
+};

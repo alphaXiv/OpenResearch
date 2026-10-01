@@ -163,6 +163,9 @@ pub async fn submit_local_openresearch_with_source(
     .sandbox;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: "openresearch_job".to_string(),
         namespace: Some(org_id),
         job_id: Some(sandbox.id.clone()),

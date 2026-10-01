@@ -278,7 +278,7 @@ fn map_ray_status(raw: &str) -> String {
 /// Submit the job. The submission id is client-chosen (`spec.submission_id`),
 /// so a success needs nothing from the response body.
 pub async fn run_job(address: &str, spec: &JobSubmission) -> Result<()> {
-    let env = super::default_unbuffered(&spec.env);
+    let env = super::default_python_env(&spec.env);
     let mut runtime_env = json!({ "env_vars": env });
     if let Some(working_dir) = &spec.working_dir {
         runtime_env["working_dir"] = json!(working_dir);

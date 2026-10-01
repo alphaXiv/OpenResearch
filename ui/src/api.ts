@@ -1,5 +1,9 @@
 // Typed client for the orx up local HTTP API (/api/*). All wire JSON is camelCase.
 
+import { workspaceScope, isCurrentScope, replaceWorkspace } from "./queries/client";
+import { invalidateWrite, removeSession, removeProject } from "./queries/invalidation";
+
+import type { GlobalWorkspace, ProjectWorkspace } from "./workspaceState";
 import { m } from "./paraglide/messages.js";
 import { getLocale } from "./paraglide/runtime.js";
 import { fmtNumber } from "./i18n";
@@ -12,7 +16,38 @@ export const isDemoProjectId = (id: string) => id.startsWith("demo_");
 export const DEMO_MAIN_SESSION_ID = "chat_demo_nanochat_v1";
 export const DEMO_FIGURE_SESSION_ID = "chat_demo_nanochat_figures_v1";
 export const DEMO_LITERATURE_SESSION_ID = "chat_demo_nanochat_literature_v1";
+
+/** Stable analytics labels for the bundled demo's recorded conversations. */
+export const DEMO_EXPERIMENT_LABELS: Record<string, string> = {
+  [DEMO_MAIN_SESSION_ID]: "cpu_end_to_end",
+  [DEMO_FIGURE_SESSION_ID]: "figures",
+  [DEMO_LITERATURE_SESSION_ID]: "literature",
+};
 export const DEMO_OVERVIEW_ARTIFACT = "cpu-apple-silicon-pipeline-results.md";
+/** Leaf message each recorded demo session is seeded with; a send moves it. */
+export const DEMO_SEEDED_LEAF_IDS: Record<string, string> = {
+  [DEMO_MAIN_SESSION_ID]: "msg_demo_nanochat_assistant_v1",
+  [DEMO_FIGURE_SESSION_ID]: "msg_demo_nanochat_figures_assistant_v1",
+  [DEMO_LITERATURE_SESSION_ID]: "msg_demo_nanochat_literature_assistant_v1",
+};
+export const DEMO_RUN_EXPERIMENT_PROMPT =
+  "Run the Muon matrix LR 2× probe experiment. When it finishes, compare its step-100 and step-200 val_bpb against the baseline and tell me whether doubling the matrix learning rate helps early training.";
+
+export class FileChangedError extends Error {
+  readonly currentVersion: string | null;
+  readonly exists: boolean;
+
+  constructor(
+    message: string,
+    currentVersion: string | null,
+    exists: boolean,
+  ) {
+    super(message);
+    this.name = "FileChangedError";
+    this.currentVersion = currentVersion;
+    this.exists = exists;
+  }
+}
 
 export interface Project {
   id: string;
@@ -51,6 +86,7 @@ export interface Experiment {
   updatedAt: number;
   /** Chat session that created this experiment; null for dashboard/legacy rows. */
   chatSessionId?: string | null;
+  archived: boolean;
 }
 
 export type RunStatus = "starting" | "running" | "done" | "failed" | "cancelled";
@@ -77,43 +113,86 @@ export function runDisplayStatus(run: Pick<Run, "status" | "cancelRequested">): 
   return live && run.cancelRequested ? "cancelling" : run.status;
 }
 
+/** Why the supervisor can't currently observe a live run, if it can't. */
+export function runMonitoringError(run: Pick<Run, "status" | "backend">): string | null {
+  if (run.status !== "running" && run.status !== "starting") return null;
+  const error = run.backend?.monitoringError;
+  return typeof error === "string" && error ? error : null;
+}
+
+/** The newest live run's monitoring error: a forced relaunch can leave an older run live. */
+export function experimentMonitoringError(runs: Pick<Run, "status" | "backend" | "createdAt">[]): string | null {
+  const newestFirst = [...runs].sort((a, b) => b.createdAt - a.createdAt);
+  return newestFirst.map(runMonitoringError).find((error) => error !== null) ?? null;
+}
+
+const writeScopes = new WeakMap<Response, ReturnType<typeof workspaceScope>>();
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     let message = text;
     try {
-      const parsed = JSON.parse(text) as { error?: string };
-      if (parsed.error) message = parsed.error;
-    } catch {
+      const parsed: unknown = JSON.parse(text);
+      if (typeof parsed === "object" && parsed !== null) {
+        if ("error" in parsed && typeof parsed.error === "string") message = parsed.error;
+        if (
+          res.status === 409 &&
+          "code" in parsed &&
+          parsed.code === "fileChanged" &&
+          "exists" in parsed &&
+          typeof parsed.exists === "boolean"
+        ) {
+          const currentVersion =
+            "currentVersion" in parsed && typeof parsed.currentVersion === "string"
+              ? parsed.currentVersion
+              : null;
+          throw new FileChangedError(message, currentVersion, parsed.exists);
+        }
+      }
+    } catch (error) {
+      if (error instanceof FileChangedError) throw error;
       // non-JSON body — show it raw
     }
     throw new Error(message || `HTTP ${res.status}`);
   }
-  return (await res.json()) as T;
+  const data: T = await res.json();
+  const scope = writeScopes.get(res);
+  if (scope && !isCurrentScope(scope)) throw new DOMException("Workspace changed", "AbortError");
+  return data;
 }
 
-const get = <T>(url: string) => fetch(url).then((r) => json<T>(r));
-const post = <T>(url: string, body?: unknown) =>
-  fetch(url, {
+const get = <T>(url: string, signal?: AbortSignal) => fetch(url, { signal }).then((r) => json<T>(r));
+async function writeResponse(url: string, init: RequestInit): Promise<Response> {
+  const scope = workspaceScope();
+  const response = await fetch(url, init);
+  if (!isCurrentScope(scope)) throw new DOMException("Workspace changed", "AbortError");
+  writeScopes.set(response, scope);
+  if (response.ok) invalidateWrite(url, scope);
+  return response;
+}
+const post = <T>(url: string, body?: unknown, keepalive = false) =>
+  writeResponse(url, {
     method: "POST",
+    keepalive,
     headers: body === undefined ? {} : { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   }).then((r) => json<T>(r));
 const patch = <T>(url: string, body: unknown) =>
-  fetch(url, {
+  writeResponse(url, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => json<T>(r));
 const put = <T>(url: string, body: unknown) =>
-  fetch(url, {
+  writeResponse(url, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   }).then((r) => json<T>(r));
 
-export const listProjects = () =>
-  get<{ projects: Project[] }>("/api/projects").then((r) => r.projects);
+export const listProjects = (signal?: AbortSignal) =>
+  get<{ projects: Project[] }>("/api/projects", signal).then((r) => r.projects);
 
 export interface ProjectActivity {
   projectId: string;
@@ -125,8 +204,8 @@ export interface ProjectActivity {
   lastMessageAt: number | null;
 }
 
-export const listProjectActivity = () =>
-  get<{ activity: ProjectActivity[] }>("/api/projects/activity").then((r) => r.activity);
+export const listProjectActivity = (signal?: AbortSignal) =>
+  get<{ activity: ProjectActivity[] }>("/api/projects/activity", signal).then((r) => r.activity);
 
 export interface OnboardingSelection {
   harness: HarnessId;
@@ -139,16 +218,32 @@ export interface OnboardingSelection {
 export type AgentSelection = OnboardingSelection;
 
 export interface UiState {
+  workspace: GlobalWorkspace | null;
   onboardingCompleted: boolean;
   tourCompleted: boolean;
   preferredAgent: AgentSelection | null;
+  preferredAutonomy: Autonomy | null;
 }
 
-export const getUiState = () => get<UiState>("/api/settings/ui-state");
+/** How much of the research the agent owns before checking in. */
+export type Autonomy = "copilot" | "agentic";
+export const DEFAULT_AUTONOMY: Autonomy = "agentic";
+
+export const getUiState = (signal?: AbortSignal) => get<UiState>("/api/settings/ui-state", signal);
+
+export const getProjectUiState = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectWorkspace | null>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, signal);
+
+export const saveProjectUiState = (projectId: string, state: ProjectWorkspace, keepalive = false) =>
+  post<ProjectWorkspace>(`/api/projects/${encodeURIComponent(projectId)}/ui-state`, state, keepalive);
+export const saveGlobalWorkspace = (workspace: GlobalWorkspace, keepalive = false) =>
+  post<UiState>("/api/settings/ui-state", { workspace }, keepalive);
 
 export const updateUiState = (body: {
+  workspace?: GlobalWorkspace;
   tourCompleted?: boolean;
   preferredAgent?: AgentSelection;
+  preferredAutonomy?: Autonomy;
 }) => post<UiState>("/api/settings/ui-state", body);
 
 export const completeOnboarding = (selection: OnboardingSelection, profile: Profile) =>
@@ -169,9 +264,9 @@ export interface ProjectPathStatus {
   githubRepo?: string | null;
 }
 
-export const getProjectPathStatus = (path = "") => {
+export const getProjectPathStatus = (path = "", signal?: AbortSignal) => {
   const query = path ? `?path=${encodeURIComponent(path)}` : "";
-  return get<ProjectPathStatus>(`/api/project-path/status${query}`);
+  return get<ProjectPathStatus>(`/api/project-path/status${query}`, signal);
 };
 
 export const pickProjectFolder = () =>
@@ -183,10 +278,13 @@ export interface NewProject {
   runCommand?: string;
   paperId?: string;
   cloneUrl?: string;
+  creationMode?: "blank" | "folder" | "paper";
   createFolder?: boolean;
   requireNewFolder?: boolean;
   initializeGit?: boolean;
   githubSyncEnabled?: boolean;
+  /** UI locale for the starter prompts the server warms up on creation. */
+  locale?: string;
 }
 
 export interface CreateProjectResult {
@@ -210,53 +308,96 @@ export interface ResolvedPaper {
   repoStars?: number | null;
 }
 
-export const searchPapers = (q: string) =>
-  get<{ papers: PaperHit[] }>(`/api/papers/search?q=${encodeURIComponent(q)}`).then(
+export const searchPapers = (q: string, signal?: AbortSignal) =>
+  get<{ papers: PaperHit[] }>(`/api/papers/search?q=${encodeURIComponent(q)}`, signal).then(
     (r) => r.papers,
   );
 
 /** The signed-in GitHub login, for naming the account a new repo lands on.
  * `login` is null when there's no usable token. */
-export const githubAccount = () => get<{ login: string | null }>("/api/github/account");
+export const githubAccount = (signal?: AbortSignal) => get<{ login: string | null }>("/api/github/account", signal);
 
-export const githubProjectRepoPreview = (name: string) =>
-  get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`);
+export const githubProjectRepoPreview = (name: string, signal?: AbortSignal) =>
+  get<{ repo: string }>(`/api/github/project-repo-preview?name=${encodeURIComponent(name)}`, signal);
 
 /** Whether the stored credentials are explicitly confirmed to push to a repo. */
-export const repoAccess = (owner: string, repo: string) =>
+export const repoAccess = (owner: string, repo: string, signal?: AbortSignal) =>
   get<{ canPush: boolean }>(
     `/api/github/repo-access?owner=${encodeURIComponent(owner)}&repo=${encodeURIComponent(repo)}`,
+    signal,
   );
 
 /** Resolve an arXiv id / URL to title + linked GitHub repo. May take a few
  * seconds for papers alphaXiv hasn't indexed yet (it scrapes arXiv on a miss). */
-export const resolvePaper = (id: string) =>
-  get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`).then(
+export const resolvePaper = (id: string, signal?: AbortSignal) =>
+  get<{ paper: ResolvedPaper }>(`/api/papers/resolve?id=${encodeURIComponent(id)}`, signal).then(
     (r) => r.paper,
   );
 
 export const updateProject = (projectId: string, body: { runCommand?: string; name?: string }) =>
   patch<{ project: Project }>(`/api/projects/${projectId}`, body).then((r) => r.project);
 
+/** One suggested opening message for the empty chat: written by a model that
+ *  read the project, or pre-written when the project is blank. */
+export interface StarterPrompt {
+  title: string;
+  prompt: string;
+}
+
+export interface ProjectStarterPrompts {
+  /** Empty when the project already has experiments or is blank; null when
+   *  the harness could not answer. */
+  prompts: StarterPrompt[] | null;
+  /** The project has nothing to read yet, so the UI offers its pre-written
+   *  prompts instead of model-generated ones. */
+  blank: boolean;
+}
+
+/** Start generating starter prompts for a project that is about to be created,
+ *  so they are cached by the time its chat opens. Fire-and-forget. */
+export const prewarmStarterPrompts = (body: {
+  name: string;
+  paperId?: string;
+  path?: string;
+  locale: string;
+}) => post<{ ok: boolean }>("/api/projects/starter-prompts/prewarm", body);
+
+/** Slow on a cache miss (one headless model call over a brief of the project). */
+export const getProjectStarterPrompts = (
+  projectId: string,
+  harness: HarnessId,
+  model: string | null,
+  locale: string,
+  signal?: AbortSignal,
+) =>
+  get<ProjectStarterPrompts>(
+    `/api/projects/${projectId}/starter-prompts?${new URLSearchParams({ harness, ...(model ? { model } : {}), locale })}`,
+    signal,
+  );
+
 /** Record a visit so the backend can persist project-level UI recency. */
 export const openProject = (projectId: string) =>
   post<{ project: Project }>(`/api/projects/${projectId}/open`).then((r) => r.project);
 
 export const deleteProject = (projectId: string) =>
-  fetch(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
+  writeResponse(`/api/projects/${projectId}`, { method: "DELETE" }).then(async (r) => {
     if (!r.ok) {
       const body = await r.json().catch(() => null);
       throw new Error(body?.error ?? `delete failed (${r.status})`);
     }
+    removeProject(projectId);
   });
 
-export const listExperiments = (projectId: string) =>
-  get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`).then(
+export const listExperiments = (projectId: string, signal?: AbortSignal) =>
+  get<{ experiments: Experiment[] }>(`/api/projects/${projectId}/experiments`, signal).then(
     (r) => r.experiments,
   );
 
-export const listRuns = (projectId: string) =>
-  get<{ runs: Run[] }>(`/api/projects/${projectId}/runs`).then((r) => r.runs);
+export const setExperimentArchived = (id: string, direction: "ancestors" | "descendants" | "only" | "region" | "taskRegion", archived: boolean) =>
+  patch<{ ids: string[] }>(`/api/experiments/${id}/archive`, { direction, archived });
+
+export const listRuns = (projectId: string, signal?: AbortSignal) =>
+  get<{ runs: Run[] }>(`/api/projects/${projectId}/runs`, signal).then((r) => r.runs);
 
 /** A run viewed as compute: every run across all projects, tagged with the
  *  name of the project that launched it. `projectName` is enriched only on the
@@ -287,10 +428,10 @@ export interface DiffPayload {
   byteLimit: number;
 }
 
-export const getRunDiff = (runId: string) => get<DiffPayload>(`/api/runs/${runId}/diff`);
+export const getRunDiff = (runId: string, signal?: AbortSignal) => get<DiffPayload>(`/api/runs/${runId}/diff`, signal);
 
-export const getExperimentDiff = (experimentId: string) =>
-  get<DiffPayload>(`/api/experiments/${experimentId}/diff`);
+export const getExperimentDiff = (experimentId: string, signal?: AbortSignal) =>
+  get<DiffPayload>(`/api/experiments/${experimentId}/diff`, signal);
 
 /** Which source answered a checkout read: a session's live worktree, the hub
  * clone (also the worktree-pruned fallback), or a branch's committed tree. */
@@ -319,14 +460,18 @@ export interface ProjectFile {
   notFound: boolean;
   root: CheckoutRoot;
   presentation: FilePresentation;
+  /** Exact live-checkout bytes; null for read-only/incomplete sources and
+   * absent when connected to an older remote server. */
+  version?: string | null;
 }
 
 /** One file from the project — a branch's committed copy when `ref` is given,
  * else a chat session's worktree, else the hub clone — capped server-side
  * (~512 KB). */
-export const getProjectFile = (projectId: string, path: string, opts: CheckoutRef = {}) =>
+export const getProjectFile = (projectId: string, path: string, opts: CheckoutRef = {}, signal?: AbortSignal) =>
   get<ProjectFile>(
     `/api/projects/${projectId}/file?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+    signal,
   );
 
 /** Byte-exact checkout file for browser-native media rendering or download. */
@@ -342,8 +487,8 @@ export type AbsoluteFile = Omit<ProjectFile, "root">;
 /** One file by absolute path — the escape hatch for a file an agent references
  * that lives outside the checkout and artifacts. Server-side capped (~512 KB);
  * loopback-only, so it reads whatever the user running `orx up` can read. */
-export const getAbsoluteFile = (path: string) =>
-  get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`);
+export const getAbsoluteFile = (path: string, signal?: AbortSignal) =>
+  get<AbsoluteFile>(`/api/files/abs?path=${encodeURIComponent(path)}`, signal);
 
 /** Byte-exact absolute-path file for browser-native media rendering or download. */
 export const absoluteFileUrl = (path: string) =>
@@ -356,12 +501,33 @@ export const saveProjectFile = (
   projectId: string,
   path: string,
   content: string,
+  opts: { sessionId?: string; expectedVersion: string },
+) =>
+  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number; version: string }>(
+    `/api/projects/${projectId}/file`,
+    { path, content, sessionId: opts.sessionId, expectedVersion: opts.expectedVersion },
+  );
+
+export type FileAction =
+  | { action: "rename"; newName: string }
+  | { action: "duplicate" | "delete" };
+
+export interface FileActionResult {
+  ok: boolean;
+  path: string;
+}
+
+export const manageProjectFile = (
+  projectId: string,
+  path: string,
+  action: FileAction,
   opts: { sessionId?: string } = {},
 ) =>
-  put<{ ok: boolean; root: CheckoutRoot; bytesWritten: number }>(
-    `/api/projects/${projectId}/file`,
-    { path, content, sessionId: opts.sessionId },
-  );
+  patch<FileActionResult>(`/api/projects/${projectId}/file`, {
+    path,
+    ...action,
+    sessionId: opts.sessionId,
+  });
 
 /** Open a checkout file on the machine running `orx up`, in the OS default app
  * for its type (the user's editor for source files). */
@@ -371,6 +537,17 @@ export const openFileInEditor = (
   opts: { sessionId?: string } = {},
 ) =>
   post<{ ok: boolean }>(`/api/projects/${projectId}/file/open`, {
+    path,
+    sessionId: opts.sessionId,
+  });
+
+/** Reveal a checkout file in the OS file manager on the machine running `orx up`. */
+export const revealFileInManager = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string } = {},
+) =>
+  post<{ ok: boolean }>(`/api/projects/${projectId}/file/reveal`, {
     path,
     sessionId: opts.sessionId,
   });
@@ -385,7 +562,7 @@ export interface LatexEngine {
 }
 
 /** Whether the machine running `orx up` can compile LaTeX. */
-export const getLatexEngine = () => get<LatexEngine>("/api/latex/engine");
+export const getLatexEngine = (signal?: AbortSignal) => get<LatexEngine>("/api/latex/engine", signal);
 
 export interface LatexCompileResult {
   ok: boolean;
@@ -418,6 +595,8 @@ export const compileLatex = (
 /** The Overleaf project a `.tex` pushes to. */
 export interface OverleafLink {
   projectId: string;
+  /** The Overleaf site the project lives on: www.overleaf.com, or a Server Pro host. */
+  host: string;
   /** The project on overleaf.com, for opening it. */
   url: string;
 }
@@ -425,13 +604,22 @@ export interface OverleafLink {
 export interface OverleafState {
   /** A Git authentication token is stored on this machine. */
   hasToken: boolean;
+  /** A browser session cookie is stored, so a linked paper can follow
+   * Overleaf live rather than by polling. */
+  hasSession: boolean;
   /** Null until this paper is pointed at a project. */
   link: OverleafLink | null;
 }
 
+export interface OverleafSettings {
+  hasToken: boolean;
+  hasSession: boolean;
+}
+
 /** Whether a Git authentication token is stored — the machine-wide half of the
  * Overleaf state, for Settings. */
-export const getOverleafSettings = () => get<{ hasToken: boolean }>("/api/overleaf/settings");
+export const getOverleafSettings = (signal?: AbortSignal) =>
+  get<OverleafSettings>("/api/overleaf/settings", signal);
 
 /** Store an Overleaf Git authentication token. Not validated here: only the Git
  * bridge can judge a token, and it needs a project to judge it against, so a
@@ -440,13 +628,65 @@ export const saveOverleafToken = (token: string) =>
   post<{ hasToken: boolean }>("/api/overleaf/token", { token });
 
 export const deleteOverleafToken = () =>
-  fetch("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+  writeResponse("/api/overleaf/token", { method: "DELETE" }).then((r) => json<{ hasToken: boolean }>(r));
+
+/** Store the Overleaf browser session cookie the live channel signs in with.
+ * Accepts the bare value or `name=value`; only a connection can say whether it
+ * works, so a stale cookie surfaces from `startOverleafLive`. */
+export const saveOverleafSession = (session: string, opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean }>("/api/overleaf/session", { session, host: opts.host });
+
+export const deleteOverleafSession = () =>
+  fetch("/api/overleaf/session", { method: "DELETE" }).then((r) => json<{ hasSession: boolean }>(r));
+
+/** Read the session cookie from a browser signed in to Overleaf on this
+ * machine, so it need not be pasted. macOS only; reading Chrome/Edge/Brave/Arc
+ * asks the Keychain for their cookie key. Rejects when no browser holds one. */
+export const importOverleafSession = (opts: { host?: string } = {}) =>
+  post<{ hasSession: boolean; source: string }>("/api/overleaf/session/import", { host: opts.host });
+
+export interface OverleafLiveStatus {
+  state: "connecting" | "live" | "stopped";
+  /** Why the channel stopped and will not reconnect on its own. */
+  error: string | null;
+  /** The cookie is what it stopped over, so a fresh one is the way back in. */
+  needsSession: boolean;
+  /** Why some documents are not moving: read-only access, a conflict held
+   * for the git sync, a format this client cannot follow. */
+  note: string | null;
+}
+
+export interface OverleafLive {
+  /** Identifies this session in `overleaf.live` and `overleaf.pulled` events. */
+  key: string;
+  /** Null in a stop's reply; a start always reports the channel's state. */
+  status: OverleafLiveStatus | null;
+}
+
+/** Open the live channel, or keep it open: a tab calls this while it stays on
+ * the file. One Overleaf refused stays refused unless `retry` is set. */
+export const startOverleafLive = (
+  projectId: string,
+  path: string,
+  opts: { sessionId?: string; retry?: boolean } = {},
+) =>
+  post<OverleafLive>(`/api/projects/${projectId}/file/overleaf/live`, {
+    path,
+    sessionId: opts.sessionId,
+    retry: opts.retry,
+  });
+
+export const stopOverleafLive = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
+  fetch(`/api/projects/${projectId}/file/overleaf/live?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+    method: "DELETE",
+  }).then((r) => json<OverleafLive>(r));
 
 export const getOverleafState = (
   projectId: string,
   path: string,
   opts: { sessionId?: string } = {},
-) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`);
+  signal?: AbortSignal,
+) => get<OverleafState>(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, signal);
 
 /** Point this `.tex` at an Overleaf project. The server proves the account can
  * reach it before storing the link, so this is where a plan without Git
@@ -463,7 +703,7 @@ export const linkOverleaf = (
   });
 
 export const unlinkOverleaf = (projectId: string, path: string, opts: { sessionId?: string } = {}) =>
-  fetch(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
+  writeResponse(`/api/projects/${projectId}/file/overleaf?${checkoutQuery(opts, new URLSearchParams({ path }))}`, {
     method: "DELETE",
   }).then((r) => json<OverleafState>(r));
 
@@ -501,9 +741,11 @@ export const getOverleafStatus = (
   projectId: string,
   path: string,
   opts: { sessionId?: string } = {},
+  signal?: AbortSignal,
 ) =>
   get<{ remoteChanged: boolean }>(
     `/api/projects/${projectId}/file/overleaf/status?${checkoutQuery(opts, new URLSearchParams({ path }))}`,
+    signal,
   );
 
 /** Page that posts the paper to Overleaf as a new project — the path for an
@@ -516,6 +758,8 @@ export const overleafUploadUrl = (
 
 export interface CodeTree {
   root: CheckoutRoot;
+  /** Absolute live checkout path; absent for committed branch listings. */
+  path?: string;
   /** The listed branch (`ref` mode), else the checked-out branch, else null
    * (detached HEAD). */
   branch: string | null;
@@ -529,9 +773,9 @@ export interface CodeTree {
  * given, else a chat session's live worktree when `sessionId` is given, else
  * the hub clone's checkout — plus the branch name. `ref` and `sessionId` are
  * mutually exclusive (the server rejects both). */
-export const getCodeTree = (projectId: string, opts: CheckoutRef = {}) => {
+export const getCodeTree = (projectId: string, opts: CheckoutRef = {}, signal?: AbortSignal) => {
   const qs = checkoutQuery(opts).toString();
-  return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`);
+  return get<CodeTree>(`/api/projects/${projectId}/code-tree${qs ? `?${qs}` : ""}`, signal);
 };
 
 /** How a file in a session's worktree differs from the diff base. Lowercase to
@@ -561,8 +805,8 @@ export interface SessionWorktree {
   diff?: DiffPayload;
 }
 
-export const getSessionWorktree = (sessionId: string) =>
-  get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`);
+export const getSessionWorktree = (sessionId: string, signal?: AbortSignal) =>
+  get<SessionWorktree>(`/api/chat/sessions/${sessionId}/worktree`, signal);
 
 /** A GitHub `tree` URL for a branch. Branch names contain `/` (`orx/<slug>`),
  * so encode each path segment — never the whole string, which would escape the
@@ -574,30 +818,42 @@ export const githubBranchUrl = (owner: string, repo: string, branch: string) =>
     .join("/")}`;
 
 export type HfTokenSource = "env" | "openresearchEnv" | "hfCache";
+export type HfValidationStatus = "missing" | "valid" | "invalid" | "unreachable";
 
 export interface HfSettings {
   configured: boolean;
   source: HfTokenSource | null;
   maskedToken: string | null;
-  valid: boolean;
+  validationStatus: HfValidationStatus;
+  validationError: string | null;
   username: string | null;
   jobsWrite: boolean | null;
 }
 
-export const getHfSettings = () => get<HfSettings>("/api/settings/hf");
+export const getHfSettings = (signal?: AbortSignal) => get<HfSettings>("/api/settings/hf", signal);
 
 export const saveHfToken = (token: string) => post<HfSettings>("/api/settings/hf", { token });
 
+export interface TinkerSettings {
+  maskedKey: string | null;
+  validationStatus: "missing" | "valid" | "invalid" | "billingRequired";
+  processEnv: boolean;
+}
+
+export const getTinkerSettings = (signal?: AbortSignal) => get<TinkerSettings>("/api/settings/tinker", signal);
+export const saveTinkerKey = (key: string) => post<TinkerSettings>("/api/settings/tinker", { key });
+
 // --- updates ------------------------------------------------------------------
 
-/** How orx was installed. Only `installer` and `app-bundle` update themselves. */
-export type InstallChannel = "installer" | "app-bundle" | "cargo" | "homebrew" | "nix" | "unknown";
+/** How orx was installed. `installer`, `app-bundle`, `appimage` and `portable` update themselves. */
+export type InstallChannel = "installer" | "app-bundle" | "appimage" | "portable" | "cargo" | "homebrew" | "nix" | "unknown";
 
 export interface UpdateStatus {
   current: string;
   /** Latest release this install can actually move to — the macOS app and the
    *  CLI read different manifests, and the app's can lag. */
   latest: string | null;
+  latestTag: string | null;
   channel: InstallChannel;
   /** Whether this install is one orx can replace at all. */
   selfUpdates: boolean;
@@ -608,7 +864,12 @@ export interface UpdateStatus {
   /** The newer version already on disk. Distinct from `latest`: a release can
    *  land between the install and the restart. */
   installedVersion: string | null;
+  installedTag: string | null;
   restartRequired: boolean;
+  /** Whether `restartApp` is honored; always true today, kept for a channel that cannot. */
+  canRestart: boolean;
+  /** Per-process id: changes when the server has relaunched. */
+  instance: string;
 }
 
 export interface InstalledCli {
@@ -620,9 +881,14 @@ export interface InstalledCli {
   alreadyCurrent: boolean;
 }
 
-export const getUpdateStatus = () => get<UpdateStatus>("/api/update");
+export const getUpdateStatus = (signal?: AbortSignal) => get<UpdateStatus>("/api/update", signal);
 
 export const applyUpdate = () => post<UpdateStatus>("/api/update/apply");
+
+/** Relaunch the server into the copy the updater installed. The old server
+ *  answers and then goes away; poll `getUpdateStatus` for the new one. */
+export const restartApp = () =>
+  post<{ restarting: boolean; version: string }>("/api/update/restart");
 
 export const setAutoUpdate = (enabled: boolean) =>
   post<UpdateStatus>("/api/update/auto", { enabled });
@@ -648,7 +914,7 @@ export interface K8sSettings {
   preflight: K8sPreflight;
 }
 
-export const getK8sSettings = () => get<K8sSettings>("/api/settings/k8s");
+export const getK8sSettings = (signal?: AbortSignal) => get<K8sSettings>("/api/settings/k8s", signal);
 
 export const saveK8sSettings = (body: { context?: string; namespace?: string }) =>
   post<K8sSettings>("/api/settings/k8s", body);
@@ -658,21 +924,16 @@ export const saveK8sSettings = (body: { context?: string; namespace?: string }) 
 export type ModalTokenSource = "env" | "syncedEnv" | "modalToml";
 
 export interface ModalSettings {
-  /** The orx-managed venv exists on disk. */
-  envProvisioned: boolean;
-  /** `import modal` succeeds with the resolved interpreter. */
-  modalImportable: boolean;
   tokenConfigured: boolean;
   tokenSource: ModalTokenSource | null;
-  /** modalImportable && tokenConfigured. */
-  ready: boolean;
-  error: string | null;
+  maskedTokenId: string | null;
+  maskedTokenSecret: string | null;
+  processEnv: boolean;
 }
 
-export const getModalSettings = () => get<ModalSettings>("/api/settings/modal");
-
-/** Build the orx-managed Modal env (first run downloads the SDK, ~30–60s). */
-export const provisionModal = () => post<ModalSettings>("/api/settings/modal/provision");
+export const getModalSettings = (signal?: AbortSignal) => get<ModalSettings>("/api/settings/modal", signal);
+export const saveModalToken = (tokenId: string, tokenSecret: string) =>
+  post<ModalSettings>("/api/settings/modal", { tokenId, tokenSecret });
 
 // --- settings: env vars / git / harnesses ------------------------------------
 
@@ -682,14 +943,14 @@ export interface EnvVar {
   inProcessEnv: boolean;
 }
 
-export const getEnvVars = () =>
-  get<{ vars: EnvVar[] }>("/api/settings/env").then((r) => r.vars);
+export const getEnvVars = (signal?: AbortSignal) =>
+  get<{ vars: EnvVar[] }>("/api/settings/env", signal).then((r) => r.vars);
 
 export const setEnvVar = (key: string, value: string) =>
   post<{ vars: EnvVar[] }>("/api/settings/env", { key, value }).then((r) => r.vars);
 
 export const deleteEnvVar = (key: string) =>
-  fetch(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
+  writeResponse(`/api/settings/env/${encodeURIComponent(key)}`, { method: "DELETE" })
     .then((r) => json<{ vars: EnvVar[] }>(r))
     .then((r) => r.vars);
 
@@ -704,7 +965,7 @@ export interface DataDirSettings {
   source: DataDirSource;
 }
 
-export const getDataDir = () => get<DataDirSettings>("/api/settings/data-dir");
+export const getDataDir = (signal?: AbortSignal) => get<DataDirSettings>("/api/settings/data-dir", signal);
 
 export interface DataDirValidation {
   ok: boolean;
@@ -719,7 +980,7 @@ export const validateDataDir = (path: string) =>
 
 /** Set the path without moving (onboarding / already-populated target). */
 export const setDataDir = (path: string) =>
-  post<DataDirSettings>("/api/settings/data-dir", { path });
+  post<DataDirSettings>("/api/settings/data-dir", { path }).then((result) => { replaceWorkspace(); return result; });
 
 /** Kick off a relocate. Resolves once the move has *started* (HTTP 202); watch
  * `onDataDirMove` (events.ts) for `progress` / `done` / `error`. Throws on the
@@ -728,6 +989,7 @@ export const moveDataDir = (path: string) =>
   post<{ started: boolean }>("/api/settings/data-dir/move", { path });
 
 export interface SshHost {
+  container?: string | null;
   host: string;
   hostname?: string;
   user?: string;
@@ -737,11 +999,110 @@ export interface SshHost {
   lastTest?: SshPreflight;
 }
 
-export const getSshHosts = () =>
-  get<{ hosts: SshHost[] }>("/api/settings/ssh").then((r) => r.hosts);
+export interface SshSettings { hosts: SshHost[]; defaultHost: string | null }
+export const getSshSettings = (signal?: AbortSignal) => get<SshSettings>("/api/settings/ssh", signal);
+export const saveSshHost = (body: { host: string; container: string | null }) =>
+  post<{ ok: boolean }>("/api/settings/ssh", body);
+export const saveSshDefault = (host: string | null) => post<{ ok: boolean }>("/api/settings/ssh/default", { host });
+export interface SshExecutionPreflight extends SshPreflight {
+  container: { reference: string; ready: boolean; error: string | null } | null;
+}
+export const testSshExecution = (host: string, container: string | null) =>
+  post<SshExecutionPreflight>("/api/settings/ssh/preflight", { host, container });
 
-export const getSshMasterStatus = (host: string) =>
-  get<{ running: boolean }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`);
+export interface SshConfigFile {
+  path: string;
+  content: string;
+}
+
+export const getSshConfig = (signal?: AbortSignal) => get<SshConfigFile>("/api/settings/ssh/config", signal);
+
+export const saveSshConfig = (content: string, previousContent: string) =>
+  put<{ ok: boolean }>("/api/settings/ssh/config", { content, previousContent });
+
+export const getSshMasterStatus = (host: string, signal?: AbortSignal) =>
+  get<{ running: boolean | null }>(`/api/settings/ssh/master?host=${encodeURIComponent(host)}`, signal);
+
+export type RemoteSessionStatus =
+  | "connecting"
+  | "needsInstall"
+  | "needsUpdate"
+  | "applying"
+  | "connected"
+  | "reconnecting"
+  | "disconnected";
+
+export interface RemoteInstallPaths {
+  binary: string;
+  database: string;
+  cache: string;
+}
+
+export interface RemoteSessionInfo {
+  id: string;
+  host: string;
+  user: string | null;
+  status: RemoteSessionStatus;
+  version: string | null;
+  dashboardProtocol: number | null;
+  gatewayUrl: string;
+  error: string | null;
+  installPaths: RemoteInstallPaths | null;
+  uiPreferences: { theme: string | null; locale: string | null };
+  canStartNewHost: boolean;
+}
+
+export type RuntimeInfo =
+  | { kind: "local"; version: string }
+  | { kind: "ssh"; version: string; dashboardProtocol: number; session: RemoteSessionInfo };
+
+export const getRuntime = (signal?: AbortSignal) => get<RuntimeInfo>("/_orx/runtime", signal);
+
+export const listRemoteSessions = (signal?: AbortSignal) =>
+  get<{ sessions: RemoteSessionInfo[] }>("/api/remote/sessions", signal).then((r) => r.sessions);
+
+export const createRemoteSession = (
+  host: string,
+  uiPreferences: { theme: string | null; locale: string | null },
+) => post<RemoteSessionInfo>("/api/remote/sessions", { host, uiPreferences });
+
+export const reconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/reconnect`);
+
+export const disconnectRemoteSession = (id: string) =>
+  post<RemoteSessionInfo>(`/api/remote/sessions/${encodeURIComponent(id)}/disconnect`);
+
+export const installRemoteSession = (paths: RemoteInstallPaths) =>
+  post<RemoteSessionInfo>("/_orx/install", paths);
+
+export const reconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/reconnect");
+
+export const disconnectCurrentRemote = () => post<RemoteSessionInfo>("/_orx/disconnect");
+
+export const startCurrentRemoteHost = () => post<RemoteSessionInfo>("/_orx/start-host");
+
+export interface RemoteStopPreview {
+  instanceId: string;
+  activeTurnCount: number;
+  queuedMessageCount: number;
+  pendingPermissionCount: number;
+  activeRunCount: number;
+  attachmentCount: number;
+}
+
+export const getRemoteStopPreview = () => get<RemoteStopPreview>("/_orx/stop-host");
+
+export const stopCurrentRemoteHost = (preview: RemoteStopPreview) =>
+  post<{ accepted: boolean }>("/_orx/stop-host", {
+    expectedInstanceId: preview.instanceId,
+    expectedPreview: {
+      activeTurnCount: preview.activeTurnCount,
+      queuedMessageCount: preview.queuedMessageCount,
+      pendingPermissionCount: preview.pendingPermissionCount,
+      activeRunCount: preview.activeRunCount,
+      attachmentCount: preview.attachmentCount,
+    },
+  });
 
 export interface SshPreflight {
   reachable: boolean;
@@ -765,7 +1126,7 @@ export interface SlurmSettings {
   hosts: SshHost[];
 }
 
-export const getSlurmSettings = () => get<SlurmSettings>("/api/settings/slurm");
+export const getSlurmSettings = (signal?: AbortSignal) => get<SlurmSettings>("/api/settings/slurm", signal);
 
 /** Empty string clears a field back to the cluster default. */
 export const saveSlurmSettings = (body: {
@@ -794,7 +1155,7 @@ export interface RaySettings {
   source: string;
 }
 
-export const getRaySettings = () => get<RaySettings>("/api/settings/ray");
+export const getRaySettings = (signal?: AbortSignal) => get<RaySettings>("/api/settings/ray", signal);
 
 /** Empty string clears the saved address (fall back to env / default). */
 export const saveRaySettings = (body: { address?: string }) =>
@@ -825,10 +1186,11 @@ export type ComputeTargetId =
   | "openresearch";
 
 /** Cheap fs/env probe only — "worth trying", not "healthy". Deep health lives
- * in each backend's own settings endpoint, fetched when its row is expanded. */
+ * in each backend's own settings endpoint, fetched when its setup surface opens. */
 export interface ComputeTargetSummary {
   id: ComputeTargetId;
   configured: boolean;
+  fromEnvironmentTab?: boolean;
   /**
    * The readiness check couldn't run (offline, unreadable ~/.ssh), so
    * `configured` is a guess rather than an answer. Absent for backends whose
@@ -848,9 +1210,10 @@ export interface ComputeSettings {
   configuredDefaultFlavor?: string | null;
 }
 
-export const getComputeSettings = (projectId?: string) =>
+export const getComputeSettings = (projectId?: string, signal?: AbortSignal) =>
   get<ComputeSettings>(
     `/api/settings/compute${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+    signal,
   );
 
 /** Set (or clear, with backend: null) the default compute target. Responds
@@ -878,7 +1241,7 @@ export interface LocalMachine {
   gpus: LocalGpu[];
 }
 
-export const getLocalMachine = () => get<LocalMachine>("/api/settings/local");
+export const getLocalMachine = (signal?: AbortSignal) => get<LocalMachine>("/api/settings/local", signal);
 
 export interface OpenResearchSettings {
   loggedIn: boolean;
@@ -895,8 +1258,8 @@ export interface OpenResearchSettings {
   error: string | null;
 }
 
-export const getOpenResearchSettings = () =>
-  get<OpenResearchSettings>("/api/settings/openresearch");
+export const getOpenResearchSettings = (signal?: AbortSignal) =>
+  get<OpenResearchSettings>("/api/settings/openresearch", signal);
 
 /** One node of the artifacts tree: a file, or a directory with children. */
 export interface ArtifactEntry {
@@ -920,14 +1283,17 @@ export interface ProjectArtifacts {
   truncated: boolean;
 }
 
-export const getArtifacts = (projectId: string) =>
-  get<ProjectArtifacts>(`/api/projects/${projectId}/files`);
+export const getArtifacts = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectArtifacts>(`/api/projects/${projectId}/files`, signal);
 
 /** Delete a file or folder in the artifacts directory. */
 export const deleteArtifact = (projectId: string, path: string) =>
-  fetch(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
+  writeResponse(`/api/projects/${projectId}/files?path=${encodeURIComponent(path)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean }>(r));
+
+export const manageArtifactFile = (projectId: string, path: string, action: FileAction) =>
+  patch<FileActionResult>(`/api/projects/${projectId}/files`, { path, ...action });
 
 /** Raw artifact bytes served by the compatibility `/files` API. */
 export const artifactUrl = (projectId: string, path: string) =>
@@ -958,8 +1324,9 @@ const decodeFileText = (bytes: ArrayBuffer, truncated: boolean): FileTextBody =>
 export const getArtifactFileText = (
   projectId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<FileTextBody | null> => {
-  return fetch(artifactUrl(projectId, path), {
+  return fetch(artifactUrl(projectId, path), { signal,
     headers: { Range: `bytes=0-${FILE_PREVIEW_BYTES - 1}` },
   }).then((r) => {
     if (r.status === 404) return null;
@@ -986,8 +1353,9 @@ export interface ArtifactFileMetadata {
 export const getArtifactFileMetadata = (
   projectId: string,
   path: string,
+  signal?: AbortSignal,
 ): Promise<ArtifactFileMetadata | null> =>
-  fetch(artifactUrl(projectId, path), { method: "HEAD" }).then((r) => {
+  fetch(artifactUrl(projectId, path), { signal, method: "HEAD" }).then((r) => {
     if (r.status === 404) return null;
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const presentation = r.headers.get("x-openresearch-presentation");
@@ -1024,7 +1392,7 @@ export interface Profile {
   papers: LinkedPaper[];
 }
 
-export const getProfile = () => get<Profile>("/api/settings/profile");
+export const getProfile = (signal?: AbortSignal) => get<Profile>("/api/settings/profile", signal);
 
 export const setProfile = (body: Profile) => post<Profile>("/api/settings/profile", body);
 
@@ -1033,10 +1401,11 @@ export interface LitSourcesSettings {
   alphaxiv: boolean;
   openalex: boolean;
   biorxiv: boolean;
+  pubmed: boolean;
 }
 
-export const getLitSources = () =>
-  get<LitSourcesSettings>("/api/settings/lit-sources");
+export const getLitSources = (signal?: AbortSignal) =>
+  get<LitSourcesSettings>("/api/settings/lit-sources", signal);
 
 export const setLitSources = (body: LitSourcesSettings) =>
   post<LitSourcesSettings>("/api/settings/lit-sources", body);
@@ -1048,8 +1417,8 @@ export interface ProjectDefaultsSettings {
   githubAuthenticated: boolean;
 }
 
-export const getProjectDefaults = () =>
-  get<ProjectDefaultsSettings>("/api/settings/projects");
+export const getProjectDefaults = (signal?: AbortSignal) =>
+  get<ProjectDefaultsSettings>("/api/settings/projects", signal);
 
 export const setProjectDefaults = (
   githubForNewProjects: boolean,
@@ -1085,8 +1454,8 @@ export interface ProjectGitStatus {
   };
 }
 
-export const getProjectGitStatus = (projectId: string) =>
-  get<ProjectGitStatus>(`/api/projects/${projectId}/git`);
+export const getProjectGitStatus = (projectId: string, signal?: AbortSignal) =>
+  get<ProjectGitStatus>(`/api/projects/${projectId}/git`, signal);
 
 export const initializeProjectGit = (projectId: string) =>
   post<ProjectGitStatus>(`/api/projects/${projectId}/git/init`);
@@ -1111,12 +1480,41 @@ export interface TelemetrySettings {
   reason: string | null;
 }
 
-export const getTelemetry = () => get<TelemetrySettings>("/api/settings/telemetry");
+export const getTelemetry = (signal?: AbortSignal) => get<TelemetrySettings>("/api/settings/telemetry", signal);
 
 export const setTelemetry = (enabled: boolean) =>
   post<TelemetrySettings>("/api/settings/telemetry", { enabled });
 
-export type HarnessId = "claude-code" | "codex" | "opencode";
+export type OnboardingStep = "welcome" | "environment" | "profile";
+export type FirstActionSurface = "demo" | "project";
+export type FirstAction =
+  | "starter_click"
+  | "typed_prompt"
+  | "open_experiment"
+  | "open_file"
+  | "run_experiment"
+  | "create_experiment"
+  | "open_settings";
+
+type UiEvent =
+  | { name: "demo_welcome_choice"; choice: "explore_demo" | "create_project" | "dismiss" }
+  | { name: "onboarding_step_viewed"; step: OnboardingStep }
+  | { name: "demo_experiment_started"; kind: "curated" | "run"; experiment: string }
+  | { name: "project_starter_clicked"; slot: number }
+  | { name: "first_action"; surface: FirstActionSurface; action: FirstAction };
+
+/** Product events raised by the UI. Fire-and-forget: analytics must never
+ * surface an error or block the interaction that triggered it. */
+export const captureUiEvent = (event: UiEvent): void => {
+  void post<{ ok: boolean }>("/api/telemetry/event", event).catch(() => {});
+};
+
+/** Tells orx which language the dashboard displays, for usage analytics. Fire-and-forget. */
+export const reportLocale = (locale: string): void => {
+  void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
+};
+
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
 
 export interface HarnessModel {
   id: string;
@@ -1129,8 +1527,7 @@ export interface HarnessModel {
    * directly.
    */
   reasoningLevels?: OptionChoice[];
-  /** The catalog's own human name ("Opus", "GPT-5.6 Sol"). Absent on
-   * statically-listed fallback models — derive from the id then. */
+  /** The catalog's own human name ("Opus", "GPT-5.6 Sol"). */
   displayName?: string;
   /** The catalog's one-line blurb. For Claude this carries the resolved
    * version ("Opus 4.8 with 1M context · …") — its aliases don't. */
@@ -1145,7 +1542,15 @@ export interface HarnessModel {
 
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
-export const harnessModelLabel = (m: HarnessModel) => m.displayName ?? modelLabel(m.id);
+export function harnessModelLabel(model: HarnessModel): string {
+  if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
+  const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
+  const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
+    ? m.local_models_custom_endpoint()
+    : provider;
+  const label = modelLabel(model.id.replace(/-(?:FP|BF)\d+$/i, ""));
+  return endpoint ? `${label} · ${endpoint}` : label;
+}
 
 /** One selectable value in a composer toggle (permission mode / reasoning). */
 export interface OptionChoice {
@@ -1275,42 +1680,73 @@ export interface Harness {
   version?: string;
   authenticated: boolean;
   authState: "ready" | "needsLogin" | "unknown" | "unsupported";
-  authMethod?: "oauth" | "apiKey";
+  authMethod?: "oauth" | "apiKey" | "thirdParty" | "local";
+  authProvider?: string;
+  loginEligible?: boolean;
+  authCheckFailed?: boolean;
+  accountLoading?: boolean;
   account?: string;
   org?: string;
   plan?: string;
   agentReady: boolean;
   agentNote?: string;
+  /** Setup is blocked by something no install/update/login command repairs —
+   * an environment credential overriding the saved login, a database the CLI
+   * will not open. `agentNote` carries the repair; offer no setup button. */
+  needsConfigRepair?: boolean;
   /** A running turn takes further input, so the composer steers instead of
    * queueing. Narrowed per installation (codex's legacy exec path can't). */
   supportsSteering: boolean;
+  /** A snapshot answer whose model catalog is still filling in the
+   * background — `models` stays empty until `harness.catalog`
+   * arrives and a plain re-read swaps in the real list. */
+  catalogPending?: boolean;
   models: HarnessModel[];
   options: HarnessOptions;
 }
 
-export const getHarnesses = (refresh = false, retryRejected = false) => {
+export interface HarnessSetupCommands {
+  install: string;
+  /** The vendor bootstrap URL an install note quotes; `install` runs the
+   * platform's own installer, which on Windows is a PowerShell script. */
+  installUrl?: string;
+  login: string;
+  update: string;
+  requiresNpm: boolean;
+}
+
+export const getHarnessSetupCommands = (signal?: AbortSignal) =>
+  get<Record<HarnessId, HarnessSetupCommands>>("/api/harnesses/setup/commands", signal);
+
+export const getHarnesses = (refresh = false, retryRejected = false, signal?: AbortSignal) => {
   const params = new URLSearchParams();
   if (refresh) params.set("refresh", "1");
   if (retryRejected) params.set("retry", "1");
   const query = params.size > 0 ? `?${params.toString()}` : "";
-  return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`).then((r) => r.harnesses);
+  return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
 
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
+  plugin?: string | null;
+  harness?: string | null;
   description: string;
   /** Built-in composer commands share the menu with harness/user skills. */
-  source?: "builtin" | "user" | "command";
+  source?: "builtin" | "user" | "project" | "command";
 }
 
-export const getSkills = () => get<{ skills: SkillInfo[] }>("/api/skills").then((r) => r.skills);
+export const getSkills = (signal?: AbortSignal, harness?: string, projectId?: string) => {
+  const query = new URLSearchParams({ ...(harness ? { harness } : {}), ...(projectId ? { project: projectId } : {}) });
+  return get<{ skills: SkillInfo[]; importing: boolean }>(`/api/skills${query.size ? `?${query}` : ""}`, signal);
+};
 
-export const getSkillContent = (name: string, projectId?: string) =>
+export const getSkillContent = (name: string, projectId?: string, signal?: AbortSignal, harness?: string | null) =>
   get<{ content: string }>(
     `/api/skills/${encodeURIComponent(name)}${
-      projectId ? `?project=${encodeURIComponent(projectId)}` : ""
+      `?${new URLSearchParams({ ...(projectId ? { project: projectId } : {}), ...(harness ? { harness } : {}) })}`
     }`,
+    signal,
   ).then((r) => r.content);
 
 /** A user-uploaded LaTeX template the paper skill follows, managed in the
@@ -1325,14 +1761,14 @@ export interface LatexTemplate {
   updatedAt: number;
 }
 
-export const listLatexTemplates = () =>
-  get<{ templates: LatexTemplate[] }>("/api/latex-templates").then((r) => r.templates);
+export const listLatexTemplates = (signal?: AbortSignal) =>
+  get<{ templates: LatexTemplate[] }>("/api/latex-templates", signal).then((r) => r.templates);
 
 export const uploadLatexTemplate = (body: { filename: string; contentBase64: string }) =>
   post<{ template: LatexTemplate }>("/api/latex-templates", body).then((r) => r.template);
 
 export const deleteLatexTemplate = (name: string) =>
-  fetch(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+  writeResponse(`/api/latex-templates?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
 
@@ -1347,8 +1783,8 @@ export interface UserSkill {
   updatedAt: number;
 }
 
-export const listUserSkills = () =>
-  get<{ skills: UserSkill[] }>("/api/user-skills").then((r) => r.skills);
+export const listUserSkills = (signal?: AbortSignal) =>
+  get<{ skills: UserSkill[]; importing: boolean }>("/api/user-skills", signal);
 
 /** Upload a SKILL.md file or a .zip of a skill folder. `contentBase64` is the
  * raw file bytes; `filename`'s extension selects single-file vs archive. */
@@ -1356,7 +1792,7 @@ export const uploadUserSkill = (req: { filename: string; contentBase64: string }
   post<{ skill: UserSkill }>("/api/user-skills", req).then((r) => r.skill);
 
 export const deleteUserSkill = (name: string) =>
-  fetch(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
+  writeResponse(`/api/user-skills?name=${encodeURIComponent(name)}`, { method: "DELETE" }).then((r) =>
     json<{ ok: boolean }>(r),
   );
 
@@ -1434,6 +1870,7 @@ export interface ChatPrompt {
 export interface ChatPart {
   id: string;
   type: string; // text | reasoning | tool | prompt | image | steer
+  phase?: "commentary" | "final_answer";
   text?: string;
   /** Original file name for an `image` (attachment) part, when known. */
   name?: string;
@@ -1450,6 +1887,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   parts: ChatPart[];
   createdAt: number;
+  completedAt?: number | null;
   parentId?: string | null;
 }
 
@@ -1473,8 +1911,11 @@ export interface ChatSession {
   model: string | null;
   serviceTier: string | null;
   permissionMode: string | null;
-  /** Independent Plan axis for Codex/OpenCode. */
+  /** Independent Plan axis for Codex/OpenCode/Cursor. */
   planMode: boolean;
+  /** What `/goal` asked the agent to keep working toward; null when unset. */
+  goal?: string | null;
+  autonomy: Autonomy;
   reasoningLevel: string | null;
   /** Hidden from the default Recents list, but fully intact and resumable. */
   archived: boolean;
@@ -1484,13 +1925,40 @@ export interface ChatSession {
   createdAt: number;
   updatedAt: number;
   busy: boolean;
+  activeLeafId: string | null;
   contextUsage?: ContextUsage;
 }
 
-export const listChatSessions = (projectId: string) =>
+export const listChatSessions = (projectId: string, signal?: AbortSignal) =>
   get<{ sessions: ChatSession[] }>(
     `/api/chat/sessions?projectId=${encodeURIComponent(projectId)}`,
+    signal,
   ).then((r) => r.sessions);
+
+/** A chat the user had in an agent's own CLI, which orx has no session for. */
+export interface NativeChat {
+  harness: HarnessId;
+  nativeId: string;
+  title: string | null;
+  cwd: string | null;
+  updatedAt: number;
+}
+
+export const listNativeChats = (signal?: AbortSignal) =>
+  get<{ chats: NativeChat[] }>("/api/chat/native-sessions", signal).then((r) => r.chats);
+
+/** Adopt one, as a session that resumes the agent's own chat. */
+export const importNativeChat = (projectId: string, chat: NativeChat) =>
+  post<{ session: ChatSession }>("/api/chat/native-sessions/import", {
+    projectId,
+    harness: chat.harness,
+    nativeId: chat.nativeId,
+    title: chat.title,
+  }).then((r) => r.session);
+
+/** Every project's sessions, newest first, for the composer's `/resume` picker. */
+export const listAllChatSessions = (signal?: AbortSignal) =>
+  get<{ sessions: ChatSession[] }>("/api/chat/sessions?scope=all", signal).then((r) => r.sessions);
 
 /** Per-session (and per-turn) composer selections beyond the harness itself. */
 export interface TurnOptions {
@@ -1504,15 +1972,15 @@ export interface TurnOptions {
 export const createChatSession = (
   projectId: string,
   harness: HarnessId,
-  opts: TurnOptions = {},
+  opts: TurnOptions & { autonomy?: Autonomy } = {},
 ) =>
   post<{ session: ChatSession }>("/api/chat/sessions", { projectId, harness, ...opts }).then(
     (r) => r.session,
   );
 
 export const deleteChatSession = (sessionId: string) =>
-  fetch(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
-    json<{ ok: boolean }>(r),
+  writeResponse(`/api/chat/sessions/${sessionId}`, { method: "DELETE" }).then((r) =>
+    json<{ ok: boolean }>(r).then((result) => { removeSession(sessionId); return result; }),
   );
 
 /** Archive/unarchive a session (archived chats stay resumable). */
@@ -1527,9 +1995,20 @@ export const renameChatSession = (sessionId: string, title: string) =>
     (r) => r.session,
   );
 
-/** Enter/leave the session-specific Plan axis used by Codex/OpenCode. */
+/** Enter/leave the session-specific Plan axis used by Codex/OpenCode/Cursor. */
 export const setChatSessionPlanMode = (sessionId: string, planMode: boolean) =>
   patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { planMode }).then(
+    (r) => r.session,
+  );
+
+/** `null` clears the goal. */
+export const setChatSessionGoal = (sessionId: string, goal: string | null) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { goal }).then(
+    (r) => r.session,
+  );
+
+export const setChatSessionAutonomy = (sessionId: string, autonomy: Autonomy) =>
+  patch<{ session: ChatSession }>(`/api/chat/sessions/${sessionId}`, { autonomy }).then(
     (r) => r.session,
   );
 
@@ -1548,9 +2027,10 @@ export interface QueuedMessage {
   error?: string | null;
 }
 
-export const getChatMessages = (sessionId: string) =>
+export const getChatMessages = (sessionId: string, signal?: AbortSignal) =>
   get<{ messages: ChatMessage[]; queued?: QueuedMessage[]; activeLeafId?: string | null }>(
     `/api/chat/sessions/${sessionId}/messages`,
+    signal,
   ).then((r) => ({
     messages: r.messages,
     queued: r.queued ?? [],
@@ -1559,7 +2039,7 @@ export const getChatMessages = (sessionId: string) =>
 
 /** Remove a still-parked message. */
 export const cancelQueuedMessage = (sessionId: string, itemId: string) =>
-  fetch(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
+  writeResponse(`/api/chat/sessions/${sessionId}/queue/${encodeURIComponent(itemId)}`, {
     method: "DELETE",
   }).then((r) => json<{ ok: boolean; removed: boolean }>(r));
 
@@ -1606,9 +2086,18 @@ export const sendChatMessage = (
     reasoningLevel: opts.reasoningLevel,
     images,
     annotations,
-      mode,
-    },
+    mode,
+  },
   );
+
+/** Compact a chat's context: natively where the agent can, else by summarizing. */
+export const compactChatSession = (sessionId: string) =>
+  post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/compact`, {});
+
+/** A composer `!` command, run in the session's checkout and recorded on its
+ * transcript as a user-side exchange the next turn is told about. */
+export const runShellCommand = (sessionId: string, command: string) =>
+  post<{ message: ChatMessage }>(`/api/chat/sessions/${sessionId}/shell`, { command });
 
 export interface ChatTurnResult {
   turnId: string;
@@ -1737,6 +2226,25 @@ export function backendDetail(backend: Run["backend"]): string {
   if (typeof backend.manifest === "string" && backend.manifest) return backend.manifest;
   // Ray's namespace is the whole Jobs URL — too long for a badge.
   if (backendKind(backend) === "ray_job") return "";
-  if (typeof backend.namespace === "string" && backend.namespace) return backend.namespace;
+  if (typeof backend.namespace === "string" && backend.namespace) {
+    const container = backend.sshContainer;
+    if (container && typeof container === "object" && "reference" in container && typeof container.reference === "string") {
+      return `${backend.namespace} / ${container.reference}`;
+    }
+    return backend.namespace;
+  }
   return "";
 }
+
+export interface LocalModelConnection {
+  id: string;
+  name: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  models: Record<string, number>;
+}
+export const getLocalModels = (signal?: AbortSignal) => get<LocalModelConnection[]>("/api/local-models", signal);
+export const discoverLocalModels = (request: { baseUrl: string; apiKey: string }) => post<{ models: string[] }>("/api/local-models/discover", request);
+export const connectLocalModel = (request: { name: string; baseUrl: string; apiKey: string; model: string; contextWindow: number }) => post<{ model: string }>("/api/local-models", request);
+export const checkLocalModel = (id: string) => post<{ models: string[] }>(`/api/local-models/${encodeURIComponent(id)}/check`, {});
+export const removeLocalModel = (id: string) => writeResponse(`/api/local-models/${encodeURIComponent(id)}`, { method: "DELETE" }).then((r) => json<{ ok: boolean }>(r));

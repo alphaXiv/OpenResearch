@@ -9,7 +9,7 @@ export function DemoWelcomeModal({
   onClose,
   onCreateProject,
 }: {
-  onClose: () => Promise<void>;
+  onClose: (choice: "explore_demo" | "dismiss") => Promise<void>;
   onCreateProject: () => Promise<void>;
 }) {
   const [saving, setSaving] = useState(false);
@@ -33,7 +33,7 @@ export function DemoWelcomeModal({
       if (event.key !== "Escape") return;
       event.preventDefault();
       event.stopPropagation();
-      run(onClose);
+      run(() => onClose("dismiss"));
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
@@ -88,7 +88,7 @@ export function DemoWelcomeModal({
         <IconButton
           className="absolute end-3.5 top-3.5"
           aria-label={m.tour_close()}
-          onClick={() => run(onClose)}
+          onClick={() => run(() => onClose("dismiss"))}
           disabled={saving}
         >
           <X size={16} />
@@ -135,10 +135,10 @@ export function DemoWelcomeModal({
             {m.tour_create_a_new_project()}
           </Button>
           <Button variant="primary"
-            onClick={() => run(onClose)}
+            onClick={() => run(() => onClose("explore_demo"))}
             disabled={saving}
           >
-            {saving ? m.common_saving() : m.tour_explore_demo()}
+            {saving ? m.common_saving() : m.tour_run_demo_experiment()}
           </Button>
         </div>
       </div>

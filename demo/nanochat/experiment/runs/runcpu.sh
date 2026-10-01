@@ -14,10 +14,21 @@
 export NANOCHAT_BASE_DIR="$PWD/.cache/nanochat"
 export UV_CACHE_DIR="$PWD/.cache/uv"
 mkdir -p "$NANOCHAT_BASE_DIR" "$UV_CACHE_DIR"
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+# uv ships no shell installer for Windows, and either installer drops the binary
+# somewhere this shell was told about before the install ran.
+if ! command -v uv &> /dev/null; then
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/install.ps1 | iex" ;;
+        *)
+            curl -LsSf https://astral.sh/uv/install.sh | sh ;;
+    esac
+    export PATH="$HOME/.local/bin:$PATH"
+fi
 [ -d ".venv" ] || uv venv
 uv sync --extra cpu
-source .venv/bin/activate
+# A Windows venv keeps its activate script in Scripts/, not bin/.
+source .venv/bin/activate 2> /dev/null || source .venv/Scripts/activate
 if [ -z "$WANDB_RUN" ]; then
     WANDB_RUN=dummy
 fi

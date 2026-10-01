@@ -8,6 +8,9 @@
 //! project registered in the local store.
 
 pub mod agent_skills;
+pub mod autonomy;
+pub mod bash;
+pub mod browser_cookies;
 pub mod chat;
 pub mod claude;
 pub mod codex;
@@ -22,13 +25,16 @@ pub mod hf;
 pub mod k8s;
 pub mod latex;
 pub mod latex_templates;
+pub mod local_models;
 pub mod localrun;
 pub mod modal;
 pub mod model;
+pub mod native_chats;
 pub mod native_store;
 pub mod opencode;
 pub mod openresearch;
 pub mod overleaf;
+pub mod overleaf_live;
 pub mod projects;
 pub mod ray;
 pub mod resolve;
@@ -37,6 +43,8 @@ pub mod skills;
 pub mod slurm;
 pub mod ssh;
 pub mod ssh_identity;
+pub mod starter;
+pub mod storage;
 pub mod user_skills;
 
 use crate::error::{anyhow, Result};
@@ -44,7 +52,7 @@ use crate::store::{now_ms, Store, StoredRun};
 
 /// Terminal run states — the run is finished and won't change further.
 pub fn is_terminal(status: &str) -> bool {
-    matches!(status, "done" | "failed" | "cancelled")
+    crate::store::is_terminal_status(status)
 }
 
 /// The stored run, but only when it belongs to a registered local experiment.

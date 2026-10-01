@@ -78,16 +78,19 @@ async fn submit_controller_run(
         .or_else(|| project.run_command.clone().filter(|c| !c.trim().is_empty()))
         .ok_or_else(|| anyhow!("{}", crate::invocation::no_run_command(&project.id)))?;
 
-    let script = crate::compute::snapshot_script(&source.path.to_string_lossy(), &run_command);
+    let script =
+        crate::compute::snapshot_script(&crate::local::bash::bash_path(&source.path), &run_command);
 
     // The run's env: everything the user synced (API keys), plus the tokens
-    // the run script expects. Exported inside run.sh (written owner-only).
+    // the run script expects. Passed to the launcher process.
     let mut env: HashMap<String, String> = crate::config::list_synced_env().into_iter().collect();
     if let Ok(hf_token) = crate::jobs::huggingface::resolve_token() {
         env.entry("HF_TOKEN".to_string()).or_insert(hf_token);
     }
     // run.sh executes the user's own script, so it needs the shell's PATH — a
     // run launched from the macOS app would otherwise have no python/uv/conda.
+    // Not on Windows: bash splits PATH on `:`, so a `C:` value collapses there.
+    #[cfg(not(windows))]
     if let Some(path) = crate::local::shell_env::search_path() {
         env.insert("PATH".to_string(), path.to_string_lossy().into_owned());
     }
@@ -115,6 +118,9 @@ async fn submit_controller_run(
     })?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: kind.to_string(),
         namespace: None,
         job_id: Some(dir.to_string_lossy().into_owned()),

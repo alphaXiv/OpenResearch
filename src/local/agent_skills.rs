@@ -10,7 +10,7 @@
 //!   native `SKILL.md` skill dirs *into the session worktree* — fresh on every
 //!   turn, right beside the playbook (see [`ensure_session_skills`]). The harness
 //!   picks the skills subdir (`.claude/skills`, `.opencode/skills`,
-//!   `.agents/skills`), so the session's own agent auto-discovers them and never
+//!   `.agents/skills`, `.cursor/skills`), so the session's own agent auto-discovers them and never
 //!   sees drift.
 //! * **`orx skill <name>`** resolves a bundled module (with or without the
 //!   `orx-` prefix) and prints it; `<name>/<resource>` prints one of its bundled
@@ -57,6 +57,10 @@ pub enum SkillSet {
 const COMPUTE: &str = include_str!("../../agent-skills/orx-compute/SKILL.md");
 const COMPUTE_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
+        path: "references/configuration.md",
+        content: include_str!("../../agent-skills/orx-compute/references/configuration.md"),
+    },
+    AgentSkillResource {
         path: "references/hf.md",
         content: include_str!("../../agent-skills/orx-compute/references/hf.md"),
     },
@@ -100,8 +104,10 @@ const LIT: &str = include_str!("../../agent-skills/orx-lit-review/SKILL.md");
 const CREATE: &str = include_str!("../../agent-skills/orx-create/SKILL.md");
 const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
+const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
+const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
 const FIGURES_RESOURCES: &[AgentSkillResource] = &[
     AgentSkillResource {
@@ -173,7 +179,7 @@ const S_AGENT_DELEGATION: AgentSkill = AgentSkill {
 };
 const S_LIT: AgentSkill = AgentSkill {
     name: "orx-lit-review",
-    description: "Search and read research papers. The main agent calls alphaXiv, OpenAlex, and bioRxiv discovery primitives, ranks the combined candidates, and chooses sources for focused follow-ups. Use for literature reviews, related work, prior art, papers, authors, methods, benchmarks, or research claims; never delegate the retrieval loop to a sub-agent.",
+    description: "Explain and compare scientific or technical concepts using original research evidence. Use before answering conceptual or architectural questions, research claims, literature reviews, or related-work requests, even when no paper, citation, or search is requested. Retrieve with relevant alphaXiv, OpenAlex, bioRxiv, and PubMed connectors; scale retrieval to the question.",
     content: LIT,
     resources: &[],
 };
@@ -185,8 +191,14 @@ const S_CREATE: AgentSkill = AgentSkill {
 };
 const S_REPORTS: AgentSkill = AgentSkill {
     name: "orx-reports",
-    description: "Write durable outputs into the artifacts directory. Use when a line of work concludes or the user asks for a write-up, summary, comparison, figures, or exported data.",
+    description: "Write and organize durable outputs in the artifacts directory. Use before creating or organizing artifacts, including reports, summaries, comparisons, figures, and exported data, or when a line of work concludes.",
     content: REPORTS,
+    resources: &[],
+};
+const S_CUSTOMIZE: AgentSkill = AgentSkill {
+    name: "orx-customize",
+    description: "Save reusable skills and LaTeX templates with `orx skills add` and `orx templates add`. Use when the user asks to create, import, or add a skill or template to OpenResearch for use across projects.",
+    content: CUSTOMIZE,
     resources: &[],
 };
 const S_PAPER: AgentSkill = AgentSkill {
@@ -203,7 +215,7 @@ const S_FIGURES: AgentSkill = AgentSkill {
 };
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
-    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, read persisted results with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
+    description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, locate persisted logs with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
     content: EVIDENCE,
     resources: &[],
 };
@@ -211,6 +223,13 @@ const S_INSTANCES: AgentSkill = AgentSkill {
     name: "orx-instances",
     description: "Create standalone OpenResearch compute instances with `orx instance create`. Use when the user wants a persistent machine for manual or ad-hoc work rather than an experiment run.",
     content: INSTANCES,
+    resources: &[],
+};
+
+const S_FEEDBACK: AgentSkill = AgentSkill {
+    name: "orx-feedback",
+    description: "Report product feedback about OpenResearch itself with `orx feedback`. Use when the user expresses frustration with an OpenResearch feature or bug, says a feature would be nice to have, or you hit a meaningful limitation or bug in the orx CLI, the agent harness, or the app. Not for research results, the user's own code, or minor nits.",
+    content: FEEDBACK,
     resources: &[],
 };
 
@@ -228,7 +247,9 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
+            &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
         SkillSet::Full => vec![
             &S_CREATE,
@@ -241,7 +262,9 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_REPORTS,
             &S_FIGURES,
             &S_PAPER,
+            &S_CUSTOMIZE,
             &S_LIT,
+            &S_FEEDBACK,
         ],
     }
 }
@@ -482,6 +505,7 @@ mod tests {
             "instances",
             "evidence",
             "reports",
+            "customize",
         ] {
             let local = find(name, SkillSet::Local).expect("local skill");
             let full = find(name, SkillSet::Full).expect("full skill");
@@ -662,7 +686,7 @@ mod tests {
             .contains(r#"<file path="figs/loss_curve.pdf" />"#));
         assert!(figures
             .content
-            .contains(r#"<file path="artifacts/loss_curve.pdf" />"#));
+            .contains(r#"<file path="artifacts/transformer-sweep/figures/loss_curve.pdf" />"#));
         assert!(figures
             .content
             .contains("The tag must match the destination"));

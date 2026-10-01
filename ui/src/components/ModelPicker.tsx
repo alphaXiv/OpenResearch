@@ -1,9 +1,10 @@
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { getHarnessesQuery } from "../queries/settings";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Zap } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Lock, Plus, Settings, Zap } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
-  getHarnesses,
   fmtNumber,
   harnessModelLabel,
   modelLabel,
@@ -15,13 +16,17 @@ import {
   type Harness,
   type HarnessId,
   type OptionChoice,
+  type AgentSelection,
+  type Autonomy,
+  DEFAULT_AUTONOMY,
 } from "../api";
 import { renderNote } from "./agentNote";
 import { HarnessLogo } from "./HarnessLogo";
-import { onHarnessAuth } from "../events";
-import type { AgentSelection } from "../api";
-import { MenuItem } from "./ui";
+
+import { IconButton, MenuItem } from "./ui";
 import { cn } from "./ui/cn";
+
+import { LocalModelSetup } from "./LocalModelSetup";
 
 const MODEL_GROUP_CLASS_NAME = [
   "model-group flex items-center justify-between gap-2",
@@ -41,6 +46,8 @@ export const HARNESS_LABELS: Record<HarnessId, string> = {
   "claude-code": "Claude Code",
   codex: "Codex",
   opencode: "OpenCode",
+  cursor: "Cursor",
+  antigravity: "Google Antigravity",
 };
 
 /** First harness that can actually run — the fallback when nothing is picked.
@@ -69,7 +76,7 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+      if (e.target instanceof Node && !ref.current?.contains(e.target) && !triggerRef?.current?.contains(e.target)) setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       // Escape closes the picker and must NOT bubble to other document-level
@@ -100,37 +107,46 @@ export function usePopover(triggerRef?: RefObject<HTMLButtonElement | null>) {
 export function ModelPicker({
   value,
   onSelect,
+  onOpenSettings,
   permissionChoices = [],
   defaultPermissionId,
   onSelectPermission,
   reasoningChoices = [],
   defaultReasoningId,
   onSelectReasoning,
-  onHarnesses,
+  autonomy,
+  onSelectAutonomy,
   lockHarness = false,
+  openRequest = 0,
   className,
 }: {
   value: ModelSelection | null;
   onSelect: (value: ModelSelection) => void;
+  onOpenSettings: () => void;
   permissionChoices?: OptionChoice[];
   defaultPermissionId?: string | null;
   onSelectPermission?: (id: string) => void;
   reasoningChoices?: OptionChoice[];
   defaultReasoningId?: string | null;
   onSelectReasoning?: (id: string) => void;
-  onHarnesses?: (harnesses: Harness[]) => void;
+  autonomy?: Autonomy;
+  onSelectAutonomy?: (autonomy: Autonomy) => void;
   /** When set (a session is open), only the current harness is offered — its
    * harness is fixed for its lifetime, so you can still switch models within it
    * but not switch to a different harness. */
   lockHarness?: boolean;
+  /** Bumped to open the picker from elsewhere (the composer's `/model`). */
+  openRequest?: number;
   className?: string;
 }) {
-  const [harnesses, setHarnesses] = useState<Harness[]>([]);
+  const { data: harnesses = EMPTY_HARNESSES } = useQuery(getHarnessesQuery());
+  const queryClient = useQueryClient();
+  const [addingLocalModel, setAddingLocalModel] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const submenuHeaderRef = useRef<HTMLButtonElement>(null);
   const { open, setOpen, ref: rootRef } = usePopover(triggerRef);
   const [filter, setFilter] = useState("");
-  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions">("root");
+  const [page, setPage] = useState<"root" | "models" | "reasoning" | "speed" | "permissions" | "autonomy">("root");
 
   const close = () => {
     setOpen(false);
@@ -138,30 +154,21 @@ export function ModelPicker({
     setFilter("");
   };
 
+  // Seeded with the mount value so a remount doesn't replay an old request.
+  const handledOpenRequest = useRef(openRequest);
+  useEffect(() => {
+    if (openRequest === handledOpenRequest.current) return;
+    handledOpenRequest.current = openRequest;
+    setPage("models");
+    setFilter("");
+    setOpen(true);
+  }, [openRequest, setOpen]);
+
   useEffect(() => {
     if (open && (page === "reasoning" || page === "speed" || page === "permissions")) {
       submenuHeaderRef.current?.focus();
     }
   }, [open, page]);
-
-  useEffect(() => {
-    let mounted = true;
-    const load = (refresh = false) =>
-      getHarnesses(refresh)
-        .then((list) => {
-          if (!mounted) return;
-          setHarnesses(list);
-          onHarnesses?.(list);
-        })
-        .catch(() => {});
-    void load();
-    const unsubscribe = onHarnessAuth(() => void load(true));
-    return () => {
-      mounted = false;
-      unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const groups = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -170,9 +177,9 @@ export function ModelPicker({
       lockHarness && value ? harnesses.filter((h) => h.id === value.harness) : harnesses;
     return shown.map((h) => {
       let models = h.models;
-      if (q) models = models.filter((m) => m.id.toLowerCase().includes(q));
-      // opencode's long tail (openrouter etc.) stays behind the filter box.
-      else if (h.id === "opencode") models = models.slice(0, 6);
+      if (q) models = models.filter((m) => `${m.id} ${harnessModelLabel(m)}`.toLowerCase().includes(q));
+      // Large catalogs stay behind the filter box.
+      else if (h.id === "opencode" || h.id === "cursor" || h.id === "antigravity") models = models.slice(0, 5);
       return { harness: h, models, hidden: q ? 0 : h.models.length - models.length };
     });
   }, [harnesses, filter, lockHarness, value]);
@@ -199,7 +206,9 @@ export function ModelPicker({
       reasoningLevel: reconcileReasoning(
         harness,
         model,
-        sameHarness ? value!.reasoningLevel : null,
+        sameHarness && harness.models.some((entry) => entry.id === model)
+          ? value!.reasoningLevel
+          : null,
       ),
     });
     close();
@@ -210,14 +219,14 @@ export function ModelPicker({
   const selected =
     value?.model != null
       ? harnesses
-          .find((h) => h.id === value.harness)
-          ?.models.find((m) => m.id === value.model)
+        .find((h) => h.id === value.harness)
+        ?.models.find((m) => m.id === value.model)
       : undefined;
   const label = value
     ? value.model
       ? selected
         ? harnessModelLabel(selected)
-        : modelLabel(value.model)
+        : `${modelLabel(value.model)} · ${m.model_picker_unverified()}`
       : m.model_picker_default_model()
     : m.model_picker_model();
   const effectiveReasoningId = value?.reasoningLevel ?? defaultReasoningId ?? reasoningChoices[0]?.id;
@@ -244,6 +253,26 @@ export function ModelPicker({
     close();
   };
 
+  const autonomyChoices: (OptionChoice & { id: Autonomy })[] = [
+    {
+      id: "agentic",
+      label: m.model_picker_autonomy_agentic(),
+      description: m.model_picker_autonomy_agentic_description(),
+    },
+    {
+      id: "copilot",
+      label: m.model_picker_autonomy_copilot(),
+      description: m.model_picker_autonomy_copilot_description(),
+    },
+  ];
+  const autonomyLabel = autonomyChoices.find((choice) => choice.id === autonomy)?.label;
+
+  const chooseAutonomy = (id: string) => {
+    const choice = autonomyChoices.find((candidate) => candidate.id === id);
+    if (choice) onSelectAutonomy?.(choice.id);
+    close();
+  };
+
   const chooseSpeed = (id: string) => {
     if (value) onSelect({ ...value, serviceTier: id });
     close();
@@ -267,18 +296,32 @@ export function ModelPicker({
   );
 
   const submenuHeader = (title: string) => (
-    <button
-      ref={submenuHeaderRef}
-      type="button"
-      className="model-submenu-header flex w-full items-center gap-2 border-0 border-b border-solid border-b-border-variant bg-transparent px-2 py-2 text-start text-sm font-medium text-text hover:bg-surface"
-      onClick={() => {
-        setPage("root");
-        setFilter("");
-      }}
-    >
-      <ChevronLeft size={15} />
-      {title}
-    </button>
+    <div className="flex shrink-0 items-center border-b border-border-variant px-1 py-1">
+      <IconButton
+        ref={submenuHeaderRef}
+        type="button"
+        size="small"
+        className="model-submenu-header"
+        aria-label={m.plan_strip_back()}
+        onClick={() => {
+          setPage("root");
+          setFilter("");
+        }}
+      >
+        <ChevronLeft size={15} />
+      </IconButton>
+      <span className="min-w-0 flex-1 text-sm font-medium text-text">{title}</span>
+      {page === "models" && (
+        <IconButton
+          type="button"
+          size="small"
+          aria-label={m.settings_page_harnesses()}
+          onClick={() => { close(); onOpenSettings(); }}
+        >
+          <Settings size={15} aria-hidden="true" />
+        </IconButton>
+      )}
+    </div>
   );
 
   const choiceList = (
@@ -349,6 +392,7 @@ export function ModelPicker({
               {reasoningChoices.length > 0 && menuRow(reasoningAxisLabel, reasoningLabel, "reasoning")}
               {speedChoices.length > 0 && menuRow(m.model_picker_speed(), speedLabel, "speed")}
               {permissionChoices.length > 0 && menuRow(m.model_picker_mode(), permissionLabel, "permissions")}
+              {onSelectAutonomy && menuRow(m.model_picker_autonomy(), autonomyLabel, "autonomy")}
             </div>
           )}
           {page === "models" && (
@@ -357,10 +401,10 @@ export function ModelPicker({
               <input
                 autoFocus
                 type="text"
-                placeholder={m.model_picker_search_models()}
+                placeholder={m.model_picker_search_or_enter_id()}
                 value={filter}
                 onChange={(e) => setFilter(e.target.value)}
-             />
+              />
               <div className="model-menu-list overflow-y-auto p-1.5">
                 {groups.map(({ harness, models, hidden }) => (
                   <div key={harness.id} className="[&_.model-item]:ps-6">
@@ -371,71 +415,74 @@ export function ModelPicker({
                       </span>
                       {!harness.agentReady && (
                         <span className="model-group-status inline-flex items-center gap-1 text-accent-amber font-normal">
-                          <Lock size={10} /> {m.model_picker_unavailable()}
+                          {harness.catalogPending ? m.onboarding_checking() : <><Lock size={10} /> {m.model_picker_unavailable()}</>}
                         </span>
                       )}
                     </div>
                     {!harness.agentReady ? (
                       <div className="model-more [&_code]:font-mono [&_code]:text-xs [&_code]:bg-panel [&_code]:border [&_code]:border-border-variant [&_code]:rounded-xs [&_code]:py-px [&_code]:px-[5px] [&_code]:whitespace-nowrap pt-1 px-2 pb-2 text-sm text-muted model-unavailable leading-normal border-b border-b-border-variant">
-                        {harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
+                        {harness.catalogPending ? m.onboarding_checking() : harness.agentNote ? renderNote(harness.agentNote) : m.model_picker_not_available()}
                       </div>
                     ) : (
                       <>
-                    {/* "Default model" (= send no --model, the CLI decides)
-                        only where the CLI advertises no catalog — a custom
-                        provider whose real models live behind its gateway.
-                        With a discovered catalog the row is redundant noise:
-                        the catalog's own default leads the list. */}
-                    {harness.models.length === 0 && (
-                      <MenuItem onClick={() => pick(harness, null)}>
-                        <span>
-                          {m.model_picker_default_model()}
-                          <span className="model-id">{m.model_picker_cli_configuration()}</span>
-                        </span>
-                        {value?.harness === harness.id && value?.model === null && (
-                          <Check size={13} />
+                        {!filter.trim() && (
+                          <MenuItem onClick={() => pick(harness, null)}>
+                            <span>{m.model_picker_default_model()}</span>
+                            {value?.harness === harness.id && value?.model === null && (
+                              <Check size={13} />
+                            )}
+                          </MenuItem>
                         )}
-                      </MenuItem>
-                    )}
-                    {models.map((m) => (
-                      <MenuItem
-                        key={m.id}
+                        {harness.models.length === 0 && harness.agentNote && (
+                          <div className={MODEL_MORE_CLASS_NAME}>{renderNote(harness.agentNote)}</div>
+                        )}
+                        {models.map((m) => (
+                          <MenuItem
+                            key={m.id}
 
-                        title={m.id}
-                        onClick={() => pick(harness, m.id)}
-                      >
-                        <span>{harnessModelLabel(m)}</span>
-                        {value?.harness === harness.id && value?.model === m.id && (
-                          <Check size={13} />
-                        )}
-                      </MenuItem>
-                    ))}
-                    {hidden > 0 && (
-                      <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
-                    )}
-                    {/* Free-form escape hatch: the catalogs are curated menus,
-                        not the set of ids the CLIs accept — `--model
-                        claude-opus-5` works on a CLI whose menu doesn't list
-                        it. Typing an id not in the list offers it directly. */}
-                    {filter.trim().length > 0 &&
-                      !harness.models.some((m) => m.id === filter.trim()) && (
-                        <MenuItem
-                          onClick={() => pick(harness, filter.trim())}
-                        >
-                          <span>
-                            {m.model_picker_use_id({ id: ltr(filter.trim()) })}
-                          </span>
-                        </MenuItem>
-                      )}
+                            title={m.id}
+                            onClick={() => pick(harness, m.id)}
+                          >
+                            <span>{harnessModelLabel(m)}</span>
+                            {value?.harness === harness.id && value?.model === m.id && (
+                              <Check size={13} />
+                            )}
+                          </MenuItem>
+                        ))}
+                        {/* An explicit ID is passed to the CLI without claiming availability. */}
+                        {filter.trim().length > 0 &&
+                          !harness.models.some((m) => m.id === filter.trim()) && (
+                            <MenuItem
+                              onClick={() => pick(harness, filter.trim())}
+                            >
+                              <span>
+                                {m.model_picker_use_id({ id: ltr(filter.trim()) })} · {m.model_picker_unverified()}
+                              </span>
+                            </MenuItem>
+                          )}
                       </>
+                    )}
+                    {harness.id === "opencode" && (
+                      <MenuItem type="button" className="font-medium" aria-haspopup="dialog" onClick={() => {
+                        close();
+                        triggerRef.current?.focus();
+                        setAddingLocalModel(true);
+                      }}>
+                        <span className="inline-flex items-center gap-1.5">
+                          {m.model_picker_add_local_model()}<Plus size={14} aria-hidden="true" />
+                        </span>
+                      </MenuItem>
+                    )}
+                    {harness.agentReady && hidden > 0 && (
+                      <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_more({ count: fmtNumber(hidden) })}</div>
                     )}
                   </div>
                 ))}
                 {harnesses.length === 0 && <div className={MODEL_MORE_CLASS_NAME}>{m.model_picker_detecting_harnesses()}</div>}
               </div>
               {lockHarness && value && harnesses.length > 1 && (
-                <div className="model-locked-note flex items-center gap-1.5 py-[7px] px-3 text-sm text-muted border-t border-t-border-variant [&_svg]:shrink-0">
-                  <Lock size={11} />
+                <div className="model-locked-note py-[7px] px-3 text-sm text-muted border-t border-t-border-variant">
+                  <Lock size={11} className="inline-block align-baseline me-1" aria-hidden="true" />
                   {m.model_picker_sessions_keep_their_harness_new_chat_to_switch()}
                 </div>
               )}
@@ -453,6 +500,12 @@ export function ModelPicker({
               {choiceList(permissionChoices, effectivePermissionId, defaultPermissionId, choosePermission)}
             </>
           )}
+          {page === "autonomy" && (
+            <>
+              {submenuHeader(m.model_picker_autonomy())}
+              {choiceList(autonomyChoices, autonomy, DEFAULT_AUTONOMY, chooseAutonomy)}
+            </>
+          )}
           {page === "speed" && (
             <>
               {submenuHeader(m.model_picker_speed())}
@@ -460,6 +513,14 @@ export function ModelPicker({
             </>
           )}
         </div>
+      )}
+      {addingLocalModel && (
+          <LocalModelSetup dialogOnly installed={harnesses.find((harness) => harness.id === "opencode")?.installed ?? false}
+            onClose={() => setAddingLocalModel(false)}
+            onConnected={(model) => {
+              const harness = queryClient.getQueryData(getHarnessesQuery().queryKey)?.find((harness) => harness.id === "opencode");
+              if (harness && (!lockHarness || value?.harness === "opencode")) pick(harness, model);
+            }} />
       )}
     </div>
   );
@@ -480,7 +541,10 @@ export function OptionPicker({
   variant = "pill",
   title,
   numbered = false,
+  searchPlaceholder,
   renderIcon,
+  renderLabel,
+  floating = false,
   onSelect,
   className,
 }: {
@@ -499,11 +563,45 @@ export function OptionPicker({
   title?: string;
   /** Show 1-based number hints on the right (like the mode menu). */
   numbered?: boolean;
+  searchPlaceholder?: string;
   renderIcon?: (choice: OptionChoice) => ReactNode;
+  renderLabel?: (choice: OptionChoice) => ReactNode;
+  floating?: boolean;
   onSelect: (id: string) => void;
   className?: string;
 }) {
-  const { open, setOpen, ref } = usePopover();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const { open, setOpen, ref } = usePopover(buttonRef);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [filter, setFilter] = useState("");
+  useLayoutEffect(() => {
+    const menu = menuRef.current;
+    const anchor = ref.current;
+    if (!open || !floating || !menu || !anchor) return;
+    if (!menu.matches(":popover-open")) {
+      menu.showPopover();
+      menu.querySelector("input")?.focus();
+    }
+    const position = () => {
+      const bounds = anchor.getBoundingClientRect();
+      const below = window.innerHeight - bounds.bottom - 12;
+      const above = bounds.top - 12;
+      const needed = Math.min(380, menu.scrollHeight);
+      const downward = dropDown ? below >= needed || below >= above : above < needed && below > above;
+      menu.style.width = `${bounds.width}px`;
+      menu.style.minWidth = "0";
+      menu.style.maxHeight = `${Math.max(0, Math.min(380, downward ? below : above))}px`;
+      menu.style.left = `${bounds.left}px`;
+      menu.style.top = `${downward ? bounds.bottom + 4 : bounds.top - menu.getBoundingClientRect().height - 4}px`;
+    };
+    position();
+    window.addEventListener("resize", position);
+    window.addEventListener("scroll", position, true);
+    return () => {
+      window.removeEventListener("resize", position);
+      window.removeEventListener("scroll", position, true);
+    };
+  }, [open, floating, dropDown, filter, choices.length, ref]);
   if (choices.length === 0) return null;
 
   const effectiveId = value ?? defaultId ?? choices[0]?.id ?? null;
@@ -519,16 +617,19 @@ export function OptionPicker({
       ? defaultChoice
       : undefined;
   const rest = pinned ? choices.filter((c) => c.id !== pinned.id) : choices;
+  const visible = rest.filter((c) => `${c.label} ${c.id}`.toLowerCase().includes(filter.toLowerCase()));
   const label = current?.label ?? choices[0]?.label ?? "";
 
   const choose = (id: string) => {
     onSelect(id);
     setOpen(false);
+    buttonRef.current?.focus();
   };
 
   return (
     <div className={`option-picker relative inline-flex${variant === "field" ? " w-full" : ""}`} ref={ref}>
       <button
+        ref={buttonRef}
         type="button"
         className={cn(
           variant === "field"
@@ -540,24 +641,28 @@ export function OptionPicker({
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={disabled}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => { setFilter(""); setOpen((v) => !v); }}
       >
         <span className="inline-flex min-w-0 items-center gap-2">
           {current && renderIcon?.(current)}
-          <span className="truncate">{label}</span>
+          <span className="truncate">{current ? renderLabel?.(current) ?? label : label}</span>
         </span>
         <ChevronDown size={12} />
       </button>
       {open && (
-        <div className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
+        <div ref={menuRef} popover={floating ? "manual" : undefined}
+          style={floating ? { position: "fixed", inset: "auto", margin: 0 } : undefined}
+          className={`option-menu absolute bottom-[calc(100%_+_8px)] start-0 max-h-95 flex flex-col bg-background border border-border rounded-lg shadow-menu z-50 overflow-hidden min-w-47.5 p-1.5 [&.align-right]:start-auto [&.align-right]:end-0 [&.drop-down]:bottom-auto [&.drop-down]:top-[calc(100%_+_4px)] [&.session-menu]:start-auto [&.session-menu]:end-1.5 [&.session-menu]:top-[calc(100%_-_2px)] [&.session-menu]:min-w-35 ${choices.some((choice) => choice.description) ? "min-w-80" : ""} ${variant === "field" ? "min-w-full text-text" : ""} ${align === "right" ? "align-right" : ""} ${dropDown ? "drop-down" : ""}`}>
           {header && <div className={MODEL_GROUP_CLASS_NAME}>{header}</div>}
+          {searchPlaceholder && <input autoFocus aria-label={searchPlaceholder} placeholder={searchPlaceholder} value={filter} onChange={(e) => setFilter(e.target.value)} className="shrink-0 border-b border-border bg-background px-2 py-2 text-sm outline-none" />}
+          <div className="min-h-0 overflow-y-auto">
           {pinned && (
             <>
               <MenuItem type="button" onClick={() => choose(pinned.id)}>
                 <span className="inline-flex items-center gap-2">
                   {renderIcon?.(pinned)}
                   <span>
-                    {pinned.label}
+                    {renderLabel?.(pinned) ?? pinned.label}
                     {/* An unnamed sentinel's label already IS "Default", so the
                         usual marker would read "Default · Default" — say where
                         the behavior comes from instead. A named one ("Adaptive")
@@ -572,13 +677,13 @@ export function OptionPicker({
               <div className="option-sep h-px my-[5px] mx-1 bg-border-variant" />
             </>
           )}
-          {rest.map((c, i) => (
+          {visible.map((c, i) => (
             <MenuItem type="button" key={c.id} onClick={() => choose(c.id)}>
               <span className="flex min-w-0 items-center gap-2">
                 {renderIcon?.(c)}
                 <span className="flex min-w-0 flex-col items-start gap-0.5">
                   <span>
-                    {c.label}
+                    {renderLabel?.(c) ?? c.label}
                     {/* A concrete default renders inline, in ramp order, with just
                         the marker — it's one of the tiers, not a separate kind of
                         choice like the pinned sentinel above. */}
@@ -600,8 +705,11 @@ export function OptionPicker({
               )}
             </MenuItem>
           ))}
+          </div>
         </div>
       )}
     </div>
   );
 }
+
+const EMPTY_HARNESSES: Harness[] = [];

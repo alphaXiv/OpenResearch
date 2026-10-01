@@ -1,3 +1,38 @@
+import { cn } from "./ui/cn";
+import { TARGET_LABELS } from "../computeTargets";
+import { HarnessSetupDialog } from "./HarnessSetupDialog";
+import {
+  setScopedQueryData,
+  workspaceScope,
+  isCurrentScope,
+  queryClient,
+} from "../queries/client";
+import { useMutation, useQuery, useQueries } from "@tanstack/react-query";
+
+import {
+  getHarnessesQuery,
+  getHarnessSetupCommandsQuery,
+  refreshHarnesses,
+  getK8sSettingsQuery,
+  getModalSettingsQuery,
+  getSshMasterStatusQuery,
+  getSshSettingsQuery,
+  getSlurmSettingsQuery,
+  getRaySettingsQuery,
+  getOpenResearchSettingsQuery,
+  getLocalMachineQuery,
+  getComputeSettingsQuery,
+  getTinkerSettingsQuery,
+  getHfSettingsQuery,
+  getEnvVarsQuery,
+  getTelemetryQuery,
+  getProjectDefaultsQuery,
+  getProjectGitStatusQuery,
+  getDataDirQuery,
+} from "../queries/settings";
+
+import { getOverleafSettingsQuery } from "../queries/files";
+import { listRunsQuery } from "../queries/projects";
 import {
   ArrowLeft,
   ArrowRight,
@@ -15,44 +50,29 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   deleteEnvVar,
+  deleteOverleafSession,
   deleteOverleafToken,
   fmtBytes,
   fmtDuration,
   fmtNumber,
-  getComputeSettings,
-  getEnvVars,
-  getProjectGitStatus,
-  getProjectDefaults,
-  getTelemetry,
-  getHarnesses,
-  getHfSettings,
-  getK8sSettings,
-  getLocalMachine,
-  getModalSettings,
-  getOpenResearchSettings,
-  getOverleafSettings,
-  getRaySettings,
-  getSlurmSettings,
-  getSshHosts,
-  getSshMasterStatus,
-  listRuns,
   setComputeDefault,
   setProjectDefaults,
   setTelemetry,
-  provisionModal,
+  saveOverleafSession,
   saveOverleafToken,
   disableProjectGithub,
   enableProjectGithub,
   initializeProjectGit,
   saveHfToken,
+  saveTinkerKey,
+  saveModalToken,
   saveK8sSettings,
   saveRaySettings,
   saveSlurmSettings,
   setEnvVar,
-  getDataDir,
   validateDataDir,
   moveDataDir,
   type DataDirSettings,
@@ -64,26 +84,27 @@ import {
   type ComputeTargetId,
   type ComputeTargetSummary,
   type EnvVar,
+  type OverleafSettings,
   type Project,
   type ProjectDefaultsSettings,
   type ProjectGitStatus,
   type TelemetrySettings,
   type Harness,
+  type HarnessSetupCommands,
   type HarnessId,
   type HfSettings,
-  type HfTokenSource,
+  type TinkerSettings,
   type K8sSettings,
   type LocalMachine,
   type ModalSettings,
-  type ModalTokenSource,
-  type OpenResearchSettings,
   type RayPreflight,
   type RaySettings,
   type Run,
   type SlurmPreflight,
   type SlurmSettings,
-  type SshHost,
   type SshPreflight,
+  type SshExecutionPreflight,
+  testSshExecution,
   applyUpdate,
   harnessModelLabel,
   installCli,
@@ -91,8 +112,8 @@ import {
   type InstallChannel,
   type InstalledCli,
 } from "../api";
-import { onDataDirMove, onHarnessAuth } from "../events";
-import { useUpdateStatus } from "./UpdateBanner";
+import { onDataDirMove } from "../events";
+import { releaseNotesUrl, useRestartApp, useUpdateStatus } from "./UpdateBanner";
 import { useThemePreference, type ThemePreference } from "../theme";
 import { m } from "../paraglide/messages.js";
 import { ltr } from "../i18n";
@@ -100,12 +121,30 @@ import { setLocale, useLocale } from "../locale";
 import { getLocale, isLocale, type Locale } from "../paraglide/runtime.js";
 import { TokenForm } from "./GitTokenForm";
 import { renderNote } from "./agentNote";
+import { claudeProviderLabel } from "./claudeProvider";
 import { BackendBadge, BackendLogo } from "./BackendLogos";
 import { ProgressBar } from "./ProgressBar";
 import { OptionPicker } from "./ModelPicker";
+import { HarnessLogo } from "./HarnessLogo";
+import { LocalModelSetup } from "./LocalModelSetup";
 import { StatusBadge } from "./StatusBadge";
-import { SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
-import { Badge, Button, ButtonLink, IconButton, IconButtonLink, Input, LoadingRow, showAlert, Spinner, Switch, Tooltip, type BadgeVariant } from "./ui";
+import { OpenResearchSetupTerminal, SettingsCommandTerminal, SshConnectTerminal, SshTerminalTranscript } from "./SshConnectTerminal";
+import { SshExecutionSettings, SshDefaultHost } from "./SshExecutionSettings";
+import { SshConfigDialog } from "./SshConfigDialog";
+import {
+  Badge,
+  Button,
+  ButtonLink,
+  IconButton,
+  IconButtonLink,
+  Input,
+  LoadingRow,
+  showAlert,
+  Spinner,
+  Switch,
+  Tooltip,
+  type BadgeVariant,
+} from "./ui";
 
 const SETTINGS_CARD_CLASS_NAME = [
   "settings-card [&_>_.error]:text-accent-red [&_>_.error]:text-base",
@@ -246,66 +285,178 @@ const SETTINGS_STACK_SECTION_CLASS_NAME = [
   "[&_>_h2]:mt-0 [&_>_h2]:mx-0 [&_>_h2]:mb-1.5 [&_>_h2]:text-xl",
 ].join(" ");
 
-export type SettingsTab =
-  | "settings"
-  | "harnesses"
-  | "projects"
-  | "compute"
-  | "instances"
-  | "environment"
-  | "git"
-  | "storage";
+export type SettingsTab = import("../workspaceState").SettingsSection;
 type Tab = SettingsTab;
+
+// --- runnable notes ----------------------------------------------------------
+
+/** Commands the server's settings allowlist accepts; keep in sync with
+ * `SETTINGS_COMMANDS` in `src/commands/up.rs`. */
+const SETTINGS_COMMANDS = new Set(["gh auth login", "hf auth login", "claude auth status"]);
+
+function settingsCommandPath(command: string) {
+  return SETTINGS_COMMANDS.has(command) ? `/api/settings/commands/run?command=${encodeURIComponent(command)}` : undefined;
+}
+
+type CommandRun = { command: string; path: string; attempt: number; owner?: string };
+
+/** The run outlives the note that started it: a successful sign-in removes
+ * the note (and often its whole card section), and the terminal must stay. */
+function useCommandRun() {
+  const [run, setRun] = useState<CommandRun | null>(null);
+  const start = (command: string, path: string, owner?: string) =>
+    setRun((current) => ({ command, path, owner, attempt: (current?.attempt ?? 0) + 1 }));
+  return { run, start, clear: () => setRun(null) };
+}
+
+/** A note whose backticked commands get a play button when `resolve` maps
+ * them to a terminal route. `disabled` hides every button: remote workspaces
+ * (the routes are local) or a tool that is not installed yet. */
+function RunnableNote({ note, className, disabled, resolve = settingsCommandPath, onRun }: {
+  note: string | undefined;
+  className: string;
+  disabled: boolean;
+  resolve?: (command: string) => string | undefined;
+  onRun: (command: string, path: string) => void;
+}) {
+  if (!note) return null;
+  return (
+    <p className={className}>
+      {renderNote(note, {
+        canRun: (command) => !disabled && resolve(command) !== undefined,
+        onRun: (command) => {
+          const path = resolve(command);
+          if (path) onRun(command, path);
+        },
+      })}
+    </p>
+  );
+}
+
+function CommandRunTerminal({ run, onComplete, onClose }: {
+  run: CommandRun | null;
+  onComplete: () => void;
+  onClose: () => void;
+}) {
+  if (!run) return null;
+  return (
+    <SettingsCommandTerminal
+      key={`${run.command}-${run.attempt}`}
+      path={run.path}
+      label={run.command}
+      onComplete={onComplete}
+      onError={(error) => showAlert(error, "error")}
+      onClose={onClose}
+    />
+  );
+}
 
 // --- harnesses ---------------------------------------------------------------
 
 function harnessStatus(h: Harness): { cls: string; variant: BadgeVariant; label: string } {
-  if (h.agentReady) return { cls: "ok", variant: "success", label: m.settings_page_signed_in() };
+  if (h.catalogPending) return { cls: "warn", variant: "warning", label: m.onboarding_checking() };
+  if (h.authCheckFailed) return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  if (h.agentReady && !h.authenticated && h.authMethod !== "local") return { cls: "warn", variant: "warning", label: m.onboarding_not_signed_in() };
+  if (h.agentReady) return { cls: "ok", variant: "success", label: h.authMethod === "thirdParty" || claudeProviderLabel(h) ? m.settings_page_ready_to_use() : h.authMethod === "local" ? m.onboarding_ready() : m.settings_page_signed_in() };
   // Not installed — the same blocker whether or not there's saved auth: the
   // CLI has to be installed before anything can run. Amber "action needed".
   if (!h.installed) return { cls: "warn", variant: "warning", label: m.settings_page_not_installed() };
   if (h.installBroken) return { cls: "warn", variant: "warning", label: m.settings_page_install_broken() };
-  if (h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
+  if (h.authMethod === "local") return { cls: "warn", variant: "warning", label: m.onboarding_server_unavailable() };
+  // A config fault reports `unsupported`, but no update repairs it; the note
+  // carries the actual repair, so the badge must not promise an update.
+  if (h.needsConfigRepair || h.authState === "unknown") return { cls: "warn", variant: "warning", label: m.settings_page_unable_to_verify() };
   if (h.authState === "unsupported") return { cls: "warn", variant: "warning", label: m.settings_page_update_required() };
   return { cls: "warn", variant: "warning", label: m.settings_page_not_signed_in() };
 }
 
 function AuthLabel({ h }: { h: Harness }) {
+  if (h.id === "opencode" && h.agentReady && !h.authenticated && !h.authMethod) return <>{m.settings_free_models_no_sign_in()}</>;
+  const provider = claudeProviderLabel(h);
+  if (provider) return <>{provider}</>;
   if (!h.authMethod) return <>—</>;
+  if (h.authMethod === "local") return <>{m.projects_local()}</>;
+  if (h.authMethod === "thirdParty") return <>{m.settings_providers()}</>;
   return <>{h.authMethod === "oauth" ? m.settings_oauth_login() : m.onboarding_api_key()}</>;
 }
 
-function HarnessesTab() {
-  const [harnesses, setHarnesses] = useState<Harness[] | null>(null);
-  const [active, setActive] = useState<HarnessId>("claude-code");
+/** A note command that is one of the harness's setup commands runs through the
+ * setup route, which owns install/login/update semantics (telemetry, OpenCode's
+ * isolated store, verification); `shell` keeps the terminal open afterwards. */
+function harnessSetupPath(h: Harness, setup: HarnessSetupCommands | undefined, command: string) {
+  if (!setup) return undefined;
+  // Install notes quote the vendor one-liner (`curl … | bash`) while the shown
+  // setup command fetches to a temp file first, so exact equality would drop the
+  // play button from every install note. The shared bootstrap URL identifies it.
+  const installsSameSource = setup.installUrl !== undefined && command.includes(setup.installUrl);
+  const action = command === setup.login ? "login" : command === setup.install ? "install" : command === setup.update ? "update" : installsSameSource ? "install" : null;
+  if (!action) return undefined;
+  if (action !== "install" && (!h.installed || h.installBroken)) return undefined;
+  return `/api/harnesses/setup?${new URLSearchParams({ harness: h.id, action, shell: "true" })}`;
+}
+
+function HarnessesTab({ remote }: { remote: boolean }) {
+  const harnessesOptions = getHarnessesQuery();
+  const { data: harnesses = null } = useQuery(harnessesOptions);
+  const [active, setActive] = useState<HarnessId | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const setupRun = useCommandRun();
+  const [setupHarness, setSetupHarness] = useState<Harness | null>(null);
+  const setupCommands = useQuery(getHarnessSetupCommandsQuery());
 
   const load = (refresh: boolean, retryRejected = false) => {
     setRefreshing(true);
-    getHarnesses(refresh, retryRejected)
-      .then(setHarnesses)
+    refreshHarnesses(refresh, retryRejected)
       .catch(() => {})
       .finally(() => setRefreshing(false));
   };
-  useEffect(() => load(false), []);
-  useEffect(() => onHarnessAuth(() => load(true)), []);
 
-  const h = harnesses?.find((x) => x.id === active);
+  const orderedHarnesses = [...(harnesses ?? [])].sort(
+    (a, b) => Number(b.agentReady) - Number(a.agentReady),
+  );
+  const h = orderedHarnesses.find((x) => x.id === active) ?? orderedHarnesses[0];
 
   return (
     <>
       <h2>{m.settings_page_harnesses()}</h2>
-      <div className="harness-tabs mt-3 flex gap-1 mb-3.5 border-b border-b-border-variant [&_button]:inline-flex [&_button]:items-center [&_button]:gap-[7px] [&_button]:py-[7px] [&_button]:px-3 [&_button]:text-sm [&_button]:font-medium [&_button]:text-text [&_button]:border-b-2 [&_button]:border-b-transparent [&_button]:-mb-px [&_button:hover]:text-text [&_button.active]:border-b-primary">
-        {(harnesses ?? []).map((x) => (
-          <button
-            key={x.id}
-            className={x.id === active ? "active" : ""}
-            onClick={() => setActive(x.id)}
-          >
-            {x.name}
-            <span className={`w-[7px] h-[7px] rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${harnessStatus(x).cls}`} />
-          </button>
-        ))}
+      {!remote && setupHarness && setupCommands.data && (
+        <HarnessSetupDialog
+          harness={setupHarness}
+          commands={setupCommands.data[setupHarness.id]}
+          onClose={() => setSetupHarness(null)}
+        />
+      )}
+      <div className="mt-3 mb-3.5 w-fit max-w-full [&_.option-menu]:w-max">
+        <OptionPicker
+          variant="field"
+          dropDown
+          title={m.settings_page_harnesses()}
+          choices={orderedHarnesses.map((harness) => ({ id: harness.id, label: harness.name }))}
+          value={h?.id ?? null}
+          onSelect={(id) => {
+            const selected = orderedHarnesses.find((harness) => harness.id === id);
+            if (selected) setActive(selected.id);
+          }}
+          renderIcon={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            return harness && <HarnessLogo harness={harness.id} />;
+          }}
+          renderLabel={(choice) => {
+            const harness = orderedHarnesses.find((harness) => harness.id === choice.id);
+            const status = harness && harnessStatus(harness);
+            return (
+              <span className="inline-flex items-center gap-2 whitespace-nowrap">
+                {choice.label}
+                {status && (
+                  <>
+                    <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full bg-muted [&.ok]:bg-accent-green [&.err]:bg-accent-red [&.warn]:bg-accent-amber ${status.cls}`} />
+                    <span className="sr-only">{status.label}</span>
+                  </>
+                )}
+              </span>
+            );
+          }}
+        />
       </div>
       {!harnesses ? (
         <LoadingRow>
@@ -316,11 +467,16 @@ function HarnessesTab() {
           <div className="settings-card-head flex items-center gap-2.5 mb-3">
             <Badge variant={harnessStatus(h).variant}>{harnessStatus(h).label}</Badge>
             <div className="spacer flex-1" />
+            {!remote && !h.catalogPending && h.installed && !h.installBroken && !h.authenticated && !h.needsConfigRepair && (h.id === "claude-code" ? h.loginEligible : h.authMethod !== "local" && h.authMethod !== "apiKey" && h.authState !== "unsupported") && (
+              <Button size="small" onClick={() => setSetupHarness(h)} disabled={!setupCommands.data} aria-haspopup="dialog">
+                <SquareTerminal size={14} /> {m.harness_setup_login()}
+              </Button>
+            )}
             <Button size="small" onClick={() => load(true, true)} disabled={refreshing}>
               <RefreshCw size={12} className={refreshing ? "animate-[spin_0.9s_linear_infinite]" : ""} /> {m.settings_page_refresh()}
             </Button>
           </div>
-          <div className={KV_CLASS_NAME}>
+          <div className={cn(KV_CLASS_NAME, "[&_.v]:text-sm")}>
             <span className="k">{m.settings_page_binary()}</span>
             <span className="v">{h.binPath ?? m.settings_not_found_on_path()}</span>
             <span className="k">{m.settings_page_version()}</span>
@@ -349,12 +505,28 @@ function HarnessesTab() {
             )}
             <span className="k">{m.settings_page_agent_models()}</span>
             <span className="v">
-              {h.models.length > 0
+              {h.catalogPending
+                ? m.onboarding_checking()
+                : h.models.length > 0
                 ? m.settings_models_available({ count: fmtNumber(h.models.length), models: new Intl.ListFormat(getLocale()).format(h.models.slice(0, 4).map((model) => ltr(harnessModelLabel(model)))) })
-                : m.settings_none()}
+                : h.agentReady ? m.model_picker_default_model() : m.settings_none()}
             </span>
           </div>
-          {!h.agentReady && h.agentNote && <p className={SETTINGS_NOTE_CLASS_NAME}>{h.agentNote}</p>}
+          <RunnableNote
+            note={h.agentNote}
+            className={cn(SETTINGS_NOTE_CLASS_NAME, "text-sm")}
+            disabled={remote}
+            resolve={(command) => harnessSetupPath(h, setupCommands.data?.[h.id], command) ?? settingsCommandPath(command)}
+            onRun={(command, path) => setupRun.start(command, path, h.id)}
+          />
+          {setupRun.run && (
+            // Hidden, not unmounted, while another harness tab is showing: a
+            // switch mid-OAuth must not kill the sign-in.
+            <div hidden={setupRun.run.owner !== h.id}>
+              <CommandRunTerminal run={setupRun.run} onComplete={() => load(true, true)} onClose={setupRun.clear} />
+            </div>
+          )}
+          {h.id === "opencode" && <LocalModelSetup installed={h.installed} />}
         </div>
       )}
     </>
@@ -364,7 +536,6 @@ function HarnessesTab() {
 // --- compute (kubernetes) -------------------------------------------------------
 
 function K8sHealthBadge({ s }: { s: K8sSettings }) {
-  if (!s.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
   const p = s.preflight;
   if (!p.kubectlFound) return <Badge variant="error">{m.settings_page_kubectl_not_found()}</Badge>;
   if (!p.reachable) return <Badge variant="error">{m.settings_page_cluster_unreachable()}</Badge>;
@@ -372,12 +543,24 @@ function K8sHealthBadge({ s }: { s: K8sSettings }) {
   return <Badge variant="success">{m.settings_page_connected()}</Badge>;
 }
 
-function K8sSection() {
-  const [settings, setSettings] = useState<K8sSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+function K8sSection({
+  onEditState,
+}: {
+  onEditState?: (state: { dirty: boolean; saving: boolean }) => void;
+}) {
+  const saveK8sSettingsMutation = useMutation({ mutationFn: saveK8sSettings });
+
+  const settingsOptions = getK8sSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<K8sSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [context, setContext] = useState("");
   const [namespace, setNamespace] = useState("");
   const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const apply = (s: K8sSettings) => {
@@ -386,24 +569,47 @@ function K8sSection() {
     setNamespace(s.namespace);
   };
 
+  const previousSettings = useRef<K8sSettings | null>(null);
   useEffect(() => {
-    getK8sSettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (
+      context === (previous.context ?? "") && namespace.trim() === previous.namespace
+    ))) {
+      setContext(settings.context ?? "");
+      setNamespace(settings.namespace ?? "");
+    }
+  }, [settings, context, namespace]);
 
   const unchanged =
     settings !== null &&
     context === (settings.context ?? "") &&
     namespace.trim() === settings.namespace;
+  const dirty = settings !== null && !unchanged;
+
+  useEffect(() => {
+    onEditState?.({ dirty, saving });
+  }, [dirty, saving, onEditState]);
+
+  async function checkAgain() {
+    if (checking || saving || !unchanged) return;
+    setChecking(true);
+    try {
+      await queryClient.fetchQuery({ ...getK8sSettingsQuery(), staleTime: 0 });
+    } catch (err) {
+      showAlert(err instanceof Error ? err.message : String(err), "error");
+    } finally {
+      setChecking(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (saving) return;
+    if (saving || checking) return;
     setSaving(true);
     setError(null);
     try {
-      apply(await saveK8sSettings({ context, namespace: namespace.trim() }));
+      apply(await saveK8sSettingsMutation.mutateAsync({ context, namespace: namespace.trim() }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -414,69 +620,71 @@ function K8sSection() {
   return (
     <>
       {loadError ? (
-        <div className="error">{loadError}</div>
+        <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError}</p>
       ) : !settings ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_checking_kubectl()}
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_cluster()}</span>
-            <span className="v">
-              <K8sHealthBadge s={settings} />
-            </span>
-          </div>
-          {settings.preflight.error && (
-            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.preflight.error}</p>
+          <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+            <dt className="text-subtext">{m.settings_page_status()}</dt>
+            <dd className="m-0">
+              {checking || saving ? (
+                <Badge>{m.common_checking()}</Badge>
+              ) : dirty ? (
+                <Badge>{m.file_viewer_unsaved()}</Badge>
+              ) : (
+                <K8sHealthBadge s={settings} />
+              )}
+            </dd>
+          </dl>
+          {unchanged && !checking && !saving && settings.preflight.error && (
+            <p className={`${COMPUTE_DIAGNOSTIC_CLASS_NAME} break-words`}>{settings.preflight.error}</p>
           )}
-          <form className={FORM_CLASS_NAME} onSubmit={submit}>
-            <div className="row2">
-              <label>
-                {m.settings_page_context()}
-                <OptionPicker
-                  choices={[
-                    {
-                      id: "",
-                        label: settings.currentContext ? m.settings_kubectl_default_context({ context: ltr(settings.currentContext) }) : m.settings_kubectl_default(),
-                    },
-                    ...(context && !settings.contexts.includes(context)
-                      ? [{ id: context, label: m.settings_not_in_kubeconfig({ context: ltr(context) }) }]
-                      : []),
-                    ...settings.contexts.map((item) => ({ id: item, label: item })),
-                  ]}
-                  value={context}
-                  variant="field"
-                  dropDown
-                  disabled={saving}
-                  onSelect={setContext}
-               />
-              </label>
-              <label>
-                {m.settings_page_namespace()}
-                <input
-                  type="text"
-                  value={namespace}
-                  onChange={(e) => setNamespace(e.target.value)}
-                  placeholder={m.settings_page_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-            </div>
-            {error && <div className="error">{error}</div>}
-            <div className="actions">
-              <Button variant="primary" type="submit" disabled={saving || unchanged}>
+          <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_page_context()}
+              <OptionPicker
+                choices={[
+                  {
+                    id: "",
+                    label: settings.currentContext ? m.settings_kubectl_default_context({ context: ltr(settings.currentContext) }) : m.settings_kubectl_default(),
+                  },
+                  ...(context && !settings.contexts.includes(context)
+                    ? [{ id: context, label: m.settings_not_in_kubeconfig({ context: ltr(context) }) }]
+                    : []),
+                  ...settings.contexts.map((item) => ({ id: item, label: item })),
+                ]}
+                value={context}
+                variant="field"
+                dropDown
+                disabled={saving || checking}
+                onSelect={setContext}
+              />
+            </label>
+            <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+              {m.settings_page_namespace()}
+              <Input
+                type="text"
+                value={namespace}
+                disabled={saving || checking}
+                onChange={(e) => setNamespace(e.target.value)}
+                placeholder={m.settings_page_default()}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </label>
+            {error && <p className="m-0 text-sm text-accent-red whitespace-pre-wrap break-words">{error}</p>}
+            <div className="flex justify-end gap-2">
+              <Button type="button" onClick={() => void checkAgain()} disabled={saving || checking || !unchanged}>
+                <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+              </Button>
+              <Button variant="primary" type="submit" disabled={saving || checking || unchanged}>
                 {saving ? m.common_saving() : m.common_save()}
               </Button>
             </div>
           </form>
-          <section className="mt-7">
-            <h3 className="mt-0 mx-0 mb-1.5 text-base font-semibold text-text">{m.settings_page_run_manifest()}</h3>
-            <p className="m-0 font-sans text-sm leading-relaxed text-text">
-              {m.settings_manifest_description({ placeholder: ltr("{{ORX_RUN}}"), command: ltr("--manifest <path>") })}
-            </p>
-          </section>
         </>
       )}
     </>
@@ -485,92 +693,93 @@ function K8sSection() {
 
 // --- compute (modal) ------------------------------------------------------------
 
-const MODAL_TOKEN_LABELS: Record<ModalTokenSource, () => string> = {
-  env: m.settings_modal_token_env,
-  syncedEnv: m.settings_modal_token_synced,
-  modalToml: m.settings_modal_token_file,
-};
-
-function ModalBadge({ s }: { s: ModalSettings }) {
-  if (s.ready) return <Badge variant="success">{m.settings_page_connected()}</Badge>;
-  if (!s.tokenConfigured && !s.modalImportable) return <Badge>{m.settings_page_not_set_up()}</Badge>;
-  if (!s.modalImportable)
-    return <Badge variant="error">{s.envProvisioned ? m.settings_env_broken() : m.settings_env_not_built()}</Badge>;
-  if (!s.tokenConfigured) return <Badge variant="error">{m.settings_page_no_token()}</Badge>;
-  return <Badge>{m.settings_page_unknown()}</Badge>;
-}
-
 function ModalSection() {
-  const [s, setS] = useState<ModalSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [provisioning, setProvisioning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const saveModalTokenMutation = useMutation({ mutationFn: (args: Parameters<typeof saveModalToken>) => saveModalToken(...args) });
 
-  useEffect(() => {
-    getModalSettings()
-      .then(setS)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  const sOptions = getModalSettingsQuery();
+  const sQuery = useQuery(sOptions);
+  const s = sQuery.data ?? null;
+  const setS = (value: React.SetStateAction<ModalSettings | null>) => {
+    setScopedQueryData(sOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? sQuery.error?.message ?? null;
+  const [tokenId, setTokenId] = useState("");
+  const [tokenSecret, setTokenSecret] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const loading = sQuery.isPending || refreshing;
+  const [saving, setSaving] = useState(false);
 
-  async function provision() {
-    if (provisioning) return;
-    setProvisioning(true);
+  async function refresh() {
+    if (loading || saving) return;
+    setRefreshing(true);
     setError(null);
     try {
-      setS(await provisionModal());
+      await queryClient.fetchQuery({ ...getModalSettingsQuery(), staleTime: 0 });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setProvisioning(false);
+      setRefreshing(false);
+    }
+  }
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    if (!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv) return;
+    setSaving(true);
+    setError(null);
+    try {
+      setS(await saveModalTokenMutation.mutateAsync([tokenId.trim(), tokenSecret.trim()]));
+      setTokenId("");
+      setTokenSecret("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
     }
   }
 
   return (
     <>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : !s ? (
+      {!s && loading ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_checking_modal()}
         </LoadingRow>
-      ) : (
-        <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_status()}</span>
-            <span className="v">
-              <ModalBadge s={s} />
-            </span>
-            <span className="k">{m.settings_page_environment()}</span>
-            <span className="v">
-              {s.modalImportable
-                ? m.settings_page_ready()
-                : s.envProvisioned
-                  ? m.settings_modal_import_failing()
-                  : m.settings_not_built_yet()}
-            </span>
-            <span className="k">{m.settings_page_token()}</span>
-            <span className="v">
-              {s.tokenSource ? MODAL_TOKEN_LABELS[s.tokenSource]() : m.settings_page_not_configured()}
-            </span>
-          </div>
-          {!s.tokenConfigured && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_modal_token_help({ command: ltr("modal token new"), id: ltr("MODAL_TOKEN_ID"), secret: ltr("MODAL_TOKEN_SECRET") })}
-            </p>
-          )}
-          {s.error && s.envProvisioned && !s.modalImportable && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>
-          )}
-          {error && <div className="error">{error}</div>}
-          {!s.modalImportable && (
-            <div className="mt-6 flex justify-end">
-              <Button variant="primary" onClick={() => void provision()} disabled={provisioning}>
-                {provisioning ? m.settings_setting_up_environment() : m.settings_set_up_environment()}
-              </Button>
-            </div>
-          )}
-        </>
+      ) : s && (
+        <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+          <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+          <dd className="m-0">
+            <Badge variant={s.tokenConfigured ? "success" : "warning"}>
+              {s.tokenConfigured ? m.settings_page_ready_to_use() : m.settings_page_not_configured()}
+            </Badge>
+          </dd>
+        </dl>
       )}
+      {s?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_modal_env_override()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s?.tokenConfigured ? m.settings_modal_replace_id() : m.settings_modal_token_id()}
+          <Input type="password" value={tokenId} onChange={(event) => setTokenId(event.target.value)}
+            placeholder={s?.maskedTokenId ?? "ak-…"} autoComplete="new-password" disabled={s?.processEnv} />
+        </label>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {s?.tokenConfigured ? m.settings_modal_replace_secret() : m.settings_modal_token_secret()}
+          <Input type="password" value={tokenSecret} onChange={(event) => setTokenSecret(event.target.value)}
+            placeholder={s?.maskedTokenSecret ?? "as-…"} autoComplete="new-password" disabled={s?.processEnv} />
+        </label>
+        <a className="self-start text-sm text-subtext underline" href="https://modal.com/docs/sdk/py/latest/config" target="_blank" rel="noreferrer">
+          {m.settings_modal_setup_help()}
+        </a>
+        {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={loading || saving} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {m.settings_page_refresh()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!tokenId.trim() || !tokenSecret.trim() || loading || saving || s?.processEnv}>
+            {saving ? m.common_saving() : m.common_save()}
+          </Button>
+        </div>
+      </form>
     </>
   );
 }
@@ -582,50 +791,17 @@ const CONNECTION_BADGE_CONNECTING_CLASS = "rounded-sm border-accent-blue bg-acce
 const SSH_MASTER_POLL_MS = 5_000;
 
 function useSshMasterStatuses(hosts: string[]) {
-  const [statuses, setStatuses] = useState<Record<string, boolean>>({});
-  const hostsKey = hosts.join("\0");
-
-  useEffect(() => {
-    const activeHosts = hostsKey ? hostsKey.split("\0") : [];
-    if (activeHosts.length === 0) {
-      setStatuses({});
-      return;
-    }
-    let cancelled = false;
-    const refresh = async () => {
-      const results = await Promise.all(activeHosts.map(async (host) => {
-        try {
-          return [host, (await getSshMasterStatus(host)).running] as const;
-        } catch {
-          return null;
-        }
-      }));
-      if (cancelled) return;
-      setStatuses((current) => {
-        const next: Record<string, boolean> = {};
-        for (const result of results) {
-          if (result) next[result[0]] = result[1];
-        }
-        // Preserve the last known value when only one status request fails.
-        for (const host of activeHosts) {
-          if (next[host] === undefined && current[host] !== undefined) next[host] = current[host];
-        }
-        return next;
-      });
-    };
-    void refresh();
-    const interval = window.setInterval(refresh, SSH_MASTER_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(interval);
-    };
-  }, [hostsKey]);
-
-  const markRunning = (host: string) => setStatuses((current) => ({ ...current, [host]: true }));
+  const scope = workspaceScope();
+  const options = hosts.map((host) => getSshMasterStatusQuery(host));
+  const queries = useQueries({ queries: options.map((query) => ({ ...query, refetchInterval: SSH_MASTER_POLL_MS })) });
+  const statuses = Object.fromEntries(hosts.flatMap((host, index) => queries[index].data ? [[host, queries[index].data.running]] : []));
+  const markRunning = (host: string) => {
+    if (isCurrentScope(scope)) setScopedQueryData(getSshMasterStatusQuery(host).queryKey, { running: true });
+  };
   return [statuses, markRunning] as const;
 }
 
-function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | undefined }) {
+function HostTestCell({ test, connecting, masterRunning, containerFailed = false }: { test: SshPreflight | undefined; connecting: boolean; masterRunning: boolean | null | undefined; containerFailed?: boolean }) {
   if (connecting)
     return (
       <span role="status">
@@ -635,7 +811,7 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
   if (test === undefined) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   const missingTools = test.missingTools ?? [];
   const disconnected = test.reachable && test.toolsFound && masterRunning === false;
-  const badge = !test.reachable ? (
+  const badge = !test.reachable || containerFailed ? (
     <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>
   ) : !test.toolsFound ? (
     <Badge className="rounded-sm" variant="error">
@@ -657,8 +833,14 @@ function HostTestCell({ test, connecting, masterRunning }: { test: SshPreflight 
 }
 
 function SshSection() {
-  const [hosts, setHosts] = useState<SshHost[] | null>(null);
-  const [tests, setTests] = useState<Record<string, SshPreflight>>({});
+  const hostsOptions = getSshSettingsQuery();
+  const hostsQuery = useQuery(hostsOptions);
+  const hosts = hostsQuery.data?.hosts ?? (hostsQuery.isError ? [] : null);
+  const [configOpen, setConfigOpen] = useState(false);
+  const [tests, setTests] = useState<Record<string, SshExecutionPreflight>>({});
+  const [drafts, setDrafts] = useState<Record<string, string | null>>({});
+  const activeAttempt = useRef(0);
+  const [probing, setProbing] = useState(false);
   const [expandedHosts, setExpandedHosts] = useState<Record<string, boolean>>({});
   const [connectingHost, setConnectingHost] = useState<string | null>(null);
   const [connectionFailed, setConnectionFailed] = useState(false);
@@ -671,13 +853,9 @@ function SshSection() {
     .map((host) => host.host) ?? [];
   const [masterRunning, markMasterRunning] = useSshMasterStatuses(checkedHosts);
 
-  useEffect(() => {
-    getSshHosts()
-      .then(setHosts)
-      .catch(() => setHosts([]));
-  }, []);
-
   function connect(host: string) {
+    activeAttempt.current += 1;
+    setProbing(false);
     setConnectionFailed(false);
     setConnectionAttempt((attempt) => attempt + 1);
     setConnectingHost(host);
@@ -685,6 +863,8 @@ function SshSection() {
   }
 
   function cancelConnect() {
+    activeAttempt.current += 1;
+    setProbing(false);
     setConnectionFailed(false);
     setConnectingHost(null);
   }
@@ -695,6 +875,13 @@ function SshSection() {
 
   return (
     <>
+      {hostsQuery.error && <p className="text-sm text-accent-red">{hostsQuery.error.message}</p>}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        {hostsQuery.data && <SshDefaultHost settings={hostsQuery.data} />}
+        <Button variant="ghost" className="ms-auto" onClick={() => setConfigOpen(true)}>
+          <Settings size={14} /> {m.ssh_configure_hosts()}
+        </Button>
+      </div>
       {hosts === null ? (
         <LoadingRow>
           <Spinner /> {m.settings_page_reading_ssh_config()}
@@ -705,45 +892,51 @@ function SshSection() {
         <div className="border-y border-border-variant divide-y divide-border-variant">
           {hosts.map((h) => {
             // Session-local result wins; the persisted one covers restarts.
-            const hostTest = tests[h.host] ?? h.lastTest;
+            const reference = drafts[h.host] === undefined ? h.container ?? null : drafts[h.host];
+            const executionTest = tests[h.host];
+            const containerTest = reference !== null && executionTest?.container?.reference === reference.trim()
+              ? executionTest : undefined;
+            const hostTest = reference !== null ? containerTest
+              : executionTest?.container ? h.lastTest : executionTest ?? h.lastTest;
+            const containerError = containerTest?.container?.error;
+            const containerFailed = containerTest?.container?.ready === false;
+            const connectionError = hostTest?.error || containerError;
             const connecting = connectingHost === h.host;
             const open = expandedHosts[h.host] ?? false;
-            const hasTerminal = connecting || hostTest?.reachable === false;
+            const hasTerminal = connecting || Boolean(connectionError);
             const address =
               `${h.user ? `${h.user}@` : ""}${h.hostname ?? h.host}${h.port ? `:${h.port}` : ""}`;
             return (
               <div key={h.host}>
                 <div
-                  className="flex items-center gap-3 py-3 px-2"
+                  className="flex items-center gap-3 py-3"
                 >
                   <div className="flex min-w-0 flex-1 items-center gap-2.5">
-                    {hasTerminal ? (
-                      <button
-                        type="button"
-                        className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
-                        aria-expanded={open}
-                        aria-label={open ? m.a11y_collapse_item({ name: ltr(h.host) }) : m.a11y_expand_item({ name: ltr(h.host) })}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          toggle(h.host, open);
-                        }}
-                      >
-                        <ChevronDown
-                          size={15}
-                          className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
-                       />
-                      </button>
-                    ) : (
-                      <span className="w-5 flex-none" aria-hidden="true" />
-                    )}
                     <div className="min-w-0">
                       <div className="truncate text-base font-medium text-text" title={h.host}>{h.host}</div>
                       <div className="mt-1 truncate text-sm text-subtext" title={address}>{address}</div>
                     </div>
                   </div>
                   <div className="grid flex-none grid-cols-[8.5rem_5rem] items-center gap-x-12">
-                    <div className="text-start">
-                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} />
+                    <div className="flex items-center gap-2 text-start">
+                      <HostTestCell test={hostTest} connecting={connecting && !connectionFailed} masterRunning={masterRunning[h.host]} containerFailed={containerFailed} />
+                      {hasTerminal && (
+                        <button
+                          type="button"
+                          className="flex-none inline-flex items-center p-0.5 rounded-sm [&:hover]:bg-panel"
+                          aria-expanded={open}
+                          aria-label={open ? m.a11y_collapse_item({ name: ltr(h.host) }) : m.a11y_expand_item({ name: ltr(h.host) })}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggle(h.host, open);
+                          }}
+                        >
+                          <ChevronDown
+                            size={18}
+                            className={`text-muted transition-transform duration-120 ease-standard${open ? " rotate-180" : ""}`}
+                          />
+                        </button>
+                      )}
                     </div>
                     <Button size="small"
                       type="button"
@@ -753,26 +946,36 @@ function SshSection() {
                         if (connecting && !connectionFailed) cancelConnect();
                         else connect(h.host);
                       }}
-                      disabled={!connecting && connectingHost !== null && !connectionFailed}
+                      disabled={!connecting && ((connectingHost !== null && !connectionFailed) || (reference !== null && !reference.trim()))}
                     >
                       {connecting
                         ? connectionFailed
                           ? m.app_retry()
                           : m.settings_page_cancel()
-                        : hostTest?.reachable === false
+                        : hostTest?.reachable === false || containerFailed
                           ? m.app_retry()
                           : hostTest
-                          ? m.settings_reconnect()
-                          : m.settings_connect()}
+                            ? m.settings_reconnect()
+                            : m.settings_connect()}
                     </Button>
                   </div>
                 </div>
+                <SshExecutionSettings host={h} connecting={connecting && !connectionFailed} reference={reference}
+                  onChange={(value) => {
+                    if (connecting) cancelConnect();
+                    setDrafts((drafts) => ({ ...drafts, [h.host]: value }));
+                    setTests((tests) => {
+                      const next = { ...tests };
+                      delete next[h.host];
+                      return next;
+                    });
+                  }} />
                 {hasTerminal && (open || connecting) && (
-                  <div className={`border-t border-t-border-variant py-3 pe-2 ps-10${open ? "" : " hidden"}`}>
-                    {!connecting && hostTest?.error && (
-                      <SshTerminalTranscript host={h.host} transcript={hostTest.error} />
+                  <div className={`border-t border-t-border-variant py-3${open ? "" : " hidden"}`}>
+                    {!connecting && connectionError && (
+                      <SshTerminalTranscript host={h.host} transcript={connectionError} />
                     )}
-                    {connecting && (
+                    {connecting && !probing && (
                       <SshConnectTerminal
                         key={connectionAttempt}
                         host={h.host}
@@ -780,16 +983,40 @@ function SshSection() {
                         active={open}
                         onComplete={(complete) => {
                           if (complete.backend !== "ssh") return;
-                          setTests((tests) => ({ ...tests, [h.host]: complete.result }));
                           markMasterRunning(h.host);
-                          setConnectionFailed(false);
-                          setConnectingHost(null);
+                          const attempt = activeAttempt.current;
+                          if (reference === null) {
+                            setTests((tests) => ({ ...tests, [h.host]: { ...complete.result, container: null } }));
+                            setConnectionFailed(false);
+                            setConnectingHost(null);
+                            return;
+                          }
+                          setProbing(true);
+                          void testSshExecution(h.host, reference.trim()).then((result) => {
+                            if (activeAttempt.current !== attempt) return;
+                            setTests((tests) => ({ ...tests, [h.host]: {
+                              ...result,
+                              container: result.container ?? { reference: reference.trim(), ready: false, error: result.error ?? null },
+                            } }));
+                          }).catch((error: unknown) => {
+                            if (activeAttempt.current !== attempt) return;
+                            setTests((tests) => ({ ...tests, [h.host]: {
+                              ...complete.result,
+                              container: { reference: reference.trim(), ready: false, error: error instanceof Error ? error.message : String(error) },
+                            } }));
+                          }).finally(() => {
+                            if (activeAttempt.current !== attempt) return;
+                            setProbing(false);
+                            setConnectionFailed(false);
+                            setConnectingHost(null);
+                          });
                         }}
                         onError={(error) => {
                           setConnectionFailed(true);
                           setTests((tests) => ({
                             ...tests,
                             [h.host]: {
+                              container: reference === null ? null : { reference: reference.trim(), ready: false, error },
                               reachable: false,
                               toolsFound: false,
                               missingTools: [],
@@ -807,6 +1034,11 @@ function SshSection() {
           })}
         </div>
       )}
+      {configOpen && (
+        <SshConfigDialog
+          onClose={() => setConfigOpen(false)}
+        />
+      )}
     </>
   );
 }
@@ -814,7 +1046,7 @@ function SshSection() {
 // --- compute (slurm) --------------------------------------------------------------
 
 /** First failing check wins, like K8sHealthBadge. */
-function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | undefined }) {
+function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPreflight | null; connecting: boolean; masterRunning: boolean | null | undefined }) {
   if (connecting) return <Badge className={CONNECTION_BADGE_CONNECTING_CLASS}>{m.settings_connecting()}</Badge>;
   if (test === null) return <Badge className={CONNECTION_BADGE_IDLE_CLASS}>{m.settings_page_not_checked()}</Badge>;
   if (!test.reachable) return <Badge className="rounded-sm" variant="error">{m.settings_page_failed()}</Badge>;
@@ -825,8 +1057,15 @@ function SlurmTestBadge({ test, connecting, masterRunning }: { test: SlurmPrefli
 }
 
 function SlurmSection() {
-  const [settings, setSettings] = useState<SlurmSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveSlurmSettingsMutation = useMutation({ mutationFn: saveSlurmSettings });
+
+  const settingsOptions = getSlurmSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<SlurmSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [host, setHost] = useState("");
   const [partition, setPartition] = useState("");
   const [account, setAccount] = useState("");
@@ -854,11 +1093,22 @@ function SlurmSection() {
     setTimeLimit(s.timeLimit ?? "");
   };
 
+  const previousSettings = useRef<SlurmSettings | null>(null);
   useEffect(() => {
-    getSlurmSettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (
+      host === (previous.host ?? "")
+      && partition.trim() === (previous.partition ?? "")
+      && account.trim() === (previous.account ?? "")
+      && timeLimit.trim() === (previous.timeLimit ?? "")
+    ))) {
+      setHost(settings.host ?? "");
+      setPartition(settings.partition ?? "");
+      setAccount(settings.account ?? "");
+      setTimeLimit(settings.timeLimit ?? "");
+    }
+  }, [settings, host, partition, account, timeLimit]);
 
   const unchanged =
     settings !== null &&
@@ -874,7 +1124,7 @@ function SlurmSection() {
     setError(null);
     try {
       apply(
-        await saveSlurmSettings({
+        await saveSlurmSettingsMutation.mutateAsync({
           host,
           partition: partition.trim(),
           account: account.trim(),
@@ -899,14 +1149,8 @@ function SlurmSection() {
       ) : (
         <>
           {!connecting && test?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{test.error}</p>}
-          {test && test.partitions.length > 0 && (
-            <div className={COMPUTE_DETAILS_CLASS_NAME}>
-              <span className="k">{m.settings_page_partitions()}</span>
-              <span className="v">{test.partitions.join(", ")}</span>
-            </div>
-          )}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
-            <div className="row2">
+            <div className="max-w-xl">
               <label>
                 {m.settings_page_login_node()}
                 <OptionPicker
@@ -927,53 +1171,10 @@ function SlurmSection() {
                     setConnecting(false);
                     setConnectionFailed(false);
                   }}
-               />
-              </label>
-              <label>
-                {m.settings_page_partition()}
-                <input
-                  type="text"
-                  list="slurm-partitions"
-                  value={partition}
-                  onChange={(e) => setPartition(e.target.value)}
-                  placeholder={m.settings_page_cluster_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-                <datalist id="slurm-partitions">
-                  {test?.partitions.map((p) => <option key={p} value={p} />)}
-                </datalist>
+                />
               </label>
             </div>
-            <div className="row2">
-              <label>
-                {m.settings_page_account()}
-                <input
-                  type="text"
-                  value={account}
-                  onChange={(e) => setAccount(e.target.value)}
-                  placeholder={m.settings_page_cluster_default()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-              <label>
-                {m.settings_page_time_limit()}
-                <input
-                  type="text"
-                  value={timeLimit}
-                  onChange={(e) => setTimeLimit(e.target.value)}
-                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
-                  autoComplete="off"
-                  spellCheck={false}
-               />
-              </label>
-            </div>
-            {error && <div className="error">{error}</div>}
             <div className="actions">
-              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
-                {saving ? m.common_saving() : m.common_save()}
-              </Button>
               <Button
                 type="button"
                 onClick={() => {
@@ -1002,6 +1203,53 @@ function SlurmSection() {
                   masterRunning={masterRunning[host]}
                 />
               </span>
+            </div>
+            <div className="mt-5 border-t border-border pt-5">
+              <div className="row2">
+                <label>
+                  {m.settings_page_partition()}
+                  <Input
+                    type="text"
+                    list="slurm-partitions"
+                    value={partition}
+                    onChange={(e) => setPartition(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <datalist id="slurm-partitions">
+                    {test?.partitions.map((p) => <option key={p} value={p} />)}
+                  </datalist>
+                </label>
+                <label>
+                  {m.settings_page_account()}
+                  <Input
+                    type="text"
+                    value={account}
+                    onChange={(e) => setAccount(e.target.value)}
+                    placeholder={m.settings_page_cluster_default()}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </label>
+              </div>
+              <label className="mt-3 block max-w-xl">
+                {m.settings_page_time_limit()}
+                <Input
+                  type="text"
+                  value={timeLimit}
+                  onChange={(e) => setTimeLimit(e.target.value)}
+                  placeholder={m.settings_page_cluster_default_e_g_4h_30m()}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+            {error && <div className="error">{error}</div>}
+            <div className="actions">
+              <Button variant="primary" type="submit" disabled={saving || unchanged || connecting}>
+                {saving ? m.common_saving() : m.common_save()}
+              </Button>
             </div>
           </form>
           {connecting && (
@@ -1035,8 +1283,15 @@ function SlurmSection() {
 }
 
 function RaySection() {
-  const [settings, setSettings] = useState<RaySettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const saveRaySettingsMutation = useMutation({ mutationFn: saveRaySettings });
+
+  const settingsOptions = getRaySettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<RaySettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [address, setAddress] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1048,11 +1303,14 @@ function RaySection() {
     setAddress(s.address ?? "");
   };
 
+  const previousSettings = useRef<RaySettings | null>(null);
   useEffect(() => {
-    getRaySettings()
-      .then(apply)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+    const previous = previousSettings.current;
+    previousSettings.current = settings;
+    if (settings && (!previous || (address === (previous.address ?? "")))) {
+      setAddress(settings.address ?? "");
+    }
+  }, [settings, address]);
 
   const unchanged = settings !== null && address === (settings.address ?? "");
 
@@ -1062,7 +1320,7 @@ function RaySection() {
     setSaving(true);
     setError(null);
     try {
-      apply(await saveRaySettings({ address }));
+      apply(await saveRaySettingsMutation.mutateAsync({ address }));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -1094,23 +1352,11 @@ function RaySection() {
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_effective_url()}</span>
-            <span className="v">{settings.resolvedAddress}</span>
-            <span className="k">{m.settings_page_source()}</span>
-            <span className="v">{settings.source}</span>
-            {preflight?.reachable && preflight.rayVersion && (
-              <>
-                <span className="k">{m.settings_page_ray_version()}</span>
-                <span className="v">{preflight.rayVersion}</span>
-              </>
-            )}
-          </div>
           {preflight?.error && <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{preflight.error}</p>}
           <form className={FORM_CLASS_NAME} onSubmit={submit}>
             <label>
               {m.settings_page_jobs_dashboard_url()}
-              <input
+              <Input
                 type="text"
                 value={address}
                 onChange={(e) => {
@@ -1120,8 +1366,11 @@ function RaySection() {
                 placeholder="http://127.0.0.1:8265"
                 autoComplete="off"
                 spellCheck={false}
-             />
+              />
             </label>
+            <p className="m-0 text-sm text-subtext">
+              {m.settings_page_effective_url()}: {ltr(settings.resolvedAddress)} · {m.settings_page_source()}: {settings.source}
+            </p>
             {error && <div className="error">{error}</div>}
             <div className="actions">
               <Button variant="primary" type="submit" disabled={saving || unchanged}>
@@ -1137,6 +1386,11 @@ function RaySection() {
               </Button>
               <RayTestBadge test={test} />
             </div>
+            {preflight?.reachable && preflight.rayVersion && (
+              <p className="m-0 text-sm text-subtext">
+                {m.settings_page_ray_version()}: {preflight.rayVersion}
+              </p>
+            )}
           </form>
         </>
       )}
@@ -1153,90 +1407,55 @@ function RayTestBadge({ test }: { test: "testing" | RayPreflight | null }) {
 
 // --- compute (local) --------------------------------------------------------------
 
-function LocalSection() {
-  const [hw, setHw] = useState<LocalMachine | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getLocalMachine()
-      .then(setHw)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  return (
-    <>
-      {loadError ? (
-        <div className="error">{loadError}</div>
-      ) : !hw ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_detecting_hardware()}
-        </LoadingRow>
-      ) : (
-        <div className={COMPUTE_DETAILS_CLASS_NAME}>
-          <span className="k">{m.settings_page_hostname()}</span>
-          <span className="v">{hw.hostname}</span>
-          <span className="k">{m.settings_page_system()}</span>
-          <span className="v">
-            {hw.os}/{hw.arch}
-            {hw.chip ? ` — ${hw.chip}` : ""}
-          </span>
-          <span className="k">CPU</span>
-          <span className="v">{hw.cpuCount > 0 ? `${hw.cpuCount} cores` : "—"}</span>
-          <span className="k">RAM</span>
-          <span className="v">{hw.memBytes !== null ? fmtBytes(hw.memBytes) : "—"}</span>
-          <span className="k">GPUs</span>
-          <span className="v">
-            {hw.gpus.length === 0
-              ? "none detected (nvidia-smi)"
-              : hw.gpus
-                  .map(
-                    (g) =>
-                      `${g.name}${g.memMib !== null ? ` — ${fmtBytes(g.memMib * 1024 * 1024)}` : ""}`,
-                  )
-                  .join(", ")}
-          </span>
-        </div>
-      )}
-    </>
-  );
+function localMachineSummary(hw: LocalMachine) {
+  const processor = hw.chip ?? `${hw.os}/${hw.arch}`;
+  const memory = hw.memBytes === null ? null : fmtBytes(hw.memBytes);
+  const gpu = hw.gpus.length === 0 ? null : m.settings_gpu_count({ count: hw.gpus.length });
+  return [processor, hw.cpuCount > 0 ? m.settings_cpu_cores({ count: hw.cpuCount }) : null, memory, gpu]
+    .filter(Boolean)
+    .join(" · ");
 }
 
 // --- compute (openresearch) ---------------------------------------------------------
 
-function OpenResearchSection() {
-  const [s, setS] = useState<OpenResearchSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getOpenResearchSettings()
-      .then(setS)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
+function OpenResearchSection({ remote }: { remote: boolean }) {
+  const settingsQuery = useQuery(getOpenResearchSettingsQuery());
+  const s = settingsQuery.data;
+  const loadError = settingsQuery.error?.message;
+  const busy = settingsQuery.isFetching;
+  const [loginAttempt, setLoginAttempt] = useState(0);
+  const [terminalLogin, setTerminalLogin] = useState(true);
+  const [signingIn, setSigningIn] = useState(false);
+  const refresh = () => settingsQuery.refetch();
 
   return (
     <>
-      {loadError ? (
+      {loadError && !s ? (
         <div className="error">{loadError}</div>
-      ) : !s ? (
-        <LoadingRow>
-          <Spinner /> {m.settings_page_checking_credentials()}
-        </LoadingRow>
-      ) : !s.loggedIn ? (
-        <p className={SETTINGS_NOTE_CLASS_NAME}>
-          {m.settings_login_help({ command: ltr("orx login") })}
-        </p>
       ) : (
         <>
           <div className={COMPUTE_DETAILS_CLASS_NAME}>
             <span className="k">{m.settings_page_status()}</span>
             <span className="v">
-              <Badge variant="success">{m.settings_page_signed_in()}</Badge>
+              {(!s && busy) || signingIn ? (
+                <Badge className="gap-1.5" role="status"><Spinner />{signingIn ? m.settings_openresearch_setting_up() : m.common_checking()}</Badge>
+              ) : loadError ? (
+                <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
+              ) : !s ? null : !s.loggedIn ? (
+                <Badge variant="warning">{m.settings_page_not_signed_in()}</Badge>
+              ) : s.sshKeyStatus === "matched" ? (
+                <Badge variant="success">{m.settings_page_ready()}</Badge>
+              ) : s.sshKeyStatus === "unknown" ? (
+                <Badge variant="warning">{m.settings_page_unable_to_verify()}</Badge>
+              ) : (
+                <Badge variant="warning">{m.settings_page_not_configured()}</Badge>
+              )}
             </span>
             <span className="k">{m.settings_page_orgs()}</span>
-            <span className="v">{s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
+            <span className="v">{s?.loggedIn && s.orgs.length > 0 ? s.orgs.join(", ") : "—"}</span>
             <span className="k">{m.settings_page_ssh_key()}</span>
             <span className="v">
-              {s.sshKeyStatus === "matched" ? (
+              {!s?.loggedIn ? "—" : s.sshKeyStatus === "matched" ? (
                 <Badge variant="success">{m.settings_page_on_this_computer()}</Badge>
               ) : s.sshKeyStatus === "no_local_match" ? (
                 <Badge variant="warning">{m.settings_page_not_on_this_computer()}</Badge>
@@ -1247,7 +1466,27 @@ function OpenResearchSection() {
               )}
             </span>
           </div>
-          {s.sshKeyStatus === "none_registered" &&
+          {remote && s && !s.loggedIn && (
+            <p className="mt-4 mb-0 text-sm text-subtext">
+              {m.settings_login_help({ command: ltr("orx login") })}
+            </p>
+          )}
+          {!remote && loginAttempt > 0 && (
+            <OpenResearchSetupTerminal
+              key={loginAttempt}
+              login={terminalLogin}
+              onComplete={() => {
+                setSigningIn(false);
+                setLoginAttempt(0);
+                void refresh();
+              }}
+              onError={(error) => {
+                setSigningIn(false);
+                showAlert(error, "error");
+              }}
+            />
+          )}
+          {remote && s?.loggedIn && s.sshKeyStatus === "none_registered" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_page_add_one_with()} <code>orx ssh-key add {s.sshKeyPath}</code>.
@@ -1259,7 +1498,7 @@ function OpenResearchSection() {
                 <code>orx ssh-key add</code>.
               </p>
             ))}
-          {s.sshKeyStatus === "no_local_match" &&
+          {remote && s?.loggedIn && s.sshKeyStatus === "no_local_match" &&
             (s.sshKeyPath ? (
               <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>
                 {m.settings_register_computer_help({ register: ltr(`orx ssh-key add ${s.sshKeyPath}`), load: ltr("ssh-add") })}
@@ -1271,26 +1510,28 @@ function OpenResearchSection() {
                 <code>ssh-keygen -t ed25519</code>.
               </p>
             ))}
-          {s.error && <p dir="auto" className={SETTINGS_NOTE_CLASS_NAME}>{s.error}</p>}
+          {!busy && (loadError || s?.error) && <p dir="auto" className="mt-4 mb-0 text-sm text-accent-red whitespace-pre-wrap break-words">{loadError || s?.error}</p>}
         </>
       )}
+      <div className="mt-4 flex justify-end gap-2">
+        <Button onClick={() => void refresh()} disabled={busy || signingIn}>
+          <RefreshCw size={13} /> {busy ? m.common_checking() : m.settings_check_again()}
+        </Button>
+        {!remote && s && (!s.loggedIn || s.sshKeyStatus !== "matched") && (
+          <Button variant="primary" disabled={busy || signingIn} onClick={() => {
+            setTerminalLogin(!s.loggedIn);
+            setSigningIn(true);
+            setLoginAttempt((attempt) => attempt + 1);
+          }}>
+            {signingIn ? <Spinner /> : <SquareTerminal size={13} />} {s.loggedIn ? m.settings_setup_ssh_key() : m.settings_sign_in()}
+          </Button>
+        )}
+      </div>
     </>
   );
 }
 
 // --- compute -----------------------------------------------------------------
-
-const TARGET_LABELS: Record<ComputeTargetId, () => string> = {
-  local: m.compute_target_local,
-  tinker: m.compute_target_tinker,
-  hf: m.compute_target_hf,
-  modal: m.compute_target_modal,
-  k8s: m.compute_target_k8s,
-  ssh: m.compute_target_ssh,
-  slurm: m.compute_target_slurm,
-  ray: m.compute_target_ray,
-  openresearch: m.compute_target_openresearch,
-};
 
 const TARGET_CARD_DESCRIPTIONS: Record<ComputeTargetId, () => string> = {
   local: m.compute_description_local,
@@ -1317,52 +1558,6 @@ const TARGET_KIND: Record<ComputeTargetId, string> = {
   openresearch: "openresearch_job",
 };
 
-const TARGET_USAGE: Record<ComputeTargetId, () => string> = {
-  local: m.compute_usage_local,
-  ssh: m.compute_usage_ssh,
-  tinker: m.compute_usage_tinker,
-  hf: m.compute_usage_hf,
-  modal: m.compute_usage_modal,
-  k8s: m.compute_usage_k8s,
-  slurm: m.compute_usage_slurm,
-  ray: m.compute_usage_ray,
-  openresearch: m.compute_usage_openresearch,
-};
-
-function targetConnection(target: ComputeTargetSummary): string {
-  switch (target.id) {
-    case "local":
-      return m.compute_connection_local();
-    case "ssh":
-      return m.compute_connection_ssh({ summary: ltr(target.summary) });
-    case "tinker":
-      return m.compute_connection_tinker({ summary: ltr(target.summary) });
-    case "hf":
-      return m.compute_connection_hf({ summary: ltr(target.summary) });
-    case "modal":
-      return m.compute_connection_modal({ summary: ltr(target.summary) });
-    case "k8s":
-      return m.compute_connection_k8s({ summary: ltr(target.summary) });
-    case "slurm":
-      return m.compute_connection_slurm({ summary: ltr(target.summary) });
-    case "ray":
-      return m.compute_connection_ray({ summary: ltr(target.summary) });
-    case "openresearch":
-      return m.compute_connection_openresearch({ summary: ltr(target.summary) });
-  }
-}
-
-function BackendOverview({ target }: { target: ComputeTargetSummary }) {
-  return (
-    <dl className="m-0 mt-8 grid grid-cols-[9rem_minmax(0,1fr)] gap-x-5 gap-y-4 font-sans">
-      <dt className="text-sm font-medium text-subtext">{m.settings_page_how_it_connects()}</dt>
-      <dd className="m-0 text-base leading-relaxed text-text">{targetConnection(target)}</dd>
-      <dt className="text-sm font-medium text-subtext">{m.settings_page_what_happens()}</dt>
-      <dd className="m-0 text-base leading-relaxed text-text">{TARGET_USAGE[target.id]()}</dd>
-    </dl>
-  );
-}
-
 /** Backends whose launches take --flavor; mirrors the server's validation. */
 const FLAVORED_TARGETS: ComputeTargetId[] = ["hf", "modal", "slurm", "ray", "openresearch"];
 /** Of those, the ones where a launch *requires* a flavor. */
@@ -1374,6 +1569,15 @@ const FLAVOR_SUGGESTIONS: Partial<Record<ComputeTargetId, string[]>> = {
   slurm: ["gpu", "h100:1", "h100:2", "a100:4"],
   ray: ["cpu", "cpu:2", "gpu", "gpu:1", "gpu:1,cpu:4", "gpu:1,mem:8GiB"],
   openresearch: ["h100_sxm", "h100_sxm:2", "cpu5c", "cpu5g", "cpu5m"],
+};
+
+const QUICK_SETUP_TARGETS: ComputeTargetId[] = ["tinker", "hf", "modal", "ray", "k8s"];
+
+const TARGET_USAGE: Partial<Record<ComputeTargetId, () => string>> = {
+  tinker: m.compute_usage_tinker,
+  hf: m.compute_usage_hf,
+  modal: m.compute_usage_modal,
+  openresearch: m.compute_usage_openresearch,
 };
 
 const CUSTOM_FLAVOR_ID = "__custom__";
@@ -1391,6 +1595,8 @@ function DefaultDestinationEditor({
   projectId?: string;
   onSaved: (settings: ComputeSettings) => void;
 }) {
+  const setComputeDefaultMutation = useMutation({ mutationFn: setComputeDefault });
+
   const savedBackend = settings.configuredDefaultBackend ?? settings.defaultBackend ?? "local";
   const savedFlavor = settings.defaultFlavor ?? "";
   const [backend, setBackend] = useState(savedBackend);
@@ -1408,6 +1614,7 @@ function DefaultDestinationEditor({
   const unchanged =
     backend === savedBackend && (!flavored || flavor.trim() === savedFlavor);
   const destination = TARGET_LABELS[backend]();
+  const usage = TARGET_USAGE[backend];
   const helperText =
     saving
       ? m.settings_updating_default_destination()
@@ -1430,7 +1637,7 @@ function DefaultDestinationEditor({
     setError(null);
     try {
       onSaved(
-        await setComputeDefault({
+        await setComputeDefaultMutation.mutateAsync({
           backend: nextBackend,
           flavor: nextFlavored ? nextFlavor.trim() || null : null,
           projectId,
@@ -1491,7 +1698,7 @@ function DefaultDestinationEditor({
               return target ? <BackendLogo kind={TARGET_KIND[target.id]} size={16} /> : null;
             }}
             onSelect={changeBackend}
-         />
+          />
           {flavored && (
             <div>
               {customFlavor ? (
@@ -1516,7 +1723,7 @@ function DefaultDestinationEditor({
                     autoComplete="off"
                     spellCheck={false}
                     disabled={saving}
-                 />
+                  />
                   <button
                     type="button"
                     className="absolute inset-y-0 end-0 inline-flex w-9 items-center justify-center text-muted hover:text-text"
@@ -1549,7 +1756,7 @@ function DefaultDestinationEditor({
                   dropDown
                   disabled={saving}
                   onSelect={changeFlavor}
-               />
+                />
               )}
             </div>
           )}
@@ -1562,6 +1769,7 @@ function DefaultDestinationEditor({
         )}
       </div>
       <p className="mt-2 mb-0 text-sm leading-relaxed text-subtext">{helperText}</p>
+      {usage && <p className="mt-1 mb-0 text-sm leading-relaxed text-subtext">{usage()}</p>}
     </section>
   );
 }
@@ -1569,12 +1777,17 @@ function DefaultDestinationEditor({
 function TargetTile({
   target,
   isDefault,
+  summary,
   onOpen,
+  onOpenEnvironment,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
-  onOpen: () => void;
+  summary?: string;
+  onOpen?: () => void;
+  onOpenEnvironment: () => void;
 }) {
+  const summaryId = `compute-${target.id}-summary`;
   const setupLabel = target.unverified
     ? m.settings_check_setup()
     : target.id === "openresearch"
@@ -1584,12 +1797,20 @@ function TargetTile({
         : m.settings_set_up();
 
   return (
-    <button
-      type="button"
-      className="group flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans transition-colors duration-120 ease-standard hover:border-text hover:bg-surface disabled:cursor-default disabled:opacity-52"
-      onClick={onOpen}
-      disabled={!target.enabled}
+    <div
+      className={`group relative flex min-h-41 w-full flex-col items-start rounded-lg border border-border bg-background p-5 text-start font-sans ${onOpen && target.enabled ? "transition-colors duration-120 ease-standard hover:border-text hover:bg-surface" : ""} ${!target.enabled ? "opacity-52" : ""}`}
     >
+      {onOpen && (
+        <button
+          type="button"
+          className="absolute inset-0 z-10 rounded-lg focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2 disabled:cursor-default"
+          onClick={onOpen}
+          disabled={!target.enabled}
+          aria-label={TARGET_LABELS[target.id]()}
+          aria-describedby={summaryId}
+          aria-haspopup={QUICK_SETUP_TARGETS.includes(target.id) ? "dialog" : undefined}
+        />
+      )}
       <span className="flex h-16 w-40 flex-none items-center justify-start">
         <BackendLogo kind={TARGET_KIND[target.id]} size={48} />
       </span>
@@ -1597,15 +1818,37 @@ function TargetTile({
       <span className="mt-1 line-clamp-2 min-h-9 text-sm leading-normal text-text">
         {TARGET_CARD_DESCRIPTIONS[target.id]()}
       </span>
+      <span id={summaryId} className="mt-2 line-clamp-2 min-h-8 text-xs leading-normal text-subtext">
+        {target.fromEnvironmentTab ? (
+          <>
+            {target.id === "tinker" ? m.settings_key_from() : m.settings_token_from()}{" "}
+            <button
+              type="button"
+              className="relative z-20 text-primary underline-offset-2 hover:text-primary-hover hover:underline"
+              onClick={onOpenEnvironment}
+            >
+              {m.settings_environment_tab()}
+            </button>
+          </>
+        ) : summary ?? target.summary}
+      </span>
       <span className="mt-auto flex w-full items-center justify-between gap-3 pt-3 text-sm">
         <span className={isDefault ? "font-medium text-primary" : "text-subtext"}>
-          {isDefault ? m.settings_page_default_808d7dc() : target.configured ? m.settings_view_settings() : setupLabel}
+          {isDefault
+            ? m.settings_page_default_808d7dc()
+            : target.configured
+              ? !onOpen || QUICK_SETUP_TARGETS.includes(target.id)
+                ? m.settings_page_ready_to_use()
+                : m.settings_view_settings()
+              : setupLabel}
         </span>
-        <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
-          <ArrowRight size={16} />
-        </span>
+        {onOpen && (
+          <span className="text-subtext transition-transform duration-120 ease-standard group-hover:translate-x-0.5" aria-hidden="true">
+            <ArrowRight size={16} />
+          </span>
+        )}
       </span>
-    </button>
+    </div>
   );
 }
 
@@ -1613,26 +1856,28 @@ function BackendDetailPage({
   target,
   isDefault,
   onBack,
+  remote,
 }: {
   target: ComputeTargetSummary;
   isDefault: boolean;
   onBack: () => void;
+  remote: boolean;
 }) {
   return (
     <>
       <button
         type="button"
-        className="settings-back mb-10 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text"
+        className="settings-back mb-6 inline-flex items-center gap-2 text-sm font-medium text-subtext hover:text-text"
         onClick={onBack}
       >
         <ArrowLeft size={16} /> {m.settings_page_back_to_compute()}
       </button>
       <div className="flex items-center justify-between gap-6">
-        <div className={`flex min-w-0 items-center ${target.id === "tinker" ? "gap-8" : "gap-5"}`}>
-          <span className="flex h-20 w-24 flex-none items-center justify-start">
-            <BackendLogo kind={TARGET_KIND[target.id]} size={72} />
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="flex h-10 w-10 flex-none items-center justify-center">
+            <BackendLogo kind={TARGET_KIND[target.id]} size={36} />
           </span>
-          <h1 className="m-0 min-w-0">{TARGET_LABELS[target.id]()}</h1>
+          <h1 className="m-0 min-w-0 text-2xl">{TARGET_LABELS[target.id]()}</h1>
         </div>
         {isDefault && (
           <Badge className="flex-none border-primary bg-primary-subtle text-primary">
@@ -1640,70 +1885,95 @@ function BackendDetailPage({
           </Badge>
         )}
       </div>
-      <BackendOverview target={target} />
-      {target.id !== "tinker" && (
-        <div className="mt-8 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
-          {target.id === "local" && <LocalSection />}
-          {target.id === "hf" && <HfSection />}
-          {target.id === "modal" && <ModalSection />}
-          {target.id === "k8s" && <K8sSection />}
-          {target.id === "ssh" && <SshSection />}
-          {target.id === "slurm" && <SlurmSection />}
-          {target.id === "ray" && <RaySection />}
-          {target.id === "openresearch" && <OpenResearchSection />}
-        </div>
-      )}
+      <div className="mt-6 font-sans text-base text-text [&_.settings-card]:mb-0 [&_.settings-form]:mt-6 [&_.settings-form]:border-t-0 [&_.settings-form]:pt-0 [&>.settings-form:first-child]:mt-0 [&>div:first-child]:border-t-0">
+        {target.id === "ssh" && <SshSection />}
+        {target.id === "slurm" && <SlurmSection />}
+        {target.id === "openresearch" && <OpenResearchSection remote={remote} />}
+      </div>
     </>
+  );
+}
+
+function QuickSetupDialog({ target, remote, onClose }: { target: ComputeTargetSummary; remote: boolean; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const [editState, setEditState] = useState({ dirty: false, saving: false });
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+
+  const close = () => {
+    if (editState.saving) return;
+    if (editState.dirty && !window.confirm(m.settings_k8s_discard_changes())) return;
+    onClose();
+  };
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="m-auto w-140 max-w-[calc(100vw_-_40px)] max-h-[calc(100vh_-_40px)] overflow-y-auto rounded-xl border border-border bg-background p-5 text-text shadow-modal backdrop:bg-modal-backdrop-light"
+      aria-labelledby="compute-quick-setup-title"
+      // Escape on keydown (not just cancel) so a declined discard confirm can't be
+      // force-closed by the close watcher; an open OptionPicker swallows it first.
+      onKeyDown={(event) => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        close();
+      }}
+      onCancel={(event) => {
+        event.preventDefault();
+        close();
+      }}
+    >
+      <div className="mb-5 flex items-center justify-between gap-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <BackendLogo kind={TARGET_KIND[target.id]} size={32} />
+          <h2 id="compute-quick-setup-title" className="m-0 text-xl font-medium text-text">
+            {TARGET_LABELS[target.id]()}
+          </h2>
+        </div>
+        <IconButton title={m.app_close_panel()} aria-label={m.app_close_panel()} onClick={close} disabled={editState.saving}>
+          <X size={14} />
+        </IconButton>
+      </div>
+      {target.id === "tinker" && <TinkerSection target={target} />}
+      {target.id === "hf" && <HfSection remote={remote} />}
+      {target.id === "modal" && <ModalSection />}
+      {target.id === "ray" && <RaySection />}
+      {target.id === "k8s" && <K8sSection onEditState={setEditState} />}
+    </dialog>
   );
 }
 
 function ComputeTab({
   project,
   onViewHistory,
+  onOpenEnvironment,
+  remote,
 }: {
   project: Project | null;
   onViewHistory: () => void;
+  onOpenEnvironment: () => void;
+  remote: boolean;
 }) {
-  const [settings, setSettings] = useState<ComputeSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const settingsOptions = getComputeSettingsQuery(project?.id);
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<ComputeSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [selectedTarget, setSelectedTarget] = useState<ComputeTargetId | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Monotonic guard: a POST response applied via `apply` must not be
-  // overwritten by a slower background GET that was already in flight.
-  const seqRef = useRef(0);
-
-  useEffect(() => {
-    seqRef.current++;
-    setSettings(null);
-    setSelectedTarget(null);
-    setLoadError(null);
-    setError(null);
-  }, [project?.id]);
-
-  // Returning to the directory refreshes summaries changed on a backend page.
-  useEffect(() => {
-    const seq = ++seqRef.current;
-    getComputeSettings(project?.id)
-      .then((s) => {
-        if (seq !== seqRef.current) return;
-        setSettings(s);
-        setLoadError(null);
-      })
-      .catch((err) => {
-        if (seq !== seqRef.current) return;
-        // Only the very first load may brick the tab; a failed background
-        // refresh of already-rendered rows goes to the transient banner.
-        const msg = err instanceof Error ? err.message : String(err);
-        setSettings((cur) => {
-          if (cur === null) setLoadError(msg);
-          else setError(msg);
-          return cur;
-        });
-      });
-  }, [selectedTarget, project?.id]);
+  const localMachineOptions = getLocalMachineQuery();
+  const localMachineQuery = useQuery(localMachineOptions);
+  const localMachine = localMachineQuery.data ?? null;
+  const localMachineError = localMachineQuery.error?.message ?? null;
+  useEffect(() => { setSelectedTarget(null); setError(null); }, [project?.id]);
 
   const apply = (s: ComputeSettings) => {
-    seqRef.current++; // supersede any in-flight background GET
     setSettings(s);
     setError(null);
   };
@@ -1713,8 +1983,8 @@ function ComputeTab({
   const defaultBackend = settings?.configuredDefaultBackend ?? settings?.defaultBackend;
   const orderedTargets = targets
     ? [...targets].sort(
-        (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
-      )
+      (a, b) => Number(b.id === defaultBackend) - Number(a.id === defaultBackend),
+    )
     : null;
   const configuredTargets = orderedTargets?.filter((target) => target.configured) ?? [];
   const availableTargets = orderedTargets?.filter((target) => !target.configured) ?? [];
@@ -1723,20 +1993,23 @@ function ComputeTab({
       key={`${project?.id ?? "none"}:${target.id}`}
       target={target}
       isDefault={defaultBackend === target.id}
-      onOpen={() => setSelectedTarget(target.id)}
-   />
+      summary={target.id === "local" ? localMachine ? localMachineSummary(localMachine) : localMachineError ?? m.settings_page_detecting_hardware() : undefined}
+      onOpen={target.id === "local" ? undefined : () => setSelectedTarget(target.id)}
+      onOpenEnvironment={onOpenEnvironment}
+    />
   );
   const selected = selectedTarget
     ? settings?.targets.find((target) => target.id === selectedTarget)
     : null;
 
-  if (selected) {
+  if (selected && !QUICK_SETUP_TARGETS.includes(selected.id)) {
     return (
       <BackendDetailPage
         target={selected}
         isDefault={defaultBackend === selected.id}
         onBack={() => setSelectedTarget(null)}
-     />
+        remote={remote}
+      />
     );
   }
 
@@ -1760,7 +2033,7 @@ function ComputeTab({
             settings={settings}
             projectId={project?.id}
             onSaved={apply}
-         />
+          />
           <section className="mb-8">
             <h2 className="mt-0 mx-0 mb-2 text-lg">{m.settings_page_ready_to_use()}</h2>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1775,66 +2048,161 @@ function ComputeTab({
               </div>
             </section>
           )}
+          {selected && <QuickSetupDialog target={selected} remote={remote} onClose={() => setSelectedTarget(null)} />}
         </>
       )}
     </>
   );
 }
 
-// --- environment ---------------------------------------------------------------
+// --- compute (tinker) ----------------------------------------------------------
 
-const SOURCE_LABELS: Record<HfTokenSource, () => string> = {
-  env: m.settings_hf_source_env,
-  openresearchEnv: m.settings_hf_source_openresearch,
-  hfCache: m.settings_hf_source_cache,
-};
+function TinkerSection({ target }: { target: ComputeTargetSummary }) {
+  const saveTinkerKeyMutation = useMutation({ mutationFn: saveTinkerKey });
 
-function HfStatusBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured) return <Badge>{m.settings_page_not_configured()}</Badge>;
-  if (!settings.valid) return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
-  return <Badge variant="success">{m.settings_page_connected()}</Badge>;
-}
-
-/** Jobs-permission detail only — configured/valid state is HfStatusBadge's job. */
-function HfJobsBadge({ settings }: { settings: HfSettings }) {
-  if (!settings.configured || !settings.valid) return null;
-  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_jobs_write_ok()}</Badge>;
-  if (settings.jobsWrite === false)
-    return <Badge variant="error">{m.settings_page_no_job_write_permission()}</Badge>;
-  return <Badge>{m.settings_page_jobs_permission_unknown()}</Badge>;
-}
-
-function HfSection() {
-  const [settings, setSettings] = useState<HfSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [token, setToken] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  // A save that lands before the slow mount fetch resolves must win over it.
-  const savedRef = useRef(false);
+  const [actionError, setError] = useState<string | null>(null);
 
-  // Fetched on mount (every visit remounts) so a token set anywhere else —
-  // the Environment tab, `hf auth login`, the process env — shows up here.
-  useEffect(() => {
-    getHfSettings()
-      .then((s) => {
-        if (!savedRef.current) setSettings(s);
-      })
-      .catch((err) => {
-        if (!savedRef.current) setLoadError(err instanceof Error ? err.message : String(err));
-      });
-  }, []);
+  const settingsOptions = getTinkerSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const error = actionError ?? settingsQuery.error?.message ?? null;
+  const setSettings = (value: React.SetStateAction<TinkerSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [refreshing, setRefreshing] = useState(false);
+  const checking = settingsQuery.isPending || refreshing;
+
+  async function refresh() {
+    if (checking || saving) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await queryClient.fetchQuery({ ...getTinkerSettingsQuery(), staleTime: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (!token.trim() || saving) return;
+    if (!apiKey.trim() || saving || checking) return;
     setSaving(true);
     setError(null);
     try {
-      const next = await saveHfToken(token.trim());
-      savedRef.current = true;
+      setSettings(await saveTinkerKeyMutation.mutateAsync(apiKey.trim()));
+      setApiKey("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      {!settings && checking ? <LoadingRow><Spinner /> {m.common_checking()}</LoadingRow> : settings && <dl className="m-0 flex items-center justify-between gap-4 text-sm">
+        <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+        <dd className="m-0">
+          <Badge variant={settings.validationStatus === "valid" ? "success" : settings.validationStatus === "invalid" ? "error" : "warning"}>
+            {settings.validationStatus === "valid" ? m.settings_page_ready()
+              : settings.validationStatus === "invalid" ? m.settings_tinker_invalid_key()
+                : settings.validationStatus === "billingRequired" ? m.settings_tinker_billing_required()
+                  : m.settings_page_not_configured()}
+          </Badge>
+        </dd>
+      </dl>}
+      {settings?.validationStatus === "billingRequired" && (
+        <p className="mt-2 mb-0 text-sm text-subtext">
+          <a className="underline" href="https://tinker.thinkingmachines.ai/" target="_blank" rel="noreferrer">{m.settings_tinker_billing_help()}</a>
+        </p>
+      )}
+      {settings?.processEnv && <p className="mt-2 mb-0 text-sm text-subtext">{m.settings_tinker_env_override()}</p>}
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
+          {target.configured || (settings !== null && settings.validationStatus !== "missing") ? m.settings_replace_key() : m.onboarding_api_key()}
+          <Input
+            type="password"
+            value={apiKey}
+            placeholder={settings?.maskedKey ?? ""}
+            onChange={(e) => setApiKey(e.target.value)}
+            autoComplete="new-password"
+          />
+        </label>
+        {error && <p className="m-0 text-sm text-accent-red">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={saving || checking} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {checking ? m.common_checking() : m.settings_check_again()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!apiKey.trim() || saving || checking}>
+            {saving ? m.settings_validating() : m.common_save()}
+          </Button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// --- environment ---------------------------------------------------------------
+
+function HfStatusBadge({ settings }: { settings: HfSettings }) {
+  if (settings.validationStatus === "missing") return <Badge variant="warning">{m.settings_page_not_configured()}</Badge>;
+  if (settings.validationStatus === "invalid") return <Badge variant="error">{m.settings_page_invalid_token()}</Badge>;
+  if (settings.validationStatus !== "valid") return null;
+  if (settings.jobsWrite === true) return <Badge variant="success">{m.settings_page_ready()}</Badge>;
+  if (settings.jobsWrite === false)
+    return (
+      <span className="inline-flex items-center gap-2">
+        <Badge variant="warning">{m.settings_page_no_job_write_permission()}</Badge>
+        <Tooltip content={m.settings_hf_write_permission_help()} className="text-subtext">
+          <Info size={15} />
+        </Tooltip>
+      </span>
+    );
+  return null;
+}
+
+function HfSection({ remote }: { remote: boolean }) {
+  const saveHfTokenMutation = useMutation({ mutationFn: saveHfToken });
+
+  const settingsOptions = getHfSettingsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<HfSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
+  const [token, setToken] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const login = useCommandRun();
+
+  async function refresh() {
+    if (saving || refreshing || (!settings && !loadError)) return;
+    setRefreshing(true);
+    setError(null);
+    try {
+      await queryClient.fetchQuery({ ...getHfSettingsQuery(), staleTime: 0 });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRefreshing(false);
+    }
+  }
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!token.trim() || saving || refreshing || (!settings && !loadError)) return;
+    setSaving(true);
+    setError(null);
+    try {
+      const next = await saveHfTokenMutation.mutateAsync(token.trim());
       setSettings(next);
-      setLoadError(null);
+      setError(null);
       setToken("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1853,51 +2221,57 @@ function HfSection() {
         </LoadingRow>
       ) : (
         <>
-          <div className={COMPUTE_DETAILS_CLASS_NAME}>
-            <span className="k">{m.settings_page_status()}</span>
-            <span className="v">
-              <HfStatusBadge settings={settings} />
-            </span>
-            <span className="k">{m.settings_page_account()}</span>
-            <span className="v">{settings.username ?? "—"}</span>
-            <span className="k">{m.settings_page_token()}</span>
-            <span className="v">{settings.maskedToken ?? "—"}</span>
-            <span className="k">{m.settings_page_source()}</span>
-            <span className="v">
-              {settings.source ? SOURCE_LABELS[settings.source]() : m.settings_page_not_configured()}
-            </span>
-            <span className="k">{m.settings_page_jobs()}</span>
-            <span className="v">
-              <HfJobsBadge settings={settings} />
-              {(!settings.configured || !settings.valid) && "—"}
-            </span>
-          </div>
+          <dl className="m-0 flex flex-col gap-3 text-sm">
+            {settings.username && <div className="flex items-center justify-between gap-4">
+              <dt className="font-medium text-subtext">{m.settings_page_account()}</dt>
+              <dd className="m-0 text-text">
+                {settings.username}
+              </dd>
+            </div>}
+            {(settings.validationStatus === "missing" || settings.validationStatus === "invalid" ||
+              (settings.validationStatus === "valid" && settings.jobsWrite !== null)) && (
+                <div className="flex items-center justify-between gap-4">
+                  <dt className="font-medium text-subtext">{m.settings_page_status()}</dt>
+                  <dd className="m-0 text-text"><HfStatusBadge settings={settings} /></dd>
+                </div>
+              )}
+          </dl>
+          {settings.validationStatus === "unreachable" && settings.validationError && (
+            <p className={COMPUTE_DIAGNOSTIC_CLASS_NAME}>{settings.validationError}</p>
+          )}
           {settings.source === "env" && (
             <p className={SETTINGS_NOTE_CLASS_NAME}>
               {m.settings_page_hf_token_is_set_in_the_environment_and()}
             </p>
           )}
-          {settings.valid && settings.jobsWrite === null && (
-            <p className={SETTINGS_NOTE_CLASS_NAME}>
-              {m.settings_hf_token_help({ login: ltr("hf auth login"), url: ltr("huggingface.co/settings/tokens") })}
-            </p>
+          {settings.validationStatus === "valid" && settings.jobsWrite === null && (
+            <RunnableNote
+              note={m.settings_hf_token_help({ login: "`hf auth login`", url: ltr("huggingface.co/settings/tokens") })}
+              className={SETTINGS_NOTE_CLASS_NAME}
+              disabled={remote}
+              onRun={login.start}
+            />
           )}
+          <CommandRunTerminal run={login.run} onComplete={() => void settingsQuery.refetch()} onClose={login.clear} />
         </>
       )}
-      <form className={FORM_CLASS_NAME} onSubmit={submit}>
-        <label>
+      <form className="mt-5 flex flex-col gap-4" onSubmit={submit}>
+        <label className="flex flex-col gap-2 text-sm font-medium text-subtext">
           {settings?.configured ? m.settings_replace_token() : m.settings_new_token()}
-          <input
+          <Input
             type="password"
             value={token}
             onChange={(e) => setToken(e.target.value)}
-            placeholder={m.settings_page_hf()}
+            placeholder={settings?.maskedToken ?? m.settings_page_hf()}
             autoComplete="off"
-         />
+          />
         </label>
         {error && <div className="error">{error}</div>}
-        <div className="actions">
-          <Button variant="primary" type="submit" disabled={!token.trim() || saving}>
+        <div className="flex justify-end gap-2">
+          <Button type="button" disabled={saving || refreshing || (!settings && !loadError)} onClick={() => void refresh()}>
+            <RefreshCw size={13} /> {refreshing ? m.common_checking() : m.settings_check_again()}
+          </Button>
+          <Button variant="primary" type="submit" disabled={!token.trim() || saving || refreshing || (!settings && !loadError)}>
             {saving ? m.settings_validating() : m.common_save()}
           </Button>
         </div>
@@ -1945,6 +2319,9 @@ function EnvRow({
   entry: EnvVar | undefined;
   onVars: (vars: EnvVar[]) => void;
 }) {
+  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
+  const deleteEnvVarMutation = useMutation({ mutationFn: deleteEnvVar });
+
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -1952,7 +2329,7 @@ function EnvRow({
     if (!value.trim() || saving) return;
     setSaving(true);
     try {
-      onVars(await setEnvVar(name, value.trim()));
+      onVars(await setEnvVarMutation.mutateAsync([name, value.trim()]));
       setValue("");
     } catch (err) {
       showEnvError(name, err);
@@ -1965,7 +2342,7 @@ function EnvRow({
     if (saving) return;
     setSaving(true);
     try {
-      onVars(await deleteEnvVar(name));
+      onVars(await deleteEnvVarMutation.mutateAsync(name));
     } catch (err) {
       showEnvError(name, err);
     } finally {
@@ -2001,7 +2378,7 @@ function EnvRow({
               aria-label={m.a11y_value_for({ name: ltr(name) })}
               autoComplete="new-password"
               disabled={saving}
-           />
+            />
           )}
         </td>
         <td>
@@ -2037,6 +2414,8 @@ function AddVarRow({
   onVars: (vars: EnvVar[]) => void;
   onDone: () => void;
 }) {
+  const setEnvVarMutation = useMutation({ mutationFn: (args: Parameters<typeof setEnvVar>) => setEnvVar(...args) });
+
   const [key, setKey] = useState("");
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
@@ -2045,7 +2424,7 @@ function AddVarRow({
     if (!key.trim() || !value.trim() || saving) return;
     setSaving(true);
     try {
-      onVars(await setEnvVar(key.trim(), value.trim()));
+      onVars(await setEnvVarMutation.mutateAsync([key.trim(), value.trim()]));
       onDone();
     } catch (err) {
       showEnvError(key.trim(), err);
@@ -2079,7 +2458,7 @@ function AddVarRow({
             autoComplete="off"
             spellCheck={false}
             disabled={saving}
-         />
+          />
         </td>
         <td>
           <Input
@@ -2093,7 +2472,7 @@ function AddVarRow({
             aria-label={m.settings_page_new_variable_value()}
             autoComplete="new-password"
             disabled={saving}
-         />
+          />
         </td>
         <td>
           <Button size="small"
@@ -2118,15 +2497,14 @@ function AddVarRow({
 }
 
 function EnvVarsSection() {
-  const [vars, setVars] = useState<EnvVar[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const varsOptions = getEnvVarsQuery();
+  const varsQuery = useQuery(varsOptions);
+  const vars = varsQuery.data ?? null;
+  const setVars = (value: React.SetStateAction<EnvVar[] | null>) => {
+    setScopedQueryData(varsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const loadError = vars ? null : varsQuery.error?.message ?? null;
   const [adding, setAdding] = useState(false);
-
-  useEffect(() => {
-    getEnvVars()
-      .then(setVars)
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-  }, []);
 
   // Recommended keys first (fixed order), then custom variables in file order.
   const customKeys =
@@ -2162,7 +2540,7 @@ function EnvVarsSection() {
                   name={name}
                   entry={vars.find((v) => v.key === name)}
                   onVars={setVars}
-               />
+                />
               ))}
               {adding && (
                 <AddVarRow onVars={setVars} onDone={() => setAdding(false)} />
@@ -2182,15 +2560,18 @@ const THEME_OPTIONS: {
   label: () => string;
   icon: typeof Monitor;
 }[] = [
-  { value: "system", label: m.settings_theme_system, icon: Monitor },
-  { value: "light", label: m.settings_theme_light, icon: Sun },
-  { value: "dark", label: m.settings_theme_dark, icon: Moon },
-];
+    { value: "system", label: m.settings_theme_system, icon: Monitor },
+    { value: "light", label: m.settings_theme_light, icon: Sun },
+    { value: "dark", label: m.settings_theme_dark, icon: Moon },
+  ];
 
 const LOCALE_CHOICES: { id: Locale; label: string }[] = [
   { id: "en", label: "English" },
   { id: "zh-CN", label: "简体中文" },
   { id: "fa", label: "فارسی" },
+  { id: "ar", label: "العربية" },
+  { id: "es", label: "Español" },
+  { id: "hi", label: "हिन्दी" },
 ];
 
 function AppearanceTab() {
@@ -2258,7 +2639,7 @@ function AppearanceTab() {
               onSelect={(next) => {
                 if (isLocale(next)) setLocale(next);
               }}
-           />
+            />
           </div>
         </div>
       </div>
@@ -2271,6 +2652,8 @@ function AppearanceTab() {
 const CHANNEL_LABELS: Record<InstallChannel, () => string> = {
   installer: m.updates_channel_installer,
   "app-bundle": m.updates_channel_app,
+  appimage: m.updates_channel_appimage,
+  portable: m.updates_channel_portable,
   cargo: m.updates_channel_cargo,
   homebrew: m.updates_channel_homebrew,
   nix: m.updates_channel_nix,
@@ -2285,11 +2668,15 @@ const MANUAL_UPDATE_HINT: Partial<Record<InstallChannel, () => string>> = {
 };
 
 function UpdatesTab() {
+  const setAutoUpdateApiMutation = useMutation({ mutationFn: (args: Parameters<typeof setAutoUpdateApi>) => setAutoUpdateApi(...args) });
+
   const { status, error: loadError, apply } = useUpdateStatus();
   // Per-action only so the right button reads "Working…"; any write disables
-  // all three, since they mutate overlapping state.
+  // all of them, since they mutate overlapping state.
   const [busy, setBusy] = useState<"auto" | "apply" | "cli" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const restart = useRestartApp(status);
+  const locked = busy !== null || restart.restarting;
 
   if (!status) {
     return (
@@ -2342,9 +2729,21 @@ function UpdatesTab() {
                 {m.settings_page_restart_to_finish_updating()}
               </div>
               <p>
-                {m.settings_restart_version({ installed: ltr(status.installedVersion ?? "—"), current: ltr(status.current ?? status.installedVersion ?? "—") })}
+                {restart.error
+                  ? m.update_banner_restart_failed({ error: restart.error })
+                  : m.settings_restart_version({ installed: ltr(status.installedVersion ?? "—"), current: ltr(status.current ?? status.installedVersion ?? "—") })}
               </p>
             </div>
+            {status.canRestart && (
+              <Button
+                size="small"
+                type="button"
+                disabled={locked}
+                onClick={restart.restart}
+              >
+                {restart.restarting ? m.update_banner_restarting() : m.update_banner_restart()}
+              </Button>
+            )}
           </div>
         )}
 
@@ -2365,9 +2764,9 @@ function UpdatesTab() {
                 type="button"
                 checked={status.autoUpdate}
                 aria-label={m.settings_page_install_updates_automatically()}
-                disabled={busy !== null}
+                disabled={locked}
                 onClick={() =>
-                  void run("auto", () => setAutoUpdateApi(!status.autoUpdate).then(apply))
+                  void run("auto", () => setAutoUpdateApiMutation.mutateAsync([!status.autoUpdate]).then(apply))
                 }
               />
             </div>
@@ -2380,12 +2779,15 @@ function UpdatesTab() {
                   {status.updateAvailable
                     ? m.settings_install_release_now()
                     : m.settings_checks_automatically()}
+                  {status.updateAvailable && status.latestTag && (
+                    <> <a href={releaseNotesUrl(status.latestTag)} target="_blank" rel="noreferrer" className="underline">{m.settings_release_notes()}</a></>
+                  )}
                 </p>
               </div>
               <Button size="small"
                 type="button"
 
-                disabled={busy !== null}
+                disabled={locked}
                 onClick={() => void run("apply", () => applyUpdate().then(apply))}
               >
                 {busy === "apply"
@@ -2410,7 +2812,9 @@ function UpdatesTab() {
           </div>
         )}
 
-        {status.channel === "app-bundle" && <InstallCliRow busy={busy} run={run} />}
+        {status.channel === "app-bundle" && (
+          <InstallCliRow busy={busy} disabled={locked} run={run} />
+        )}
         {error && <div className="error">{error}</div>}
       </div>
     </>
@@ -2418,21 +2822,23 @@ function UpdatesTab() {
 }
 
 function TelemetryTab() {
-  const [settings, setSettings] = useState<TelemetrySettings | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const setTelemetryMutation = useMutation({ mutationFn: setTelemetry });
 
-  useEffect(() => {
-    void getTelemetry()
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  const settingsOptions = getTelemetryQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<TelemetrySettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? settingsQuery.error?.message ?? null;
 
   const toggle = () => {
     if (!settings || saving) return;
     setSaving(true);
     setError(null);
-    void setTelemetry(!settings.preferenceEnabled)
+    void setTelemetryMutation.mutateAsync(!settings.preferenceEnabled)
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2479,11 +2885,15 @@ function TelemetryTab() {
  *  terminal can't see until it's linked onto PATH. */
 function InstallCliRow({
   busy,
+  disabled,
   run,
 }: {
   busy: "auto" | "apply" | "cli" | null;
+  disabled: boolean;
   run: (which: "cli", action: () => Promise<unknown>) => Promise<void>;
 }) {
+  const installCliMutation = useMutation({ mutationFn: installCli });
+
   const [result, setResult] = useState<InstalledCli | null>(null);
   // Set once a plain install was refused for an existing orx on PATH; the retry
   // is what makes the backend's "re-run with --force" reachable from here.
@@ -2491,7 +2901,7 @@ function InstallCliRow({
 
   const install = (force: boolean) =>
     void run("cli", () =>
-      installCli(force)
+      installCliMutation.mutateAsync(force)
         .then((r) => {
           setResult(r);
           setNeedsForce(false);
@@ -2526,7 +2936,7 @@ function InstallCliRow({
       <Button size="small"
         type="button"
 
-        disabled={busy !== null}
+        disabled={disabled}
         onClick={() => install(needsForce)}
       >
         {busy === "cli" ? m.chat_working() : needsForce ? m.settings_replace_anyway() : result ? m.settings_relink() : m.settings_install()}
@@ -2537,25 +2947,28 @@ function InstallCliRow({
 
 // --- project defaults ----------------------------------------------------------
 
-function ProjectDefaultsTab() {
-  const [settings, setSettings] = useState<ProjectDefaultsSettings | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+function ProjectDefaultsTab({ remote }: { remote: boolean }) {
+  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
 
-  const load = () => {
-    setError(null);
-    return getProjectDefaults()
-      .then(setSettings)
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+  const settingsOptions = getProjectDefaultsQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const setSettings = (value: React.SetStateAction<ProjectDefaultsSettings | null>) => {
+    setScopedQueryData(settingsOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
   };
-  useEffect(() => void load(), []);
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? settingsQuery.error?.message ?? null;
+
+  const load = async () => { await settingsQuery.refetch({ cancelRefetch: false }); };
+  const gh = useCommandRun();
 
   const toggle = () => {
     if (!settings || saving) return;
     const enabled = !settings.githubForNewProjects;
     setSaving(true);
     setError(null);
-    void setProjectDefaults(enabled, true)
+    void setProjectDefaultsMutation.mutateAsync([enabled, true])
       .then(setSettings)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSaving(false));
@@ -2591,9 +3004,10 @@ function ProjectDefaultsTab() {
           </div>
           {!settings.githubAuthenticated && (
             <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-              <GitHubCliHelp ghInstalled={settings.ghInstalled} onCheck={load} />
+              <GitHubCliHelp ghInstalled={settings.ghInstalled} remote={remote} onCheck={load} onRun={gh.start} />
             </div>
           )}
+          <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
           {error && <div className="error">{error}</div>}
         </div>
       )}
@@ -2603,10 +3017,14 @@ function ProjectDefaultsTab() {
 
 function GitHubCliHelp({
   ghInstalled,
+  remote,
   onCheck,
+  onRun,
 }: {
   ghInstalled: boolean;
+  remote: boolean;
   onCheck: () => Promise<void>;
+  onRun: (command: string, path: string) => void;
 }) {
   const [checking, setChecking] = useState(false);
   const check = () => {
@@ -2616,9 +3034,12 @@ function GitHubCliHelp({
 
   return (
     <>
-      <p className="git-card-helper m-0 text-sm leading-relaxed text-text">
-        {renderNote(ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login())}
-      </p>
+      <RunnableNote
+        note={ghInstalled ? m.settings_run_gh_auth_login() : m.settings_install_gh_then_login()}
+        className="git-card-helper m-0 text-sm leading-relaxed text-text"
+        disabled={remote || !ghInstalled}
+        onRun={onRun}
+      />
       <div className="flex flex-wrap gap-2 mt-2.5">
         {!ghInstalled && (
           <ButtonLink variant="primary"
@@ -2637,18 +3058,28 @@ function GitHubCliHelp({
   );
 }
 
-/** The Overleaf Git authentication token is machine-wide. Which Overleaf
- * *project* a paper pushes to is per-paper, and lives on the .tex tab. */
+/** The Overleaf Git authentication token and session cookie are machine-wide.
+ * Which Overleaf *project* a paper pushes to is per-paper, and lives on the
+ * .tex tab. */
 function OverleafCard() {
-  const [hasToken, setHasToken] = useState<boolean | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const deleteOverleafTokenMutation = useMutation({ mutationFn: deleteOverleafToken });
+  const deleteOverleafSessionMutation = useMutation({ mutationFn: deleteOverleafSession });
 
-  useEffect(() => {
-    getOverleafSettings()
-      .then((s) => setHasToken(s.hasToken))
-      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
-  }, []);
+  const tokenOptions = getOverleafSettingsQuery();
+  const settings = useQuery(tokenOptions);
+  const hasToken = settings.data?.hasToken ?? null;
+  const hasSession = settings.data?.hasSession ?? null;
+  const patch = (next: Partial<OverleafSettings>) =>
+    setScopedQueryData(tokenOptions.queryKey, {
+      hasToken: hasToken ?? false,
+      hasSession: hasSession ?? false,
+      ...next,
+    });
+  const setHasToken = (value: boolean) => patch({ hasToken: value });
+  const [saving, setSaving] = useState(false);
+  const [actionError, setError] = useState<string | null>(null);
+
+  const error = actionError ?? settings.error?.message;
 
   return (
     <div className={GIT_SETTINGS_CARD_CLASS_NAME}>
@@ -2671,7 +3102,7 @@ function OverleafCard() {
             onClick={() => {
               setSaving(true);
               setError(null);
-              void deleteOverleafToken()
+              void deleteOverleafTokenMutation.mutateAsync()
                 .then((s) => setHasToken(s.hasToken))
                 .catch((err) => setError(err instanceof Error ? err.message : String(err)))
                 .finally(() => setSaving(false));
@@ -2686,7 +3117,43 @@ function OverleafCard() {
           onSaved={(result) => setHasToken(result.hasToken)}
           placeholder={m.settings_page_overleaf_git_authentication_token()}
           createHref="https://www.overleaf.com/user/settings"
-       />
+        />
+      )}
+      <div className={KV_CLASS_NAME}>
+        <span className="k">{m.settings_page_session_cookie()}</span>
+        <span className="v">
+          <Badge variant={hasSession ? "success" : "default"}>
+            {hasSession === null ? (error ? m.model_picker_unavailable() : m.common_checking()) : hasSession ? m.settings_saved() : m.settings_not_set()}
+          </Badge>
+        </span>
+      </div>
+      <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
+        {m.settings_page_session_cookie_help()}
+      </p>
+      {hasSession ? (
+        <div className={GIT_CARD_ACTIONS_CLASS_NAME}>
+          <Button
+            disabled={saving}
+            onClick={() => {
+              setSaving(true);
+              setError(null);
+              void deleteOverleafSessionMutation.mutateAsync()
+                .then((s) => patch({ hasSession: s.hasSession }))
+                .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+                .finally(() => setSaving(false));
+            }}
+          >
+            {saving ? m.settings_removing() : m.settings_remove_session()}
+          </Button>
+        </div>
+      ) : (
+        <TokenForm
+          save={(session) => saveOverleafSession(session)}
+          onSaved={(result) => patch({ hasSession: result.hasSession })}
+          placeholder={m.overleaf_session_cookie()}
+          createHref="https://www.overleaf.com/project"
+          createLabel={m.overleaf_open_overleaf()}
+        />
       )}
       {error && <div className="error">{error}</div>}
     </div>
@@ -2697,39 +3164,31 @@ function OverleafCard() {
 
 function GitTab({
   project,
-  publicationError,
   onProjectUpdate,
+  remote,
 }: {
   project: Project | null;
-  publicationError: string | null;
   onProjectUpdate: (project: Project) => void;
+  remote: boolean;
 }) {
-  const [status, setStatus] = useState<ProjectGitStatus | null>(null);
+  const setProjectDefaultsMutation = useMutation({ mutationFn: (args: Parameters<typeof setProjectDefaults>) => setProjectDefaults(...args) });
+
+  const statusOptions = { ...getProjectGitStatusQuery(project?.id ?? ""), enabled: Boolean(project) };
+  const statusQuery = useQuery(statusOptions);
+  const gh = useCommandRun();
+  const status = statusQuery.data ?? null;
+  const setStatus = (value: React.SetStateAction<ProjectGitStatus | null>) => {
+    setScopedQueryData(statusOptions.queryKey, (current) => (typeof value === "function" ? value(current ?? null) : value) ?? undefined);
+  };
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [actionError, setError] = useState<string | null>(null);
+  const error = actionError ?? statusQuery.error?.message ?? null;
   const [defaultPromptOpen, setDefaultPromptOpen] = useState(false);
   const [defaultPromptSaving, setDefaultPromptSaving] = useState(false);
   const [defaultPromptError, setDefaultPromptError] = useState<string | null>(null);
-  const seqRef = useRef(0);
   const hasGithubRepository = Boolean(status?.github.owner && status.github.repo);
 
-  const load = (clear = true) => {
-    const request = ++seqRef.current;
-    if (clear) setStatus(null);
-    setError(null);
-    if (!project) return Promise.resolve();
-    return getProjectGitStatus(project.id)
-      .then((projectStatus) => {
-        if (request !== seqRef.current) return;
-        setStatus(projectStatus);
-      })
-      .catch((err) => {
-        if (request === seqRef.current) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      });
-  };
-  useEffect(() => void load(), [project?.id]);
+  const load = async () => { await statusQuery.refetch({ cancelRefetch: false }); };
 
   const syncErrorMessage = (err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -2753,7 +3212,7 @@ function GitTab({
       .then((result) => {
         setStatus(result.git);
         onProjectUpdate(result.project);
-        void getProjectDefaults()
+        void queryClient.fetchQuery(getProjectDefaultsQuery())
           .then((defaults) => {
             if (!defaults.githubForNewProjects && !defaults.githubDefaultPromptSeen) {
               setDefaultPromptOpen(true);
@@ -2768,7 +3227,7 @@ function GitTab({
   const finishDefaultPrompt = (enabled: boolean) => {
     setDefaultPromptSaving(true);
     setDefaultPromptError(null);
-    void setProjectDefaults(enabled, true)
+    void setProjectDefaultsMutation.mutateAsync([enabled, true])
       .then(() => setDefaultPromptOpen(false))
       .catch((err) => setDefaultPromptError(err instanceof Error ? err.message : String(err)))
       .finally(() => setDefaultPromptSaving(false));
@@ -2810,9 +3269,10 @@ function GitTab({
             </div>
             {!status.github.authenticated && (
               <div className="mt-3.5 pt-3.5 border-t border-t-border-variant">
-                <GitHubCliHelp ghInstalled={status.github.ghInstalled} onCheck={() => load(false)} />
+                <GitHubCliHelp ghInstalled={status.github.ghInstalled} remote={remote} onCheck={() => load()} onRun={gh.start} />
               </div>
             )}
+            <CommandRunTerminal run={gh.run} onComplete={() => void load()} onClose={gh.clear} />
             {status.github.authenticated && !status.github.enabled && (
               <>
                 <p className="git-card-helper mt-3.5 mx-0 mb-0 text-sm leading-relaxed text-text">
@@ -2839,7 +3299,6 @@ function GitTab({
             )}
           </div>
           <OverleafCard />
-          {publicationError && <div className="error">{syncErrorMessage(publicationError)}</div>}
           {error && <div className="error">{syncErrorMessage(error)}</div>}
         </>
       )}
@@ -2896,27 +3355,19 @@ type MoveState =
   | { kind: "error"; message: string };
 
 function StorageTab() {
-  const [settings, setSettings] = useState<DataDirSettings | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const settingsOptions = getDataDirQuery();
+  const settingsQuery = useQuery(settingsOptions);
+  const settings = settingsQuery.data ?? null;
+  const loadError = settings ? null : settingsQuery.error?.message ?? null;
   const [path, setPath] = useState("");
   const [checking, setChecking] = useState(false);
   const [validation, setValidation] = useState<DataDirValidation | null>(null);
   const [move, setMove] = useState<MoveState>({ kind: "idle" });
   const [error, setError] = useState<string | null>(null);
 
-  const load = () =>
-    getDataDir()
-      .then((s) => {
-        setSettings(s);
-        // Seed the input to the current path only when empty — preserves an
-        // in-progress edit, and (after a move clears it) re-seeds to the new path.
-        setPath((p) => (p ? p : s.current));
-      })
-      .catch((err) => setLoadError(err instanceof Error ? err.message : String(err)));
-
   useEffect(() => {
-    void load();
-  }, []);
+    if (settings) setPath((current) => current || settings.current);
+  }, [settings]);
 
   // Subscribe to move progress streamed over the shared SSE.
   useEffect(() => {
@@ -2936,9 +3387,8 @@ function StorageTab() {
       } else if (ev.type === "done") {
         setMove({ kind: "done", oldPathLeft: ev.oldPathLeft });
         setValidation(null);
-        // Clear so load()'s empty-guard re-seeds the input to the new path.
+        // The acknowledged snapshot seeds the new path.
         setPath("");
-        void load();
       } else if (ev.type === "error") {
         setMove({ kind: "error", message: ev.error });
       }
@@ -3026,7 +3476,7 @@ function StorageTab() {
                   autoComplete="off"
                   spellCheck={false}
                   disabled={move.kind === "moving"}
-               />
+                />
               </label>
 
               {validation && !validation.error && validation.ok && (
@@ -3053,7 +3503,7 @@ function StorageTab() {
                       </span>
                     ) : undefined
                   }
-               />
+                />
               )}
               {move.kind === "done" && (
                 <p className={SETTINGS_NOTE_CLASS_NAME}>
@@ -3160,9 +3610,10 @@ function InstancesTable({ instances, emptyLabel }: { instances: Run[]; emptyLabe
 }
 
 function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onViewHistory: () => void }) {
-  const [instances, setInstances] = useState<Run[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
+  const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
+  const error = query.error?.message;
+  const refreshing = query.isFetching;
 
   // Re-render every 30s so live rows' Runtime keeps counting (client-side
   // only — the minute-level display doesn't warrant a refetch).
@@ -3172,25 +3623,7 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
     return () => clearInterval(t);
   }, []);
 
-  // Point-in-time snapshot: the page refetches on every open and Refresh updates it in place.
-  const load = () => {
-    if (!projectId) {
-      setInstances([]);
-      return;
-    }
-    setRefreshing(true);
-    listRuns(projectId)
-      .then((rows) => {
-        setInstances(rows);
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-        setInstances((prev) => prev ?? []);
-      })
-      .finally(() => setRefreshing(false));
-  };
-  useEffect(() => load(), [projectId]);
+  const load = () => { if (projectId) void query.refetch(); };
 
   const byRecent = (a: Run, b: Run) => b.createdAt - a.createdAt;
   const running = instances?.filter((i) => isLive(i.status)).sort(byRecent);
@@ -3225,9 +3658,10 @@ function ComputeActivity({ projectId, onViewHistory }: { projectId?: string; onV
 }
 
 function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: () => void }) {
-  const [instances, setInstances] = useState<Run[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
+  const query = useQuery({ ...listRunsQuery(projectId ?? ""), enabled: Boolean(projectId), subscribed: Boolean(projectId) });
+  const instances = projectId ? query.data ?? (query.error ? [] : null) : [];
+  const error = query.error?.message;
+  const refreshing = query.isFetching;
   const [, setTick] = useState(0);
 
   useEffect(() => {
@@ -3235,24 +3669,7 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
     return () => clearInterval(timer);
   }, []);
 
-  const load = () => {
-    if (!projectId) {
-      setInstances([]);
-      return;
-    }
-    setRefreshing(true);
-    listRuns(projectId)
-      .then((rows) => {
-        setInstances(rows.sort((a, b) => b.createdAt - a.createdAt));
-        setError(null);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-        setInstances((current) => current ?? []);
-      })
-      .finally(() => setRefreshing(false));
-  };
-  useEffect(load, [projectId]);
+  const load = () => { if (projectId) void query.refetch(); };
 
   return (
     <>
@@ -3269,7 +3686,7 @@ function InstanceHistory({ projectId, onBack }: { projectId?: string; onBack: ()
       {!instances ? (
         <LoadingRow><Spinner /> {m.settings_page_loading()}</LoadingRow>
       ) : (
-        <InstancesTable instances={instances} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
+        <InstancesTable instances={[...instances].sort((a, b) => b.createdAt - a.createdAt)} emptyLabel={projectId ? m.instances_none_yet() : m.instances_select_project_history()} />
       )}
     </>
   );
@@ -3311,17 +3728,35 @@ function isSettingsSection(tab: Tab): boolean {
 export function SettingsView({
   tab,
   project,
-  githubPublicationError,
   onProjectUpdate,
   onSelectTab,
+  remote = false,
 }: {
   tab: Tab;
   project: Project | null;
-  githubPublicationError: string | null;
   onProjectUpdate: (project: Project) => void;
   onSelectTab: (tab: Tab) => void;
+  remote?: boolean;
 }) {
   const showsSettings = tab === "settings" || isSettingsSection(tab);
+  const sectionRef = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const section = sectionRef.current;
+    const stack = section?.parentElement;
+    if (!section || !stack) return;
+    const reveal = () => section.scrollIntoView({ block: "start" });
+    // Earlier sections load asynchronously; keep the target visible until the user interacts.
+    const observer = new ResizeObserver(reveal);
+    observer.observe(stack);
+    reveal();
+    const stop = () => observer.disconnect();
+    const events = ["wheel", "touchstart", "pointerdown", "keydown"];
+    for (const event of events) window.addEventListener(event, stop, { passive: true });
+    return () => {
+      stop();
+      for (const event of events) window.removeEventListener(event, stop);
+    };
+  }, [tab, project?.id]);
 
   return (
     <div className="settings-view max-w-readable my-0 mx-auto pt-6 px-8 pb-15 [&_h1]:mt-0 [&_h1]:mx-0 [&_h1]:mb-1.5 [&_h1]:text-3xl [&_>_.error]:text-accent-red [&_>_.error]:text-base [&_>_.error]:whitespace-pre-wrap [&_>_.error]:mt-0 [&_>_.error]:mx-0 [&_>_.error]:mb-3">
@@ -3332,21 +3767,25 @@ export function SettingsView({
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <AppearanceTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <ProjectDefaultsTab />
+            <section ref={tab === "projects" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <ProjectDefaultsTab remote={remote} />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <HarnessesTab />
+            <section ref={tab === "harnesses" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+              <HarnessesTab remote={remote} />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <StorageTab />
-            </section>
+            {!remote && (
+              <section ref={tab === "storage" ? sectionRef : undefined} className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <StorageTab />
+              </section>
+            )}
             <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
               <TelemetryTab />
             </section>
-            <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
-              <UpdatesTab />
-            </section>
+            {!remote && (
+              <section className={SETTINGS_STACK_SECTION_CLASS_NAME}>
+                <UpdatesTab />
+              </section>
+            )}
           </div>
         </>
       )}
@@ -3354,7 +3793,9 @@ export function SettingsView({
         <ComputeTab
           project={project}
           onViewHistory={() => onSelectTab("instances")}
-       />
+          onOpenEnvironment={() => onSelectTab("environment")}
+          remote={remote}
+        />
       )}
       {tab === "instances" && (
         <InstanceHistory projectId={project?.id} onBack={() => onSelectTab("compute")} />
@@ -3368,9 +3809,9 @@ export function SettingsView({
       {tab === "git" && (
         <GitTab
           project={project}
-          publicationError={githubPublicationError}
           onProjectUpdate={onProjectUpdate}
-       />
+          remote={remote}
+        />
       )}
     </div>
   );

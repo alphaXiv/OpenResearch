@@ -63,7 +63,7 @@ make each change on its printed local branch, and commit it. Use the configured
 default compute target, or the explicit backend and flavor/host the user chose;
 source snapshots do not require GitHub. Keep the inherited run command fixed.
 Wait with `orx exp wait --project <project-id>`, inspect `orx runs`, and
-read every terminal run with `orx logs <run-id>`.
+locate every terminal run's log with `orx logs <run-id>`, then inspect the file.
 
 Record the paper number, observed number, scale or substitutions, sample size,
 scoring method, runtime, and an honest assessment in `orx exp desc`. Repair a
@@ -91,8 +91,9 @@ one; if none, use the skill's default preamble.
 
 Method:
 1. Ground the paper in what actually ran. Read the tree with `orx project view
-   <projectId>`, then pull every number you intend to report out of `orx logs`
-   (the `orx-evidence` skill covers this). Never write a metric you have not read
+   <projectId>`, then use `orx logs` to locate each file and read every number
+   you intend to report from it (the `orx-evidence` skill covers this). Never
+   write a metric you have not read
    out of a run; if something is not measured yet, say so in the text.
 2. Load `orx-lit-review`, retrieve real related work with `orx discover`, and
    read the selected sources with `orx paper <id>`. Cite those. Do not invent
@@ -111,7 +112,7 @@ Method:
 pub const CATALOG: &[Skill] = &[
     Skill {
         name: "lit-review",
-        description: "Multi-hop literature review across alphaXiv, OpenAlex, and bioRxiv",
+        description: "Multi-hop literature review across alphaXiv, OpenAlex, bioRxiv, and PubMed",
         template: LIT_REVIEW_TEMPLATE,
         empty_request: "(none given — ask the user what topic to review before searching)",
     },

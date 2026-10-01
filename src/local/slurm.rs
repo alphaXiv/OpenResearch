@@ -75,10 +75,8 @@ pub async fn submit_local_slurm_with_source(
         })?;
 
     // `--timeout` beats the settings default; neither = the cluster's default.
-    let time_limit_secs = match args.timeout.as_deref().or(settings.time_limit.as_deref()) {
-        Some(t) => Some(huggingface::parse_timeout(t)?),
-        None => None,
-    };
+    let time_limit_secs =
+        slurm::resolve_time_limit(args.timeout.as_deref(), settings.time_limit.as_deref())?;
 
     let store = Store::open()?;
     let exp = store
@@ -106,6 +104,7 @@ pub async fn submit_local_slurm_with_source(
         &run_id,
         &source.path,
         &source.digest,
+        None,
     )
     .await?;
     let job_id = slurm::run_job(&slurm::SlurmJobSpec {
@@ -122,6 +121,9 @@ pub async fn submit_local_slurm_with_source(
     .await?;
 
     let mut descriptor = BackendDescriptor {
+        ssh_container: None,
+        monitoring_error: None,
+        cancellation_accepted: false,
         kind: "slurm_job".to_string(),
         namespace: Some(host.clone()),
         job_id: Some(job_id.clone()),
@@ -134,7 +136,7 @@ pub async fn submit_local_slurm_with_source(
         ssh_host: None,
         ssh_port: None,
         ssh_user: None,
-        timeout_secs: None,
+        timeout_secs: time_limit_secs,
         source_digest: None,
         source_path: None,
         source_size: None,

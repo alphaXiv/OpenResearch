@@ -72,6 +72,7 @@ mod tests {
             created_at: now,
             updated_at: now,
             chat_session_id: None,
+            archived: false,
         }
     }
 

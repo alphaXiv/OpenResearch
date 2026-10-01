@@ -3,8 +3,12 @@
 // Split out of FileViewer, which already carries three file sources, an editor
 // and five render modes.
 
+import { useQuery } from "@tanstack/react-query";
+
+import { getLatexEngineQuery } from "./queries/files";
+
 import { useCallback, useEffect, useRef, useState } from "react";
-import { compileLatex, getLatexEngine } from "./api";
+import { compileLatex } from "./api";
 import { m } from "./paraglide/messages.js";
 
 interface CompiledPdf {
@@ -49,6 +53,8 @@ export function useLatexCompile({
   filePath,
   sessionId,
   enabled,
+  autoRun = true,
+  onManualAction,
   ready,
   source,
 }: {
@@ -58,14 +64,17 @@ export function useLatexCompile({
   sessionId?: string;
   /** This is a .tex file the compiler can actually reach (live checkout). */
   enabled: boolean;
+  autoRun?: boolean;
+  onManualAction?: () => void;
   /** The file has loaded, so `source` is real and not the empty initial buffer. */
   ready: boolean;
   /** The live edit buffer, which is what a compile should reflect. */
   source: string;
 }): LatexCompile {
-  const [engine, setEngine] = useState<string | null | undefined>(undefined);
-  const [installHint, setInstallHint] = useState<string | null>(null);
-  const [installCommand, setInstallCommand] = useState<string | null>(null);
+  const engineQuery = useQuery({ ...getLatexEngineQuery(), enabled, subscribed: enabled });
+  const engine = engineQuery.data?.engine ?? (engineQuery.isPending ? undefined : null);
+  const installHint = engineQuery.data?.hint ?? null;
+  const installCommand = engineQuery.data?.installCommand ?? null;
   const [compiling, setCompiling] = useState(false);
   const [compiled, setCompiled] = useState<CompiledPdf | null>(null);
   const [log, setLog] = useState<string | null>(null);
@@ -83,30 +92,14 @@ export function useLatexCompile({
   const sourceRef = useRef(source);
   sourceRef.current = source;
 
-  useEffect(() => {
-    if (!enabled) return;
-    let cancelled = false;
-    getLatexEngine()
-      .then((result) => {
-        if (cancelled) return;
-        setEngine(result.engine);
-        setInstallHint(result.hint);
-        setInstallCommand(result.installCommand);
-      })
-      .catch(() => {
-        if (!cancelled) setEngine(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [enabled]);
-
   // The in-flight guard lives in a ref, not in a setState updater: React
   // double-invokes updaters under StrictMode, so a guard inside one lets two
   // compiles of the same file race each other's aux and output files.
   const compilingRef = useRef(false);
+  const autoCompiled = useRef<string | null>(null);
   const compile = useCallback(() => {
     if (compilingRef.current) return;
+    autoCompiled.current = filePath;
     compilingRef.current = true;
     setCompiling(true);
     const built = sourceRef.current;
@@ -151,13 +144,11 @@ export function useLatexCompile({
 
   // Render the real document on open. Once per file: a compile that fails must
   // not spin, and the user can retry from the header.
-  const autoCompiled = useRef<string | null>(null);
   useEffect(() => {
-    if (!enabled || !ready || !engine) return;
+    if (!enabled || !autoRun || !ready || !engine) return;
     if (autoCompiled.current === filePath) return;
-    autoCompiled.current = filePath;
     compile();
-  }, [enabled, ready, engine, filePath, compile]);
+  }, [enabled, autoRun, ready, engine, filePath, compile]);
 
   return {
     engine,
@@ -173,7 +164,10 @@ export function useLatexCompile({
     showPdf,
     setShowPdf: showPdfPane,
     viewNonce,
-    compile,
+    compile: () => {
+      onManualAction?.();
+      compile();
+    },
     dismiss: () => {
       setError(null);
       setLog(null);

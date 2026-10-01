@@ -116,7 +116,7 @@ impl DeleteTargets {
         let executable = delete_cli
             .then(std::env::current_exe)
             .transpose()?
-            .map(|path| path.canonicalize().unwrap_or(path));
+            .map(|path| crate::paths::canonicalize(&path).unwrap_or(path));
         // Canonicalizing means `orx delete --cli` run through the app's PATH
         // link (see `orx install-cli`) resolves to the bundle's executable —
         // deleting it would gut the app the user is running, from a command
@@ -139,7 +139,7 @@ impl DeleteTargets {
             Some(executable) => match crate::updates::load_receipt() {
                 Ok(receipt) => receipt.and_then(|receipt| {
                     let prefix = PathBuf::from(receipt.install_prefix);
-                    let prefix = prefix.canonicalize().unwrap_or(prefix);
+                    let prefix = crate::paths::canonicalize(&prefix).unwrap_or(prefix);
                     crate::updates::exe_matches_prefix(executable, &prefix)
                         .then(crate::updates::receipt_path)
                 }),
@@ -221,7 +221,7 @@ mod tests {
             std::fs::read_to_string(root.join("files/result.txt")).unwrap(),
             "keep"
         );
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -240,6 +240,6 @@ mod tests {
         drop(exclusive.try_write().unwrap());
         drop(exclusive);
         drop(shared);
-        std::fs::remove_dir_all(root).unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

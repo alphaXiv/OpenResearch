@@ -1,13 +1,12 @@
 //! Local implementations of project, experiment, run, and log commands.
 
 use std::collections::HashMap;
-use std::io::{Read as _, Seek as _};
 use std::time::{Duration, Instant};
 
-use super::{CreateExperimentSpec, DescInput, LogRequest, ProjectEdit, Run, RunListing, RunLog};
+use super::{CreateExperimentSpec, DescInput, ProjectEdit, Run, RunListing};
 use crate::error::{anyhow, Result};
 use crate::local::model::{LocalExperiment, LocalProject};
-use crate::store::{log_path, Store};
+use crate::store::Store;
 use crate::ExpRunArgs;
 
 /// The local-store plane. `project`/`experiment` carry the row the resolver
@@ -19,8 +18,6 @@ pub struct LocalPlane {
     pub(super) experiment: Option<LocalExperiment>,
     pub(super) id: String,
 }
-
-const LOCAL_DEFAULT_BYTES: i64 = 64 * 1024;
 
 impl LocalPlane {
     /// The resolved project row, or an error when called on a plane built by a
@@ -38,6 +35,13 @@ impl LocalPlane {
             .ok_or_else(|| anyhow!("internal: local plane missing its experiment row"))
     }
 
+    /// Demo analytics label for a launch, keyed on the experiment's owning project.
+    pub(super) fn demo_run_label(&self) -> Option<&'static str> {
+        self.experiment
+            .as_ref()
+            .and_then(crate::local::demo::run_label)
+    }
+
     pub async fn list_runs(&self) -> Result<RunListing> {
         let store = &self.store;
         let project_id = &self.id;
@@ -52,55 +56,7 @@ impl LocalPlane {
         Ok(RunListing { runs, titles })
     }
 
-    pub async fn read_log(&self, req: LogRequest) -> Result<RunLog> {
-        let run_id = &self.id;
-        let path = log_path(run_id);
-        let total = match std::fs::metadata(&path) {
-            Ok(m) => m.len() as i64,
-            Err(_) => {
-                return Ok(RunLog {
-                    content: Vec::new(),
-                    start_byte: 0,
-                    end_byte: 0,
-                    total_bytes: 0,
-                    source: "local file".to_string(),
-                    truncated_before: false,
-                    truncated_after: false,
-                    missing_local: true,
-                });
-            }
-        };
-
-        let max = req.max_bytes.unwrap_or(LOCAL_DEFAULT_BYTES).max(0);
-        let (start, end) = match req.mode.as_str() {
-            "range" => (
-                req.start_byte.unwrap_or(0).clamp(0, total),
-                req.end_byte.unwrap_or(total).clamp(0, total),
-            ),
-            "head" => (0, max.min(total)),
-            _ => ((total - max).max(0), total),
-        };
-
-        let mut content = Vec::new();
-        if end > start {
-            let mut file = std::fs::File::open(&path)?;
-            file.seek(std::io::SeekFrom::Start(start as u64))?;
-            file.take((end - start) as u64).read_to_end(&mut content)?;
-        }
-
-        Ok(RunLog {
-            content,
-            start_byte: start,
-            end_byte: end,
-            total_bytes: total,
-            source: "local file".to_string(),
-            truncated_before: start > 0,
-            truncated_after: end < total,
-            missing_local: false,
-        })
-    }
-
-    pub async fn view_project(&self) -> Result<()> {
+    pub async fn view_project(&self, all: bool) -> Result<()> {
         let store = &self.store;
         let project = self.project()?;
         println!("{} (local)", project.name);
@@ -119,7 +75,11 @@ impl LocalPlane {
             ),
         }
 
-        let experiments = store.list_experiments_by_project(&project.id)?;
+        let experiments: Vec<_> = store
+            .list_experiments_by_project(&project.id)?
+            .into_iter()
+            .filter(|e| all || !e.archived)
+            .collect();
         println!("\nExperiments");
         if experiments.is_empty() {
             println!("  (none)");
@@ -131,10 +91,11 @@ impl LocalPlane {
                     ""
                 };
                 println!(
-                    "  {}  {}{}  ({})",
+                    "  {}  {}{}{}  ({})",
                     e.id,
                     e.display_name(),
                     root,
+                    if e.archived { " [archived]" } else { "" },
                     e.branch_name
                 );
             }
@@ -174,12 +135,15 @@ impl LocalPlane {
 
     // --- experiment -------------------------------------------------------
 
-    pub async fn experiment_status(&self) -> Result<()> {
+    pub async fn experiment_status(&self, scheduler: bool) -> Result<()> {
         let store = &self.store;
         let exp = self.experiment()?;
         println!("{}  ({})  [local]", exp.display_name(), exp.agent_status);
         println!("  id:       {}", exp.id);
         println!("  branch:   {}", exp.branch_name);
+        if exp.archived {
+            println!("  archived: yes");
+        }
         match &exp.parent_experiment_id {
             Some(parent_id) => match store.get_local_experiment(parent_id)? {
                 Some(parent) => {
@@ -211,6 +175,35 @@ impl LocalPlane {
                     crate::output::format_duration(run.duration_secs),
                     run.updated_display
                 );
+                if let Ok(backend) = crate::jobs::BackendDescriptor::parse(&r.backend_json) {
+                    if backend.kind == "slurm_job" {
+                        println!(
+                            "  requested time limit: {}",
+                            backend
+                                .timeout_secs
+                                .map(|s| format!("{s}s"))
+                                .unwrap_or_else(|| "unknown (older run or cluster default)".into())
+                        );
+                        if let Some(error) = backend.monitoring_error.as_deref() {
+                            println!("  {error}");
+                        }
+                        if scheduler {
+                            match backend.slurm_ref() {
+                                Ok((host, job_id)) => match tokio::time::timeout(
+                                    std::time::Duration::from_secs(15),
+                                    crate::jobs::slurm::diagnostics(host, job_id),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(details)) => println!("  scheduler: {details}"),
+                                    Ok(Err(error)) => println!("  scheduler: unknown ({error})"),
+                                    Err(_) => println!("  scheduler: unknown (query timed out)"),
+                                },
+                                Err(_) => println!("  scheduler: unknown (job not submitted)"),
+                            }
+                        }
+                    }
+                }
                 if let Some(detail) = run.failure_detail() {
                     println!("  {detail}");
                 }
@@ -219,6 +212,18 @@ impl LocalPlane {
                 }
             }
             None => println!("  last run: — (never run)"),
+        }
+        // A forced relaunch can leave an older run live; monitoring alerts send agents here.
+        for older in store.list_runs_by_experiment(&exp.id)?.iter().skip(1) {
+            if !matches!(older.status.as_str(), "starting" | "running") {
+                continue;
+            }
+            let error = crate::jobs::BackendDescriptor::parse(&older.backend_json)
+                .ok()
+                .and_then(|backend| backend.monitoring_error);
+            if let Some(error) = error {
+                println!("  older live run {}: {error}", older.id);
+            }
         }
         Ok(())
     }
@@ -315,6 +320,12 @@ impl LocalPlane {
         if result.is_ok() {
             let target = backend_label.as_deref().unwrap_or("unknown");
             crate::telemetry::capture_experiment_started("run", true, Some(target));
+            // A launch out of the bundled demo is the clearest signal the demo
+            // converted into real work, so it is counted separately.
+            if let Some(label) = self.demo_run_label() {
+                crate::telemetry::capture_demo_experiment_started("run", label);
+                crate::telemetry::capture_first_action("demo", "run_experiment");
+            }
         }
         result
     }

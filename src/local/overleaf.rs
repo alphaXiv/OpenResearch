@@ -17,6 +17,10 @@
 //!
 //! The bridge cannot create projects, so a paper is linked to a project the
 //! user already owns; `crate::store` remembers which.
+//!
+//! Neither path is live: the bridge snapshots on demand and rate-limits a
+//! client that asks often. `crate::local::overleaf_live` is the third path,
+//! the editor's own channel, which this module's pull rules also govern.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -42,6 +46,12 @@ const HOST_ENV: &str = "ORX_OVERLEAF_HOST";
 const PULLABLE_EXTENSIONS: &[&str] = &[
     "tex", "bib", "cls", "sty", "bst", "png", "jpg", "jpeg", "pdf", "eps", "svg",
 ];
+
+/// The ones Overleaf holds as documents, which the live channel can follow.
+const TEXT_EXTENSIONS: &[&str] = &["tex", "bib", "cls", "sty", "bst"];
+
+/// Where Overleaf's own site serves its editor and its bridge.
+pub const CLOUD_HOST: &str = "www.overleaf.com";
 
 /// Overleaf caps a project at far more than this; the limit here is about not
 /// mistaking a checkout for a paper when a `\includegraphics` path is wrong.
@@ -78,7 +88,7 @@ pub struct Project {
 
 impl Project {
     fn is_cloud(&self) -> bool {
-        self.host == "www.overleaf.com" || self.host == "overleaf.com"
+        self.host == CLOUD_HOST || self.host == "overleaf.com"
     }
 
     /// Cloud puts the bridge on its own host; Server Pro serves it from the
@@ -102,12 +112,17 @@ impl Project {
     }
 
     pub fn web_url(&self) -> String {
-        let host = if self.is_cloud() {
-            "www.overleaf.com"
+        format!("https://{}/project/{}", self.live_host(), self.id)
+    }
+
+    /// The site the editor itself is served from — where a session cookie is
+    /// valid, and the only host the live channel talks to.
+    pub fn live_host(&self) -> String {
+        if self.is_cloud() {
+            CLOUD_HOST.to_string()
         } else {
-            &self.host
-        };
-        format!("https://{host}/project/{}", self.id)
+            self.host.clone()
+        }
     }
 }
 
@@ -221,7 +236,7 @@ pub fn collect(tex: &Path) -> Result<Payload> {
     let dir = tex
         .parent()
         .ok_or_else(|| anyhow!("the paper has no parent directory"))?;
-    let root = std::fs::canonicalize(dir)?;
+    let root = crate::paths::canonicalize(dir)?;
     let main = tex
         .file_name()
         .ok_or_else(|| anyhow!("the paper has no file name"))?
@@ -294,7 +309,7 @@ fn resolve(root: &Path, reference: &str) -> Option<(String, PathBuf)> {
     if trimmed.split('/').any(|part| part.starts_with('.')) {
         return None;
     }
-    let path = std::fs::canonicalize(root.join(trimmed)).ok()?;
+    let path = crate::paths::canonicalize(root.join(trimmed)).ok()?;
     if !path.is_file() || !path.starts_with(root) {
         return None;
     }
@@ -809,7 +824,7 @@ fn plan(
                 // `confined_path` is lexical; this is the same canonicalized
                 // boundary `collect` applies, so a symlinked folder cannot make
                 // a "keep this copy" send something from outside the paper.
-                match std::fs::canonicalize(&local_path) {
+                match crate::paths::canonicalize(&local_path) {
                     Ok(real) if real.starts_with(&payload.dir) => {
                         plan.forced.insert(rel.clone(), real);
                     }
@@ -1071,7 +1086,7 @@ fn tree_files(clone: &Path) -> Result<BTreeSet<String>> {
 /// A remote path resolved under the paper's directory, or None when it does not
 /// stay there. Overleaf paths are ordinary relative paths, so this only ever
 /// refuses something that should not have arrived.
-fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
+pub(crate) fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
     let path = Path::new(rel);
     let ordinary = path.components().all(|c| match c {
         // A dotted component is how a config or workflow file would arrive.
@@ -1081,18 +1096,26 @@ fn confined_path(dir: &Path, rel: &str) -> Option<PathBuf> {
     (!path.is_absolute() && ordinary).then(|| dir.join(path))
 }
 
-fn pullable(rel: &str) -> bool {
+pub(crate) fn pullable(rel: &str) -> bool {
+    has_extension(rel, PULLABLE_EXTENSIONS)
+}
+
+pub(crate) fn text_doc(rel: &str) -> bool {
+    has_extension(rel, TEXT_EXTENSIONS)
+}
+
+fn has_extension(rel: &str, extensions: &[&str]) -> bool {
     Path::new(rel)
         .extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| PULLABLE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .is_some_and(|e| extensions.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 /// Never follow a symlink out of the paper's directory: the pull writes files,
 /// not wherever a link in the checkout happens to point. Every directory on the
 /// way is checked, not just the leaf, since a symlinked `figs/` would carry the
 /// write out just as well.
-fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         // Checked before anything is created: `create_dir_all` follows a
         // symlinked component, which would leave directories outside the paper
@@ -1104,7 +1127,7 @@ fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
                 None => break,
             }
         }
-        if !std::fs::canonicalize(existing)?.starts_with(dir) {
+        if !crate::paths::canonicalize(existing)?.starts_with(dir) {
             return Err(anyhow!(
                 "{} resolves outside the paper's folder",
                 parent.display()
@@ -1119,7 +1142,7 @@ fn write_pulled(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn hash(bytes: &[u8]) -> String {
+pub(crate) fn hash(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -1869,8 +1892,15 @@ mod tests {
 
     #[test]
     fn the_upload_page_posts_every_file_as_a_data_url() {
+        // `"` is reserved in a Windows filename; `&` is not, and still has to be
+        // escaped to stay inside the attribute.
+        #[cfg(windows)]
+        let (risky, escaped) = ("pa&per.tex", "pa&amp;per.tex");
+        #[cfg(not(windows))]
+        let (risky, escaped) = ("pa\"per.tex", "pa&quot;per.tex");
+
         let temporary = TemporaryDirectory::new("orx-overleaf-test").unwrap();
-        let tex = temporary.path().join("pa\"per.tex");
+        let tex = temporary.path().join(risky);
         std::fs::write(&tex, b"% !TeX program = lualatex\nhi").unwrap();
         let payload = collect(&tex).unwrap();
 
@@ -1878,8 +1908,8 @@ mod tests {
         assert!(html.contains("action=\"https://www.overleaf.com/docs\""));
         assert!(html.contains("data:text/plain;base64,"));
         assert!(html.contains("name=\"engine\" value=\"lualatex\""));
-        // A quote in a file name must not break out of the attribute.
-        assert!(html.contains("pa&quot;per.tex"));
-        assert!(!html.contains("value=\"pa\"per.tex\""));
+        // The raw character must not break out of the attribute.
+        assert!(html.contains(escaped));
+        assert!(!html.contains(&format!("value=\"{risky}\"")));
     }
 }

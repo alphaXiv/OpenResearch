@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes } from "react";
+import type { ComponentProps } from "react";
 import { cn } from "./cn";
 
 type InputVariant = "default" | "inline";
@@ -8,7 +8,7 @@ const VARIANTS: Record<InputVariant, string> = {
   inline: "h-8 rounded-none border-x-0 border-t-0 border-b border-transparent bg-transparent px-0 py-0 focus:border-text",
 };
 
-export type InputProps = InputHTMLAttributes<HTMLInputElement> & {
+export type InputProps = ComponentProps<"input"> & {
   variant?: InputVariant;
 };
 

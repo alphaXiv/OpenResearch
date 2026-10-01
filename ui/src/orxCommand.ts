@@ -1,11 +1,11 @@
-export type LitSource = "alphaxiv" | "openalex" | "biorxiv";
+export type LitSource = "alphaxiv" | "openalex" | "biorxiv" | "pubmed";
 
 export type OrxLitCall =
   | { kind: "paper"; source: LitSource; id?: string }
   | {
       kind: "discover";
       source: LitSource;
-      strategy: "keyword" | "embedding" | "openalex" | "biorxiv";
+      strategy: "keyword" | "embedding" | "openalex" | "biorxiv" | "pubmed";
       query?: string;
     };
 
@@ -14,7 +14,7 @@ export function containsShellGlob(value: string): boolean {
 }
 
 function asSource(value: string | undefined): LitSource | undefined {
-  return value === "alphaxiv" || value === "openalex" || value === "biorxiv"
+  return value === "alphaxiv" || value === "openalex" || value === "biorxiv" || value === "pubmed"
     ? value
     : undefined;
 }
@@ -24,10 +24,16 @@ function detectPaperSource(id: string): LitSource {
   const lower = value.toLowerCase();
   if (lower.includes("biorxiv.org")) return "biorxiv";
   if (lower.includes("openalex.org")) return "openalex";
+  if (
+    lower.includes("pubmed.ncbi.nlm.nih.gov") ||
+    lower.includes("ncbi.nlm.nih.gov/pubmed") ||
+    lower.startsWith("pmid:")
+  ) return "pubmed";
   const doi = value.match(/10\.\d+\/\S+/);
   if (doi) return doi[0].startsWith("10.1101/") ? "biorxiv" : "openalex";
   const last = value.split("/").pop() ?? "";
   if (/^W\d+$/i.test(last)) return "openalex";
+  if (/^\d{1,9}$/.test(value)) return "pubmed";
   return "alphaxiv";
 }
 
@@ -186,9 +192,10 @@ export function parseOrxLit(command: string | readonly string[]): OrxLitCall | n
     strategy !== "keyword" &&
     strategy !== "embedding" &&
     strategy !== "openalex" &&
-    strategy !== "biorxiv"
+    strategy !== "biorxiv" &&
+    strategy !== "pubmed"
   ) return null;
-  const discoverSource = strategy === "openalex" || strategy === "biorxiv"
+  const discoverSource = strategy === "openalex" || strategy === "biorxiv" || strategy === "pubmed"
     ? strategy
     : "alphaxiv";
   return { kind, source: discoverSource, strategy, query: positionals[1] };

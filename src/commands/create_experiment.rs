@@ -34,5 +34,11 @@ pub async fn run(mut args: crate::CreateExperimentArgs) -> Result<()> {
         })
         .await?;
     crate::telemetry::capture_experiment_started("create", true, None);
+    let surface = if args.project_id == crate::local::demo::PROJECT_ID {
+        "demo"
+    } else {
+        "project"
+    };
+    crate::telemetry::capture_first_action(surface, "create_experiment");
     Ok(())
 }

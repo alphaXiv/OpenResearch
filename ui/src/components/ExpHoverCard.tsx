@@ -1,3 +1,5 @@
+import { useQuery } from "@tanstack/react-query";
+import { getRunDiffQuery } from "../queries/files";
 import { m } from "../paraglide/messages.js";
 import { getLocale } from "../paraglide/runtime.js";
 import { ltr } from "../i18n";
@@ -9,15 +11,15 @@ import { ltr } from "../i18n";
 // node's own views, so keyboard/touch users lose a shortcut, not a capability.
 // Client-only (portals straight into document.body).
 
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { FolderTree, GitBranch, Terminal } from "lucide-react";
 import { parseDiff, type FileData } from "react-diff-view";
 import {
   backendKind,
+  experimentMonitoringError,
   fmtDuration,
   fmtNumber,
-  getRunDiff,
   runDisplayStatus,
   timeAgo,
   type Experiment,
@@ -156,61 +158,37 @@ export function ExpHoverCard({
     { x: anchor.x, y: anchor.y, width: anchor.width, height: anchor.height, anchor: side, distance: GAP },
     measure,
   );
-  const [diffStat, setDiffStat] = useState<DiffStat | null>(null);
-
-  // Diffstat of the branch vs its parent — only defined for non-baseline runs
-  // that committed something (the endpoint 400s otherwise).
   const diffRunId = exp.parentExperimentId && latestRun?.commitSha ? latestRun.id : null;
-  useEffect(() => {
-    // Reset on every run change so a previous run's stat can't linger next
-    // to the new run's status while (or if) the new fetch resolves.
-    setDiffStat(null);
-    if (!diffRunId) return;
-    let cancelled = false;
-    getRunDiff(diffRunId)
-      .then((p) => {
-        // Same parser and counting helpers as the Changes tab, so renames,
-        // quoted paths and binary files are counted and labeled identically.
-        let text = p.diff;
-        if (p.truncated) {
-          // The backend byte-caps mid-line, which can crash the parser (a cut
-          // inside an @@ header) — drop the trailing partial file so the
-          // counts stay honest lower bounds.
-          const cut = text.lastIndexOf("\ndiff --git ");
-          text = cut !== -1 ? text.slice(0, cut + 1) : text.slice(0, text.lastIndexOf("\n") + 1);
-        }
-        let files: FileData[] = [];
-        try {
-          files = text.trim() ? parseDiff(text) : [];
-        } catch {
-          return; // malformed even after trimming — skip the row
-        }
-        // A truncated single-file diff can trim down to a bare header that
-        // parses as one file with no hunks; "≥ +0 −0 · 1+ files" is noise.
-        if (p.truncated && files.every((f) => f.hunks.length === 0)) return;
-        let additions = 0;
-        let deletions = 0;
-        for (const f of files) {
-          const c = countChanges(f);
-          additions += c.additions;
-          deletions += c.deletions;
-        }
-        if (!cancelled) {
-          setDiffStat({
-            fileCount: files.length,
-            additions,
-            deletions,
-            truncated: p.truncated,
-          });
-        }
-      })
-      .catch(() => {
-        // Diffstat is a nice-to-have; drop the row on fetch or parse failure.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [diffRunId]);
+  const { data: diff } = useQuery({ ...getRunDiffQuery(diffRunId ?? ""), enabled: Boolean(diffRunId), subscribed: Boolean(diffRunId) });
+  const diffStat = useMemo<DiffStat | null>(() => {
+    if (!diff) return null;
+    const p = diff;
+    let text = p.diff;
+    if (p.truncated) {
+      // The backend byte-caps mid-line, which can crash the parser (a cut
+      // inside an @@ header) — drop the trailing partial file so the
+      // counts stay honest lower bounds.
+      const cut = text.lastIndexOf("\ndiff --git ");
+      text = cut !== -1 ? text.slice(0, cut + 1) : text.slice(0, text.lastIndexOf("\n") + 1);
+    }
+    let files: FileData[] = [];
+    try {
+      files = text.trim() ? parseDiff(text) : [];
+    } catch {
+      return null; // malformed even after trimming — skip the row
+    }
+    // A truncated single-file diff can trim down to a bare header that
+    // parses as one file with no hunks; "≥ +0 −0 · 1+ files" is noise.
+    if (p.truncated && files.every((f) => f.hunks.length === 0)) return null;
+    let additions = 0;
+    let deletions = 0;
+    for (const f of files) {
+      const c = countChanges(f);
+      additions += c.additions;
+      deletions += c.deletions;
+    }
+    return { fileCount: files.length, additions, deletions, truncated: p.truncated };
+  }, [diff]);
 
   const counts = { done: 0, failed: 0, cancelled: 0, live: 0 };
   for (const r of runs) {
@@ -228,6 +206,7 @@ export function ExpHoverCard({
   const failureNote =
     latestRun?.status === "failed" && latestRun.resultMarkdown ? latestRun.resultMarkdown : null;
   const body = exp.description || (failureNote ? null : latestRun?.resultMarkdown) || null;
+  const monitoringError = experimentMonitoringError(runs);
 
   // Clamped by default; "Show more" appears when the clamp actually hides
   // content and stays while expanded so "Show less" remains reachable.
@@ -246,7 +225,7 @@ export function ExpHoverCard({
   return createPortal(
     <div
       ref={measure.ref}
-      className="exp-hover-card fixed z-60 bg-background border border-border rounded-lg shadow-menu py-3.5 px-4 text-sm text-text [&_.hc-head]:flex [&_.hc-head]:items-baseline [&_.hc-head]:justify-between [&_.hc-head]:gap-2.5 [&_.hc-slug]:text-sm [&_.hc-slug]:font-semibold [&_.hc-slug]:min-w-0 [&_.hc-slug]:overflow-hidden [&_.hc-slug]:text-ellipsis [&_.hc-slug]:whitespace-nowrap [&_.hc-title]:mt-[3px] [&_.hc-title]:text-text [&_.hc-actions]:flex [&_.hc-actions]:items-center [&_.hc-actions]:gap-1.5 [&_.hc-actions]:mt-2.5 [&_.hc-actions_button]:inline-flex [&_.hc-actions_button]:items-center [&_.hc-actions_button]:justify-center [&_.hc-actions_button]:gap-[5px] [&_.hc-actions_button]:min-w-21 [&_.hc-actions_button]:py-1.5 [&_.hc-actions_button]:px-2.5 [&_.hc-actions_button]:border [&_.hc-actions_button]:border-border [&_.hc-actions_button]:rounded-md [&_.hc-actions_button]:bg-background [&_.hc-actions_button]:text-text [&_.hc-actions_button]:text-sm [&_.hc-actions_button]:font-medium [&_.hc-actions_button:hover]:border-border-hover-strong [&_.hc-actions_button:hover]:bg-canvas [&_.hc-body]:mt-2.5 [&_.hc-body]:border-t [&_.hc-body]:border-t-border-variant [&_.hc-body]:pt-2.5 [&_.hc-body]:leading-[1.6] [&_.hc-body]:whitespace-pre-line [&_.hc-body]:line-clamp-10 [&_.hc-body.expanded]:block [&_.hc-body.expanded]:line-clamp-none [&_.hc-body.expanded]:max-h-[45vh] [&_.hc-body.expanded]:overflow-y-auto [&_.hc-body.expanded]:overflow-x-hidden [&_.hc-body.expanded]:pb-1 [&_.hc-toggle]:mt-1 [&_.hc-toggle]:text-sm [&_.hc-toggle]:font-medium [&_.hc-toggle]:text-muted [&_.hc-toggle:hover]:text-text [&_.hc-failure]:mt-2 [&_.hc-failure]:text-accent-red [&_.hc-failure]:line-clamp-3 [&_.hc-stats]:mt-2.5 [&_.hc-stats]:border-t [&_.hc-stats]:border-t-border-variant [&_.hc-stats]:pt-2.5 [&_.hc-stats]:flex [&_.hc-stats]:items-center [&_.hc-stats]:gap-3 [&_.hc-stats]:flex-wrap [&_.hc-stats]:text-xs [&_.hc-stats]:text-text [&_.hc-git]:mt-2.5 [&_.hc-git]:pt-2 [&_.hc-git]:border-t [&_.hc-git]:border-t-border-variant [&_.hc-git]:text-xs [&_.hc-git]:text-text [&_.hc-git]:flex [&_.hc-git]:flex-col [&_.hc-git]:gap-1 [&_.hc-git-row]:flex [&_.hc-git-row]:items-center [&_.hc-git-row]:gap-2.5 [&_.hc-git-row]:flex-wrap [&_.hc-git-row]:min-w-0 [&_.hc-branch]:inline-flex [&_.hc-branch]:items-center [&_.hc-branch]:gap-1 [&_.hc-branch]:min-w-0 [&_.hc-branch]:overflow-hidden [&_.hc-branch]:text-ellipsis [&_.hc-branch]:whitespace-nowrap [&_.hc-foot]:mt-2 [&_.hc-foot]:flex [&_.hc-foot]:items-center [&_.hc-foot]:justify-between [&_.hc-foot]:gap-2.5 [&_.hc-foot]:text-xs [&_.hc-foot]:text-muted [&_.hc-foot_.hc-command]:min-w-0 [&_.hc-foot_.hc-command]:overflow-hidden [&_.hc-foot_.hc-command]:text-ellipsis [&_.hc-foot_.hc-command]:whitespace-nowrap"
+      className="exp-hover-card fixed z-60 bg-background border border-border rounded-lg shadow-menu py-3.5 px-4 text-sm text-text [&_.hc-head]:flex [&_.hc-head]:items-baseline [&_.hc-head]:justify-between [&_.hc-head]:gap-2.5 [&_.hc-slug]:text-sm [&_.hc-slug]:font-semibold [&_.hc-slug]:min-w-0 [&_.hc-slug]:overflow-hidden [&_.hc-slug]:text-ellipsis [&_.hc-slug]:whitespace-nowrap [&_.hc-title]:mt-[3px] [&_.hc-title]:text-text [&_.hc-actions]:flex [&_.hc-actions]:items-center [&_.hc-actions]:gap-1.5 [&_.hc-actions]:mt-2.5 [&_.hc-actions_button]:inline-flex [&_.hc-actions_button]:items-center [&_.hc-actions_button]:justify-center [&_.hc-actions_button]:gap-[5px] [&_.hc-actions_button]:min-w-21 [&_.hc-actions_button]:py-1.5 [&_.hc-actions_button]:px-2.5 [&_.hc-actions_button]:border [&_.hc-actions_button]:border-border [&_.hc-actions_button]:rounded-md [&_.hc-actions_button]:bg-background [&_.hc-actions_button]:text-text [&_.hc-actions_button]:text-sm [&_.hc-actions_button]:font-medium [&_.hc-actions_button:hover]:border-border-hover-strong [&_.hc-actions_button:hover]:bg-canvas [&_.hc-body]:mt-2.5 [&_.hc-body]:border-t [&_.hc-body]:border-t-border-variant [&_.hc-body]:pt-2.5 [&_.hc-body]:leading-[1.6] [&_.hc-body]:whitespace-pre-line [&_.hc-body]:line-clamp-10 [&_.hc-body.expanded]:block [&_.hc-body.expanded]:line-clamp-none [&_.hc-body.expanded]:max-h-[45vh] [&_.hc-body.expanded]:overflow-y-auto [&_.hc-body.expanded]:overflow-x-hidden [&_.hc-body.expanded]:pb-1 [&_.hc-toggle]:mt-1 [&_.hc-toggle]:text-sm [&_.hc-toggle]:font-medium [&_.hc-toggle]:text-muted [&_.hc-toggle:hover]:text-text [&_.hc-failure]:mt-2 [&_.hc-failure]:text-accent-red [&_.hc-failure]:line-clamp-3 [&_.hc-monitoring]:mt-2 [&_.hc-monitoring]:text-accent-amber [&_.hc-monitoring]:line-clamp-3 [&_.hc-stats]:mt-2.5 [&_.hc-stats]:border-t [&_.hc-stats]:border-t-border-variant [&_.hc-stats]:pt-2.5 [&_.hc-stats]:flex [&_.hc-stats]:items-center [&_.hc-stats]:gap-3 [&_.hc-stats]:flex-wrap [&_.hc-stats]:text-xs [&_.hc-stats]:text-text [&_.hc-git]:mt-2.5 [&_.hc-git]:pt-2 [&_.hc-git]:border-t [&_.hc-git]:border-t-border-variant [&_.hc-git]:text-xs [&_.hc-git]:text-text [&_.hc-git]:flex [&_.hc-git]:flex-col [&_.hc-git]:gap-1 [&_.hc-git-row]:flex [&_.hc-git-row]:items-center [&_.hc-git-row]:gap-2.5 [&_.hc-git-row]:flex-wrap [&_.hc-git-row]:min-w-0 [&_.hc-branch]:inline-flex [&_.hc-branch]:items-center [&_.hc-branch]:gap-1 [&_.hc-branch]:min-w-0 [&_.hc-branch]:overflow-hidden [&_.hc-branch]:text-ellipsis [&_.hc-branch]:whitespace-nowrap [&_.hc-foot]:mt-2 [&_.hc-foot]:flex [&_.hc-foot]:items-center [&_.hc-foot]:justify-between [&_.hc-foot]:gap-2.5 [&_.hc-foot]:text-xs [&_.hc-foot]:text-muted [&_.hc-foot_.hc-command]:min-w-0 [&_.hc-foot_.hc-command]:overflow-hidden [&_.hc-foot_.hc-command]:text-ellipsis [&_.hc-foot_.hc-command]:whitespace-nowrap"
       style={{
         width: CARD_W,
         left: x,
@@ -291,6 +270,11 @@ export function ExpHoverCard({
         </button>
       )}
       {failureNote && <div className="hc-failure">{failureNote}</div>}
+      {monitoringError && (
+        <div className="hc-monitoring" title={monitoringError}>
+          {monitoringError}
+        </div>
+      )}
       <div className="hc-stats">
         <span>
           {new Intl.ListFormat(getLocale(), { style: "short" }).format([

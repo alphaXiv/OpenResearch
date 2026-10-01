@@ -10,10 +10,10 @@ const VARIANTS: Record<BadgeVariant, string> = {
   warning: "border-accent-amber bg-accent-amber-subtle text-accent-amber",
 };
 
-export function Badge({ variant = "default", className, ...props }: HTMLAttributes<HTMLSpanElement> & { variant?: BadgeVariant }) {
+export function Badge({ variant = "default", size = "default", className, ...props }: HTMLAttributes<HTMLSpanElement> & { variant?: BadgeVariant; size?: "default" | "small" }) {
   return (
     <span
-      className={cn("badge inline-flex items-center rounded-full border px-2 py-px font-sans text-sm font-medium", VARIANTS[variant], className)}
+      className={cn("badge inline-flex items-center rounded-full border py-px font-sans", size === "small" ? "px-1.5 text-xs font-normal" : "px-2 text-sm font-medium", VARIANTS[variant], className)}
       {...props}
     />
   );
