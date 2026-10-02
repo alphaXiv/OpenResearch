@@ -776,6 +776,9 @@ pub enum LitSource {
     Openalex,
     /// bioRxiv biology preprints (searched via OpenAlex, fetched via bioRxiv).
     Biorxiv,
+    /// You.com web search for current research and broader context (opt-in;
+    /// enabled only when selected explicitly, no default fallback).
+    Youcom,
     /// PubMed biomedical literature (NCBI E-utilities).
     Pubmed,
 }
@@ -789,6 +792,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaxiv",
             LitSource::Openalex => "openalex",
             LitSource::Biorxiv => "biorxiv",
+            LitSource::Youcom => "youcom",
             LitSource::Pubmed => "pubmed",
         }
     }
@@ -799,6 +803,7 @@ impl LitSource {
             LitSource::Alphaxiv => "alphaXiv",
             LitSource::Openalex => "OpenAlex",
             LitSource::Biorxiv => "bioRxiv",
+            LitSource::Youcom => "You.com",
             LitSource::Pubmed => "PubMed",
         }
     }
@@ -820,6 +825,10 @@ pub enum DiscoverCommand {
     Openalex(DiscoverySearchArgs),
     /// bioRxiv preprint search through OpenAlex's bioRxiv source index.
     Biorxiv(DiscoverySearchArgs),
+    /// You.com web search for current research and broader context. Opt-in;
+    /// requires `YDC_API_KEY` for the authenticated endpoint, falls back to
+    /// the keyless agents endpoint otherwise.
+    Youcom(DiscoverySearchArgs),
     /// PubMed biomedical literature search through NCBI E-utilities.
     Pubmed(DiscoverySearchArgs),
 }

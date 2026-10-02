@@ -2,7 +2,7 @@
 
 use crate::client::{
     discover_openalex, discover_papers_by_embedding, discover_papers_by_keyword, discover_pubmed,
-    LitHit, OpenAlexDiscoveryOptions, PaperDiscoveryOptions, PubmedDiscoveryOptions,
+    search_youcom, LitHit, OpenAlexDiscoveryOptions, PaperDiscoveryOptions, PubmedDiscoveryOptions,
     BIORXIV_SOURCE_ID,
 };
 use crate::error::{anyhow, Result};
@@ -40,6 +40,10 @@ pub async fn run(args: crate::DiscoverArgs) -> Result<()> {
                 openalex_options(&args, Some(BIORXIV_SOURCE_ID)),
             )
             .await?
+        }
+        crate::DiscoverCommand::Youcom(args) => {
+            ensure_source_enabled(LitSource::Youcom, &disabled)?;
+            search_youcom(&args.query, args.limit).await?
         }
         crate::DiscoverCommand::Pubmed(args) => {
             ensure_source_enabled(LitSource::Pubmed, &disabled)?;
