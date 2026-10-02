@@ -118,6 +118,7 @@ pub(crate) use local_plane::LocalPlane;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local::model::{LocalExperiment, LocalProject};
     use crate::store::{now_ms, StoredRun};
 
     fn stored_run(status: &str, result_markdown: Option<&str>) -> StoredRun {
@@ -213,6 +214,89 @@ mod tests {
         assert_eq!(label("demo_nanochat_lr_probe_v1"), Some("lr_probe"));
         assert_eq!(label("agent_made"), Some("other"));
         assert_eq!(label("user_exp"), None);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_experiment_rename() {
+        let dir = std::env::temp_dir().join(format!("orx-test-rename-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        store
+            .create_local_project(&LocalProject {
+                id: "p1".into(),
+                name: "p1".into(),
+                slug: "p1".into(),
+                github_owner: "o".into(),
+                github_repo: "r".into(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: "/tmp/repo".into(),
+                run_command: None,
+                paper_id: None,
+                created_at: 0,
+                updated_at: 0,
+            })
+            .unwrap();
+        store
+            .create_local_experiment(&LocalExperiment {
+                id: "exp1".into(),
+                project_id: "p1".into(),
+                parent_experiment_id: None,
+                slug: "baseline-exp".into(),
+                branch_name: "orx/baseline-exp".into(),
+                title: None,
+                description: None,
+                run_command: "true".into(),
+                agent_status: "idle".into(),
+                created_at: 0,
+                updated_at: 0,
+                chat_session_id: None,
+                archived: false,
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .get_local_experiment("exp1")
+                .unwrap()
+                .unwrap()
+                .display_name(),
+            "baseline-exp"
+        );
+        let plane = resolve_experiment(Store::open_at(dir.clone()).unwrap(), "exp1").unwrap();
+
+        // Rename to a new title
+        plane
+            .experiment_rename(Some("New Baseline Experiment"))
+            .await
+            .unwrap();
+        let updated = store.get_local_experiment("exp1").unwrap().unwrap();
+        assert_eq!(updated.title.as_deref(), Some("New Baseline Experiment"));
+        assert_eq!(updated.display_name(), "New Baseline Experiment");
+
+        // Rename to empty returns Err
+        assert!(plane.experiment_rename(Some("   ")).await.is_err());
+
+        // Clear title returns to slug
+        plane.experiment_rename(None).await.unwrap();
+        let cleared = store.get_local_experiment("exp1").unwrap().unwrap();
+        assert_eq!(cleared.title, None);
+        assert_eq!(cleared.display_name(), "baseline-exp");
+
+        // Verify renaming preserves descriptions
+        let mut exp = store.get_local_experiment("exp1").unwrap().unwrap();
+        exp.description = Some("My important notes".into());
+        store.update_local_experiment(&exp).unwrap();
+
+        plane
+            .experiment_rename(Some("Renamed Again"))
+            .await
+            .unwrap();
+        let exp_after = store.get_local_experiment("exp1").unwrap().unwrap();
+        assert_eq!(exp_after.title.as_deref(), Some("Renamed Again"));
+        assert_eq!(exp_after.description.as_deref(), Some("My important notes"));
+
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -46,6 +46,31 @@ pub async fn run(args: crate::ExpArgs) -> Result<()> {
                 .experiment_desc(set, stdin)
                 .await
         }
+        ExpCommand::Rename {
+            exp_id,
+            title,
+            name,
+            clear,
+        } => {
+            let new_title = if clear {
+                None
+            } else {
+                let raw = title.or(name).ok_or_else(|| {
+                    anyhow!("Provide a new title: orx exp rename <expId> \"<new_title>\" (or pass --clear)")
+                })?;
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    return Err(anyhow!(
+                        "Experiment title cannot be empty. Pass --clear to remove the title."
+                    ));
+                }
+                Some(trimmed.to_string())
+            };
+            crate::local::chat::record_chat_target("experiments", &exp_id);
+            resolve_experiment(store, &exp_id)?
+                .experiment_rename(new_title.as_deref())
+                .await
+        }
         ExpCommand::Run(run_args) => {
             let run_args = *run_args;
             resolve_experiment(store, &run_args.exp_id)?
