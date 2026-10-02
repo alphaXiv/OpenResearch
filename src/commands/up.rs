@@ -538,6 +538,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             "/api/experiments/{id}/archive",
             axum::routing::patch(set_experiment_archive),
         )
+        .route(
+            "/api/experiments/{id}/rename",
+            axum::routing::patch(rename_experiment).post(rename_experiment),
+        )
         .route("/api/experiments/{id}/commits", get(experiment_commits))
         .route(
             "/api/experiments/{id}/commits/{sha}/diff",
@@ -2058,6 +2062,35 @@ async fn set_experiment_archive(
     }
     let ids = local::experiments::set_archived(&mut store, &id, direction, request.archived)?;
     Ok(Json(json!({ "ids": ids })))
+}
+
+#[derive(Deserialize)]
+struct RenameExperimentRequest {
+    title: Option<String>,
+}
+
+async fn rename_experiment(
+    Path(id): Path<String>,
+    Json(request): Json<RenameExperimentRequest>,
+) -> ApiResult {
+    let store = Store::open()?;
+    let mut exp = store
+        .get_local_experiment(&id)?
+        .ok_or_else(|| not_found("experiment"))?;
+    match request.title.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => {
+            exp.title = Some(t.to_string());
+        }
+        _ => {
+            exp.title = None;
+        }
+    }
+    store.update_local_experiment(&exp)?;
+    Ok(Json(json!({
+        "id": exp.id,
+        "title": exp.title,
+        "displayName": exp.display_name(),
+    })))
 }
 
 async fn list_project_runs(Path(id): Path<String>) -> ApiResult {

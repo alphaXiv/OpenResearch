@@ -249,6 +249,36 @@ impl LocalPlane {
         Ok(())
     }
 
+    pub async fn experiment_rename(&self, title: Option<&str>) -> Result<()> {
+        let mut exp = self.experiment()?.clone();
+        match title {
+            Some(title) => {
+                let trimmed = title.trim();
+                if trimmed.is_empty() {
+                    return Err(anyhow!(
+                        "Experiment title cannot be empty. Pass --clear to remove the custom title."
+                    ));
+                }
+                exp.title = Some(trimmed.to_string());
+                self.store.update_local_experiment(&exp)?;
+                println!("\u{2713} Experiment renamed.");
+                println!("  id:    {}", exp.id);
+                println!("  title: {}", trimmed);
+            }
+            None => {
+                exp.title = None;
+                self.store.update_local_experiment(&exp)?;
+                println!(
+                    "\u{2713} Experiment title cleared (reverted to slug \"{}\").",
+                    exp.slug
+                );
+                println!("  id:   {}", exp.id);
+                println!("  slug: {}", exp.slug);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn launch(&self, mut args: ExpRunArgs) -> Result<()> {
         // Fill backend/flavor from the persisted default
         // BEFORE the flag validations below, so e.g. `--host box1` with a default
