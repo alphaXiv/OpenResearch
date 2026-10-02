@@ -215,6 +215,7 @@ fn control_path(target: &SshTarget) -> PathBuf {
     control_dir().join(format!("{:016x}", h.finish()))
 }
 
+#[cfg(unix)]
 fn find_persist(target: &SshTarget) -> String {
     let mut iter = target.extra_opts.iter();
     while let Some(arg) = iter.next() {
