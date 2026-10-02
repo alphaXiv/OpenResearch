@@ -264,6 +264,9 @@ pub struct CheckArgs {
     no_container: bool,
     #[arg(long)]
     address: Option<String>,
+    /// How long the multiplexed SSH master connection should persist after idle (e.g. 24h, 7d, yes).
+    #[arg(long)]
+    persist: Option<String>,
 }
 #[derive(Debug, Subcommand)]
 pub enum SshConfigCommand {
@@ -570,7 +573,12 @@ async fn connect(args: &CheckArgs) -> Result<()> {
                 },
             }
             .ok_or_else(|| anyhow!("Pass --host or configure a default host."))?;
-            let target = crate::jobs::ssh::SshTarget::alias(&host);
+            let mut target = crate::jobs::ssh::SshTarget::alias(&host);
+            if let Some(ref p) = args.persist {
+                target
+                    .extra_opts
+                    .extend(["-o".into(), format!("ControlPersist={p}")]);
+            }
             let argv = crate::jobs::ssh::interactive_args(&target)?;
             interactive_command("ssh", &argv).await?;
         }

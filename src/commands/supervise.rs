@@ -586,13 +586,15 @@ async fn run_ssh(
     eprintln!("supervise {run_id}: watching ssh job {host}:{dir}");
     let target = ssh::SshTarget::alias(host);
     let dir = dir.to_string();
+    let container = descriptor.ssh_container.clone();
     watch_ssh_job(
         &store,
         status_of(&stored)?,
         target,
         dir,
-        descriptor.ssh_container,
+        container,
         &run_id,
+        Some(descriptor),
     )
     .await?;
     Ok(())
@@ -608,6 +610,7 @@ async fn watch_ssh_job(
     dir: String,
     container: Option<ssh::ContainerRun>,
     run_id: &str,
+    mut descriptor: Option<BackendDescriptor>,
 ) -> Result<RunStatus> {
     let path = log_path(run_id);
     let (done_tx, done_rx) = tokio::sync::watch::channel(false);
@@ -622,15 +625,57 @@ async fn watch_ssh_job(
     let mut last_status = initial_status;
     let mut cancel_sent = false;
     let mut last_message = None;
+    let mut last_error = None;
+    let mut failing_since: Option<std::time::Instant> = None;
 
     loop {
-        let job = match ssh::inspect_job(&target, &dir, container.as_ref()).await {
-            Ok(j) => j,
-            Err(err) => {
-                eprintln!("supervise {run_id}: inspect failed (will retry): {err}");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
+        if !cancel_sent && local_cancel_requested(store, run_id) {
+            cancel_ssh(&target, &dir, container.as_ref(), run_id, &mut cancel_sent).await;
+        }
+
+        let observed = ssh::inspect_job(&target, &dir, container.as_ref()).await;
+        let error = match &observed {
+            Err(err) => Some(format!(
+                "Monitoring unavailable: {err}. Reconnect with orx compute connect ssh --host {}. The job has not been declared stopped.",
+                ssh::sh_quote(&target.dest)
+            )),
+            _ => None,
+        };
+        match (&error, &last_error) {
+            (Some(message), last) if last.as_ref() != Some(message) => {
+                eprintln!("supervise {run_id}: {message}");
             }
+            (None, Some(_)) => eprintln!("supervise {run_id}: monitoring restored"),
+            _ => {}
+        }
+        last_error = error.clone();
+        failing_since = error
+            .as_ref()
+            .map(|_| failing_since.unwrap_or_else(std::time::Instant::now));
+        if let Some(desc) = &mut descriptor {
+            let reported = error.clone().filter(|_| {
+                desc.monitoring_error.is_some()
+                    || failing_since.is_some_and(|since| since.elapsed() >= MONITORING_GRACE)
+            });
+            if reported != desc.monitoring_error || cancel_sent != desc.cancellation_accepted {
+                let mut updated = desc.clone();
+                updated.monitoring_error = reported;
+                updated.cancellation_accepted = cancel_sent;
+                match store.set_backend_json(run_id, &updated.to_json()) {
+                    Ok(()) => *desc = updated,
+                    Err(err) => {
+                        eprintln!("supervise {run_id}: could not save monitoring state: {err}")
+                    }
+                }
+            }
+        }
+        if error.is_some() {
+            tokio::time::sleep(POLL_INTERVAL).await;
+            continue;
+        }
+        let job = match observed {
+            Ok(j) => j,
+            Err(_) => continue,
         };
         let stage = job.stage.as_str();
         let status = run_status_for_stage(store, run_id, cancel_sent, stage);
@@ -933,7 +978,16 @@ async fn run_openresearch(
     // The shared ssh loop owns status and logs; the box is deleted after
     // it returns (logs are drained from the box BEFORE teardown), and even
     // when it errors.
-    let watch = watch_ssh_job(&store, status_of(&stored)?, target, dir, None, &run_id).await;
+    let watch = watch_ssh_job(
+        &store,
+        status_of(&stored)?,
+        target,
+        dir,
+        None,
+        &run_id,
+        Some(descriptor),
+    )
+    .await;
     teardown_box(&store, &lifecycle, &sandbox_id, &run_id).await;
     watch?;
     Ok(())
