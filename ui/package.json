@@ -11,6 +11,7 @@
     "lint:i18n": "node scripts/check-i18n.mjs",
     "lint:styles": "node scripts/check-styles.mjs",
     "test": "node --test --experimental-strip-types tests/*.test.mjs",
+    "test:e2e": "node e2e/run.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -41,6 +42,7 @@
     "unified": "11.0.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "4.3.3",
     "@tanstack/router-cli": "^1.167.33",
     "@tanstack/router-plugin": "^1.168.35",

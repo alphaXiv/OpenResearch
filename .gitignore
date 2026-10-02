@@ -23,3 +23,5 @@ Claude.local.md
 
 # This repo uses pnpm; ignore an accidental npm lockfile
 ui/package-lock.json
+ui/e2e-results/
+ui/e2e-report/

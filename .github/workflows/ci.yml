@@ -65,7 +65,7 @@ jobs:
         working-directory: ui
         run: pnpm typecheck
 
-      - name: UI unit tests
+      - name: UI isolated behavior tests
         run: node --test --experimental-strip-types ui/tests/*.test.mjs
 
       - name: Committed UI bundle matches source
@@ -107,6 +107,31 @@ jobs:
 
       - name: Test
         run: cargo test --locked
+
+      - name: Dashboard workflow tests
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 lsof
+          pnpm -C ui exec playwright install --with-deps chromium
+          if ! git worktree list --porcelain | grep -qx 'branch refs/heads/main'; then
+            if ! git show-ref --verify --quiet refs/heads/main; then
+              git branch main HEAD
+            fi
+            git worktree add "$RUNNER_TEMP/e2e-main" main
+          fi
+          pnpm -C ui test:e2e
+
+      - name: Upload repeatable workflow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-e2e
+          path: |
+            ui/e2e-report/
+            ui/e2e-results/
+          if-no-files-found: warn
 
   # The Linux desktop app: a glibc build with the `desktop` feature, packaged as
   # an AppImage on the oldest Ubuntu it supports and launched under a virtual
