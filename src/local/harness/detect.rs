@@ -216,8 +216,8 @@ impl ModelInfo {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessInfo {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub installed: bool,
     /// On PATH, but the binary can't run: `--version` failed conclusively.
     /// Never `agent_ready` — spawning it just dumps its own crash into the chat.
@@ -274,10 +274,10 @@ pub struct HarnessInfo {
 }
 
 impl HarnessInfo {
-    pub(super) fn new(id: &'static str, name: &'static str) -> Self {
+    pub(super) fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
-            id,
-            name,
+            id: id.into(),
+            name: name.into(),
             installed: false,
             install_broken: false,
             bin_path: None,

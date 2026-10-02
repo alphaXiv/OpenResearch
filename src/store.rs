@@ -8,6 +8,7 @@
 //! Data dir: `$ORX_DATA_DIR`, else `$XDG_DATA_HOME/openresearch`, else
 //! `~/.local/share/openresearch`.
 
+mod acp;
 mod telemetry;
 pub(crate) use telemetry::{InvocationIdentity, TokenUsage};
 
@@ -652,6 +653,11 @@ impl Store {
                 root       TEXT NOT NULL DEFAULT '',
                 PRIMARY KEY (project_id, tex_path)
             );
+            CREATE TABLE IF NOT EXISTS acp_sessions (
+                session_id TEXT PRIMARY KEY REFERENCES chat_sessions(id) ON DELETE CASCADE,
+                launch_json TEXT NOT NULL,
+                configuration_json TEXT NOT NULL DEFAULT '[]'
+            );
             CREATE TABLE IF NOT EXISTS ui_state (
                 id                       INTEGER PRIMARY KEY CHECK (id = 1),
                 onboarding_completed     INTEGER NOT NULL DEFAULT 0,
@@ -713,6 +719,7 @@ impl Store {
             let _ = conn.execute(ddl, []);
         }
         conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_chat_invocation_identities AFTER DELETE ON chat_sessions BEGIN DELETE FROM native_invocation_identities WHERE session_id = OLD.id; END;")?;
+        conn.execute_batch("CREATE TRIGGER IF NOT EXISTS delete_acp_session AFTER DELETE ON chat_sessions BEGIN DELETE FROM acp_sessions WHERE session_id = OLD.id; END;")?;
         conn.execute(
             "DELETE FROM native_invocation_identities WHERE session_id IS NULL AND created_at < ?1",
             [now_ms() - 7 * 24 * 60 * 60 * 1000],
@@ -1964,6 +1971,12 @@ impl Store {
     // --- chat sessions / messages ------------------------------------------
 
     pub fn create_chat_session(&self, s: &StoredChatSession) -> Result<()> {
+        let acp_state = self.acp_launch_for_session(s)?;
+        let transaction = if acp_state.is_some() && self.conn.is_autocommit() {
+            Some(self.conn.unchecked_transaction()?)
+        } else {
+            None
+        };
         self.conn.execute(
             "INSERT INTO chat_sessions (id, project_id, harness, native_session_id, title, title_source, model,
                                         service_tier, permission_mode, plan_mode, plan_reset_pending, reasoning_level, archived, bootstrap_context,
@@ -1993,6 +2006,15 @@ impl Store {
                 s.side_parent_session_id,
             ],
         )?;
+        if let Some(state) = acp_state {
+            self.conn.execute(
+                "INSERT INTO acp_sessions (session_id, launch_json, configuration_json) VALUES (?1, ?2, ?3)",
+                params![s.id, serde_json::to_string(&state.launch)?, serde_json::to_string(&state.configuration)?],
+            )?;
+        }
+        if let Some(transaction) = transaction {
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -4447,6 +4469,55 @@ mod tests {
             created_at: 1,
             updated_at: 1,
         }
+    }
+
+    #[test]
+    fn acp_side_chat_keeps_launch_snapshot_and_deletes_its_state() {
+        let dir = std::env::temp_dir().join(format!("orx-acp-store-{}", uuid::Uuid::new_v4()));
+        let store = Store::open_at(dir.clone()).unwrap();
+        let parent = chat_session_fixture("parent");
+        store.create_chat_session(&parent).unwrap();
+        let launch = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "Saved agent".into(),
+            executable: "original-agent".into(),
+            arguments: vec!["original argument".into()],
+        };
+        store.conn.execute(
+            "INSERT INTO acp_sessions(session_id, launch_json, configuration_json) VALUES (?1, ?2, ?3)",
+            params![parent.id, serde_json::to_string(&launch).unwrap(), "[]"],
+        ).unwrap();
+        let mut side = chat_session_fixture("side");
+        side.harness = launch.id.clone();
+        side.side_parent_session_id = Some(parent.id.clone());
+        store.create_chat_session(&side).unwrap();
+        assert_eq!(
+            store.acp_session_state("side").unwrap().unwrap().launch,
+            launch
+        );
+        assert!(store
+            .get_chat_session("side")
+            .unwrap()
+            .unwrap()
+            .native_session_id
+            .is_none());
+        let configuration = serde_json::json!([{"id":"model", "currentValue":"native/model"}]);
+        store.set_acp_configuration("side", &configuration).unwrap();
+        drop(store);
+        let store = Store::open_at(dir.clone()).unwrap();
+        assert_eq!(
+            store
+                .acp_session_state("side")
+                .unwrap()
+                .unwrap()
+                .configuration,
+            configuration
+        );
+        store.delete_chat_session("side").unwrap();
+        assert!(store.acp_session_state("side").unwrap().is_none());
+        assert!(store.acp_session_state("parent").unwrap().is_some());
+        drop(store);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn chat_spawn_fixture(session_id: &str, parent: &str) -> ChatSpawn {

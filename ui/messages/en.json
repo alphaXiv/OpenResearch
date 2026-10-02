@@ -1263,5 +1263,18 @@
   "side_chat_empty": "Side chats are deleted when you close them or quit the app.",
   "workspace_more_tools": "More tools",
   "side_chat_nested": "A side chat can't open its own side chat.",
-  "side_chat_close_failed": "Couldn't delete the side chat: {error}"
+  "side_chat_close_failed": "Couldn't delete the side chat: {error}",
+  "acp_add": "Add ACP harness",
+  "acp_edit": "Edit ACP harness",
+  "acp_preset": "Preset",
+  "acp_custom": "Custom",
+  "acp_name": "Name",
+  "acp_executable": "Executable",
+  "acp_arguments": "Arguments",
+  "acp_argument": "Argument {number}",
+  "acp_add_argument": "Add argument",
+  "acp_test": "Test connection",
+  "acp_setup_help": "Install and sign in using the harness CLI on the backend machine, then re-check. Connected confirms the protocol handshake; provider credentials are checked when you chat.",
+  "acp_setup_docs": "Setup documentation",
+  "acp_edit_help": "Changes apply to new chats. Existing chats keep their launch configuration."
 }

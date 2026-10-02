@@ -108,6 +108,8 @@ fn flush_window() -> Duration {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
     #[serde(default)]
+    pub acp_harnesses: Vec<crate::local::acp::Definition>,
+    #[serde(default)]
     pub ssh: crate::config::SshSettings,
     /// Random anonymous id (uuid v4), generated once on first enabled run.
     #[serde(default)]
@@ -474,7 +476,7 @@ fn lock_settings_file() -> Option<fd_lock::RwLock<std::fs::File>> {
 /// mutation is REFUSED (writes nothing) so a persisted opt-out hiding in an
 /// unparseable file is never silently dropped — the caller's change is lost,
 /// but the user's privacy choice is preserved.
-fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
+pub(crate) fn mutate_settings<F: FnOnce(&mut Settings)>(f: F) -> std::io::Result<()> {
     let _guard = SETTINGS_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
@@ -1428,6 +1430,42 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn acp_definitions_are_independent_and_preserve_settings() {
+        let _guard = EnvGuard::new(OPT_VARS);
+        let dir = std::env::temp_dir().join(format!("orx-acp-settings-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        set_persisted_disabled(true).unwrap();
+        let first = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "First".into(),
+            executable: "agent-one".into(),
+            arguments: vec!["a b".into(), "'quoted'".into()],
+        };
+        let second = crate::local::acp::Definition {
+            id: format!("acp:{}", uuid::Uuid::new_v4()),
+            name: "Second".into(),
+            executable: "agent-two".into(),
+            arguments: vec![],
+        };
+        crate::local::acp::save(first.clone(), true).unwrap();
+        crate::local::acp::save(second.clone(), true).unwrap();
+        assert_eq!(
+            crate::local::acp::definitions(),
+            [first.clone(), second.clone()]
+        );
+        assert!(crate::local::acp::save(first.clone(), true).is_err());
+        let mut edited = first.clone();
+        edited.executable = "new-agent".into();
+        crate::local::acp::save(edited.clone(), false).unwrap();
+        assert_eq!(crate::local::acp::definitions(), [edited, second.clone()]);
+        crate::local::acp::remove(&first.id).unwrap();
+        assert_eq!(crate::local::acp::definitions(), [second]);
+        assert!(crate::local::acp::save(first, false).is_err());
+        assert_eq!(load_settings().unwrap().telemetry_disabled, Some(true));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

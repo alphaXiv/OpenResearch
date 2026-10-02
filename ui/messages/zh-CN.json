@@ -1263,5 +1263,18 @@
   "side_chat_empty": "关闭侧边对话或退出应用后，侧边对话会被删除。",
   "workspace_more_tools": "更多工具",
   "side_chat_nested": "侧边对话不能再开启自己的侧边对话。",
-  "side_chat_close_failed": "无法删除侧边对话：{error}"
+  "side_chat_close_failed": "无法删除侧边对话：{error}",
+  "acp_add": "添加 ACP 智能体",
+  "acp_edit": "编辑 ACP 智能体",
+  "acp_preset": "预设",
+  "acp_custom": "自定义",
+  "acp_name": "名称",
+  "acp_executable": "可执行文件",
+  "acp_arguments": "参数",
+  "acp_argument": "参数 {number}",
+  "acp_add_argument": "添加参数",
+  "acp_test": "测试连接",
+  "acp_setup_help": "在运行后端的机器上使用智能体 CLI 安装并登录，然后重新检查。已连接表示协议握手成功；开始聊天时才会检查提供商凭据。",
+  "acp_setup_docs": "设置文档",
+  "acp_edit_help": "更改适用于新聊天。现有聊天保留其启动配置。"
 }

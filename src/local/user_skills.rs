@@ -452,7 +452,7 @@ struct Mirrored {
     /// Display name of the agent or plugin it came from, for the UI badge.
     origin: String,
     /// The harness that can resolve this native skill.
-    harness: &'static str,
+    harness: String,
     plugin: bool,
     dir: PathBuf,
     name: String,
@@ -689,7 +689,7 @@ pub fn refresh_imports() -> bool {
 fn collect_mirrored(
     dir: &Path,
     origin: &str,
-    harness: &'static str,
+    harness: &str,
     plugin: bool,
     out: &mut Vec<Mirrored>,
 ) {
@@ -718,7 +718,7 @@ fn collect_mirrored(
         }
         out.push(Mirrored {
             origin: origin.to_string(),
-            harness,
+            harness: harness.to_string(),
             plugin,
             dir: path,
             name: fm.name,
@@ -1403,9 +1403,9 @@ mod tests {
         Mirrored {
             origin: origin.to_string(),
             harness: if session_skills_dir == Some(".claude/skills") {
-                "claude"
+                "claude".into()
             } else {
-                "codex"
+                "codex".into()
             },
             plugin: session_skills_dir.is_none(),
             dir: dir.to_path_buf(),

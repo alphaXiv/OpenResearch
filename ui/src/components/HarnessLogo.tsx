@@ -2,8 +2,10 @@
 // rust-embedded and CSP-locked.
 
 import type { HarnessId } from "../api";
+import { Plug } from "lucide-react";
 
 export function HarnessLogo({ harness, size = 16 }: { harness: HarnessId; size?: number }) {
+  if (harness.startsWith("acp:")) return <Plug size={size} className="block shrink-0" aria-hidden="true" />;
   const cls = "block shrink-0";
   if (harness === "claude-code") {
     return (

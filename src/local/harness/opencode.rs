@@ -1577,9 +1577,7 @@ async fn opencode_pre_accept_setup(
 async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // Native permission and question requests die with their turn. Clear any
     // crash/restart leftovers before a new live request can be surfaced.
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::opencode_session(&id))

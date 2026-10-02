@@ -2614,9 +2614,7 @@ async fn run_turn_app_server(ctx: &mut TurnCtx) -> Result<()> {
     // resume by message — the next user message replaces them, exactly like
     // Claude's precedent. Behavior-preserving for the pre-plan-mode cards (all
     // of which were native).
-    ctx.host
-        .resolve_stale_prompts(&ctx.session_id, true)
-        .await?;
+    ctx.host.resolve_stale_prompts(&ctx.session_id, true)?;
     let project = ctx.project.clone();
     let session_id = ctx.session_id.clone();
     // The modular orx skills land in the harness's session-skills dir, fresh,

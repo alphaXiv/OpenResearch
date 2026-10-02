@@ -2324,7 +2324,7 @@ async fn run_turn(ctx: &mut TurnCtx) -> Result<()> {
     // unresolved: they can never be answered again, and once this turn makes the
     // session busy one could capture the composer's typed-text routing. End-turn
     // cards are deliberately left alone — they resume via --resume.
-    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true).await;
+    let _ = ctx.host.resolve_stale_prompts(&ctx.session_id, true);
 
     let native_session = match ctx.native_session_id.clone() {
         Some(id) => tokio::task::spawn_blocking(move || native_store::claude_session(&id))

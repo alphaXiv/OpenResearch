@@ -274,6 +274,7 @@ pub async fn run(args: UpArgs) -> Result<()> {
     agent.shutdown().await;
     codex.shutdown().await;
     claude.shutdown().await;
+    state.chat.acp.shutdown().await;
     if let Some(server) = control_server {
         server.shutdown().await;
     }
@@ -702,6 +703,15 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             get(lit_sources_settings).post(set_lit_sources_settings),
         )
         .route("/api/harnesses", get(list_harnesses))
+        .route(
+            "/api/harnesses/acp",
+            get(list_acp_harnesses).post(create_acp_harness),
+        )
+        .route("/api/harnesses/acp/test", post(test_acp_harness))
+        .route(
+            "/api/harnesses/acp/{id}",
+            axum::routing::put(update_acp_harness).delete(delete_acp_harness),
+        )
         .route("/api/harnesses/{id}/snapshot", get(harness_snapshot))
         .route(
             "/api/harnesses/setup/commands",
@@ -741,6 +751,10 @@ fn router(state: AppState, remote_auth: Option<RemoteAuth>) -> Router {
             axum::routing::delete(delete_chat_session).patch(update_chat_session),
         )
         .route("/api/chat/sessions/{id}/messages", get(chat_messages))
+        .route(
+            "/api/chat/sessions/{id}/configuration",
+            post(set_chat_configuration),
+        )
         .route("/api/chat/sessions/{id}/worktree", get(session_worktree))
         .route("/api/chat/sessions/{id}/message", post(send_chat_message))
         .route("/api/chat/sessions/{id}/shell", post(run_shell_command))
@@ -2011,6 +2025,7 @@ async fn delete_project(State(state): State<AppState>, Path(id): Path<String>) -
         state.chat.opencode.kill_session(&session.id).await;
         state.chat.codex.kill_session(&session.id).await;
         state.chat.claude.forget_session(&session.id).await;
+        state.chat.acp.stop(&session.id).await;
     }
     store.delete_local_project(&id)?;
     for session in &sessions {
@@ -6526,6 +6541,66 @@ async fn list_harnesses(
     Json(harnesses_payload(&state, &q).await)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpHarnessInput {
+    name: String,
+    executable: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+}
+
+impl AcpHarnessInput {
+    fn definition(self, id: String) -> local::acp::Definition {
+        local::acp::Definition {
+            id,
+            name: self.name,
+            executable: self.executable,
+            arguments: self.arguments,
+        }
+    }
+}
+
+async fn list_acp_harnesses() -> Json<Value> {
+    Json(json!(local::acp::definitions()))
+}
+
+async fn create_acp_harness(
+    State(state): State<AppState>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    local::acp::save(definition.clone(), true).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn update_acp_harness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<AcpHarnessInput>,
+) -> ApiResult {
+    let definition = input.definition(id);
+    local::acp::save(definition.clone(), false).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!(definition)))
+}
+
+async fn delete_acp_harness(State(state): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    local::acp::remove(&id).map_err(bad_request)?;
+    *state.harnesses.lock().await = None;
+    Ok(Json(json!({"ok": true})))
+}
+
+async fn test_acp_harness(Json(input): Json<AcpHarnessInput>) -> ApiResult {
+    let definition = input.definition(format!("acp:{}", uuid::Uuid::new_v4()));
+    Ok(Json(
+        local::acp::test_connection(&definition)
+            .await
+            .map_err(bad_request)?,
+    ))
+}
+
 /// The shared detection path behind `GET /api/harnesses` and the startup
 /// preflight: the snapshot pass runs under the cache lock, so whoever arrives
 /// first does the probing and everyone else in the TTL window reads the same
@@ -6796,7 +6871,8 @@ fn spawn_catalog_fill(state: AppState, snapshot_at: std::time::Instant, fill_id:
                         if *at == snapshot_at {
                             if let Some(slot) =
                                 payload["harnesses"].as_array_mut().and_then(|all| {
-                                    all.iter_mut().find(|h| h["id"].as_str() == Some(info.id))
+                                    all.iter_mut()
+                                        .find(|h| h["id"].as_str() == Some(info.id.as_str()))
                                 })
                             {
                                 *slot = json!(info);
@@ -7132,6 +7208,75 @@ struct UpdateChatSessionReq {
     #[serde(default, deserialize_with = "present_nullable_string")]
     goal: Option<Option<String>>,
     autonomy: Option<Autonomy>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NativeConfigurationInput {
+    option_id: String,
+    value: String,
+}
+
+async fn set_chat_configuration(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<NativeConfigurationInput>,
+) -> ApiResult {
+    reject_if_moving(&state)?;
+    let store = Store::open()?;
+    let session = store
+        .get_chat_session(&id)?
+        .ok_or_else(|| not_found("chat session"))?;
+    let saved = store
+        .acp_session_state(&id)?
+        .ok_or_else(|| bad_request("This chat is not an ACP session"))?;
+    let client = match state.chat.acp.connected(&id).await {
+        Ok(client) => client,
+        Err(_) => {
+            let native_id = session.native_session_id.as_deref().ok_or_else(|| {
+                bad_request("Start the conversation before changing agent options")
+            })?;
+            let project = store
+                .get_local_project(&session.project_id)?
+                .ok_or_else(|| not_found("project"))?;
+            let session_id = id.clone();
+            let (cwd, _) = tokio::task::spawn_blocking(move || {
+                local::opencode::ensure_playbook(&project, &session_id, None)
+            })
+            .await
+            .map_err(bad_request)?
+            .map_err(bad_request)?;
+            let client = state
+                .chat
+                .acp
+                .get(&id, &saved.launch, &cwd)
+                .await
+                .map_err(bad_request)?;
+            match client.restore(native_id, &cwd).await {
+                Ok(configuration) => store.set_acp_configuration(&id, &configuration)?,
+                Err(error) => {
+                    state.chat.acp.stop(&id).await;
+                    return Err(bad_request(error));
+                }
+            }
+            client.end_turn();
+            client
+        }
+    };
+    client
+        .configure(&id, &input.option_id, &input.value)
+        .await
+        .map_err(bad_request)?;
+    let session = Store::open()?.get_chat_session(&id)?;
+    let session = state
+        .chat
+        .emit_session(session)
+        .await
+        .ok_or_else(|| bad_request("Chat session no longer exists"))?;
+    Ok(Json(local::chat::session_json(
+        &session,
+        state.chat.is_busy(&id).await,
+    )))
 }
 
 async fn update_chat_session(

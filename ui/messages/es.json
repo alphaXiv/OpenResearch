@@ -1263,5 +1263,18 @@
   "side_chat_empty": "Los chats laterales se eliminan cuando los cierras o sales de la app.",
   "workspace_more_tools": "Más herramientas",
   "side_chat_nested": "Un chat lateral no puede abrir su propio chat lateral.",
-  "side_chat_close_failed": "No se pudo eliminar el chat lateral: {error}"
+  "side_chat_close_failed": "No se pudo eliminar el chat lateral: {error}",
+  "acp_add": "Añadir agente ACP",
+  "acp_edit": "Editar agente ACP",
+  "acp_preset": "Preajuste",
+  "acp_custom": "Personalizado",
+  "acp_name": "Nombre",
+  "acp_executable": "Ejecutable",
+  "acp_arguments": "Argumentos",
+  "acp_argument": "Argumento {number}",
+  "acp_add_argument": "Añadir argumento",
+  "acp_test": "Probar conexión",
+  "acp_setup_help": "Instala e inicia sesión con la CLI del agente en la máquina del backend y vuelve a comprobar. Conectado confirma el protocolo; las credenciales del proveedor se comprueban al conversar.",
+  "acp_setup_docs": "Documentación de configuración",
+  "acp_edit_help": "Los cambios se aplican a los chats nuevos. Los chats existentes conservan su configuración de inicio."
 }

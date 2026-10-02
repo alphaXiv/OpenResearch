@@ -623,8 +623,8 @@ mod tests {
     #[test]
     fn setup_verification_distinguishes_install_login_and_automatic_readiness() {
         let mut h = crate::local::harness::HarnessInfo {
-            id: "opencode",
-            name: "OpenCode",
+            id: "opencode".into(),
+            name: "OpenCode".into(),
             ..blank_harness()
         };
         h.installed = true;
@@ -657,8 +657,8 @@ mod tests {
     /// A blank `HarnessInfo`; `HarnessInfo::new` is private to the harness module.
     fn blank_harness() -> crate::local::harness::HarnessInfo {
         crate::local::harness::HarnessInfo {
-            id: "claude-code",
-            name: "Claude Code",
+            id: "claude-code".into(),
+            name: "Claude Code".into(),
             installed: false,
             install_broken: false,
             bin_path: None,

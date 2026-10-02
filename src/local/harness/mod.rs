@@ -17,6 +17,7 @@
 //! in `registry()`; the dispatch, the ID list, the detection sweep, and the
 //! skill installer all pick it up with no further edits.
 
+pub(crate) mod acp;
 pub(crate) mod antigravity;
 pub(crate) mod claude;
 pub(crate) mod codex;
@@ -265,10 +266,10 @@ pub enum ResumeAction {
 pub trait Harness: Send + Sync {
     /// Canonical, stable id used on the wire and in the store
     /// (e.g. `"claude-code"`). Must be unique across the registry.
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
 
     /// Human-readable name for UI and prompts (e.g. `"Claude Code"`).
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     // --- chat capability ---------------------------------------------------
 
@@ -520,13 +521,19 @@ pub fn permission_id_for_mode(harness_id: &str, mode: PermissionMode) -> Option<
 /// The one registry. Every consumer — chat dispatch, detection sweep, the
 /// create-session allowlist, and the skill installer — iterates this.
 pub fn registry() -> Vec<Box<dyn Harness>> {
-    vec![
+    let mut harnesses: Vec<Box<dyn Harness>> = vec![
         Box::new(claude::ClaudeCode),
         Box::new(codex::Codex),
         Box::new(opencode::OpenCode),
         Box::new(cursor::Cursor),
         Box::new(antigravity::Antigravity),
-    ]
+    ];
+    harnesses.extend(
+        crate::local::acp::definitions()
+            .into_iter()
+            .map(|definition| Box::new(acp::Acp(definition)) as Box<dyn Harness>),
+    );
+    harnesses
 }
 
 /// A single self-contained request for [`Harness::one_shot`].
@@ -606,6 +613,15 @@ pub fn chat_harness(id: &str) -> Option<Box<dyn Harness>> {
         .find(|h| h.id() == id && h.supports_chat())
 }
 
+pub fn session_harness(id: &str, session_id: &str) -> Option<Box<dyn Harness>> {
+    if id.starts_with("acp:") {
+        let state = Store::open().ok()?.acp_session_state(session_id).ok()??;
+        return (state.launch.id == id)
+            .then(|| Box::new(acp::Acp(state.launch)) as Box<dyn Harness>);
+    }
+    chat_harness(id)
+}
+
 /// True if `id` names a chat-capable harness (create-session allowlist).
 pub fn is_chat_harness(id: &str) -> bool {
     registry().iter().any(|h| h.id() == id && h.supports_chat())
@@ -622,7 +638,17 @@ async fn detect_one(harness: &dyn Harness, snapshot: bool) -> Option<HarnessInfo
     // The per-harness wall clock joins the fill's probe timings as the
     // `"total"` row — the snapshot pass is covered by its own pass event.
     if !snapshot {
-        detect::record_probe_timing(harness.id(), "total", start.elapsed().as_millis() as u64);
+        let telemetry_id = match harness.id() {
+            "claude-code" => Some("claude-code"),
+            "codex" => Some("codex"),
+            "opencode" => Some("opencode"),
+            "cursor" => Some("cursor"),
+            "antigravity" => Some("antigravity"),
+            _ => None,
+        };
+        if let Some(telemetry_id) = telemetry_id {
+            detect::record_probe_timing(telemetry_id, "total", start.elapsed().as_millis() as u64);
+        }
     }
     if timing {
         eprintln!(

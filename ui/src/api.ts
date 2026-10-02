@@ -1514,7 +1514,7 @@ export const reportLocale = (locale: string): void => {
   void post<{ locale: string }>("/api/telemetry/locale", { locale }).catch(() => {});
 };
 
-export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity";
+export type HarnessId = "claude-code" | "codex" | "opencode" | "cursor" | "antigravity" | `acp:${string}`;
 
 export interface HarnessModel {
   id: string;
@@ -1543,6 +1543,7 @@ export interface HarnessModel {
 /** Display label for a harness model: the catalog's own name when it has one,
  * else prettified from the id. */
 export function harnessModelLabel(model: HarnessModel): string {
+  if (model.id === "default" && !model.displayName) return m.model_picker_default_model();
   if (!model.id.startsWith("orx-local-")) return model.displayName ?? modelLabel(model.id);
   const provider = model.displayName?.split(" · ").slice(1).join(" · ").replace(/ \(local\)$/, "");
   const endpoint = provider === "OpenAI-compatible server" || provider === "Custom endpoint" || provider === "Custom Endpoint"
@@ -1726,6 +1727,21 @@ export const getHarnesses = (refresh = false, retryRejected = false, signal?: Ab
   return get<{ harnesses: Harness[] }>(`/api/harnesses${query}`, signal).then((r) => r.harnesses);
 };
 
+export interface AcpDefinition {
+  id: `acp:${string}`;
+  name: string;
+  executable: string;
+  arguments: string[];
+}
+
+export const listAcpHarnesses = () => get<AcpDefinition[]>("/api/harnesses/acp");
+export const saveAcpHarness = (definition: Omit<AcpDefinition, "id">, id?: string) => id
+  ? put<AcpDefinition>(`/api/harnesses/acp/${encodeURIComponent(id)}`, definition)
+  : post<AcpDefinition>("/api/harnesses/acp", definition);
+export const removeAcpHarness = (id: string) => writeResponse(`/api/harnesses/acp/${encodeURIComponent(id)}`, { method: "DELETE" }).then((response) => json<{ ok: boolean }>(response));
+export const testAcpHarness = (definition: Omit<AcpDefinition, "id">) => post<{ status: string; agentInfo?: { version?: string } }>("/api/harnesses/acp/test", definition);
+export const setChatConfiguration = (sessionId: string, optionId: string, value: string) => post<ChatSession>(`/api/chat/sessions/${sessionId}/configuration`, { optionId, value });
+
 /** Slash-skill offered in the composer's `/` dropdown; expanded server-side. */
 export interface SkillInfo {
   name: string;
@@ -1843,6 +1859,7 @@ export interface ChatQuestionOption {
 
 /** An interactive request the user acts on before the harness continues. */
 export interface ChatPrompt {
+  nativeChoices?: { id: string; label: string; kind: string }[];
   kind: "plan" | "permission" | "question";
   resolved: boolean;
   plan?: string;
@@ -1903,6 +1920,8 @@ export interface ChatSession {
   id: string;
   projectId: string;
   harness: HarnessId;
+  harnessName?: string | null;
+  nativeConfiguration?: unknown;
   title: string | null;
   /** Who wrote `title`: `"fallback"` (first-line placeholder), `"generated"`
    * (harness auto-title), `"user"` (explicitly chosen — a rename, or an agent's
