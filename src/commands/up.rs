@@ -2070,22 +2070,26 @@ struct RenameExperimentRequest {
 }
 
 async fn rename_experiment(
+    State(state): State<AppState>,
     Path(id): Path<String>,
     Json(request): Json<RenameExperimentRequest>,
 ) -> ApiResult {
+    reject_if_moving(&state)?;
     let store = Store::open()?;
-    let mut exp = store
+    if store.get_local_experiment(&id)?.is_none() {
+        return Err(not_found("experiment"));
+    }
+    let title = match request.title.as_deref().map(str::trim) {
+        Some("") => {
+            return Err(bad_request("Experiment title cannot be empty"));
+        }
+        Some(t) => Some(t),
+        None => None,
+    };
+    store.update_local_experiment_title(&id, title)?;
+    let exp = store
         .get_local_experiment(&id)?
         .ok_or_else(|| not_found("experiment"))?;
-    match request.title.as_deref().map(str::trim) {
-        Some(t) if !t.is_empty() => {
-            exp.title = Some(t.to_string());
-        }
-        _ => {
-            exp.title = None;
-        }
-    }
-    store.update_local_experiment(&exp)?;
     Ok(Json(json!({
         "id": exp.id,
         "title": exp.title,

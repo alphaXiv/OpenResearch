@@ -1941,6 +1941,18 @@ impl Store {
         Ok(())
     }
 
+    /// Atomic title-only update by id without overwriting description or other row fields.
+    pub fn update_local_experiment_title(&self, id: &str, title: Option<&str>) -> Result<()> {
+        let rows = self.conn.execute(
+            "UPDATE local_experiments SET title = ?2, updated_at = ?3 WHERE id = ?1",
+            params![id, title, now_ms()],
+        )?;
+        if rows == 0 {
+            return Err(anyhow::anyhow!("Experiment not found: {}", id));
+        }
+        Ok(())
+    }
+
     pub fn set_experiments_archived(
         &mut self,
         ids: &[String],

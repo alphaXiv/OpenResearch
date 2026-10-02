@@ -250,7 +250,7 @@ impl LocalPlane {
     }
 
     pub async fn experiment_rename(&self, title: Option<&str>) -> Result<()> {
-        let mut exp = self.experiment()?.clone();
+        let exp = self.experiment()?.clone();
         match title {
             Some(title) => {
                 let trimmed = title.trim();
@@ -259,15 +259,14 @@ impl LocalPlane {
                         "Experiment title cannot be empty. Pass --clear to remove the custom title."
                     ));
                 }
-                exp.title = Some(trimmed.to_string());
-                self.store.update_local_experiment(&exp)?;
+                self.store
+                    .update_local_experiment_title(&exp.id, Some(trimmed))?;
                 println!("\u{2713} Experiment renamed.");
                 println!("  id:    {}", exp.id);
                 println!("  title: {}", trimmed);
             }
             None => {
-                exp.title = None;
-                self.store.update_local_experiment(&exp)?;
+                self.store.update_local_experiment_title(&exp.id, None)?;
                 println!(
                     "\u{2713} Experiment title cleared (reverted to slug \"{}\").",
                     exp.slug

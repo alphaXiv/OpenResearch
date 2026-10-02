@@ -284,6 +284,19 @@ mod tests {
         assert_eq!(cleared.title, None);
         assert_eq!(cleared.display_name(), "baseline-exp");
 
+        // Verify renaming preserves descriptions
+        let mut exp = store.get_local_experiment("exp1").unwrap().unwrap();
+        exp.description = Some("My important notes".into());
+        store.update_local_experiment(&exp).unwrap();
+
+        plane
+            .experiment_rename(Some("Renamed Again"))
+            .await
+            .unwrap();
+        let exp_after = store.get_local_experiment("exp1").unwrap().unwrap();
+        assert_eq!(exp_after.title.as_deref(), Some("Renamed Again"));
+        assert_eq!(exp_after.description.as_deref(), Some("My important notes"));
+
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
