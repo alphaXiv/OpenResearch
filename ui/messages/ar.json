@@ -1267,5 +1267,9 @@
   "window_minimize": "تصغير",
   "window_maximize": "تكبير",
   "window_restore": "استعادة",
-  "window_close": "إغلاق"
+  "window_close": "إغلاق",
+  "mermaid_show_source": "إظهار الشيفرة",
+  "mermaid_show_diagram": "إظهار المخطط",
+  "mermaid_could_not_render": "تعذّر عرض هذا المخطط: {error}",
+  "mermaid_not_a_diagram": "ليس مخططًا — يتم عرض الشيفرة بدلًا منه."
 }

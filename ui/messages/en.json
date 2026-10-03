@@ -1267,5 +1267,9 @@
   "window_minimize": "Minimize",
   "window_maximize": "Maximize",
   "window_restore": "Restore",
-  "window_close": "Close"
+  "window_close": "Close",
+  "mermaid_show_source": "Show source",
+  "mermaid_show_diagram": "Show diagram",
+  "mermaid_could_not_render": "This diagram could not be rendered: {error}",
+  "mermaid_not_a_diagram": "Not a diagram — showing the source instead."
 }

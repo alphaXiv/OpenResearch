@@ -1267,5 +1267,9 @@
   "window_minimize": "کوچک کردن",
   "window_maximize": "بزرگ کردن",
   "window_restore": "بازیابی",
-  "window_close": "بستن"
+  "window_close": "بستن",
+  "mermaid_show_source": "نمایش کد مبدأ",
+  "mermaid_show_diagram": "نمایش نمودار",
+  "mermaid_could_not_render": "این نمودار رندر نشد: {error}",
+  "mermaid_not_a_diagram": "نمودار نیست — به‌جای آن کد مبدأ نمایش داده می‌شود."
 }

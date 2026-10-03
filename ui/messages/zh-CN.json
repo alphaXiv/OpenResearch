@@ -1267,5 +1267,9 @@
   "window_minimize": "最小化",
   "window_maximize": "最大化",
   "window_restore": "还原",
-  "window_close": "关闭"
+  "window_close": "关闭",
+  "mermaid_show_source": "显示源代码",
+  "mermaid_show_diagram": "显示图表",
+  "mermaid_could_not_render": "无法渲染此图表：{error}",
+  "mermaid_not_a_diagram": "不是图表 — 已改为显示源代码。"
 }

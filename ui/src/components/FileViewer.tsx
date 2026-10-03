@@ -64,6 +64,8 @@ import { HtmlPreview } from "./HtmlPreview";
 import { OverleafButton } from "./OverleafPanel";
 import { MediaPreview, mediaPreviewKind } from "./MediaPreview";
 import { MediaToolbarSlot } from "./mediaToolbar";
+import { MermaidDiagram } from "./Mermaid";
+import { isMermaidFile } from "../mermaid";
 import { Md } from "./Md";
 import { Button, IconButton, IconButtonLink, Spinner, showAlert } from "./ui";
 
@@ -224,7 +226,10 @@ export function FileViewer({
   const isLatex = isLatexFile(path);
   // .html likewise, and its scripts run — see HtmlPreview.
   const isHtml = isHtmlFile(path);
-  const rendersByDefault = isMarkdown || isHtml;
+  // A standalone .mmd/.mermaid file is the document, so it draws by default and
+  // its source sits behind the same toggle markdown uses.
+  const isMermaid = isMermaidFile(path);
+  const rendersByDefault = isMarkdown || isHtml || isMermaid;
   const [activated, setActivated] = useState(false);
   const autoRun = !restored || activated;
   const activate = () => {
@@ -884,6 +889,10 @@ export function FileViewer({
               download={false}
             />
           </MediaToolbarSlot.Provider>
+        ) : isMermaid && !showSource ? (
+          <div ref={selectableContentRef} className="file-view-mermaid p-5">
+            <MermaidDiagram code={data.content} />
+          </div>
         ) : isMarkdown && !showSource ? (
           <div ref={selectableContentRef} className="file-view-md max-w-readable pt-4.5 px-5 pb-8 [&_.md]:text-base [&_.md_h1]:text-2xl [&_.md_h1]:mt-4.5 [&_.md_h1]:mx-0 [&_.md_h1]:mb-2 [&_.md_h2]:text-xl [&_.md_h2]:mt-4 [&_.md_h2]:mx-0 [&_.md_h2]:mb-2 [&_.md_h3]:text-lg">
             {artifactsMode ? (

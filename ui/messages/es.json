@@ -1267,5 +1267,9 @@
   "window_minimize": "Minimizar",
   "window_maximize": "Maximizar",
   "window_restore": "Restaurar",
-  "window_close": "Cerrar"
+  "window_close": "Cerrar",
+  "mermaid_show_source": "Mostrar el código",
+  "mermaid_show_diagram": "Mostrar el diagrama",
+  "mermaid_could_not_render": "No se pudo renderizar este diagrama: {error}",
+  "mermaid_not_a_diagram": "No es un diagrama: se muestra el código en su lugar."
 }
