@@ -8587,11 +8587,15 @@ async fn complete_chat_spawn(
             None
         };
         if let Some(Err(error)) = &report {
-            store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Running)?;
+            // A malformed report cannot improve on retry. Retire the helper
+            // under the completion lease checks and keep processing later rows.
+            eprintln!(
+                "orx up: could not summarize spawned agent {}: {error}",
+                spawn.session_id
+            );
             if let Some(guard) = parent.as_mut() {
                 guard.release().await;
             }
-            return Err(anyhow!("could not summarize spawned agent: {error}"));
         }
         if !store.update_chat_spawn_completion(&spawn.session_id, &token, &lease_token, None)? {
             store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Running)?;
@@ -10923,6 +10927,51 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         drop(next);
         drop(guard);
         drop(other);
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_helper_report_retires_delegation_without_blocking_later_helpers() {
+        let (store, dir) = temp_store("malformed-report");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        session(&store, "child");
+        session(&store, "parent");
+        session(&store, "later");
+        spawn_row(&store, "child", "parent", ChatSpawnState::Running);
+        spawn_row(&store, "later", "missing-parent", ChatSpawnState::Running);
+        let mut message = assistant_message("a1", None, "reply");
+        message.parts_json = "{".into();
+        store.upsert_chat_message(&message).unwrap();
+        assert!(spawn_report_text(&store, &spawn_fixture("child", "parent"), false).is_err());
+        assert_eq!(
+            store.list_chat_spawns(ChatSpawnState::Running).unwrap()[0].session_id,
+            "child"
+        );
+        let host = bare_host();
+
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .expect("a malformed report must not abort the completion sweep");
+
+        let done = store.list_chat_spawns(ChatSpawnState::Done).unwrap();
+        assert_eq!(
+            done.iter()
+                .map(|spawn| spawn.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child", "later"]
+        );
+        assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 0);
+        assert_eq!(store.count_live_chat_spawns("missing-parent").unwrap(), 0);
+        assert!(store.list_chat_messages("parent").unwrap().is_empty());
+        for id in ["child", "parent", "later"] {
+            assert!(!store.chat_turn_leased(id).unwrap());
+            assert!(!host.is_busy(id).await);
+        }
+        assert!(host.durable_turns.lock().unwrap().is_empty());
+        assert!(host.turns.lock().await.is_empty());
         drop(host);
         drop(store);
         drop(root);
