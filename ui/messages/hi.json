@@ -1267,5 +1267,9 @@
   "window_minimize": "छोटा करें",
   "window_maximize": "बड़ा करें",
   "window_restore": "पुनर्स्थापित करें",
-  "window_close": "बंद करें"
+  "window_close": "बंद करें",
+  "mermaid_show_source": "स्रोत दिखाएँ",
+  "mermaid_show_diagram": "आरेख दिखाएँ",
+  "mermaid_could_not_render": "यह आरेख प्रदर्शित नहीं हो सका: {error}",
+  "mermaid_not_a_diagram": "यह आरेख नहीं है — इसके बजाय स्रोत दिखाया जा रहा है।"
 }
