@@ -92,6 +92,10 @@ test('serializes lifecycle transitions for the same worktree', async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'orx-dev-slot-lock-'))
   try {
     const lock = path.join(root, 'lifecycle-lock')
+    if (process.platform === 'win32') {
+      await assert.rejects(acquireAdvisoryLock(lock), /requires macOS or Linux/)
+      return
+    }
     const releaseFirst = await acquireAdvisoryLock(lock)
     let secondAcquired = false
     const second = acquireAdvisoryLock(lock).then(async (release) => {
