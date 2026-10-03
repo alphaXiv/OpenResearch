@@ -316,7 +316,11 @@ pub(crate) async fn interactive_args(
         file
     };
     #[cfg(unix)]
-    if !master_is_running(target).await? {
+    if master_is_running(target).await? {
+        if !master_is_responsive(target).await {
+            master_exit(target).await?;
+        }
+    } else {
         match std::fs::remove_file(control_path(target)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -341,6 +345,23 @@ pub(crate) async fn master_is_running(_target: &SshTarget) -> Result<bool> {
     Ok(false)
 }
 
+#[cfg(not(unix))]
+pub(crate) async fn master_is_responsive(_target: &SshTarget) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+pub(crate) async fn master_exit(_target: &SshTarget) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parse_mux_pid(s: &str) -> Option<i32> {
+    let start = s.find("(pid=")? + 5;
+    let end = s[start..].find(')')? + start;
+    s[start..end].trim().parse().ok()
+}
+
 #[cfg(unix)]
 pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     prepare_control_dir()?;
@@ -348,19 +369,120 @@ pub(crate) async fn master_is_running(target: &SshTarget) -> Result<bool> {
     if !path.try_exists()? {
         return Ok(false);
     }
-    let status = Command::new("ssh")
-        .args(["-O", "check", "-S"])
-        .arg(path)
+    let mut cmd = Command::new("ssh");
+    cmd.args(["-O", "check", "-S"]).arg(&path);
+    cmd.args(&target.extra_opts);
+    cmd.arg("--")
+        .arg(&target.dest)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let status = match tokio::time::timeout(Duration::from_secs(2), cmd.status()).await {
+        Ok(Ok(status)) => status,
+        _ => {
+            let _ = std::fs::remove_file(&path);
+            return Ok(false);
+        }
+    };
+    if !status.success() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+pub(crate) async fn master_is_responsive(target: &SshTarget) -> bool {
+    let path = control_path(target);
+    if !path.try_exists().unwrap_or(false) {
+        return false;
+    }
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("-o")
+        .arg("ControlMaster=no")
+        .arg("-S")
+        .arg(&path);
+    cmd.args(&target.extra_opts);
+    cmd.arg("--")
+        .arg(&target.dest)
+        .arg("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+
+    let probe = tokio::time::timeout(Duration::from_secs(5), cmd.status()).await;
+    matches!(probe, Ok(Ok(s)) if s.success())
+}
+
+#[cfg(unix)]
+pub(crate) async fn master_exit(target: &SshTarget) -> Result<()> {
+    prepare_control_dir()?;
+    let path = control_path(target);
+    if !path.try_exists().unwrap_or(false) && std::fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
+
+    let pid = {
+        let mut check = Command::new("ssh");
+        check.args(["-O", "check", "-S"]).arg(&path);
+        check.args(&target.extra_opts);
+        check
+            .arg("--")
+            .arg(&target.dest)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+
+        if let Ok(Ok(out)) = tokio::time::timeout(Duration::from_secs(2), check.output()).await {
+            let combined = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            parse_mux_pid(&combined).filter(|&p| p > 1)
+        } else {
+            None
+        }
+    };
+
+    let mut exit_cmd = Command::new("ssh");
+    exit_cmd.args(["-O", "exit", "-S"]).arg(&path);
+    exit_cmd.args(&target.extra_opts);
+    exit_cmd
         .arg("--")
         .arg(&target.dest)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .status()
-        .await
-        .map_err(|e| anyhow!("Could not check the SSH master: {e}"))?;
-    Ok(status.success())
+        .kill_on_drop(true);
+    let _ = tokio::time::timeout(Duration::from_secs(2), exit_cmd.status()).await;
+
+    if let Some(pid) = pid {
+        for _ in 0..10 {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(())
 }
 
 /// Run a command on `target` over ssh, feeding `stdin` if given, returning stdout.
@@ -836,6 +958,45 @@ mod tests {
         ] {
             assert!(opts.iter().any(|value| value == option));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_mux_pid_extracts_process_id() {
+        assert_eq!(parse_mux_pid("Master running (pid=12345)\n"), Some(12345));
+        assert_eq!(parse_mux_pid("Master running (pid=42)"), Some(42));
+        assert_eq!(
+            parse_mux_pid("Control socket connect(/path): Connection refused"),
+            None
+        );
+        assert_eq!(parse_mux_pid(""), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn master_exit_removes_socket_file() {
+        use std::os::unix::net::UnixListener;
+        let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
+        prepare_control_dir().unwrap();
+        let path = control_path(&target);
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(path.exists());
+        master_exit(&target).await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn master_is_responsive_reports_false_for_missing_or_unresponsive_socket() {
+        let target = SshTarget::alias(&format!("orx-test-{}", uuid::Uuid::new_v4()));
+        assert!(!master_is_responsive(&target).await);
+
+        use std::os::unix::net::UnixListener;
+        prepare_control_dir().unwrap();
+        let path = control_path(&target);
+        drop(UnixListener::bind(&path).unwrap());
+        assert!(!master_is_responsive(&target).await);
+        let _ = std::fs::remove_file(path);
     }
 
     #[cfg(unix)]
