@@ -2415,7 +2415,17 @@ pub struct ChatHost {
     /// Sink for mid-turn steering text, present only while a capable harness is running.
     steering: std::sync::Mutex<HashMap<String, SteerSink>>,
     queue_dispatch_in_flight: std::sync::Mutex<HashMap<String, String>>,
+    #[cfg(test)]
+    test_turn: Option<TestTurn>,
 }
+
+#[cfg(test)]
+type TestTurn = fn(
+    &mut TurnCtx,
+) -> std::result::Result<
+    crate::local::harness::TurnOutcome,
+    crate::local::harness::TurnFailure,
+>;
 
 struct PendingClientTurnGuard {
     host: Arc<ChatHost>,
@@ -3328,6 +3338,8 @@ impl ChatHost {
             queue_cancellation_held: std::sync::Mutex::new(HashSet::new()),
             steering: std::sync::Mutex::new(HashMap::new()),
             queue_dispatch_in_flight: std::sync::Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            test_turn: None,
         }
     }
 
@@ -5748,14 +5760,21 @@ impl ChatHost {
                     None,
                 )
             });
-            let result = match crate::local::harness::chat_harness(&ctx.harness) {
-                Some(harness) => harness.run_turn(&mut ctx).await,
-                None => Err(crate::local::harness::TurnFailure {
-                    kind: "unknown_harness",
-                    message: format!("unknown harness: {}", ctx.harness),
-                    delivery: DeliveryState::Rejected,
-                }),
-            };
+            let result = async {
+                #[cfg(test)]
+                if let Some(script) = ctx.host.test_turn {
+                    return script(&mut ctx);
+                }
+                match crate::local::harness::chat_harness(&ctx.harness) {
+                    Some(harness) => harness.run_turn(&mut ctx).await,
+                    None => Err(crate::local::harness::TurnFailure {
+                        kind: "unknown_harness",
+                        message: format!("unknown harness: {}", ctx.harness),
+                        delivery: DeliveryState::Rejected,
+                    }),
+                }
+            }
+            .await;
             drop(steer_route);
             if let Some(mut steering) = ctx.steering.take() {
                 steering.close();
@@ -5842,6 +5861,13 @@ impl ChatHost {
                 .finish_turn(&ctx.session_id, Some(&ctx.assistant.id))
                 .await;
             ctx.host.drain_queue(&ctx.session_id).await;
+            #[cfg(test)]
+            if ctx.host.test_turn.is_some() {
+                ctx.host.emit(
+                    "chat.test.turn_finished",
+                    json!({ "sessionId": ctx.session_id, "turnId": ctx.turn_id }),
+                );
+            }
         });
         turns.insert(
             sid.clone(),
@@ -8428,6 +8454,7 @@ async fn process_chat_spawns(
         return Ok(());
     }
     store.prune_chat_spawns()?;
+    store.prune_run_wakeups()?;
     for spawn in store.list_chat_spawns(ChatSpawnState::Pending)? {
         if moving() {
             return Ok(());
@@ -8505,48 +8532,113 @@ async fn process_chat_spawns(
         // The durable lease, not just this process's turn map: a helper running
         // under another `orx up` (or under one that has since restarted) is
         // still working, and reporting it finished would abandon the task.
-        if chat.is_busy(&spawn.session_id).await || store.chat_turn_leased(&spawn.session_id)? {
+        if chat.is_busy(&spawn.session_id).await
+            || store.chat_turn_leased(&spawn.session_id)?
+            || store.session_has_run_wakeups(&spawn.session_id)?
+        {
             continue;
         }
-        if !spawn.wake_parent || store.get_chat_session(&spawn.parent_session_id)?.is_none() {
-            // Nobody to tell — fire-and-forget, or a deleted parent. The
-            // helper's own session stays either way.
-            let Some(token) = store.claim_chat_spawn(
-                &spawn.session_id,
-                ChatSpawnState::Running,
-                ChatSpawnState::Waking,
-            )?
-            else {
-                continue;
-            };
-            store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Done)?;
-            continue;
-        }
-        // Re-read rather than trusting the listing: earlier iterations await
-        // whole turns, and a helper that finished cleanly during that window
-        // would otherwise be reported as interrupted and its reply discarded.
-        let interrupted = store
-            .get_chat_spawn(&spawn.session_id)?
-            .is_some_and(|row| row.finished_at.is_none());
-        let text = match spawn_report_text(&store, &spawn, interrupted) {
-            Ok(text) => text,
-            Err(err) => {
-                eprintln!("orx up: could not summarize spawned agent: {err}");
-                let Some(token) = store.claim_chat_spawn(
-                    &spawn.session_id,
-                    ChatSpawnState::Running,
-                    ChatSpawnState::Waking,
-                )?
-                else {
-                    continue;
-                };
-                store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Done)?;
-                continue;
-            }
-        };
-        store = deliver_wake_up(chat, store, &spawn, ChatSpawnState::Running, text).await?;
+        store = complete_chat_spawn(chat, store, &spawn).await?;
     }
     Ok(())
+}
+
+/// Reserve the parent before the helper so a busy parent cannot freeze the
+/// helper's continuation. The helper lease stays held through settlement.
+async fn complete_chat_spawn(
+    chat: &Arc<ChatHost>,
+    store: Store,
+    spawn: &crate::store::ChatSpawn,
+) -> Result<Store> {
+    let notify = spawn.wake_parent && store.get_chat_session(&spawn.parent_session_id)?.is_some();
+    let mut parent_guard = if notify {
+        let Some(guard) = TurnGuard::claim_hidden(chat, &spawn.parent_session_id).await else {
+            return Ok(store);
+        };
+        Some(guard)
+    } else {
+        None
+    };
+    let Some(mut helper_guard) = TurnGuard::claim_hidden(chat, &spawn.session_id).await else {
+        if let Some(guard) = &mut parent_guard {
+            guard.release().await;
+        }
+        return Ok(store);
+    };
+    let lease_token = chat.durable_turns.lock().unwrap()[&spawn.session_id].clone();
+    let parent = &mut parent_guard;
+    let result = async move {
+        let Some(token) = store.claim_completed_chat_spawn(&spawn.session_id, &lease_token)? else {
+            if let Some(guard) = parent.as_mut() {
+                guard.release().await;
+            }
+            return Ok(store);
+        };
+        let report = if notify {
+            let current = store
+                .get_chat_spawn(&spawn.session_id)?
+                .ok_or_else(|| anyhow!("spawn disappeared during completion"))?;
+            Some(spawn_report_text(
+                &store,
+                &current,
+                current.finished_at.is_none(),
+            ))
+        } else {
+            None
+        };
+        if let Some(Err(error)) = &report {
+            // A malformed report cannot improve on retry. Retire the helper
+            // under the completion lease checks and keep processing later rows.
+            eprintln!(
+                "orx up: could not summarize spawned agent {}: {error}",
+                spawn.session_id
+            );
+            if let Some(guard) = parent.as_mut() {
+                guard.release().await;
+            }
+        }
+        if !store.update_chat_spawn_completion(&spawn.session_id, &token, &lease_token, None)? {
+            store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Running)?;
+            if let Some(guard) = parent.as_mut() {
+                guard.release().await;
+            }
+            return Ok(store);
+        }
+        let next = if let (Some(Ok(text)), Some(guard)) = (report, parent.take()) {
+            match chat
+                .send_hidden_message(&spawn.parent_session_id, text, guard)
+                .await
+            {
+                Ok(TurnSubmission::Started(_)) => ChatSpawnState::Done,
+                outcome => {
+                    if let Err(error) = outcome {
+                        eprintln!("orx up: could not wake a spawned agent's parent: {error}");
+                    }
+                    ChatSpawnState::Running
+                }
+            }
+        } else {
+            ChatSpawnState::Done
+        };
+        if !store.update_chat_spawn_completion(
+            &spawn.session_id,
+            &token,
+            &lease_token,
+            Some(next),
+        )? {
+            store.settle_chat_spawn(&spawn.session_id, &token, ChatSpawnState::Running)?;
+            return Err(anyhow!(
+                "helper completion lease or spawn claim expired during delivery"
+            ));
+        }
+        Ok(store)
+    }
+    .await;
+    if let Some(guard) = &mut parent_guard {
+        guard.release().await;
+    }
+    helper_guard.release().await;
+    result
 }
 
 /// Wake the parent and retire the row, but only together: a row that stays in
@@ -10477,6 +10569,462 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         ))
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn quiet_delegation_holds_capacity_while_experiment_wakeup_is_pending() {
+        let (store, dir) = temp_store("quiet-pending");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        session(&store, "child");
+        session(&store, "parent");
+        store
+            .create_chat_spawn(&crate::store::ChatSpawn {
+                wake_parent: false,
+                finished_at: None,
+                ..spawn_fixture("child", "parent")
+            })
+            .unwrap();
+        let token = store
+            .claim_chat_spawn("child", ChatSpawnState::Pending, ChatSpawnState::Starting)
+            .unwrap()
+            .unwrap();
+        store
+            .settle_chat_spawn("child", &token, ChatSpawnState::Running)
+            .unwrap();
+        store.mark_chat_spawn_finished("child").unwrap();
+        store.upsert_run(&run("running")).unwrap();
+        store.register_run_wakeup("run_x", "child").unwrap();
+        let host = bare_host();
+
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .list_chat_spawns(ChatSpawnState::Running)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(store
+            .list_chat_spawns(ChatSpawnState::Done)
+            .unwrap()
+            .is_empty());
+        assert!(!host.is_busy("parent").await);
+        store.upsert_run(&run("cancelled")).unwrap();
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 0);
+        assert!(store.list_chat_messages("child").unwrap().is_empty());
+        assert!(store.list_chat_messages("parent").unwrap().is_empty());
+        assert!(!store.session_has_run_wakeups("child").unwrap());
+        assert!(host.durable_turns.lock().unwrap().is_empty());
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    fn delegation_turn(
+        ctx: &mut TurnCtx,
+    ) -> std::result::Result<crate::local::harness::TurnOutcome, crate::local::harness::TurnFailure>
+    {
+        let store = Store::open().unwrap();
+        let admitted = store
+            .get_chat_turn(&ctx.session_id, &ctx.turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.assistant_message_id, ctx.assistant.id);
+        let calls = store
+            .list_chat_messages(&ctx.session_id)
+            .unwrap()
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count();
+        let reply = match (ctx.session_id.as_str(), calls) {
+            ("child", 0) => {
+                let mut experiment = run("running");
+                experiment.id = "delegation-run".into();
+                experiment.chat_session_id = Some("child".into());
+                store.upsert_run(&experiment).unwrap();
+                store.register_run_wakeup(&experiment.id, "child").unwrap();
+                "waiting".to_string()
+            }
+            ("child", 1) => format!("evaluation:{}", ctx.turn_id),
+            ("parent", 0) => ctx.text.clone(),
+            call => panic!("unexpected provider call: {call:?}"),
+        };
+        ctx.assistant.parts.push(WirePart::text("reply", reply));
+        Ok(crate::local::harness::TurnOutcome::Completed)
+    }
+
+    fn control_turn(
+        ctx: &mut TurnCtx,
+    ) -> std::result::Result<crate::local::harness::TurnOutcome, crate::local::harness::TurnFailure>
+    {
+        if ctx.session_id == "child" {
+            ctx.assistant.parts.push(WirePart::text(
+                "reply",
+                format!("evaluation:{}", ctx.turn_id),
+            ));
+            Ok(crate::local::harness::TurnOutcome::Completed)
+        } else {
+            delegation_turn(ctx)
+        }
+    }
+
+    fn repeated_turn(
+        ctx: &mut TurnCtx,
+    ) -> std::result::Result<crate::local::harness::TurnOutcome, crate::local::harness::TurnFailure>
+    {
+        let store = Store::open().unwrap();
+        let calls = store
+            .list_chat_messages(&ctx.session_id)
+            .unwrap()
+            .iter()
+            .filter(|message| message.role == "assistant")
+            .count();
+        match (ctx.session_id.as_str(), calls) {
+            ("child", 1) => {
+                let mut experiment = run("running");
+                experiment.id = "delegation-run-next".into();
+                experiment.chat_session_id = Some("child".into());
+                store.upsert_run(&experiment).unwrap();
+                store.register_run_wakeup(&experiment.id, "child").unwrap();
+                ctx.assistant
+                    .parts
+                    .push(WirePart::text("reply", "waiting again"));
+                Ok(crate::local::harness::TurnOutcome::Completed)
+            }
+            ("child", 2) => control_turn(ctx),
+            _ => delegation_turn(ctx),
+        }
+    }
+
+    fn two_wakeups_turn(
+        ctx: &mut TurnCtx,
+    ) -> std::result::Result<crate::local::harness::TurnOutcome, crate::local::harness::TurnFailure>
+    {
+        let store = Store::open().unwrap();
+        let first = ctx.session_id == "child"
+            && store
+                .list_chat_messages("child")
+                .unwrap()
+                .iter()
+                .all(|message| message.role != "assistant");
+        let result = repeated_turn(ctx);
+        if first {
+            let mut experiment = run("running");
+            experiment.id = "delegation-run-next".into();
+            experiment.chat_session_id = Some("child".into());
+            store.upsert_run(&experiment).unwrap();
+            store.register_run_wakeup(&experiment.id, "child").unwrap();
+        }
+        result
+    }
+
+    async fn delegation_idle(
+        events: &mut broadcast::Receiver<(&'static str, Value)>,
+        session_id: &str,
+    ) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (event, payload) = events.recv().await.unwrap();
+                if event == "chat.test.turn_finished" && payload["sessionId"] == session_id {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("delegated turn for {session_id} should reach idle"));
+    }
+
+    async fn delegation_resumes(status: &str) {
+        let (store, dir) = temp_store(status);
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        store
+            .create_local_project(&crate::local::model::LocalProject {
+                id: "p1".into(),
+                name: "Delegation".into(),
+                slug: "delegation".into(),
+                github_owner: String::new(),
+                github_repo: String::new(),
+                github_sync_enabled: false,
+                baseline_branch: "main".into(),
+                repo_path: dir.join("repo").display().to_string(),
+                run_command: None,
+                paper_id: None,
+                created_at: 1,
+                updated_at: 1,
+            })
+            .unwrap();
+        session(&store, "child");
+        session(&store, "parent");
+        store
+            .set_chat_session_title("child", "Child", "user")
+            .unwrap();
+        store
+            .set_chat_session_title("parent", "Parent", "user")
+            .unwrap();
+        spawn_row(&store, "child", "parent", ChatSpawnState::Pending);
+        let mut host = bare_host();
+        Arc::get_mut(&mut host).unwrap().test_turn = Some(match status {
+            "control" => control_turn,
+            "repeated" => repeated_turn,
+            "two" => two_wakeups_turn,
+            _ => delegation_turn,
+        });
+        let mut events = host.subscribe();
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+        delegation_idle(&mut events, "child").await;
+        if status == "restart" {
+            drop(events);
+            drop(host);
+            host = bare_host();
+            Arc::get_mut(&mut host).unwrap().test_turn = Some(delegation_turn);
+            events = host.subscribe();
+        }
+
+        let run_ids: &[&str] = match status {
+            "control" => &[],
+            "repeated" | "two" => &["delegation-run", "delegation-run-next"],
+            _ => &["delegation-run"],
+        };
+        for run_id in run_ids {
+            process_chat_spawns(&host, Store::open().unwrap(), None)
+                .await
+                .unwrap();
+            assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 1);
+            assert!(store.list_chat_messages("parent").unwrap().is_empty());
+            let mut terminal = run(if status == "failed" { "failed" } else { "done" });
+            terminal.id = (*run_id).into();
+            terminal.chat_session_id = Some("child".into());
+            terminal.ended_at = Some(now_ms());
+            store.upsert_run(&terminal).unwrap();
+            process_run_wakeups(&host, Store::open().unwrap(), None)
+                .await
+                .unwrap();
+            assert!(
+                host.is_busy("child").await,
+                "terminal continuation must start"
+            );
+            delegation_idle(&mut events, "child").await;
+        }
+        let child_messages = store.list_chat_messages("child").unwrap();
+        let evaluation = child_messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant")
+            .unwrap();
+        let evaluation_parts: Vec<WirePart> = serde_json::from_str(&evaluation.parts_json).unwrap();
+        let evaluation_identity = evaluation_parts[0].text.as_ref().unwrap();
+        if status == "busy-parent" {
+            host.turns
+                .lock()
+                .await
+                .insert("parent".into(), TurnState::Reserved { turn_id: None });
+            process_chat_spawns(&host, Store::open().unwrap(), None)
+                .await
+                .unwrap();
+            assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 1);
+            assert!(store.list_chat_messages("parent").unwrap().is_empty());
+            assert!(!store.chat_turn_leased("child").unwrap());
+            host.turns.lock().await.remove("parent");
+        }
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.count_live_chat_spawns("parent").unwrap(),
+            0,
+            "closing notification must settle the delegation"
+        );
+        delegation_idle(&mut events, "parent").await;
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+        let parent_messages = store.list_chat_messages("parent").unwrap();
+        assert_eq!(parent_messages.len(), 1);
+        let parent_parts: Vec<WirePart> =
+            serde_json::from_str(&parent_messages[0].parts_json).unwrap();
+        assert!(parent_parts[0]
+            .text
+            .as_ref()
+            .unwrap()
+            .contains(evaluation_identity));
+        assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 0);
+        assert!(host.turns.lock().await.is_empty());
+        assert!(host.durable_turns.lock().unwrap().is_empty());
+        drop(events);
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_waits_for_successful_experiment_evaluation() {
+        delegation_resumes("done").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_waits_for_failed_experiment_evaluation() {
+        delegation_resumes("failed").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_reports_one_turn_control_once() {
+        delegation_resumes("control").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_waits_for_repeated_experiment_continuations() {
+        delegation_resumes("repeated").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_waits_for_two_outstanding_experiment_wakeups() {
+        delegation_resumes("two").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_survives_restart_while_waiting_for_experiment() {
+        delegation_resumes("restart").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn delegation_retries_busy_parent_without_reusing_waiting_reply() {
+        delegation_resumes("busy-parent").await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn helper_completion_reservation_excludes_other_hosts_until_settlement() {
+        let (store, dir) = temp_store("completion-reservation");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        session(&store, "child");
+        spawn_row(&store, "child", "parent", ChatSpawnState::Running);
+        let host = bare_host();
+        let other = bare_host();
+        let mut guard = TurnGuard::claim_hidden(&host, "child").await.unwrap();
+        let lease = host.durable_turns.lock().unwrap()["child"].clone();
+        let token = store
+            .claim_completed_chat_spawn("child", &lease)
+            .unwrap()
+            .unwrap();
+
+        assert!(TurnGuard::claim_hidden(&other, "child").await.is_none());
+        assert!(store
+            .update_chat_spawn_completion("child", &token, &lease, Some(ChatSpawnState::Done))
+            .unwrap());
+        guard.release().await;
+        let mut next = TurnGuard::claim_hidden(&other, "child").await.unwrap();
+        next.release().await;
+
+        assert!(host.durable_turns.lock().unwrap().is_empty());
+        assert!(other.durable_turns.lock().unwrap().is_empty());
+        drop(next);
+        drop(guard);
+        drop(other);
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn malformed_helper_report_retires_delegation_without_blocking_later_helpers() {
+        let (store, dir) = temp_store("malformed-report");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        session(&store, "child");
+        session(&store, "parent");
+        session(&store, "later");
+        spawn_row(&store, "child", "parent", ChatSpawnState::Running);
+        spawn_row(&store, "later", "missing-parent", ChatSpawnState::Running);
+        let mut message = assistant_message("a1", None, "reply");
+        message.parts_json = "{".into();
+        store.upsert_chat_message(&message).unwrap();
+        assert!(spawn_report_text(&store, &spawn_fixture("child", "parent"), false).is_err());
+        assert_eq!(
+            store.list_chat_spawns(ChatSpawnState::Running).unwrap()[0].session_id,
+            "child"
+        );
+        let host = bare_host();
+
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .expect("a malformed report must not abort the completion sweep");
+
+        let done = store.list_chat_spawns(ChatSpawnState::Done).unwrap();
+        assert_eq!(
+            done.iter()
+                .map(|spawn| spawn.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["child", "later"]
+        );
+        assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 0);
+        assert_eq!(store.count_live_chat_spawns("missing-parent").unwrap(), 0);
+        assert!(store.list_chat_messages("parent").unwrap().is_empty());
+        for id in ["child", "parent", "later"] {
+            assert!(!store.chat_turn_leased(id).unwrap());
+            assert!(!host.is_busy(id).await);
+        }
+        assert!(host.durable_turns.lock().unwrap().is_empty());
+        assert!(host.turns.lock().await.is_empty());
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_parent_notification_releases_helper_and_parent_leases() {
+        let (store, dir) = temp_store("notification-failure");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
+        session(&store, "child");
+        session(&store, "parent");
+        spawn_row(&store, "child", "parent", ChatSpawnState::Running);
+        let host = bare_host();
+        let mut events = host.subscribe();
+
+        // No project exists, so public turn preparation cannot launch the
+        // parent. The delegation must be handed back rather than lost.
+        process_chat_spawns(&host, Store::open().unwrap(), None)
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let (event, payload) = events.recv().await.unwrap();
+                if event == "chat.busy"
+                    && payload["sessionId"] == "parent"
+                    && payload["busy"] == false
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(store.count_live_chat_spawns("parent").unwrap(), 1);
+        assert_eq!(
+            store
+                .list_chat_spawns(ChatSpawnState::Running)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!store.chat_turn_leased("child").unwrap());
+        assert!(!store.chat_turn_leased("parent").unwrap());
+        assert!(host.turns.lock().await.is_empty());
+        drop(events);
+        drop(host);
+        drop(store);
+        drop(root);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[tokio::test]
     async fn a_helper_whose_turn_is_already_held_keeps_its_row_pending() {
         let (store, dir) = temp_store("spawn-busy");
@@ -10687,9 +11235,10 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn a_finished_helper_whose_parent_is_gone_retires_quietly() {
         let (store, dir) = temp_store("spawn-orphan");
+        let root = crate::store::TestDataDirGuard::new(dir.clone());
         session(&store, "child");
         spawn_row(&store, "child", "deleted_parent", ChatSpawnState::Running);
         let host = bare_host();
@@ -10709,6 +11258,8 @@ with other project runs using `orx runs p1` and inspect the file located by `orx
             1
         );
         drop(store);
+        drop(host);
+        drop(root);
         let _ = std::fs::remove_dir_all(dir);
     }
 
