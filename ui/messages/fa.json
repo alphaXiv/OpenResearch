@@ -1267,5 +1267,15 @@
   "window_minimize": "کوچک کردن",
   "window_maximize": "بزرگ کردن",
   "window_restore": "بازیابی",
-  "window_close": "بستن"
+  "window_close": "بستن",
+  "sidebar_project_details": "جزئیات پروژه · {name}",
+  "sidebar_project_chats": "{count} گفت‌وگو",
+  "sidebar_edit_project": "ویرایش پروژه",
+  "sidebar_source_folder": "پوشهٔ منبع",
+  "sidebar_pin_project": "سنجاق کردن",
+  "sidebar_unpin_project": "برداشتن سنجاق",
+  "sidebar_reveal_project": "نمایش در Finder",
+  "sidebar_filter": "فیلتر",
+  "sidebar_group_by": "گروه‌بندی بر اساس",
+  "sidebar_one_list": "در یک فهرست"
 }

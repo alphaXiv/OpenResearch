@@ -1267,5 +1267,15 @@
   "window_minimize": "Minimizar",
   "window_maximize": "Maximizar",
   "window_restore": "Restaurar",
-  "window_close": "Cerrar"
+  "window_close": "Cerrar",
+  "sidebar_project_details": "Detalles del proyecto · {name}",
+  "sidebar_project_chats": "{count} chats",
+  "sidebar_edit_project": "Editar proyecto",
+  "sidebar_source_folder": "Carpeta de origen",
+  "sidebar_pin_project": "Fijar",
+  "sidebar_unpin_project": "Desfijar",
+  "sidebar_reveal_project": "Mostrar en Finder",
+  "sidebar_filter": "Filtrar",
+  "sidebar_group_by": "Agrupar por",
+  "sidebar_one_list": "En una lista"
 }

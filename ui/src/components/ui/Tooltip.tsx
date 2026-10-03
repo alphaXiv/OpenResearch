@@ -5,10 +5,12 @@ export function Tooltip({
   content,
   children,
   className,
+  interactive = false,
 }: {
   content: string;
   children: ReactNode;
   className?: string;
+  interactive?: boolean;
 }) {
   const triggerRef = useRef<HTMLSpanElement>(null);
   const tooltipRef = useRef<HTMLSpanElement>(null);
@@ -26,7 +28,8 @@ export function Tooltip({
   }
 
   function hide() {
-    if (!triggerRef.current?.matches(":hover, :focus")) tooltipRef.current?.hidePopover();
+    const trigger = triggerRef.current;
+    if (!trigger?.matches(":hover, :focus-visible") && !trigger?.querySelector(":focus-visible")) tooltipRef.current?.hidePopover();
   }
 
   useEffect(() => {
@@ -46,12 +49,14 @@ export function Tooltip({
         "group relative inline-flex cursor-help rounded-full outline-none focus-visible:outline-2 focus-visible:outline-text focus-visible:outline-offset-2",
         className,
       )}
-      tabIndex={0}
-      role="img"
-      aria-label={content}
+      tabIndex={interactive ? undefined : 0}
+      role={interactive ? undefined : "img"}
+      aria-label={interactive ? undefined : content}
       onMouseEnter={show}
       onMouseLeave={hide}
-      onFocus={show}
+      onFocus={(event) => {
+        if (event.target.matches(":focus-visible")) show();
+      }}
       onBlur={hide}
       onKeyDown={(event) => {
         if (event.key === "Escape" && tooltipRef.current?.matches(":popover-open")) {

@@ -84,7 +84,7 @@ for (const kind of ["local", "ssh"]) {
         "./queries/client": {},
         "@tanstack/react-query": { useQuery: ({ kind }) => ({
           data: scenario === "loading" || scenario === "error" ? undefined
-            : kind === "projects" ? [] : { onboardingCompleted: scenario !== "onboarding" },
+            : kind === "projects" ? (scenario === "projects" ? [{ id: "p" }] : []) : { onboardingCompleted: scenario !== "onboarding" },
           error: scenario === "error" ? new Error("offline") : null,
         }) },
         "./queries/projects": { listProjectsQuery: () => ({ kind: "projects" }), getUiStateQuery: () => ({ kind: "state" }) },

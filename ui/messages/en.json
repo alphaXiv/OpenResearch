@@ -1267,5 +1267,15 @@
   "window_minimize": "Minimize",
   "window_maximize": "Maximize",
   "window_restore": "Restore",
-  "window_close": "Close"
+  "window_close": "Close",
+  "sidebar_project_details": "Project details · {name}",
+  "sidebar_project_chats": "{count} chats",
+  "sidebar_edit_project": "Edit project",
+  "sidebar_source_folder": "Source folder",
+  "sidebar_pin_project": "Pin",
+  "sidebar_unpin_project": "Unpin",
+  "sidebar_reveal_project": "Reveal in Finder",
+  "sidebar_filter": "Filter",
+  "sidebar_group_by": "Group by",
+  "sidebar_one_list": "In one list"
 }

@@ -1267,5 +1267,15 @@
   "window_minimize": "最小化",
   "window_maximize": "最大化",
   "window_restore": "还原",
-  "window_close": "关闭"
+  "window_close": "关闭",
+  "sidebar_project_details": "项目详情 · {name}",
+  "sidebar_project_chats": "{count} 个聊天",
+  "sidebar_edit_project": "编辑项目",
+  "sidebar_source_folder": "源文件夹",
+  "sidebar_pin_project": "置顶",
+  "sidebar_unpin_project": "取消置顶",
+  "sidebar_reveal_project": "在访达中显示",
+  "sidebar_filter": "筛选",
+  "sidebar_group_by": "分组方式",
+  "sidebar_one_list": "单一列表"
 }

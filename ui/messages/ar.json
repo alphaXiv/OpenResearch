@@ -1267,5 +1267,15 @@
   "window_minimize": "تصغير",
   "window_maximize": "تكبير",
   "window_restore": "استعادة",
-  "window_close": "إغلاق"
+  "window_close": "إغلاق",
+  "sidebar_project_details": "تفاصيل المشروع · {name}",
+  "sidebar_project_chats": "{count} محادثات",
+  "sidebar_edit_project": "تعديل المشروع",
+  "sidebar_source_folder": "مجلد المصدر",
+  "sidebar_pin_project": "تثبيت",
+  "sidebar_unpin_project": "إلغاء التثبيت",
+  "sidebar_reveal_project": "إظهار في Finder",
+  "sidebar_filter": "تصفية",
+  "sidebar_group_by": "تجميع حسب",
+  "sidebar_one_list": "في قائمة واحدة"
 }

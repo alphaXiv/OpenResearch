@@ -1,3 +1,4 @@
+import { onChatEvent } from "../events";
 import { readLiveSnapshot, mergeLiveList } from "./live";
 import { queryOptions } from "@tanstack/react-query";
 import * as api from "../api";
@@ -59,3 +60,19 @@ export const getChatMessagesQuery = (sessionId: string) => queryOptions({
   refetchOnMount: "always",
   refetchOnWindowFocus: "always",
 });
+
+export async function readSidebarChatPage(filter: "active" | "archived" | "all", before: api.SidebarChatCursor | null, signal: AbortSignal) {
+  const indicators = new Map<string, Partial<Pick<api.ChatSession, "busy" | "contextUsage">>>();
+  const off = onChatEvent((event) => {
+    if (event.type === "busy" || event.type === "usage") {
+      indicators.set(event.sessionId, { ...indicators.get(event.sessionId),
+        ...(event.type === "busy" ? { busy: event.busy } : { contextUsage: event.usage }),
+      });
+    }
+  });
+  try {
+    const page = await api.listSidebarChatSessions(filter, before, signal);
+    signal.throwIfAborted();
+    return { ...page, sessions: page.sessions.map((session) => ({ ...session, ...indicators.get(session.id) })) };
+  } finally { off(); }
+}

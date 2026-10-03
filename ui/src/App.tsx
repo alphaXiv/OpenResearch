@@ -263,6 +263,11 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const destination = parseDestination(location.pathname);
   const mainView = destination?.kind === "skills" ? "skills" : destination?.kind === "settings" ? destination.section ?? "settings" : "chat";
   const rememberedSessionRef = useRef<string | null>(null);
+  const rememberedProjectRef = useRef(projectId);
+  if (rememberedProjectRef.current !== projectId) {
+    rememberedProjectRef.current = projectId;
+    rememberedSessionRef.current = null;
+  }
   const activeSessionId = destination?.kind === "task" ? destination.sessionId ?? null : rememberedSessionRef.current;
   if (destination?.kind === "task") rememberedSessionRef.current = activeSessionId;
   const panelOpen = pane !== undefined;
@@ -333,7 +338,6 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
   const tourCompletedRef = useRef<boolean | undefined>(undefined);
   tourCompletedRef.current = uiState?.tourCompleted;
   const failedStartupItems = [
-    !sessionsQuery.data && sessionsQuery.error ? m.chat_all_sessions() : null,
     !projectsQuery.data && projectsQuery.error ? m.app_projects() : null,
     !uiStateQuery.data && uiStateQuery.error ? m.app_settings() : null,
   ].filter((item) => item !== null);
@@ -1687,11 +1691,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     return <div className={EMPTY_STATE_CLASS_NAME}>{m.model_picker_unavailable()}<Button onClick={() => setProjectId(null)}>{m.app_projects()}</Button></div>;
   }
 
-  if (workspaceError && !workspaceReady) {
-    return <div className={EMPTY_STATE_CLASS_NAME}><p role="alert">{workspaceError}</p><Button onClick={retryWorkspace}>{m.app_retry()}</Button></div>;
-  }
-
-  if (projects === null || uiState === null || !workspaceLoaded || sessions === null) {
+  if (projects === null || uiState === null) {
     return (
       <div className="app flex flex-col h-full">
         <div className={EMPTY_STATE_CLASS_NAME}>
@@ -1702,16 +1702,18 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
     );
   }
 
-  if (!activeProject || (destination?.kind === "task" && activeSessionId && !sessions?.includes(activeSessionId))) {
+  if (!activeProject) {
     return <div className={EMPTY_STATE_CLASS_NAME}>{m.model_picker_unavailable()}<Button onClick={() => setProjectId(null)}>{m.app_projects()}</Button></div>;
   }
 
+  const conversationError = (!workspaceLoaded && workspaceError)
+    || (!sessionsQuery.data && sessionsQuery.error ? errorText(sessionsQuery.error) : null)
+    || (destination.kind === "task" && activeSessionId && sessions && !sessions.includes(activeSessionId) ? m.model_picker_unavailable() : null);
+  const conversationLoading = !conversationError && (!workspaceLoaded || sessions === null);
+  const retryConversation = () => { retryWorkspace(); void sessionsQuery.refetch(); };
+
   const railHeader = (
     <RailHeader
-      projectName={projects.find((p) => p.id === projectId)?.name ?? ""}
-      onHome={() => void router.navigate({ to: "/projects" })}
-      onNewProject={() => setNewProjectOpen(true)}
-      onRepository={() => selectMainView("git")}
       onCollapse={() => setRailOpen(false)}
     />
   );
@@ -1725,10 +1727,14 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
         {projectId && (
           <ChatPanel
             projectId={projectId}
-            projectName={activeProject?.name ?? ""}
+            projectName={activeProject.name}
+            contentLoading={conversationLoading}
+            contentError={conversationError || null}
+            onRetryContent={retryConversation}
             railHeader={railHeader}
             railOpen={railOpen}
             onShowRail={() => setRailOpen(true)}
+            onNewProject={() => setNewProjectOpen(true)}
             mainView={mainView}
             onSelectMainView={selectMainView}
             onOpenFile={openChatFile}
@@ -1740,7 +1746,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             onOpenSubagent={openSubagentTab}
             onOpenSideChat={(parentSessionId, question) => void startSideChat(parentSessionId, question)}
             composerFocusNonce={composerFocusNonce}
-            demoRunningRunId={demoRunningRunId}
+            demoRunningRunId={isDemoProjectId(activeProject.id) && activeSessionId === DEMO_MAIN_SESSION_ID ? demoRunningRunId : null}
             runtime={runtime}
             onOpenDemoWelcome={
               activeProject && isDemoProjectId(activeProject.id) ? openDemoWelcome : undefined
@@ -1767,7 +1773,7 @@ export default function App({ runtime, projectId, pane }: { runtime: RuntimeInfo
             ) : null}
           </ChatPanel>
         )}
-        {mainView === "chat" && (
+        {mainView === "chat" && workspaceReady && !conversationError && (
           <WorkspaceTools
             expanded={workspaceCardVisible}
             experiments={experiments}

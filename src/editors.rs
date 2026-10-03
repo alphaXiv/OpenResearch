@@ -47,7 +47,7 @@ pub fn open_in_default_app(path: &std::path::Path) -> std::io::Result<()> {
     spawn_detached(&mut cmd)
 }
 
-/// Command that reveals `path` in the OS file manager (Linux opens its parent directory).
+/// Command that reveals `path` in the OS file manager (Linux opens directories or the file's parent).
 fn reveal_command(path: &std::path::Path) -> Command {
     #[cfg(target_os = "macos")]
     let cmd = {
@@ -71,7 +71,11 @@ fn reveal_command(path: &std::path::Path) -> Command {
     let cmd = {
         // No portable "select the file" opener on Linux, so open the containing directory.
         let mut c = Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
+        c.arg(if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        });
         crate::local::shell_env::restore_host_gui_env(&mut c);
         c
     };
@@ -117,5 +121,12 @@ mod tests {
         let cmd = reveal_command(std::path::Path::new("/tmp/orx/data.bin"));
         assert_eq!(cmd.get_program(), "xdg-open");
         assert_eq!(args(&cmd), ["/tmp/orx"]);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[test]
+    fn reveal_command_opens_directory_itself() {
+        let dir = std::env::temp_dir();
+        let cmd = reveal_command(&dir);
+        assert_eq!(args(&cmd), [dir.to_string_lossy().into_owned()]);
     }
 }

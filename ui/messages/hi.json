@@ -1267,5 +1267,15 @@
   "window_minimize": "छोटा करें",
   "window_maximize": "बड़ा करें",
   "window_restore": "पुनर्स्थापित करें",
-  "window_close": "बंद करें"
+  "window_close": "बंद करें",
+  "sidebar_project_details": "प्रोजेक्ट विवरण · {name}",
+  "sidebar_project_chats": "{count} चैट",
+  "sidebar_edit_project": "प्रोजेक्ट संपादित करें",
+  "sidebar_source_folder": "स्रोत फ़ोल्डर",
+  "sidebar_pin_project": "पिन करें",
+  "sidebar_unpin_project": "पिन हटाएँ",
+  "sidebar_reveal_project": "Finder में दिखाएँ",
+  "sidebar_filter": "फ़िल्टर",
+  "sidebar_group_by": "समूह बनाएँ",
+  "sidebar_one_list": "एक सूची में"
 }
