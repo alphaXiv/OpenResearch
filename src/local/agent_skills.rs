@@ -106,6 +106,7 @@ const REPORTS: &str = include_str!("../../agent-skills/orx-reports/SKILL.md");
 const EVIDENCE: &str = include_str!("../../agent-skills/orx-evidence/SKILL.md");
 const CUSTOMIZE: &str = include_str!("../../agent-skills/orx-customize/SKILL.md");
 const PAPER: &str = include_str!("../../agent-skills/orx-paper/SKILL.md");
+const DIAGRAMS: &str = include_str!("../../agent-skills/orx-diagrams/SKILL.md");
 const INSTANCES: &str = include_str!("../../agent-skills/orx-instances/SKILL.md");
 const FEEDBACK: &str = include_str!("../../agent-skills/orx-feedback/SKILL.md");
 const FIGURES: &str = include_str!("../../agent-skills/orx-figures/SKILL.md");
@@ -150,6 +151,7 @@ const FIGURES_RESOURCES: &[AgentSkillResource] = &[
 // works blind). Keep each ≤400 chars — Codex's ambient budget is ~8k across
 // the whole set.
 
+const D_DIAGRAMS: &str = "Draw flowcharts, sequence, state, ER, class, gantt, gitgraph and mindmap diagrams as mermaid, which the app renders from .mmd/.mermaid files and fenced blocks. Covers choosing the type, the quoting and reserved-word rules that break parsing, and when a result belongs in matplotlib instead. Use whenever asked to draw or diagram a process, pipeline, architecture, protocol, state machine or dataflow.";
 const D_COMPUTE: &str = "Launch and monitor experiment runs and route guidance for hf, modal, k8s/Kubernetes, ssh, slurm, ray, OpenResearch, Tinker, and local backends. Covers the fixed run contract, sizing, cancellation, and wait versus wake. Use before any launch or relaunch, when authoring a k8s manifest, choosing or switching compute, or handling an OOM, stall, or timeout; then read one backend reference.";
 const D_EXPERIMENT_TREE: &str = "Plan and drive the experiment tree: first-launch setup, fixed run contract, frozen nodes, stacked-bush tree shape, branch/launch/wait/promote, repair limits, notes, and turn summaries. Use before creating or changing experiments, launching a first run, deciding what to try next, handling a completed run, or reporting experiment progress.";
 
@@ -213,6 +215,12 @@ const S_FIGURES: AgentSkill = AgentSkill {
     content: FIGURES,
     resources: FIGURES_RESOURCES,
 };
+const S_DIAGRAMS: AgentSkill = AgentSkill {
+    name: "orx-diagrams",
+    description: D_DIAGRAMS,
+    content: DIAGRAMS,
+    resources: &[],
+};
 const S_EVIDENCE: AgentSkill = AgentSkill {
     name: "orx-evidence",
     description: "Prepare and inspect experiment run evidence: design stdout metrics and summaries, locate persisted logs with `orx logs`, and validate run-derived claims. Use before launching a run whose output must be judged, after a run finishes, or before analyzing or reporting run results.",
@@ -246,6 +254,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_EVIDENCE,
             &S_REPORTS,
             &S_FIGURES,
+            &S_DIAGRAMS,
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,
@@ -261,6 +270,7 @@ pub fn skills(set: SkillSet) -> Vec<&'static AgentSkill> {
             &S_EVIDENCE,
             &S_REPORTS,
             &S_FIGURES,
+            &S_DIAGRAMS,
             &S_PAPER,
             &S_CUSTOMIZE,
             &S_LIT,

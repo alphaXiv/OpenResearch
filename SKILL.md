@@ -139,6 +139,7 @@ list, with one-line descriptions, is printed at the end of `orx skill` output):
 - **orx-evidence** — capture and inspect experiment results through run logs.
 - **orx-reports** — write durable research outputs into the project's artifacts directory.
 - **orx-figures** — publication-quality figures in matplotlib or TikZ. Load it **before** writing any plotting code, then read the one reference for that figure type.
+- **orx-diagrams** — flowcharts, sequence, state, ER and architecture diagrams as mermaid, which the app renders from `.mmd` files and fenced blocks. Load it **before** drawing any process, pipeline or protocol; `orx-figures` remains the right tool for a schematic bound for a paper or for anything with numbers on it.
 - **orx-customize** — add reusable skills and LaTeX templates across projects.
 - **orx-paper** — draft a paper or preprint as LaTeX that renders and compiles to PDF.
 - **orx-feedback** — report meaningful OpenResearch bugs, feature requests, and user frustration without leaking research details.
